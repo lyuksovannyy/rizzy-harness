@@ -665,6 +665,18 @@ describe("a turn's changes (X.12)", () => {
   });
 });
 
+describe("a notice among the chat's notes", () => {
+  test("is drawn as a notice, a failure as an error, both through showHidden", async () => {
+    await show([{ type: "error", message: "This undo put back 150 files." , notice: true }, { type: "error", message: "It broke" }], sessionRow());
+    const notice = host.querySelector(".msg.notice");
+    expect(notice?.textContent).toBe("This undo put back 150 files.");
+    expect(notice?.classList.contains("error")).toBe(false);
+    const errors = host.querySelectorAll(".msg.error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.textContent).toBe("It broke");
+  });
+});
+
 describe("events the fold could not show", () => {
   test("a chat says how many, and nothing when there are none", async () => {
     await show([{ type: "error", message: "x" }], sessionRow());

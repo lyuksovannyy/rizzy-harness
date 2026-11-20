@@ -398,6 +398,23 @@ fn a_real_secret_is_gone_from_every_free_position() {
     assert_eq!(p["input"]["model"], "x[REDACTED]");
 }
 
+/// A notice (the large-turn note) is still an `error` event to the
+/// scrubber: its message is free text, its flag is schema.
+#[test]
+fn a_notice_is_scrubbed_like_an_error() {
+    let set = set_of(&[CANARY.to_string()]);
+    let (kind, mut p) = EventKind::Error(ErrorEvent {
+        turn_id: Some("t1".into()),
+        message: format!("This turn changed {CANARY} files"),
+        notice: true,
+    })
+    .into_parts();
+    set.scrub_event(&kind, &mut p);
+    assert_eq!(p["message"], "This turn changed [REDACTED] files");
+    assert_eq!(p["notice"], true);
+    assert!(EventKind::from_parts(&kind, p).is_ok());
+}
+
 /// A schema word that is also a secret is removed from free text and left
 /// in the schema: `session_created` keeps `approval_mode`, the text loses it.
 #[test]

@@ -283,6 +283,7 @@ async fn run(
         .await;
     if let Some(e) = &out.error {
         host.push(EventKind::Error(ErrorEvent {
+            notice: false,
             turn_id: Some(turn_id.into()),
             message: e.clone(),
         }));
@@ -418,6 +419,7 @@ async fn run_spec(
         .await;
     if let Some(e) = &out.error {
         host.push(EventKind::Error(ErrorEvent {
+            notice: false,
             turn_id: Some(turn_id.into()),
             message: e.clone(),
         }));

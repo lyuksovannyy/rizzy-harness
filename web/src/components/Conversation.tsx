@@ -798,7 +798,7 @@ export default function Conversation(props: {
                     );
                   case "error":
                     return (
-                      <div key={i} className="msg error">
+                      <div key={i} className={it.notice ? "msg notice" : "msg error"}>
                         {showHidden(it.message)}
                       </div>
                     );

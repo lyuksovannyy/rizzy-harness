@@ -259,6 +259,7 @@ fn events() -> Vec<RawEvent> {
             head_moved: None,
         }),
         EventKind::Error(ErrorEvent {
+            notice: false,
             turn_id: Some(t()),
             message: "node restarted".into(),
         }),
@@ -844,6 +845,7 @@ fn events() -> Vec<RawEvent> {
             tags: vec![],
         }),
         EventKind::Error(ErrorEvent {
+            notice: false,
             turn_id: Some("t7".into()),
             message: "The model is not available.".into(),
         }),
@@ -1179,6 +1181,11 @@ fn events() -> Vec<RawEvent> {
                 message_seq: at,
                 agents: vec!["editor".into()],
                 reason: PeersSkipReason::Stopped,
+            }),
+            EventKind::Error(ErrorEvent {
+                notice: true,
+                turn_id: None,
+                message: "This undo put back 150 files, more than the recommended 100.".into(),
             }),
         ],
     );

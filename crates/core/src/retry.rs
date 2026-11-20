@@ -45,7 +45,7 @@ pub fn check(history: &[RawEvent], failed: &str) -> Result<RetryOf, String> {
                 has_message |= !m.queued;
             }
             Ok(EventKind::QueuedDelivered(d)) if d.turn_id == failed => has_message = true,
-            Ok(EventKind::Error(x)) if x.turn_id.as_deref() == Some(failed) => {
+            Ok(EventKind::Error(x)) if !x.notice && x.turn_id.as_deref() == Some(failed) => {
                 error = Some(x.message)
             }
             Ok(EventKind::TurnEnded(x)) if x.turn_id == failed => {
@@ -233,6 +233,7 @@ mod tests {
         }
         fn error(&mut self, t: &str, msg: &str) -> &mut Self {
             self.push(EventKind::Error(ErrorEvent {
+                notice: false,
                 turn_id: Some(t.into()),
                 message: msg.into(),
             }))
@@ -273,6 +274,24 @@ mod tests {
             let want = (reason == TurnEndReason::Error).then_some("the model is not available");
             assert_eq!(r.error.as_deref(), want, "{reason:?}");
         }
+    }
+
+    /// A notice (the large-turn note) is written under the turn's id too;
+    /// it is not the attempt's failure and must not become its error text.
+    #[test]
+    fn a_notice_is_not_the_turns_error() {
+        let mut l = Log::new();
+        l.started("t1", None, None)
+            .message("t1", "fix the bug", false)
+            .error("t1", "the model is not available")
+            .push(EventKind::Error(ErrorEvent {
+                turn_id: Some("t1".into()),
+                message: "This turn changed 150 files, more than the recommended 100.".into(),
+                notice: true,
+            }))
+            .ended("t1", TurnEndReason::Error);
+        let r = check(&l.events, "t1").unwrap();
+        assert_eq!(r.error.as_deref(), Some("the model is not available"));
     }
 
     #[test]

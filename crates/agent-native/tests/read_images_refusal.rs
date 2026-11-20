@@ -332,6 +332,7 @@ impl Turn<'_> {
             .await;
         if let Some(e) = &out.error {
             self.host.push(EventKind::Error(ErrorEvent {
+                notice: false,
                 turn_id: Some(turn_id.into()),
                 message: e.clone(),
             }));

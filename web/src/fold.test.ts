@@ -90,6 +90,15 @@ describe("fold", () => {
   });
 });
 
+describe("fold: a notice", () => {
+  const ev = (seq: number, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind: "error", payload }) as RawEvent;
+  it("keeps the flag, and a failure has no key for it", () => {
+    const v = fold([ev(1, { message: "n", notice: true }), ev(2, { message: "f" })]);
+    expect(v.items[0]).toStrictEqual({ type: "error", message: "n", notice: true });
+    expect(v.items[1]).toStrictEqual({ type: "error", message: "f" });
+  });
+});
+
 describe("fold: retries and the turn's limits", () => {
   const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
   it("shows a retry until a tool call starts, and keeps the turn's window and summary point", () => {

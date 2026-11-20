@@ -242,7 +242,7 @@ const KINDS: Record<string, string> = {
   checkpoint: "turn_id phase:=phase git_ref ?files:[s ?head_moved:@headMoved",
   turn_ended: "turn_id reason:=turnEnd ?usage:@usage",
   turn_usage: "turn_id usage:@usage",
-  error: "message",
+  error: "message ?notice:b",
   agent_changed: "agent:@agent ?model",
   variant_selected: "group message_id",
   history_summarized: "turn_id through_seq:n text ?manual:b ?focus ?usage:@usage ?tokens_after:n",
@@ -718,7 +718,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       break;
     }
     case "error":
-      v.items.push({ type: "error", message: p.message });
+      v.items.push(p.notice ? { type: "error", message: p.message, notice: true } : { type: "error", message: p.message });
       break;
     case "agent_changed": {
       const it: Extract<Item, { type: "agent_changed" }> = { type: "agent_changed", agent: p.agent };

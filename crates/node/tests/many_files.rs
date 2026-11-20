@@ -75,6 +75,23 @@ async fn one_over_the_limit_warns_at_the_end_and_on_the_undo_and_both_complete()
     );
 }
 
+/// Both notes are notices, and a failure written by the same session is not.
+#[tokio::test]
+async fn the_two_notes_are_notices() {
+    let mut r = repo_rig().await;
+    let n = MAX + 1;
+    let mark = r.seen.len();
+    let turn = r.turn(&files("f", n)).await.id.expect("a checkpoint");
+    let end = r.notices_since(mark);
+    assert_eq!(end.len(), 1, "{end:?}");
+    assert!(end[0].starts_with("This turn changed"), "{end:?}");
+    let mark = r.seen.len();
+    assert_eq!(r.restore(&turn, false).await.result, Ok(()));
+    let undo = r.notices_since(mark);
+    assert_eq!(undo.len(), 1, "{undo:?}");
+    assert!(undo[0].starts_with("This undo put back"), "{undo:?}");
+}
+
 /// 100 files and one more inside a nested repository, and one more in an
 /// ignored folder: neither is counted, so nobody is warned.
 #[tokio::test]

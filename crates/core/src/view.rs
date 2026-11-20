@@ -125,9 +125,7 @@ pub enum Item {
     },
     /// A file the user saved as an artifact ("Save as artifact"), or a
     /// staged file whose tool call is not in the log.
-    Artifact {
-        staged: Box<ArtifactStaged>,
-    },
+    Artifact { staged: Box<ArtifactStaged> },
     /// Saving a file as an artifact failed on the node.
     ArtifactFailed {
         path: String,
@@ -136,6 +134,9 @@ pub enum Item {
     },
     Error {
         message: String,
+        /// Information for the person, not a failure (`ErrorEvent::notice`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        notice: bool,
     },
     TurnEnd {
         turn_id: String,
@@ -220,10 +221,7 @@ pub enum Item {
     },
     /// The node did not resume the agent for these ends
     /// (`callback_refused`); they wait for the person's next message.
-    CallbackRefused {
-        bg_ids: Vec<String>,
-        reason: String,
-    },
+    CallbackRefused { bg_ids: Vec<String>, reason: String },
     /// `model` answered this turn instead of `from` (`model_fallback`).
     Fallback {
         turn_id: String,
@@ -809,7 +807,10 @@ impl SessionView {
                 self.live = Some((t.turn_id, u));
                 self.show_usage();
             }
-            EventKind::Error(e) => self.items.push(Item::Error { message: e.message }),
+            EventKind::Error(e) => self.items.push(Item::Error {
+                message: e.message,
+                notice: e.notice,
+            }),
             EventKind::AgentChanged(a) => {
                 self.items.push(Item::AgentChanged {
                     agent: a.agent,
@@ -840,7 +841,10 @@ impl SessionView {
                 if let Some(u) = &c.usage {
                     self.settle(u);
                 }
-                self.items.push(Item::Error { message: c.reason });
+                self.items.push(Item::Error {
+                    message: c.reason,
+                    notice: false,
+                });
             }
             EventKind::ContextShortened(c) => self.items.push(Item::Shortened {
                 turn_id: c.turn_id,
@@ -1144,6 +1148,33 @@ mod tests {
                     requested: Some(ApprovalMode::Auto)
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn a_notice_keeps_its_flag_through_the_fold_and_a_failure_does_not_get_one() {
+        let sid = SessionId::new();
+        let err = |seq, notice| {
+            ev(
+                sid,
+                seq,
+                EventKind::Error(ErrorEvent {
+                    turn_id: None,
+                    message: "m".into(),
+                    notice,
+                }),
+            )
+        };
+        let evs = vec![err(1, true), err(2, false)];
+        let v = SessionView::fold(&evs).unwrap();
+        let json = serde_json::to_value(&v.items).unwrap();
+        assert_eq!(
+            json[0],
+            serde_json::json!({"type": "error", "message": "m", "notice": true})
+        );
+        assert_eq!(
+            json[1],
+            serde_json::json!({"type": "error", "message": "m"})
         );
     }
 

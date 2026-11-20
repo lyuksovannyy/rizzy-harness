@@ -1165,6 +1165,7 @@ impl Session {
             .map_err(fail)?;
         }
         self.append(EventKind::Error(ErrorEvent {
+            notice: false,
             turn_id: Some(turn_id.clone()),
             message: message.into(),
         }))
@@ -3321,6 +3322,7 @@ impl Session {
     ) {
         if let Some(message) = error {
             self.append_end(EventKind::Error(ErrorEvent {
+                notice: false,
                 turn_id: Some(turn_id.into()),
                 message,
             }))
@@ -3437,6 +3439,7 @@ impl Session {
     async fn no_checkpoint_notice(&self, turn_id: &str, reason: &str) {
         let _ = self
             .emit(EventKind::Error(ErrorEvent {
+                notice: false,
                 turn_id: Some(turn_id.into()),
                 message: format!(
                     "This turn has no checkpoint, so it cannot be undone: the folder could \
@@ -3456,6 +3459,7 @@ impl Session {
         }
         let _ = self
             .emit(EventKind::Error(ErrorEvent {
+                notice: false,
                 turn_id: Some(turn_id.into()),
                 message: format!(
                     "Left out of this turn's checkpoint: {} (a named pipe, socket or device \
@@ -3514,6 +3518,7 @@ impl Session {
                     if let Some(message) = large_turn_note(changed_count) {
                         let _ = self
                             .emit(EventKind::Error(ErrorEvent {
+                                notice: true,
                                 turn_id: Some(turn_id.into()),
                                 message,
                             }))
@@ -3525,6 +3530,7 @@ impl Session {
                     if !ignore_changed.is_empty() {
                         let _ = self
                             .emit(EventKind::Error(ErrorEvent {
+                                notice: false,
                                 turn_id: Some(turn_id.into()),
                                 message: format!(
                                     "This turn changed {}: files the new rules ignore are \
@@ -3596,6 +3602,7 @@ impl Session {
         };
         let _ = self
             .emit(EventKind::Error(ErrorEvent {
+                notice: false,
                 turn_id: Some(turn_id.into()),
                 message,
             }))
@@ -3970,6 +3977,7 @@ impl Session {
         let safety = interrupted.as_ref().map(|_| saved.as_str());
         if let Some(message) = restore_notice(files.len(), &plan, safety) {
             self.append(EventKind::Error(ErrorEvent {
+                notice: false,
                 turn_id: None,
                 message,
             }))
@@ -3978,6 +3986,7 @@ impl Session {
         }
         if let Some(message) = large_undo_note(files.len()) {
             self.append(EventKind::Error(ErrorEvent {
+                notice: true,
                 turn_id: None,
                 message,
             }))
@@ -4004,6 +4013,7 @@ impl Session {
                     continue;
                 };
                 let note = EventKind::Error(ErrorEvent {
+                    notice: false,
                     turn_id: None,
                     message: crate::others::reverted_note(files, *unlisted),
                 });
@@ -4015,6 +4025,7 @@ impl Session {
                 }
             }
             self.append(EventKind::Error(ErrorEvent {
+                notice: false,
                 turn_id: None,
                 message: format!(
                     "This undo put back files another chat working in this folder changed or \
@@ -4508,7 +4519,7 @@ impl Session {
         // Why its turn ended, when it did not complete: the parent can tell
         // the step cap from the guard or a provider error.
         let error = log.iter().rev().find_map(|e| match e.typed() {
-            Ok(EventKind::Error(err)) => Some(err.message),
+            Ok(EventKind::Error(err)) if !err.notice => Some(err.message),
             _ => None,
         });
         // The harness's own words, after the child's quoted report.

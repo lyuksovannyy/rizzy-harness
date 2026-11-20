@@ -273,6 +273,7 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             usage: usage(w),
         }),
         EventKind::Error(ErrorEvent {
+            notice: false,
             turn_id: Some(s()),
             message: s(),
         }),
