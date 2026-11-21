@@ -11,6 +11,10 @@ other request with "method not found". Flags:
   --hang-init      never answer `initialize`
   --slow-init MS   answer `initialize` after MS milliseconds
   --started PATH   append "started <pid>" to PATH when it starts
+  --detach         leave its process group and session at once (`setsid`), so
+                   that a stop of the group the harness started does not
+                   reach it: it keeps answering until its input closes
+  --die-init MS    exit 1 after MS milliseconds, during `initialize`
   --calls PATH     append "call <tool>" to PATH for every `tools/call` it
                    receives (before it answers)
   --marker WORD    ignored (lets a test find the process in /proc)
@@ -42,6 +46,9 @@ def value(name, default=None):
         return args[args.index(name) + 1]
     return default
 
+
+if flag("--detach"):
+    os.setsid()
 
 if value("--started"):
     with open(value("--started"), "a") as f:
@@ -165,6 +172,9 @@ for line in sys.stdin.buffer:
     if method == "initialize":
         if flag("--hang-init"):
             continue
+        if value("--die-init"):
+            time.sleep(int(value("--die-init")) / 1000.0)
+            sys.exit(1)
         if value("--slow-init"):
             time.sleep(int(value("--slow-init")) / 1000.0)
         send(

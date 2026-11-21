@@ -764,13 +764,21 @@ impl Slot {
 
     /// Out of its table for good: stopped, and never started again.
     ///
+    /// A process is reachable by this from the moment it is spawned, not
+    /// only once it is published: `start` hands it to [`Self::register`]
+    /// right after spawning, so a removal during `initialize` or
+    /// `tools/list` stops it through the same stop order as a published one
+    /// (the guard confirms it in a sandbox chat), and the starter is told it
+    /// was removed.
+    ///
     /// The flag is stored BEFORE `kill` takes the `live` lock;
-    /// [`Self::publish`] checks the flag INSIDE that same lock. Either
-    /// `publish` holds the lock first (then `kill` waits for it, finds the
-    /// process it published and stops it), or `kill` has had the lock
-    /// first (then the flag was stored before that, and `publish` sees it
-    /// and stops its own process). No order leaves a process started for a
-    /// retired slot that nobody stops.
+    /// `register` and [`Self::publish`] check the flag INSIDE that same
+    /// lock. Either they hold the lock first (then `kill` waits and stops
+    /// the process they left there), or `kill` has had the lock first (then
+    /// the flag was stored before that, and they see it and stop their own
+    /// process). No order leaves a started process for a retired slot that
+    /// nobody stops. (With `register`, `publish`'s check no longer guards a
+    /// process, only that a dead one is not made the slot's state.)
     fn retire(&self) {
         self.retired.store(true, Ordering::SeqCst);
         self.kill();
@@ -781,6 +789,25 @@ impl Slot {
         "it is no longer one of this chat's servers (its approval was removed or changed, or it \
          left the repository's .mcp.json)"
             .into()
+    }
+
+    /// What a call that was in flight when its server was removed is told:
+    /// the server may have carried it out before it was stopped.
+    fn removed_in_flight(&self) -> ToolOutcome {
+        ToolOutcome::err(format!(
+            "MCP server `{}` is not available: {}; whether this call was carried out before the \
+             server was stopped is not known",
+            self.name,
+            Self::removed_text()
+        ))
+    }
+
+    /// Make a process that has just been spawned reachable by `retire` and
+    /// `close` (they stop what is in `live`) before it has answered
+    /// `initialize`; false when the slot was retired or its table closed
+    /// already. Same lock and same order as [`Self::publish`].
+    fn register(&self, live: &Live, closed: &AtomicBool) -> bool {
+        self.publish(live, closed)
     }
 
     /// Make a started process the slot's live one, unless the slot was
@@ -896,10 +923,21 @@ impl Slot {
         if closed.load(Ordering::SeqCst) {
             return Err("the chat's servers were stopped".into());
         }
+        let register = |l: &Live| self.register(l, closed);
         let started = tokio::select! {
-            r = tokio::time::timeout(self.cfg.startup_timeout(), start(&self.name, &self.cfg, ctx, self.home.as_deref())) => r,
+            r = tokio::time::timeout(self.cfg.startup_timeout(), start(&self.name, &self.cfg, ctx, self.home.as_deref(), &register)) => r,
             _ = ctx.cancel.cancelled() => return Err("the turn was stopped".into()),
         };
+        // A start that failed, in any way, after the slot was removed or its
+        // table closed is told as that and counts nothing.
+        if !matches!(started, Ok(Ok(_))) {
+            if self.retired.load(Ordering::SeqCst) {
+                return Err(Self::removed_text());
+            }
+            if closed.load(Ordering::SeqCst) {
+                return Err("the chat's servers were stopped".into());
+            }
+        }
         match started {
             Ok(Ok(mut up)) => {
                 up.live.generation = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1013,11 +1051,7 @@ impl Slot {
                     // Taken out of the table: not the chat's servers any
                     // more, and the stop was ours (nothing counted).
                     if self.retired.load(Ordering::SeqCst) {
-                        return ToolOutcome::err(format!(
-                            "MCP server `{}` is not available: {}",
-                            self.name,
-                            Self::removed_text()
-                        ));
+                        return self.removed_in_flight();
                     }
                     self.take_down(generation, "").await;
                     return ToolOutcome::err(format!(
@@ -1057,11 +1091,7 @@ impl Slot {
                 // The removal closed the transport under this call: its
                 // answer is the removal's, and it counts nothing.
                 if self.retired.load(Ordering::SeqCst) {
-                    return ToolOutcome::err(format!(
-                        "MCP server `{}` is not available: {}",
-                        self.name,
-                        Self::removed_text()
-                    ));
+                    return self.removed_in_flight();
                 }
                 let why = if oversize.load(Ordering::SeqCst) {
                     over_cap()
@@ -1213,6 +1243,7 @@ async fn start(
     cfg: &ServerConfig,
     ctx: &ToolCtx,
     home: Option<&Home>,
+    register: &(dyn Fn(&Live) -> bool + Sync),
 ) -> Result<Up, StartError> {
     let env = ctx.env.with_pass(&cfg.env_vars)?;
     let args: Vec<&OsStr> = cfg.args.iter().map(OsStr::new).collect();
@@ -1350,6 +1381,15 @@ async fn start(
     tokio::spawn(own(child, contained, live.kill.clone(), exited_tx));
     // If anything below fails, the process goes with `guard`.
     let guard = live.kill.clone().drop_guard();
+    // Reachable by a removal or a close from now on, not only once it is
+    // published (`Slot::register`); refused when one already happened.
+    if !register(&live) {
+        return Err(
+            "it is no longer one of this chat's servers (it was taken out while it \
+                    started)"
+                .into(),
+        );
+    }
     let oversize = Arc::new(AtomicBool::new(false));
     let reader = Capped {
         inner: stdout,
