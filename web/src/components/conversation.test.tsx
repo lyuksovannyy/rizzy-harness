@@ -133,6 +133,48 @@ async function show(
   await act(() => new Promise((r) => setTimeout(r, 0)));
 }
 
+describe("the header is one line", () => {
+  const garden = { project_id: "p1", workspace_id: "w1", name: "test-project", description: "", icon: "house", accent: "green", chats: 1, updated_ms: 0 };
+  const draw = async (row: SessionRow, profile: "chat" | "agentic" = "agentic", exec = "sandbox") => {
+    current = { ...view([], profile), meta: { ...view([], profile).meta, exec_mode: exec, incognito: row.incognito } } as SessionView;
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={row} nodes={[]} agents={[]} models={[]} projects={[garden]} />));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+  };
+  const head = () => host.querySelector(".conv-head")!;
+  const parts = () => [...head().querySelectorAll(".chat-part")].map((c) => (c.querySelector(".ellipsis") ?? c).textContent);
+
+  test("an agentic chat in a project: title, project, node, state; export and delete; no second line", async () => {
+    await draw(sessionRow({ project_id: "p1" }));
+    expect(head().querySelector("h1")!.textContent).toBe("Nightly build");
+    expect(parts()).toEqual(["test-project", "n1", "sandbox"]);
+    expect(head().querySelector<HTMLElement>(".chat-suffix")!.title).toBe("/src");
+    expect([...head().querySelectorAll(".conv-actions button")].map((b) => b.getAttribute("aria-label"))).toEqual(["Export as Markdown", "Delete chat"]);
+    expect(head().querySelector(".conv-meta, .conv-agent, .meta-model, .agent-avatar")).toBeNull();
+    expect(head().querySelector('[aria-label="Rename chat"]')).toBeNull();
+  });
+
+  test("an agentic chat without a project, a host chat, and a plain chat", async () => {
+    await draw(sessionRow({ project_id: null }));
+    expect(parts()).toEqual(["Project", "n1", "sandbox"]);
+    await draw(sessionRow({ project_id: null }), "agentic", "host");
+    expect(head().querySelector(".exec-mode")!.textContent).toBe("host shell");
+    await draw(sessionRow({ profile: "chat", project_id: "p1" }), "chat");
+    expect(parts()).toEqual(["test-project"]);
+  });
+
+  test("the model is in the composer's strip, not in the header", async () => {
+    await draw(sessionRow());
+    expect(host.querySelector(".composer-strip .strip-model")!.textContent).toBe("mock");
+    expect(head().textContent).not.toContain("mock");
+  });
+
+  test("an incognito chat: no project control; its banner stays", async () => {
+    await draw(sessionRow({ incognito: true }));
+    expect(head().querySelector(".project-chip")).toBeNull();
+    expect(host.querySelector(".incognito-banner")).not.toBeNull();
+  });
+});
+
 describe("routine chats", () => {
   test("a chat with webhook data says so and links its routine", async () => {
     await show([], sessionRow({ routine: mark({ untrusted: true }) }));
@@ -240,15 +282,16 @@ describe("thinking", () => {
 
 describe("agent switches", () => {
   test("the notice names the agent and its model, from the record; the picker shows the chat's pick", async () => {
-    await show(
-      [{ type: "agent_changed", agent: { agent_id: "writer", name: "Writer", prompt_hash: "h" }, model: "demo::big" }],
-      sessionRow({ agent_id: "researcher" }),
-    );
+    const named = (id: string, name: string) => ({ id, name, description: "", builtin: true, default_model: null, main_model: null, fallbacks: [], unavailable: [], avatar: { shape: "circle", eyes: "round", accent: "blue" } });
+    current = view([{ type: "agent_changed", agent: { agent_id: "writer", name: "Writer", prompt_hash: "h" }, model: "demo::big" }]);
+    const agents = [named("researcher", "Researcher"), named("writer", "Writer")] as never;
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow({ agent_id: "researcher" })} nodes={[]} agents={agents} models={[]} />));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
     const lines = [...host.querySelectorAll(".divider")].map((d) => d.textContent ?? "");
     expect(lines).toContain("Switched to Writer · demo::big");
     // The row (the person's pick since) wins over the fold's last switch.
-    // (No agent list here: the header names the agent by its id.)
-    expect(host.textContent).toContain("researcher");
+    // The strip's picker names the agent (the header no longer does).
+    expect(host.querySelector('.agent-pick button[aria-label^="agent:"]')!.getAttribute("aria-label")).toBe("agent: Researcher");
   });
 });
 
@@ -344,34 +387,25 @@ describe("artifacts", () => {
     expect(host.querySelector(".msg.error")!.textContent).toBe("Couldn't save secrets/.env: outside the chat's folder");
   });
 
-  test("the header's Save a file form, in an agentic chat the viewer drives", async () => {
+  test("the header has no Save a file button any more: the form is on a bash card (chatartifacts.test.tsx)", async () => {
     await show([], sessionRow());
     expect(features).toHaveBeenCalledWith({ workspace: "w1" });
-    const toggle = host.querySelector<HTMLButtonElement>('button[aria-label="Save a file as an artifact"]')!;
-    act(() => toggle.click());
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    const input = host.querySelector<HTMLInputElement>('.save-file-bar input[aria-label="File or folder to save"]')!;
+    expect(host.querySelector('button[aria-label="Save a file as an artifact"]')).toBeNull();
+    expect(host.querySelector(".save-file-bar")).toBeNull();
+  });
+
+  test("a bash card of an agentic chat still offers the free-path Save form, with the Save call", async () => {
+    const bash = { type: "tool", call_id: "c1", author: null, tool: "bash", input: { command: "make" }, live_output: "", result: { ok: true, output: "done", exit_code: 0 }, approval: null } as Item;
+    await show([bash], sessionRow());
+    act(() => host.querySelector<HTMLButtonElement>(".tool-head")!.click());
+    act(() => [...host.querySelectorAll("button")].find((b) => b.textContent === "Save a file as artifact…")!.click());
+    const input = host.querySelector<HTMLInputElement>('input[aria-label="File or folder to save"]')!;
     act(() => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "dist");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    await act(async () => host.querySelector<HTMLFormElement>(".save-file-bar form")!.requestSubmit());
+    await act(async () => host.querySelector<HTMLFormElement>(".save-artifact-form")!.requestSubmit());
     expect(artifactsApi.save).toHaveBeenCalledWith(SID, "dist", "");
-  });
-
-  test("no Save a file in a chat chat, for a blocked viewer, or with Artifacts off", async () => {
-    await show([], sessionRow({ blocked: "You can't run agentic chats here." }));
-    expect(features).not.toHaveBeenCalled();
-    // A chat chat asks too (images), but saves no files.
-    await show([], sessionRow({ profile: "chat" }), "chat");
-    expect(features).toHaveBeenCalledWith({ workspace: "w1" });
-    expect(host.querySelector('button[aria-label="Save a file as an artifact"]')).toBeNull();
-    // Each chat is its own mount (Shell keys it by id), so it asks afresh.
-    act(() => root.unmount());
-    root = createRoot(host);
-    features.mockResolvedValue(FEATURES(false));
-    await show([], sessionRow());
-    expect(host.querySelector('button[aria-label="Save a file as an artifact"]')).toBeNull();
   });
 });
 
@@ -733,7 +767,7 @@ describe("usage in the strip during a turn", () => {
     expect(header()).toContain("≈ $1.20");
     // Shown once: the header keeps the title and the badges, not the figures.
     expect(host.querySelector(".conv-head .meter, .conv-head .context-meter, .conv-head .cost-meter, .conv-head .session-figures")).toBeNull();
-    expect(host.querySelector(".conv-meta")!.textContent).not.toContain("tokens");
+    expect(host.querySelector(".conv-head")!.textContent).not.toContain("tokens");
     apply(current, ev(3, "turn_usage", { turn_id: "t", usage: use(3000, 400) }));
     await draw();
     expect(header()).toContain("3.0k in · 400 out");
@@ -816,6 +850,17 @@ describe("a sub-agent's chat (X.41)", () => {
     expect(stop()!.getAttribute("aria-label")).toBe("Stop");
     await act(async () => stop()!.click());
     expect(api.cancel).toHaveBeenCalledWith(SID);
+  });
+
+  test("its slim read-only strip holds the agent's name, the model and the figures, and nothing to press", async () => {
+    await render(sessionRow({ agent_id: "advisor", parent_id: "parent-1" }), [agent("advisor", false)]);
+    const strip = host.querySelector(".tag-only-row .composer-strip.readonly")!;
+    expect(strip.querySelector(".strip-agent")!.textContent).toBe("Advisor");
+    expect(strip.querySelector(".strip-model")!.textContent).toBe("mock");
+    expect(strip.querySelector<HTMLElement>(".strip-model")!.title).toBe("Model answering in this chat: demo::mock");
+    expect(strip.querySelector(".session-figures")).not.toBeNull();
+    expect(strip.querySelector("button, select, input, textarea, a")).toBeNull();
+    expect(host.querySelector(".conv-head .strip-agent, .conv-head .strip-model")).toBeNull();
   });
 
   test("an agent that works only as a sub-agent still shows the chat's figures beside its line", async () => {

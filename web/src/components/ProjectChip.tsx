@@ -40,6 +40,12 @@ export function canJoinProject(row: SessionRow | null): boolean {
   return !!row && !row.incognito && !row.parent_id;
 }
 
+/** Whether the chip draws anything: a chat that can join a project, and a
+ * project to show or to pick. */
+export function showsProjectChip(row: SessionRow | null, projects: ProjectSummary[]): boolean {
+  return canJoinProject(row) && projects.length > 0;
+}
+
 export function ProjectChip({ row, projects }: { row: SessionRow; projects: ProjectSummary[] }) {
   const [error, setError] = useState<string | null>(null);
   const current = projects.find((p) => p.project_id === row.project_id) ?? null;

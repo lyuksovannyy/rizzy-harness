@@ -98,9 +98,11 @@ let PAGE = null;
     await agentic('run: echo "release notes" > NOTES.txt');
     await p.click('.approval button.primary:has-text("Allow")');
     await p.waitForSelector('.tool .tool-status.s-ok');
-    await p.click('button[aria-label="Save a file as an artifact"]');
-    await p.fill('.save-file-bar input[aria-label="File or folder to save"]', 'NOTES.txt');
-    await p.click('.save-file-bar button:has-text("Save as artifact")');
+    // The header's button is gone: the bash card's own form takes a path.
+    await p.locator('.tool-head[aria-expanded="false"]').last().click();
+    await p.locator('.tool-body button:has-text("Save a file as artifact")').last().click();
+    await p.fill('.save-artifact input[aria-label="File or folder to save"]', 'NOTES.txt');
+    await p.click('.save-artifact button:has-text("Save as artifact")');
     await p.waitForSelector('.artifact-card.is-ready:has-text("Saved") [role=status]:text-is("In Artifacts")', { timeout: 30000 });
     const notes = await download(() => p.click('.artifact-card:has-text("Saved") a[href*="link="]:has-text("Download")'));
     check(notes.toString() === 'release notes\n', 'the saved file downloads as written');

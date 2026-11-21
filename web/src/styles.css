@@ -1478,123 +1478,139 @@ select.pill {
 }
 .conv-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--space-2);
   padding: 10px 16px 8px;
   border-bottom: 1px solid var(--line);
 }
+/* One line: the title, then its muted suffix. The title gives way first (an
+   ellipsis, with a floor); the suffix's parts shrink only after it. */
 .conv-title {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
 }
-/* The title and its Rename button on one line; the title is cut, not wrapped. */
-.chat-title-row {
-  flex-wrap: nowrap;
+.conv-actions {
+  display: flex;
+  align-items: center;
   gap: var(--space-1);
-  min-width: 0;
+  flex: none;
 }
-.chat-title-row h1 {
-  min-width: 0;
-}
-.chat-rename {
+.chat-title-row {
+  flex: 0 1000 auto;
   flex-wrap: nowrap;
-}
-.chat-rename input {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--text-lg);
-  font-weight: var(--w-semibold);
+  gap: var(--space-2);
+  min-width: 8ch;
 }
 .conv-title h1 {
   font-size: var(--text-lg);
   font-weight: var(--w-semibold);
   letter-spacing: -0.01em;
   margin: 0;
-}
-.conv-meta {
-  display: flex;
-  gap: var(--space-3);
-  align-items: center;
-  font-size: var(--text-sm);
   min-width: 0;
 }
-/* The meta row (agent, model, node, mode, folder, meter) is never allowed past
-   its column or under the buttons: what can give way does, with an ellipsis
-   and a small floor, in this order: the folder path (gives up the most), the
-   model id, the mode's notes, the agent's name, and only when nothing else is
-   left the meter and the node and mode badges. Weights scale with an item's own
-   width, so these are ratios, not a strict queue; they stay well above 1 so the
-   last ones left still shrink the whole overflow. */
-.conv-meta > * {
-  flex: none;
-  white-space: nowrap;
-}
-.conv-meta > .ellipsis,
-.conv-meta > .meta-model,
-.conv-meta > .exec-gaps,
-.conv-meta > .conv-agent,
-.conv-meta > .badge {
+/* The title is a button that looks like text: it reads as the title, and a
+   click or Enter turns it into the field below, the same size and font. */
+.chat-title-btn {
+  all: unset;
+  display: block;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: text;
+  border-radius: var(--r-sm);
 }
-.conv-meta > .ellipsis {
-  flex: 0 1000000000000 auto;
-  min-width: 5ch;
+.chat-title-btn:hover {
+  background: var(--bg-hover);
 }
-.conv-meta > .meta-model {
-  flex: 0 100000000 auto;
-  min-width: 7ch;
+.chat-title-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
-.conv-meta > .exec-gaps {
-  flex: 0 100000000 auto;
-  min-width: 5ch;
-}
-.conv-meta > .conv-agent {
-  flex: 0 10000 auto;
-  min-width: 7ch;
-}
-.conv-meta > .badge {
-  flex: 0 20 auto;
-  min-width: 5ch;
-}
-.conv-agent > .ellipsis {
-  flex: 0 1 auto;
+.chat-title-edit {
+  display: flex;
   min-width: 0;
 }
-.conv-agent > :not(.ellipsis) {
-  flex: none;
+.chat-title-edit input {
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  padding: 0 4px;
+  margin: 0 -4px;
+  min-width: 6ch;
+  max-width: 100%;
+  min-height: 0;
+  height: auto;
+  line-height: inherit;
 }
-/* Up to 1100px the row drops under the title and the buttons, at full width,
-   and wraps, several items to a line. Nothing is shortened while it fits on a
-   line of its own; an item wider than the whole row gets an ellipsis. */
-@media (max-width: 1100px) {
-  .conv-head {
-    flex-wrap: wrap;
-  }
+/* "project · node · how commands run": small, muted, after the title. */
+.chat-suffix {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0 var(--space-1-5);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.chat-part {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.chat-part > * {
+  min-width: 0;
+}
+/* The badges are plain words here, not pills. */
+.chat-suffix .badge {
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 24ch;
+}
+.chat-suffix .badge-offline {
+  color: var(--bad);
+}
+.chat-suffix .badge-warn {
+  color: var(--warn);
+}
+/* The project control: the chip, without its pill. */
+.chat-suffix .project-chip {
+  border: none;
+  padding: 0;
+  max-width: 24ch;
+  font-size: inherit;
+  color: inherit;
+  border-radius: var(--r-sm);
+}
+.chat-suffix .project-chip.on {
+  color: inherit;
+}
+.chat-suffix .project-chip:hover {
+  background: none;
+  color: var(--fg);
+  text-decoration: underline;
+}
+/* Narrow: the suffix wraps under the title; the buttons stay at the right. */
+@media (max-width: 600px) {
   .conv-title {
-    display: contents;
+    flex-wrap: wrap;
+    row-gap: 0;
   }
-  .conv-title > :not(.conv-meta) {
-    flex: 1 1 0;
-    min-width: 0;
+  .chat-title-row {
+    flex: 1 1 100%;
   }
-  .conv-meta {
-    order: 9;
+  .chat-suffix {
     flex: 1 1 100%;
     flex-wrap: wrap;
-    gap: 2px var(--space-2);
-  }
-  .conv-meta > *,
-  .conv-meta > .ellipsis,
-  .conv-meta > .meta-model,
-  .conv-meta > .exec-gaps,
-  .conv-meta > .conv-agent,
-  .conv-meta > .badge {
-    flex: 0 1 auto;
-    min-width: 0;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 }
 .timeline {
@@ -3670,6 +3686,22 @@ button.swatch:hover:not(:disabled) {
   padding-top: 0;
   font-size: var(--text-xs);
 }
+/* What answers in this chat: a read-only label after the agent picker. */
+.strip-model {
+  padding: 0 var(--space-1-5);
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+/* A chat with no composer: the same strip, read-only, where the box would be. */
+.composer-strip.readonly .strip-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+}
+.composer-strip.readonly .strip-agent.bad { color: var(--bad); }
 .session-figures {
   display: flex;
   flex-wrap: wrap;

@@ -49,6 +49,7 @@ const en = {
   "composer.attachHint": "Attach documents (text, code, Markdown, CSV, JSON, PDF; up to 5)",
   "composer.attachments": "Attachments",
   "composer.strip": "Chat settings and usage",
+  "strip.model": "Model answering in this chat: {id}",
   "composer.chars": "characters",
   "composer.truncated": "cut to fit",
   "composer.files": "Files",

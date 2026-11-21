@@ -111,6 +111,29 @@ describe("the box and the strip (a chat)", () => {
     c.unmount();
   });
 
+  test("the model that answers is a small muted read-only label right after the agent picker, its full id on hover", async () => {
+    const c = mount({ sessionModel: "prov::gpt-x-1" });
+    await until(c.host, ".step-pick button");
+    const controls = c.host.querySelector(".strip-controls")!;
+    const label = controls.querySelector<HTMLElement>(".strip-model")!;
+    expect(label.textContent).toBe("gpt-x-1");
+    expect(label.title).toBe("Model answering in this chat: prov::gpt-x-1");
+    expect(label.matches("button, select, input, [tabindex]")).toBe(false);
+    const kids = [...controls.children];
+    expect(kids.indexOf(label)).toBe(kids.indexOf(controls.querySelector(".agent-pick")!) + 1);
+    expect(names(controls)).toEqual(["agent: Coder", "Approval mode: Auto", "1000 steps"]);
+    c.unmount();
+  });
+
+  test("no model known, no label; the home screen has its model control instead", () => {
+    const c = mount({});
+    expect(c.host.querySelector(".strip-model")).toBeNull();
+    c.unmount();
+    const h = mount({ where: "home", sessionModel: "prov::gpt-x-1", approval: undefined, steps: undefined, models: [model("p::a", true), model("p::b")] });
+    expect(h.host.querySelector(".strip-model")).toBeNull();
+    h.unmount();
+  });
+
   test("with no figures there is no right side", () => {
     const c = mount({ approval: undefined, steps: undefined });
     expect(c.host.querySelector(".strip-figures")).toBeNull();

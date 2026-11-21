@@ -36,7 +36,13 @@ export const pages = {
   "conv.delete": "Delete chat",
   "conv.rename": "Rename chat",
   "conv.renameField": "Chat title",
-  "conv.renameSave": "Save",
+  // The header's suffix, said in words for a screen reader (ChatHeader).
+  "head.inProject": "in project {name}",
+  "head.noProject": "in no project",
+  "head.onNode": "on node {name}",
+  "head.sandboxed": "sandboxed",
+  "head.hostShell": "in the host shell, not contained",
+  "head.folder": "folder {path}",
   "conv.export": "Export as Markdown",
   "conv.exportWhat":
     "Download this chat as a Markdown file: your messages, the answers, and each tool call as one line.",

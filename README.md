@@ -360,11 +360,17 @@ agents (with Stop while its turn runs; the banner above links back to the main
 chat). Only chats in the open workspace notify, and a
 second tab may notify while another tab shows the chat.
 
-A chat is titled from its first message. The pencil next to the title in the
-chat's header renames it (Enter saves, Escape cancels; at most 200
-characters, control and hidden characters dropped); only you can rename your
-chats, and the new title is what the list and search show. The download
-button next to it saves the chat as a Markdown file: your messages, the
+A chat is titled from its first message. A click on the title in the chat's
+header (or Enter or F2 when it has keyboard focus) turns it into a field, with
+no buttons: Enter or a click outside applies, Escape cancels (a blank or
+unchanged title does nothing; at most 200 characters, control and hidden
+characters dropped); only you can rename your chats, and the new title is what
+the list and search show. After the title, in muted type, the header says
+**project · node · how commands run** (for example `test-project · local ·
+sandbox`; hover it for the chat's folder). The project there is the picker that
+moves the chat into another project or out; a chat in no project, or a plain
+chat with no folder, shows only what applies. The download
+button at the right saves the chat as a Markdown file: your messages, the
 answers, and each tool call as one line (tick **Include tool outputs** for
 their full output). The file is made in your browser from what the chat
 shows; nothing is fetched for it. It holds the model's text as the model
@@ -709,8 +715,8 @@ archives, documents and media, each name with its versions. In an agentic
 chat an agent calls `publish` (Software Developer, Senior Teamlead and Writer
 have it, and any custom agent
 that may edit files or run commands); in `ask` mode you approve each publish. You can also
-use **Save as artifact** on a file a tool card shows, or the field in the chat
-header. The node copies the file (a folder is packed as `.tar.gz`), the
+use **Save as artifact** on a file a tool card shows, or **Save a file as
+artifact…** on a command's card, which takes any path in the chat's folder. The node copies the file (a folder is packed as `.tar.gz`), the
 server pulls it and checks its size and sha256, and the chat card turns into
 Download / Open in Artifacts.
 
@@ -880,8 +886,11 @@ and, once the server has prices, an estimate of what it cost:
 number yet and says on hover and keyboard focus that your plan's quota will
 show there later. The strip is also where the home screen puts the model,
 effort, mode and search controls (it has no figures: there is no chat yet); on
-a narrow screen the figures wrap under the controls. The chat header keeps the
-title, the agent, the model, the node and shell badges and the folder. The figures move
+a narrow screen the figures wrap under the controls. The chat header is one line:
+the title, then the project, the node and the shell (see above); the agent and the
+model are in the strip (the model as a small muted label after the agent picker,
+its full id on hover); a sub-agent's chat, which has no box, gets the same strip
+read-only. The figures move
 after each model reply while a turn runs, not only when it ends (they are an
 estimate: the provider's own count for the whole turn replaces the running
 one when the turn ends, and a turn stopped by a restart keeps what it had
@@ -1952,8 +1961,8 @@ that warning first. Every request for `host`, granted or refused by any
 check, is written to the audit log (who, the workspace, the node, the
 outcome; never chat content). A routine's chat always asks for `sandbox`. A connected node must have announced the mode it is sent: one
 from before modes gets no agent chat, and the refusal says what to do on
-the node; a node that is away is "not connected", as before. The chat's header names its mode and
-the gaps its node announced at connect (network off without a namespace,
+the node; a node that is away is "not connected", as before. The chat's header names its mode, and
+its hover text says the gaps its node announced at connect (network off without a namespace,
 or not applied at all; the socket gap below Linux 7.1; no `/proc` of its
 own); which modes a node offers is shown only to accounts that may run
 agent chats.
@@ -2315,7 +2324,7 @@ offers ("execution modes"). `[execution] sandbox` decides when the
 sandbox mode is offered:
 
 - `"auto"` (default): where the probe passes at start, with any gap
-  above named in the log and in `doctor`, and in the chat's header as its
+  above named in the log and in `doctor`, and in the hover text of the chat header's mode as its
   node announced it at connect (the network, socket and `/proc` gaps). Where bubblewrap
   does not work, the sandbox mode is not offered (no command runs with
   Landlock alone in it): the node offers `host` if `[execution] host =
@@ -3202,8 +3211,8 @@ A project groups chats around one piece of work inside a workspace:
 **Projects** in the sidebar → **+**, then pick a
 name, an icon, an accent and a board template. In a team workspace owners and
 admins manage projects; every member sees them and works in them with their
-own chats. Start chats from the project's page, or add a chat from its header's
-project picker. Every message in a project's chats gets, after the history:
+own chats. Start chats from the project's page, or add a chat from the project
+name after its title in the chat's header (the picker). Every message in a project's chats gets, after the history:
 the project's **instructions** (Settings tab, up to 4,000 characters), the
 project's confirmed **memory**, and the open cards of its **board**. Memory
 comes whole, newest first, up to about 4,000 characters, so "continue" in a

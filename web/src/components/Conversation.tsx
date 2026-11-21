@@ -4,7 +4,7 @@ import { own } from "../emptyView";
 import { seqAt } from "../fold";
 import "../lib/i18nPages";
 import { errText } from "../lib/errorText";
-import { AtSign, Download, FileText, Image as ImageIcon, Package, Square, Trash2 } from "lucide-react";
+import { AtSign, FileText, Image as ImageIcon, Square } from "lucide-react";
 import { isValidElement, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../api";
 import { plansOf } from "../lib/planReview";
@@ -34,15 +34,15 @@ import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type Me
 import { CopyMessage } from "../md/CopyMessage";
 import { rt } from "../md/strings";
 import { showHidden, shownName } from "../md/hidden";
+import { rawModel } from "../lib/models";
 import type { History } from "../bg/topics";
 import type { Agent, ApprovalMode, HeadMoved, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow, SessionView, UploadedAttachment } from "../types";
 import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
 import { Composer, type ComposerHandle, type Submission } from "./Composer";
 import type { Picture } from "../lib/downscale";
 import { AgentMark, agentAlert } from "./AgentAvatar";
-import { ChatArtifactsCtx, SaveAsArtifact, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
+import { ChatArtifactsCtx, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
 import { BubbleImages } from "./ChatImages";
-import { ChatTitle } from "./ChatTitle";
 import { HeadNote, LaterNotes } from "./HeadNote";
 import { ThinkingRow } from "./ThinkingRow";
 import { DeleteChat } from "./DeleteChat";
@@ -51,8 +51,7 @@ import { useSubagentOnly } from "../lib/useSubagentOnly";
 import { Markdown } from "./Markdown";
 import { Mentioned } from "./Mentioned";
 import { peersLeft } from "../lib/peers";
-import { NodeBadge } from "./NodeBadge";
-import { ExecBadge } from "./ExecBadge";
+import { ChatHeader } from "./ChatHeader";
 import { compactTokens } from "./ContextMeter";
 import { SessionFigures } from "./SessionFigures";
 import { RetryNote } from "./RetryNote";
@@ -68,7 +67,6 @@ import { repliedBlock, ReplyBubble } from "./ReplyBubble";
 import { ApprovalChoice, Held } from "./ApprovalChoice";
 import { ToolCard, WebGroupCard } from "./ToolCard";
 import { RowBoundary, RowFailed } from "./RowBoundary";
-import { canJoinProject, ProjectChip } from "./ProjectChip";
 import type { ProjectSummary } from "../lib/projects";
 
 // Opt-in, and only its own small chunk: most people never load it.
@@ -601,7 +599,6 @@ export default function Conversation(props: {
   const saveable = agentic && !!features?.artifacts.enabled;
   const imagesUsed = items.reduce((n, it) => n + (it.type === "user" ? (it.images?.length ?? 0) : 0), 0);
   const artifacts = useChatArtifacts(sessionId, live, stagedKeys(items), saveable);
-  const [savingFile, setSavingFile] = useState(false);
   // Deleting asks in a dialog that also offers the chat's Media files.
   const [deleting, setDeleting] = useState(false);
   // Export as Markdown: its dialog and the file's builder load on the first click.
@@ -678,48 +675,21 @@ export default function Conversation(props: {
           <ChatGutter sessionId={sessionId} agentic={agentic} history={props.gutter} />
         </Suspense>
       )}
-      <header className="conv-head">
-        <div className="conv-title">
-          {/* The row's title: a rename changes only the row (the log keeps the first). */}
-          <ChatTitle sessionId={sessionId} title={props.row?.title ?? meta?.title ?? "…"} canRename={!!props.row} />
-          <div className="conv-meta">
-            <span className={`conv-agent${sessionAgent && agentAlert(sessionAgent) ? " bad" : ""}`}>
-              {sessionAgent && <AgentMark agent={sessionAgent} state={answering === activeAgent ? face : "idle"} size={20} />}
-              <span className="ellipsis">{agentName(activeAgent)}</span>
-            </span>
-            <span className="muted meta-model">{meta?.model}</span>
-            {agentic && <NodeBadge node={node} nodeId={nodeId} />}
-            {agentic && <ExecBadge mode={meta?.exec_mode} node={node} />}
-            {agentic && <span className="mono muted ellipsis">{shownName(meta?.cwd ?? "")}</span>}
-          </div>
-        </div>
-        {props.row && canJoinProject(props.row) && <ProjectChip row={props.row} projects={props.projects ?? []} />}
-        {saveable && (
-          <button
-            type="button"
-            className="icon"
-            aria-label="Save a file as an artifact"
-            title="Save a file as an artifact"
-            aria-expanded={savingFile}
-            onClick={() => setSavingFile(!savingFile)}
-          >
-            <Package size={18} />
-          </button>
-        )}
-        <button
-          type="button"
-          className="icon"
-          aria-label={t("conv.export")}
-          title={t("conv.export")}
-          disabled={!view || view.items.length === 0}
-          onClick={() => setExporting(true)}
-        >
-          <Download size={18} />
-        </button>
-        <button type="button" className="icon" aria-label={t("conv.delete")} title={t("conv.delete")} onClick={remove}>
-          <Trash2 size={18} />
-        </button>
-      </header>
+      <ChatHeader
+        sessionId={sessionId}
+        title={props.row?.title ?? meta?.title ?? "…"}
+        canRename={!!props.row}
+        row={props.row}
+        projects={props.projects ?? []}
+        agentic={agentic}
+        node={node}
+        nodeId={nodeId}
+        execMode={meta?.exec_mode}
+        cwd={meta?.cwd}
+        exportDisabled={!view || view.items.length === 0}
+        onExport={() => setExporting(true)}
+        onDelete={remove}
+      />
       {deleting && <DeleteChat sessionId={sessionId} workspaceId={workspaceId} incognito={incognito} onClose={() => setDeleting(false)} />}
       {exporting && view && (
         <Suspense fallback={null}>
@@ -730,11 +700,6 @@ export default function Conversation(props: {
             onClose={() => setExporting(false)}
           />
         </Suspense>
-      )}
-      {savingFile && (
-        <div className="incognito-banner save-file-bar">
-          <SaveAsArtifact autoFocus />
-        </div>
       )}
       {routine?.untrusted && (
         <div className="incognito-banner untrusted-banner" role="note">
@@ -1296,7 +1261,21 @@ export default function Conversation(props: {
               <p className="muted small tag-only" role="note">
                 {agentName(activeAgent)} only takes tasks from other agents, so there is nobody to answer here.
               </p>
-              {stripFigures && <div className="composer-strip alone"><div className="strip-figures">{stripFigures}</div></div>}
+              {/* No composer here, so the strip is read-only: who answers, with what, and the figures. */}
+              <div className="composer-strip readonly alone" role="group" aria-label={t("composer.strip")}>
+                <div className="strip-controls">
+                  <span className={`strip-agent${sessionAgent && agentAlert(sessionAgent) ? " bad" : ""}`}>
+                    {sessionAgent && <AgentMark agent={sessionAgent} state="idle" size={14} />}
+                    <span className="ellipsis">{agentName(activeAgent)}</span>
+                  </span>
+                  {meta?.model && (
+                    <span className="strip-model" title={t("strip.model", { id: meta.model })}>
+                      {rawModel(meta.model)}
+                    </span>
+                  )}
+                </div>
+                {stripFigures && <div className="strip-figures">{stripFigures}</div>}
+              </div>
               {/* The composer's Stop, for a sub-agent that goes on after its parent's turn ended. */}
               {running && (
                 <button type="button" className="send stop" onClick={() => void pageApi.cancel(sessionId)} aria-label={t("composer.stop")}>

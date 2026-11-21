@@ -5,15 +5,22 @@ import { own } from "../emptyView";
 import { MODE_LABEL, modeGaps } from "../lib/execWords";
 import type { ExecMode, NodeInfo } from "../types";
 
-export function ExecBadge({ mode, node }: { mode: ExecMode | undefined; node?: NodeInfo }) {
+/** `inline`: the chat header's suffix, where the gaps are the hover text
+ * instead of a line of their own. */
+export function ExecBadge({ mode, node, inline }: { mode: ExecMode | undefined; node?: NodeInfo; inline?: boolean }) {
   if (!mode) return null;
   const gaps = modeGaps(mode, node?.exec_gaps);
+  const word = own(MODE_LABEL, mode) ?? "unknown mode";
+  const hover = `commands run in the ${word}`;
   return (
     <>
-      <span className={`badge exec-mode ${mode === "host" ? "badge-warn" : ""}`} title={`commands run in the ${own(MODE_LABEL, mode) ?? "unknown mode"}`}>
-        {own(MODE_LABEL, mode) ?? "unknown mode"}
+      <span
+        className={`badge exec-mode ${mode === "host" ? "badge-warn" : ""}`}
+        title={inline && gaps.length > 0 ? `${hover} — ${gaps.join("; ")}` : hover}
+      >
+        {word}
       </span>
-      {gaps.length > 0 && <span className="muted small exec-gaps">{gaps.join("; ")}</span>}
+      {!inline && gaps.length > 0 && <span className="muted small exec-gaps">{gaps.join("; ")}</span>}
     </>
   );
 }

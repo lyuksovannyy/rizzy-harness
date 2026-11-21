@@ -4,7 +4,7 @@ import { t } from "../lib/i18n";
 import { isTag, marked, mentionable, pickable } from "../lib/agents";
 import { activeMention, filterAgents, matchedAlias, insertMention, isPathToken, leadingMention } from "../lib/mentions";
 import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
-import { modelLabel, offeredModels, resolveModel } from "../lib/models";
+import { modelLabel, offeredModels, rawModel, resolveModel } from "../lib/models";
 import { radioKeys, radioTab } from "../lib/radios";
 import { api } from "../api";
 import { readDraft, writeDraft } from "../lib/drafts";
@@ -906,6 +906,12 @@ export function Composer(props: {
                   ta.current?.focus();
                 }}
               />
+            </span>
+          )}
+          {/* What answers in this chat (it was in the chat's header): read-only. */}
+          {!home && props.sessionModel && (
+            <span className="strip-model" title={t("strip.model", { id: props.sessionModel })}>
+              {rawModel(props.sessionModel)}
             </span>
           )}
           {!home && props.approval && !props.readOnly && (
