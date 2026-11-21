@@ -385,6 +385,16 @@ describe("@ file mentions (T63)", () => {
     vi.restoreAllMocks();
   });
 
+  test("a folder typed whole (`@src/`, what picking it inserts) is a mention at once; a half-typed name is not", async () => {
+    // Intended rule: a chip for any token the folder holds, a directory with its slash too
+    // (`insertMention("@sr", .., "src/")` writes `@src/`); `@src/ma` names nothing and gets none.
+    const { pageApi } = await import("../apiPages");
+    const { existing } = await import("../lib/fileMentions");
+    vi.spyOn(pageApi, "files").mockImplementation(async (_id, q) => ({ paths: q === "./src" ? ["./src/"] : [] }));
+    expect(await existing("s1", ["src/", "src/ma"], new Map())).toEqual(["src/"]);
+    vi.restoreAllMocks();
+  });
+
   test("an answer about a path expires, so a file made later becomes a chip", async () => {
     const { pageApi } = await import("../apiPages");
     const { existing, KNOWN_MS } = await import("../lib/fileMentions");
