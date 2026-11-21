@@ -220,12 +220,11 @@ async fn a_background_childs_later_changes_are_undone_in_its_own_chat() {
     assert!(r.read("late.txt").is_none());
 }
 
-/// A background sub-agent that wrote DURING the lead's turn is another
-/// chat's work for T57 (the lead did not wait for it): the lead's Undo asks
-/// first, naming that file and not the lead's own, and "Undo anyway" puts
-/// everything back.
+/// A background sub-agent's writes while one of the lead's turns runs are
+/// that turn's (its checkpoint holds them): the turn's Undo takes them back
+/// with the lead's own, as it did for a background server's write (T47).
 #[tokio::test]
-async fn a_background_childs_writes_in_the_leads_turn_are_another_chats() {
+async fn a_background_childs_writes_inside_the_leads_turn_are_undone_with_it() {
     let mut r = repo_rig().await;
     r.lead_caps = Some(DelegateCaps {
         background: true,
@@ -246,15 +245,44 @@ async fn a_background_childs_writes_in_the_leads_turn_are_another_chats() {
     let mut files = after_files(&r, lead, &turn);
     files.sort();
     assert_eq!(files, ["fast.txt", "own.txt"]);
-    let mid = r.files();
     let undo = r.restore(&turn, false).await;
-    let err = undo.result.expect_err("refused: a background chat's file");
+    assert_eq!(undo.result, Ok(()));
+    assert_eq!(r.files(), before);
+}
+
+/// What a background sub-agent writes BETWEEN the lead's turns is another
+/// chat's work for a rewind that spans the gap: it asks first, naming the
+/// file and not the lead's own, and "Undo anyway" puts everything back.
+#[tokio::test]
+async fn a_rewind_across_a_background_childs_work_between_turns_asks_first() {
+    let mut r = repo_rig().await;
+    r.lead_caps = Some(DelegateCaps {
+        background: true,
+        ..Default::default()
+    });
+    let before = r.files();
+    let script = json!([
+        {"tool": "delegate", "input": {
+            "agent": "dev", "background": true,
+            "task": "run: sleep 1; echo late > late.txt"
+        }},
+    ]);
+    let (first, _) = r.lead_turn(&format!("script: {script}")).await;
+    let first = first.id.expect("a turn checkpoint");
+    r.until(|k| matches!(k, EventKind::BackgroundEnded(_)))
+        .await;
+    assert_eq!(r.read("late.txt").as_deref(), Some("late\n"));
+    let own = json!([{"tool": "write", "input": {"path": "own.txt", "content": "lead\n"}}]);
+    r.lead_turn(&format!("script: {own}")).await;
+    let mid = r.files();
+    let undo = r.restore_with(&first, false, true).await;
+    let err = undo.result.expect_err("refused: another chat's file");
     assert!(
-        err.contains("another chat") && err.contains("`fast.txt`") && !err.contains("`own.txt`"),
+        err.contains("another chat") && err.contains("`late.txt`") && !err.contains("`own.txt`"),
         "{err}"
     );
     assert_eq!(r.files(), mid);
-    let undo = r.restore(&turn, true).await;
+    let undo = r.restore_with(&first, true, true).await;
     assert_eq!(undo.result, Ok(()));
     assert_eq!(r.files(), before);
 }

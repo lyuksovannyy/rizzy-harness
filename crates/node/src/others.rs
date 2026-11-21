@@ -281,6 +281,33 @@ pub(crate) struct Other {
     pub id: SessionId,
     pub cwd: PathBuf,
     pub repo: Option<Repo>,
+    /// A background sub-agent of the undoing chat: the spans of that chat's
+    /// own turns, in which what it did is the turn's (the undo takes it
+    /// back); only what it did outside them is another chat's.
+    pub during: Option<Vec<(i64, i64)>>,
+}
+
+/// `[since, end]` less the `turns` (spans of the undoing chat's own turns):
+/// the stretches in which a background sub-agent's work is another chat's.
+fn outside(since: i64, end: i64, turns: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    let mut turns: Vec<(i64, i64)> = turns
+        .iter()
+        .copied()
+        .filter(|(a, b)| *b >= since && *a <= end)
+        .collect();
+    turns.sort();
+    let mut out = Vec::new();
+    let mut at = since;
+    for (a, b) in turns {
+        if a > at {
+            out.push((at, a));
+        }
+        at = at.max(b);
+    }
+    if at < end {
+        out.push((at, end));
+    }
+    out
 }
 
 /// The other chats' work on `touched` (paths relative to the checkpoint's
@@ -327,7 +354,16 @@ pub(crate) async fn foreign_work(
         let mut unlisted = false;
         match events {
             Ok(events) => {
-                let w = read_window(&events, since, end, span.me);
+                let w = match &other.during {
+                    None => read_window(&events, since, end, span.me),
+                    Some(turns) => {
+                        let mut all = Window::default();
+                        for (a, b) in outside(since, end, turns) {
+                            all.absorb(read_window(&events, a, b, span.me));
+                        }
+                        all
+                    }
+                };
                 for path in w.recorded {
                     if let Some(rel) = relative(&root, Path::new(&path))
                         && touched.contains(&rel)
@@ -482,6 +518,27 @@ struct Window {
     turns: Vec<(Option<String>, Option<String>)>,
     /// A background command of it ran in the window.
     background: bool,
+}
+
+impl Window {
+    fn absorb(&mut self, o: Window) {
+        for p in o.recorded {
+            if !self.recorded.contains(&p) {
+                self.recorded.push(p);
+            }
+        }
+        for p in o.restored {
+            if !self.restored.contains(&p) {
+                self.restored.push(p);
+            }
+        }
+        for t in o.turns {
+            if !self.turns.contains(&t) {
+                self.turns.push(t);
+            }
+        }
+        self.background |= o.background;
+    }
 }
 
 /// What a chat's events say happened in `[since, end]`: a call counts when

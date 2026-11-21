@@ -4115,30 +4115,32 @@ impl Session {
             .collect();
         let parent: HashMap<SessionId, Option<SessionId>> =
             all.iter().map(|(id, p, _)| (*id, *p)).collect();
-        // This chat's sub-agents (and theirs) work for this turn, those it
-        // waited for: a sub-agent it started in the background was not
-        // waited for, and its work in the folder is another chat's (a
-        // shared one writes the same folder; PLAN.md T32, T57).
-        let background = self.background_children().await;
-        let mine = |mut id: SessionId| {
+        // This chat's sub-agents (and theirs) work for its turns, so what
+        // they write while one of its turns runs is the turn's (the
+        // checkpoint holds it, Undo takes it back). One the chat started in
+        // the background was not waited for: what it writes while no turn
+        // of the chat runs (between turns, or after the last) is another
+        // chat's, and a rewind across such a gap asks first (a shared one
+        // writes the same folder; PLAN.md T32, T57).
+        let (background, turns) = self.background_work().await;
+        // The chain from `id` up to this chat, and whether it passes a
+        // background start on the way (`None`: not this chat's at all).
+        let chain = |mut id: SessionId| -> Option<bool> {
+            let mut via_bg = false;
             for _ in 0..64 {
                 if id == self.id {
-                    return true;
+                    return Some(via_bg);
                 }
-                if background.contains(&id) {
-                    return false;
-                }
-                match parent.get(&id).copied().flatten() {
-                    Some(p) => id = p,
-                    None => return false,
-                }
+                via_bg |= background.contains(&id);
+                id = parent.get(&id).copied().flatten()?;
             }
-            false
+            None
         };
         let root = real_path(&repo.root);
         let ids: Vec<(SessionId, PathBuf)> = all
             .iter()
-            .filter(|(id, _, _)| !mine(*id))
+            // Its waited-for sub-agents are the chat itself.
+            .filter(|(id, _, _)| chain(*id) != Some(false))
             .map(|(id, _, cwd)| (*id, real_path(cwd)))
             .filter(|(_, cwd)| overlaps(cwd, &root))
             .collect();
@@ -4157,6 +4159,9 @@ impl Session {
                 id: s.id,
                 cwd,
                 repo: theirs,
+                // A background sub-agent of this chat: only what it did
+                // outside this chat's turns is another chat's.
+                during: chain(s.id).map(|_| turns.clone()),
             });
         }
         let store = &self.node.cfg.store;
@@ -4182,21 +4187,44 @@ impl Session {
     }
 
     /// The sub-agents this chat ever started in the background (its log's
-    /// `background_started` entries that name a child).
-    async fn background_children(&self) -> std::collections::HashSet<SessionId> {
+    /// `background_started` entries that name a child), and the time spans
+    /// of its own turns (an open one runs until now).
+    async fn background_work(&self) -> (std::collections::HashSet<SessionId>, Vec<(i64, i64)>) {
         let me = self.id;
-        self.node
+        let events = self
+            .node
             .cfg
             .store
-            .call(move |s| s.events_since_turn_at(me, i64::MIN, &["background_started"]))
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|e| match e.typed() {
-                Ok(EventKind::BackgroundStarted(b)) => b.child.map(|c| c.session),
-                _ => None,
+            .call(move |s| {
+                s.events_since_turn_at(
+                    me,
+                    i64::MIN,
+                    &["background_started", "turn_started", "turn_ended"],
+                )
             })
-            .collect()
+            .await
+            .unwrap_or_default();
+        let mut children = std::collections::HashSet::new();
+        let mut open: HashMap<String, i64> = HashMap::new();
+        let mut spans = Vec::new();
+        for e in &events {
+            match e.typed() {
+                Ok(EventKind::BackgroundStarted(b)) => {
+                    children.extend(b.child.map(|c| c.session));
+                }
+                Ok(EventKind::TurnStarted(t)) => {
+                    open.insert(t.turn_id, e.ts_ms);
+                }
+                Ok(EventKind::TurnEnded(t)) => {
+                    if let Some(from) = open.remove(&t.turn_id) {
+                        spans.push((from, e.ts_ms));
+                    }
+                }
+                _ => {}
+            }
+        }
+        spans.extend(open.into_values().map(|from| (from, i64::MAX)));
+        (children, spans)
     }
 
     /// Register a restore of `root` (the checkpoint's folder: the

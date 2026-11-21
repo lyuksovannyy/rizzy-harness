@@ -345,10 +345,15 @@ pub fn shared_note(files: Option<&[String]>, record_incomplete: bool) -> String 
             s
         }
     };
+    let tail = if matches!(files, Some([])) && !record_incomplete {
+        ""
+    } else {
+        ". What you read of those files before is out of date: read them again before you \
+         edit them"
+    };
     format!(
         "it worked in this chat's folder, not in a copy of its own, so its changes are already \
-         there; {changed}. What you read of those files before is out of date: read them \
-         again before you edit them"
+         there; {changed}{tail}"
     )
 }
 
@@ -867,7 +872,8 @@ mod sub_folder_tests {
         let n = shared_note(Some(&nasty), false);
         assert!(!n.contains('\n') && !n.contains('\u{202e}'), "{n:?}");
         assert!(n.contains("`a\u{FFFD}, \u{FFFD}b`"), "{n}");
-        assert!(shared_note(Some(&[]), false).contains("no file in the folder changed"));
+        let none = shared_note(Some(&[]), false);
+        assert!(none.contains("no file in the folder changed") && !none.contains("out of date"));
         assert!(shared_note(None, false).contains("could not be listed"));
         let a8 = shared_note(None, true);
         assert!(

@@ -84,9 +84,8 @@ let PAGE = null;
     // Senior Teamlead in the roster (9c32186).
     await p.click('.new-chat');
     await p.waitForSelector('h1.greeting');
-    // Two read-only sub-agents: Writer can change files since the roster, and
-    // a sub-agent that changes files needs a git repository (it works on its
-    // own copy), which this plain folder is not.
+    // Two read-only sub-agents (a writer would work in this folder too, since
+    // 2026-11-21; a copy of its own, `folder: "own"`, would need a git repository).
     await p.fill('.composer textarea', 'delegate: scout=look around | reviewer=check the notes');
     await p.click('.mode-switch button:has-text("Agentic")');
     await pickAgent(p, 'Senior Teamlead');
