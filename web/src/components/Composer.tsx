@@ -356,9 +356,13 @@ export function Composer(props: {
       // Focus waits on the choice's container (never a button): the rest of
       // a typing burst lands there and is dropped, not in the page.
       if (typing.current || at === document.body) props.choiceBox?.current?.focus({ preventScroll: true });
-    } else if (typing.current) {
+    } else {
+      // Focus on nothing (the page) is where the choice's own button left it
+      // when it went; a second call asked after the first leaves no memory of
+      // the typing in between (the browser drops focus from a hidden field).
+      const lost = typing.current || document.activeElement === document.body;
       typing.current = false;
-      el?.focus();
+      if (lost && !props.readOnly) el?.focus();
     }
   }, [props.choosing]);
 
