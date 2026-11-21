@@ -563,6 +563,132 @@ async fn nobody_else_may_rewind_not_even_an_admin() {
     assert_eq!(events(&t, &t.alex, sid).await.len(), 4);
 }
 
+/// One request with the API token.
+async fn token_req(t: &T, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let mut rb = reqwest::Client::new()
+        .request(method, format!("{}{path}", t.base))
+        .bearer_auth(TOKEN);
+    if let Some(b) = body {
+        rb = rb.json(&b);
+    }
+    let r = rb.send().await.unwrap();
+    let st = r.status();
+    (st, r.json().await.unwrap_or(Value::Null))
+}
+
+/// The API token is no account: on a chat somebody owns it gets the 404 of
+/// a chat that does not exist (on both routes) and the node is sent
+/// nothing; on a chat nobody owns it is relayed like an owner's request
+/// (the guard in `http/rewind.rs::owned` is what this pins).
+#[tokio::test]
+async fn the_api_token_rewinds_only_a_chat_nobody_owns() {
+    let t = start().await;
+    // A chat alex owns, with a rewind already made (so an undo exists).
+    let owned = chat(&t, &t.alex, "local", None).await;
+    send(&t, &t.alex, owned, "first").await;
+    let second = send(&t, &t.alex, owned, "second").await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &path(owned),
+        Some(json!({"message_seq": second})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let at = caught_up(&t, &t.alex, owned, 8)
+        .await
+        .iter()
+        .find(|e| e["kind"] == "conversation_rewound")
+        .unwrap()["seq"]
+        .as_u64()
+        .unwrap();
+    let before = (rewinds(&t.local).len(), undos(&t.local).len());
+    let first = 3; // the first message's seq: turn_started 2, message 3
+    let (st, v) = token_req(
+        &t,
+        Method::POST,
+        &path(owned),
+        Some(json!({"message_seq": first})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    assert_eq!(v["error"], "unknown session");
+    let (st, v) = token_req(&t, Method::POST, &undo_path(owned, at), None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    assert_eq!(v["error"], "unknown session");
+    let (st, missing) = token_req(
+        &t,
+        Method::POST,
+        &path(SessionId::new()),
+        Some(json!({"message_seq": 1})),
+    )
+    .await;
+    assert_eq!(
+        (st, &missing["error"]),
+        (StatusCode::NOT_FOUND, &v["error"])
+    );
+    assert_eq!((rewinds(&t.local).len(), undos(&t.local).len()), before);
+
+    // A chat nobody owns: made with the token.
+    let (st, v) = token_req(
+        &t,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"cwd": "/w", "title": "t", "node_id": "local"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let free: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    let (st, v) = token_req(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{free}/prompt"),
+        Some(json!({"text": "one"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = token_req(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{free}/prompt"),
+        Some(json!({"text": "two"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let mut msg = 0;
+    for _ in 0..500 {
+        let (_, v) = token_req(
+            &t,
+            Method::GET,
+            &format!("/api/sessions/{free}/events?after=0"),
+            None,
+        )
+        .await;
+        let evs = v["events"].as_array().cloned().unwrap_or_default();
+        if evs.len() >= 7 {
+            msg = evs.iter().rfind(|e| e["kind"] == "user_message").unwrap()["seq"]
+                .as_u64()
+                .unwrap();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(msg > 0, "the mirror never caught up");
+    let (st, v) = token_req(
+        &t,
+        Method::POST,
+        &path(free),
+        Some(json!({"message_seq": msg})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        rewinds(&t.local).last().map(|r| (r.0, r.1)),
+        Some((free, msg))
+    );
+}
+
 /// A sub-agent's chat is rewound by the agent that delegated it, never by
 /// the person; a node that did not announce `rewind` is told to update.
 #[tokio::test]
