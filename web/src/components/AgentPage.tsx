@@ -19,7 +19,7 @@ import { rawModel } from "../lib/models";
 import type { Chain } from "../lib/modelPlan";
 import type { Agent, AgentDetail, AgentFeatures, NewAgent } from "../types";
 import { AgentAvatar, AgentMark, agentAlert } from "./AgentAvatar";
-import { AgentModelEditor, NewAgentModels } from "./AgentModelEditor";
+import { AgentModelEditor, type ChainHandle, NewAgentModels } from "./AgentModelEditor";
 import { AvatarEditor } from "./AvatarEditor";
 import { DelegatePicker } from "./DelegatePicker";
 
@@ -227,6 +227,10 @@ function draftOf(d: AgentDetail): Draft {
   };
 }
 
+/** Two scopes name the same place. */
+const sameScope = (a: Scope | null, b: Scope | null) =>
+  a === b || (!!a && !!b && a !== "server" && b !== "server" && a.workspace === b.workspace);
+
 const same = (a: Draft, b: Draft) => JSON.stringify(a) === JSON.stringify(b);
 
 /** What a viewer who may not change the chain is told about who does. */
@@ -275,6 +279,8 @@ export function AgentPage(props: {
   onChanged: () => void;
   /** Where the page reads and, when `editable`, writes: a workspace's agents or the server's ("server"). */
   scope?: Scope | null;
+  /** The scope `agents` was listed in, when it is not the one written (the sidebar page lists in the active workspace and edits the server's). */
+  listedIn?: Scope | null;
   /** The scope is the viewer's Personal workspace: it has no settings, so no chains of its own. */
   personal?: boolean;
   /** The viewer is a server admin, who sets the server's chains (also from a Personal workspace). */
@@ -306,6 +312,8 @@ export function AgentPage(props: {
   const [made, setMade] = useState<{ id: string; why: string } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // The chain editor of an agent edited whole is saved by this page's Save.
+  const [chainH, setChainH] = useState<ChainHandle | null>(null);
   const ids = useId();
 
   useEffect(() => {
@@ -370,6 +378,12 @@ export function AgentPage(props: {
     own: creating ? inWorkspace : listed?.scope === "workspace",
   });
   const newChain = "edit" in place && creating && chain?.model ? chain : null;
+  // An agent edited whole has one Save for itself and its chain; the others
+  // (built in, files, a server agent seen from a workspace) change only the
+  // chain and the additional instructions, so the Models block keeps its own.
+  const oneSave = !creating && !locked && canEdit && "edit" in place && !!listed;
+  const chainDirty = oneSave && !!chainH?.dirty;
+  const chainInvalid = oneSave && !!chainH?.invalid;
   // Once the agent exists its handle is taken: by itself.
   const handleError = creating && !made ? handleProblem(draft.id, props.agents) : null;
   const nameError = canEdit && !locked && !draft.name.trim() ? "Give it a name." : null;
@@ -407,7 +421,9 @@ export function AgentPage(props: {
         props.onOpen(d.id);
         return;
       }
-      const d = locked
+      const d = !dirty
+        ? null
+        : locked
         ? await pageApi.updateAgent(props.id, { summary: draft.summary, instructions: draft.instructions }, writeScope)
         : await pageApi.updateAgent(
             props.id,
@@ -421,11 +437,23 @@ export function AgentPage(props: {
             },
             writeScope,
           );
-      setDetail(d);
-      setDraft(draftOf(d));
-      setSaved(draftOf(d));
+      if (d) {
+        setDetail(d);
+        setDraft(draftOf(d));
+        setSaved(draftOf(d));
+        props.onChanged();
+      }
+      if (chainDirty && chainH) {
+        // After the agent, so an agent that cannot be saved never gets a chain
+        // half of a Save; if the chain fails the agent stays saved and Save tries the chain again.
+        try {
+          await chainH.commit();
+        } catch (x) {
+          setErr(t("agentModels.savedNoModels", { id: props.id, why: x instanceof Error ? x.message : String(x) }));
+          return;
+        }
+      }
       setMsg("Saved.");
-      props.onChanged();
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
@@ -705,7 +733,21 @@ export function AgentPage(props: {
             <div className="field">
               <span className="field-label">Models</span>
               {"edit" in place && writeScope ? (
-                <AgentModelEditor agent={listed} target={place.edit} scope={writeScope} onSaved={props.onChanged} />
+                <AgentModelEditor
+                  agent={listed}
+                  target={place.edit}
+                  scope={writeScope}
+                  onSaved={props.onChanged}
+                  embedded={oneSave}
+                  register={setChainH}
+                  readOnly={
+                    <>
+                      <AgentModels agent={listed} />
+                      {agentAlert(listed) && <span className="small error-text">{agentAlert(listed)}</span>}
+                      {sameScope(props.listedIn ?? writeScope, writeScope) ? null : <p className="field-hint">{t("agentModels.readListed")}</p>}
+                    </>
+                  }
+                />
               ) : (
                 <>
                   <AgentModels agent={listed} />
@@ -742,7 +784,7 @@ export function AgentPage(props: {
                 <button
                   type="submit"
                   className="primary"
-                  disabled={busy !== null || (!dirty && !creating) || !!handleError || !!nameError || !!promptError}
+                  disabled={busy !== null || (!dirty && !creating && !chainDirty) || chainInvalid || !!handleError || !!nameError || !!promptError}
                 >
                   {creating ? "Create agent" : "Save"}
                 </button>

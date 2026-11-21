@@ -315,6 +315,11 @@ export const pages = {
   "agentModels.created": "@{id} was created, but its models were not saved: {why}",
   "agentModels.retry": "Try saving the models again",
   "agentModels.open": "Open the agent",
+  "agentModels.loadFailed": "Could not load the chain to edit: {why}",
+  "agentModels.notListed": "the server does not list this agent",
+  "agentModels.loadRetry": "Try again",
+  "agentModels.savedNoModels": "@{id} was saved, but its models were not saved: {why}",
+  "agentModels.readListed": "This is the chain as the workspace you are in has it; the server's may differ.",
 } as const;
 
 extend(pages);

@@ -6,7 +6,7 @@
 // them to many agents, which is the wrong shape for one agent. A lazy chunk
 // with the Agents page.
 import { ArrowDown, ArrowUp, CircleAlert, X } from "lucide-react";
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, type Scope } from "../api";
 import {
   type ChainTarget,
@@ -226,59 +226,117 @@ export function inheritLabel(at: ChainTarget["at"], agent: { id: string }): stri
 const ownInherit = (at: ChainTarget["at"], a: { id: string }, own: boolean) =>
   at === "workspace" && own ? t("agentModels.useDefault") : inheritLabel(at, a);
 
-/** An agent's page: its chain, edited and saved on its own. */
-export function AgentModelEditor(props: { agent: Agent; target: ChainTarget; scope: Scope; onSaved: () => void }) {
+/** What the page that holds the editor may ask of it: whether it has a
+ * change to save, whether that change may not be saved yet, and the save
+ * itself (it throws; the page words the failure). */
+export interface ChainHandle {
+  dirty: boolean;
+  invalid: boolean;
+  commit: () => Promise<void>;
+}
+
+/** An agent's page: its chain, edited and saved on its own, or, with
+ * `embedded`, saved by the page's own Save (`register` hands the page the
+ * handle). The chain it starts from is read where it will be written: the
+ * server's from a listing at the server's scope, a workspace's from its
+ * settings document. The listing the page itself holds is in whatever scope
+ * the app is in, so its chain is never the starting point. `readOnly` is
+ * what the page shows when the chain cannot be read. */
+export function AgentModelEditor(props: {
+  agent: Agent;
+  target: ChainTarget;
+  scope: Scope;
+  onSaved: () => void;
+  readOnly: ReactNode;
+  embedded?: boolean;
+  register?: (h: ChainHandle | null) => void;
+}) {
   const { agent: a, target } = props;
   const models = useModels(props.scope);
   const label = useMemo(() => modelNamer(models), [models]);
   const own = a.scope === "workspace";
   const wsId = target.at === "workspace" ? target.id : null;
-  // What the listing says about the chain, as a value: the key an effect follows.
-  const listing = JSON.stringify([a.default_model, a.main_model, a.fallbacks]);
 
-  // The saved chain: the server's from the listing (until a save answers),
-  // a workspace's from its settings (null: not read yet).
-  const [answered, setAnswered] = useState<Chain | null>(null);
-  const [wsBase, setWsBase] = useState<Chain | null>(null);
+  // The saved chain at the place it is written (null: not read yet), and the
+  // server's own listing of the agent (the chain in effect where none is set).
+  const [base, setBase] = useState<Chain | null>(null);
+  const [serverOf, setServerOf] = useState<Agent | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
-  useEffect(() => setAnswered(null), [listing]);
+  const [tries, setTries] = useState(0);
   useEffect(() => {
-    if (!wsId) return;
     let live = true;
     setLoadErr(null);
-    workspaceChain(wsId, a.id).then(
-      (c) => live && setWsBase(c),
-      (x) => live && setLoadErr(message(x)),
-    );
+    const server = () =>
+      Promise.resolve()
+        .then(() => api.agents("server"))
+        .then((r) => r?.agents.find((x) => x.id === a.id) ?? null);
+    if (wsId) {
+      workspaceChain(wsId, a.id).then(
+        (c) => live && setBase(c),
+        (x) => live && setLoadErr(message(x)),
+      );
+      // Only the note of what "use the server's chain" means: not needed to edit.
+      if (!own) server().then((s) => live && setServerOf(s), () => live && setServerOf(null));
+    } else {
+      server().then(
+        (s) => {
+          if (!live) return;
+          if (!s) return setLoadErr(t("agentModels.notListed"));
+          setServerOf(s);
+          setBase(serverChain(s));
+        },
+        (x) => live && setLoadErr(message(x)),
+      );
+    }
     return () => {
       live = false;
     };
-  }, [wsId, a.id, listing]);
-  const [serverOf, setServerOf] = useState<Agent | null>(null);
-  useEffect(() => {
-    if (!wsId || own) return;
-    let live = true;
-    Promise.resolve()
-      .then(() => api.agents("server"))
-      .then((r) => live && setServerOf(r?.agents.find((x) => x.id === a.id) ?? null))
-      .catch(() => live && setServerOf(null));
-    return () => {
-      live = false;
-    };
-  }, [wsId, a.id, own]);
-
-  const base: Chain | null = wsId ? wsBase : (answered ?? serverChain(a));
+  }, [wsId, a.id, own, tries]);
   const [edit, setEdit] = useState<Chain | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [lost, setLost] = useState<string[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
-  if (!base) return loadErr ? <div className="error-text">{loadErr}</div> : <div className="muted small">{t("agentModels.loading")}</div>;
-  const shown = edit ?? base;
-  const inherit = ownInherit(target.at, a, own);
+  const shown = edit ?? base ?? NO_CHAIN;
   const problems = chainProblems(shown, a, target.at === "workspace", label);
-  const dirty = edit !== null && !sameChain(edit, base);
+  const dirty = base !== null && edit !== null && !sameChain(edit, base);
+
+  const commit = async () => {
+    const r = await saveChain(target, a.id, shown, label);
+    setBase(r.chain);
+    setEdit(null);
+    setLost(r.lost);
+    props.onSaved();
+  };
+  // The page's Save calls the latest commit, whatever the render it was handed over in.
+  const latest = useRef(commit);
+  latest.current = commit;
+  const invalid = problems.length > 0;
+  const { register } = props;
+  useEffect(() => {
+    if (!register || !props.embedded || !base) return;
+    register({ dirty, invalid, commit: () => latest.current() });
+    return () => register(null);
+  }, [register, props.embedded, base, dirty, invalid]);
+
+  if (!base) {
+    if (!loadErr) return <div className="muted small">{t("agentModels.loading")}</div>;
+    return (
+      <div className="stack">
+        {props.readOnly}
+        <div className="error-text" role="alert">
+          {t("agentModels.loadFailed", { why: loadErr })}
+        </div>
+        <div className="row">
+          <button type="button" onClick={() => setTries(tries + 1)}>
+            {t("agentModels.loadRetry")}
+          </button>
+        </div>
+      </div>
+    );
+  }
+  const inherit = ownInherit(target.at, a, own);
 
   const save = async () => {
     setBusy(true);
@@ -286,13 +344,8 @@ export function AgentModelEditor(props: { agent: Agent; target: ChainTarget; sco
     setMsg(null);
     setLost([]);
     try {
-      const r = await saveChain(target, a.id, shown, label);
-      if (wsId) setWsBase(r.chain);
-      else setAnswered(r.chain);
-      setEdit(null);
-      setLost(r.lost);
+      await commit();
       setMsg(t("agentModels.saved"));
-      props.onSaved();
     } catch (x) {
       setErr(message(x));
     } finally {
@@ -305,8 +358,8 @@ export function AgentModelEditor(props: { agent: Agent; target: ChainTarget; sco
   const inEffect = !wsId
     ? base.model
       ? null
-      : a.main_model
-        ? t("agentModels.notSet", { model: label(a.main_model) })
+      : serverOf?.main_model
+        ? t("agentModels.notSet", { model: label(serverOf.main_model) })
         : t("agentModels.notSetNoModel")
     : base.model
       ? t("agentModels.wsOwn")
@@ -336,16 +389,18 @@ export function AgentModelEditor(props: { agent: Agent; target: ChainTarget; sco
         </div>
       )}
       {err && <div className="error-text">{err}</div>}
-      <div className="row end">
-        {msg && (
-          <span className="muted small" role="status">
-            {msg}
-          </span>
-        )}
-        <button type="button" className="primary" disabled={busy || !dirty || problems.length > 0} onClick={() => void save()}>
-          {t("agentModels.save")}
-        </button>
-      </div>
+      {!props.embedded && (
+        <div className="row end">
+          {msg && (
+            <span className="muted small" role="status">
+              {msg}
+            </span>
+          )}
+          <button type="button" className="primary" disabled={busy || !dirty || problems.length > 0} onClick={() => void save()}>
+            {t("agentModels.save")}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -8,6 +8,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { Scope } from "../api";
 import { NEW_AGENT } from "../lib/agents";
 import type { Agent, AgentDetail, Me, ModelInfo } from "../types";
 
@@ -115,9 +116,12 @@ const type = (el: HTMLInputElement | HTMLTextAreaElement, value: string) =>
     el.dispatchEvent(new Event("input", { bubbles: true }));
   });
 
-async function server(me: Me, a: Agent, d?: Partial<AgentDetail>, agents = [a]) {
+// `agents` is the listing the Shell holds (the active workspace's scope);
+// `serverAgents` what `GET /api/agents?scope=server` answers.
+async function server(me: Me, a: Agent, d?: Partial<AgentDetail>, agents = [a], serverAgents = [a], scope: Scope | null = null) {
   api.agent.mockResolvedValue(detail(a, d));
-  await act(async () => root.render(<Agents me={me} agents={agents} id={a.id} onOpen={onOpen} onChanged={onChanged} />));
+  api.agents.mockResolvedValue({ agents: serverAgents });
+  await act(async () => root.render(<Agents me={me} agents={agents} id={a.id} onOpen={onOpen} onChanged={onChanged} scope={scope} />));
 }
 interface Opts {
   editable?: boolean;
@@ -158,7 +162,8 @@ describe("who sees the editor", () => {
   test.each(kinds)("a server admin edits %s at the server's scope", async (_n, more) => {
     await server(admin, agent("coder", more));
     expect(field("Main model")).not.toBeNull();
-    expect(button("Save models")).toBeDefined();
+    // An agent edited whole has the page's one Save; the others keep the block's own.
+    expect(button("Save models") !== undefined).toBe(more.origin !== "custom");
     expect(host.textContent).not.toContain("Chosen per agent in Settings");
   });
 
@@ -177,7 +182,7 @@ describe("who sees the editor", () => {
       api.workspace.mockResolvedValue(settings());
       await inWorkspace(agent("coder", more));
       expect(field("Main model")).not.toBeNull();
-      expect(button("Save models")).toBeDefined();
+      expect(button("Save models") !== undefined).toBe(more.origin !== "custom");
     },
   );
 
@@ -189,7 +194,10 @@ describe("who sees the editor", () => {
   });
 
   test("a Personal workspace: the server's admin edits the server's chain, a member reads one line", async () => {
+    // The server's chain is read from the server's own listing.
+    api.agents.mockResolvedValue({ agents: [agent("coder")] });
     await inWorkspace(agent("coder"), { personal: true, serverAdmin: true });
+    expect(api.agents).toHaveBeenCalledWith("server");
     expect(field("Main model")).not.toBeNull();
     api.saveAgentModels.mockResolvedValue({ agent_models: { coder: { model: id("gpt-b"), fallbacks: [] } } });
     choose("Main model", id("gpt-b"));
@@ -500,5 +508,162 @@ describe("a new agent", () => {
       },
     });
     expect(onOpen).toHaveBeenCalledWith("lead");
+  });
+});
+
+describe("an editor starts from the chain of the place it writes to", () => {
+  const wsView = () => agent("coder", { default_model: id("gpt-b"), main_model: id("gpt-b"), fallbacks: [] });
+  const serverView = () => agent("coder", { default_model: id("gpt-a"), main_model: id("gpt-a"), fallbacks: [id("gpt-b"), id("gpt-c")] });
+  const wsScope = { workspace: "w1" };
+
+  test("the server's page under a team workspace with its own chain: the server's chain, and a save writes it", async () => {
+    // The Shell's listing is the workspace's (main gpt-b, no fallbacks); the server's is gpt-a with two fallbacks.
+    await server(admin, wsView(), undefined, [wsView()], [serverView()], wsScope);
+    expect(api.agents).toHaveBeenCalledWith("server");
+    expect((field("Main model") as HTMLSelectElement).value).toBe(id("gpt-a"));
+    expect(fallbacks()).toEqual(["gpt-b", "gpt-c"]);
+    // Untouched: nothing to save, no call.
+    expect(button("Save models")!.disabled).toBe(true);
+    await click("Save models");
+    expect(api.saveAgentModels).not.toHaveBeenCalled();
+    choose("Add a fallback", id("gpt-d"));
+    api.saveAgentModels.mockResolvedValue({ agent_models: { coder: { model: id("gpt-a"), fallbacks: ["gpt-b", "gpt-c", "gpt-d"].map(id) } } });
+    await click("Save models");
+    expect(api.saveAgentModels).toHaveBeenCalledTimes(1);
+    expect(api.saveAgentModels).toHaveBeenCalledWith({
+      agent_models: { coder: { model: id("gpt-a"), fallbacks: [id("gpt-b"), id("gpt-c"), id("gpt-d")] } },
+    });
+    // The workspace's chain is not touched.
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+    expect(api.workspace).not.toHaveBeenCalled();
+  });
+
+  test("the server's page says the server's chain is in effect, not the workspace's", async () => {
+    const bare = agent("coder", { default_model: null, main_model: id("gpt-b") });
+    const serverBare = agent("coder", { default_model: null, main_model: id("gpt-a") });
+    await server(admin, bare, undefined, [bare], [serverBare], wsScope);
+    expect(host.textContent).toContain("Not set: it runs on the server's default model (gpt-a).");
+    expect(host.textContent).not.toContain("(gpt-b)");
+  });
+
+  test("a workspace's page starts from the workspace's own chain, never the resolved one, and never writes the server's route", async () => {
+    // The listing is resolved (gpt-a); the workspace's own chain is gpt-b + gpt-c.
+    api.workspace.mockResolvedValue(settings({ coder: { model: id("gpt-b"), fallbacks: [id("gpt-c")] } }));
+    await inWorkspace(serverView());
+    expect((field("Main model") as HTMLSelectElement).value).toBe(id("gpt-b"));
+    expect(fallbacks()).toEqual(["gpt-c"]);
+    expect(button("Save models")!.disabled).toBe(true);
+    await click("Save models");
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+  });
+
+  test("a workspace without a chain of its own starts at 'Use the server's chain', whatever the listing resolved", async () => {
+    api.workspace.mockResolvedValue(settings());
+    api.agents.mockResolvedValue({ agents: [serverView()] });
+    await inWorkspace(serverView());
+    expect((field("Main model") as HTMLSelectElement).value).toBe("");
+    expect(fallbacks()).toEqual([]);
+    choose("Main model", id("gpt-d"));
+    api.updateWorkspace.mockImplementation((_w: string, b: { settings: unknown }) => Promise.resolve({ workspace_id: "w1", settings: b.settings }));
+    await click("Save models");
+    expect(api.updateWorkspace).toHaveBeenCalledTimes(1);
+    expect(api.saveAgentModels).not.toHaveBeenCalled();
+  });
+
+  test("the server's chain cannot be read: no editor, the read-only line, and a retry; nothing is written", async () => {
+    api.agent.mockResolvedValue(detail(serverView()));
+    api.agents.mockRejectedValueOnce(new Error("offline"));
+    await act(async () =>
+      root.render(<Agents me={admin} agents={[wsView()]} id="coder" onOpen={onOpen} onChanged={onChanged} scope={wsScope} />),
+    );
+    expect(field("Main model")).toBeNull();
+    expect(button("Save models")).toBeUndefined();
+    expect(host.querySelector(".agent-models")).not.toBeNull();
+    expect(host.textContent).toContain("Could not load the chain to edit");
+    expect(host.textContent).toContain("offline");
+    api.agents.mockResolvedValue({ agents: [serverView()] });
+    await click("Try again");
+    expect((field("Main model") as HTMLSelectElement).value).toBe(id("gpt-a"));
+    expect(fallbacks()).toEqual(["gpt-b", "gpt-c"]);
+    expect(api.saveAgentModels).not.toHaveBeenCalled();
+  });
+
+  test("the agent missing from the server's listing counts as unreadable", async () => {
+    await server(admin, wsView(), undefined, [wsView()], [agent("other")], wsScope);
+    expect(field("Main model")).toBeNull();
+    expect(host.textContent).toContain("Could not load the chain to edit");
+  });
+
+  test("the workspace's settings cannot be read: no editor, a retry", async () => {
+    api.workspace.mockRejectedValueOnce(new Error("forbidden"));
+    await inWorkspace(serverView());
+    expect(field("Main model")).toBeNull();
+    expect(host.querySelector(".agent-models")).not.toBeNull();
+    expect(host.textContent).toContain("Could not load the chain to edit");
+    api.workspace.mockResolvedValue(settings());
+    await click("Try again");
+    expect(field("Main model")).not.toBeNull();
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+  });
+});
+
+describe("one Save for an agent edited whole", () => {
+  const mine = () => agent("mine", { origin: "custom", builtin: false, default_model: id("gpt-a"), main_model: id("gpt-a"), fallbacks: [] });
+  const typeName = (v: string) => type(host.querySelector<HTMLInputElement>('input[aria-label="Name"]')!, v);
+  const saveBtn = () => button("Save")!;
+
+  test("the page's Save saves the agent, then its chain; the block has no button of its own", async () => {
+    await server(admin, mine());
+    expect(button("Save models")).toBeUndefined();
+    expect(saveBtn().disabled).toBe(true);
+    typeName("Mine 2");
+    choose("Add a fallback", id("gpt-b"));
+    const order: string[] = [];
+    api.updateAgent.mockImplementation(async () => (order.push("agent"), detail(mine(), { name: "Mine 2" })));
+    api.saveAgentModels.mockImplementation(async () => (order.push("models"), { agent_models: { mine: { model: id("gpt-a"), fallbacks: [id("gpt-b")] } } }));
+    await click("Save");
+    expect(order).toEqual(["agent", "models"]);
+    expect(api.saveAgentModels).toHaveBeenCalledWith({ agent_models: { mine: { model: id("gpt-a"), fallbacks: [id("gpt-b")] } } });
+    expect(saveBtn().disabled).toBe(true);
+    expect(host.textContent).toContain("Saved.");
+  });
+
+  test("only the chain changed: Save is enabled and sends only the chain", async () => {
+    await server(admin, mine());
+    choose("Add a fallback", id("gpt-b"));
+    expect(saveBtn().disabled).toBe(false);
+    api.saveAgentModels.mockResolvedValue({ agent_models: { mine: { model: id("gpt-a"), fallbacks: [id("gpt-b")] } } });
+    await click("Save");
+    expect(api.updateAgent).not.toHaveBeenCalled();
+    expect(api.saveAgentModels).toHaveBeenCalledTimes(1);
+  });
+
+  test("only the agent changed: no models call", async () => {
+    await server(admin, mine());
+    typeName("Mine 2");
+    api.updateAgent.mockResolvedValue(detail(mine(), { name: "Mine 2" }));
+    await click("Save");
+    expect(api.updateAgent).toHaveBeenCalledTimes(1);
+    expect(api.saveAgentModels).not.toHaveBeenCalled();
+  });
+
+  test("the agent is saved but the chain is not: it says so, keeps the chain, and Save tries the chain again only", async () => {
+    await server(admin, mine());
+    typeName("Mine 2");
+    choose("Add a fallback", id("gpt-b"));
+    api.updateAgent.mockResolvedValue(detail(mine(), { name: "Mine 2" }));
+    api.saveAgentModels.mockRejectedValueOnce(new Error('unknown model "openai::gpt-b"'));
+    await click("Save");
+    expect(host.textContent).toContain("@mine was saved, but its models were not saved");
+    expect(host.textContent).toContain('unknown model "openai::gpt-b"');
+    expect(fallbacks()).toEqual(["gpt-b"]);
+    expect(host.querySelector<HTMLInputElement>('input[aria-label="Name"]')!.value).toBe("Mine 2");
+    expect(saveBtn().disabled).toBe(false);
+    api.saveAgentModels.mockResolvedValueOnce({ agent_models: { mine: { model: id("gpt-a"), fallbacks: [id("gpt-b")] } } });
+    await click("Save");
+    expect(api.updateAgent).toHaveBeenCalledTimes(1);
+    expect(api.saveAgentModels).toHaveBeenCalledTimes(2);
+    expect(host.textContent).not.toContain("were not saved");
+    expect(saveBtn().disabled).toBe(true);
   });
 });
