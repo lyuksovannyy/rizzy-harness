@@ -341,6 +341,7 @@ Each row's full text is in `docs/plan/`.
 | [X.47 **sec** (T91)](docs/plan/X.47.md) | The `history` tool: an agent reads its own chat's earlier turns, results, attachments and images in full after a summary… |
 | [X.48 **sec** (T92)](docs/plan/X.48.md) | Fork a chat at a finished turn, part 1: the conversation (a new chat on the same node that begins with a copy of the parent's events at the same `seq`; `docs/fork.md`)… |
 | [X.51 **sec** (T93)](docs/plan/X.51.md) | The row under a finished answer (Copy, Fork from here, Pin, the time, the tokens with models and sub-agents on hover) and pinned messages as a bookmark the model is never told of (`docs/pins.md`)… |
+| [X.52 **sec** (T39)](docs/plan/X.52.md) | Switch an existing agentic chat between the sandbox and the host shell while nothing of it runs (the owner, 2026-11-21: "Yes, build it"; `docs/execution-modes.md`)… |
 
 When X.2's work on instruction files and prompts starts, the instructions of every agent that can change files gain the 100-file rule of `docs/undo-and-stash.md` §2.6 (try to keep a turn's changes to at most 100 files; split larger work across turns; exceeding it is allowed).
 

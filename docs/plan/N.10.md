@@ -19,13 +19,15 @@ Review of part 2 (2026-11-14): fit after fixes; L2-1, L2-3, L2-4, L2-5, L2-7 to 
 L2-2 decided by the owner: a role carries its level (a co-owner gets `host`, capped by their ceiling).
 The level per member below.
 **Master:** a level per member per workspace (replaces `Perm::Agentic`), checked where `agentic_gate` checks today: create and every prompt, approval, restore and routine firing.
-A session's mode (`container`, `sandbox`, `host`) is chosen at creation from what the level and the node allow, the most confined one by default, recorded in the session's first event and never changed; sub-agents inherit it; nothing in a model's output or a tool result selects it.
+A session's mode (`container`, `sandbox`, `host`) is chosen at creation from what the level and the node allow, the most confined one by default, recorded in the session's first event and moved only by its owner while nothing of the chat runs (N.10b, the owner's decision of 2026-11-21: "Yes, build it"; before, never changed); sub-agents inherit it as it is then; nothing in a model's output or a tool result selects it.
 **Node:** `[execution]` states the ceiling; the node refuses a mode above it whatever the master sends, and offers the master only modes its own self-test can enforce.
 **UI:** the member list shows and sets the level; the chat names its mode, and also shows the node's gaps: not contained, and network off without a network namespace (review T8B-3; today only the node's start-up log and `doctor` say so).
 Choosing `host` shows a warning before it is saved, both when an owner grants the level and when a member picks the mode for a chat (the owner, 2026-11-12: "display warning when selected and say the risks").
 It says, in plain words: the agent's commands run as the node's own user with nothing between them and the machine; they can read and change every file that user can, its keys and other projects included; what they start can keep running after the chat ends; one web page or file the agent reads can turn all of that against you.
 The approval card is then the only check.
 **N.10a** (the level, the ceiling, the checks, the modes `sandbox` and `host`) needs only T.8a; `container` is offered once N.4 exists.
+
+**N.10b built** (branch `feat/exec-switch`, plan row X.52; `docs/execution-modes.md` "Switching a chat's mode", PLAN.md T39): the owner of an existing agentic chat switches it between `sandbox` and `host` while nothing of it runs; the rule "never moved to another mode, in either direction" of N.10a is replaced by it (README, `docs/execution-modes.md`, T39).
 
 ## Abuse tests beyond the note's
 
