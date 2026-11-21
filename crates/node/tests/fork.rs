@@ -1088,3 +1088,57 @@ async fn a_cut_inside_a_list_of_agents_is_said_in_the_fork_and_not_again_at_a_re
     );
     assert_eq!(after.len(), parent.len() + 1);
 }
+
+/// Rewinding a fork to a message it copied: the conversation part is the
+/// fork's own to do, the files part is not (the copied turn's snapshots are
+/// the parent's chat's), so "with files" is refused whole and writes
+/// nothing, and without files it works.
+#[tokio::test]
+async fn a_fork_rewinds_to_a_copied_message_but_not_with_files() {
+    let mut h = H::new().await;
+    h.turn("run: echo one > a.txt").await;
+    h.turn("hello two").await;
+    let turns = H::ended(&h.log());
+    let f = h.fork(h.sid, &turns[1]).await;
+    f.result.clone().unwrap();
+    let first = h
+        .log_of(f.sid)
+        .iter()
+        .find(|e| matches!(e.typed(), Ok(EventKind::UserMessage(m)) if !m.queued))
+        .unwrap()
+        .seq;
+    let rewind = async |h: &mut H, id: &str, files: bool| {
+        h.link
+            .to_node
+            .try_send(MasterToNode::Rewind {
+                req_id: id.into(),
+                session_id: f.sid,
+                message_seq: first,
+                files,
+                force: false,
+            })
+            .unwrap();
+        loop {
+            if let NodeToMaster::Ack { req_id, ok, error } = h.recv().await
+                && req_id == id
+            {
+                return if ok {
+                    Ok(())
+                } else {
+                    Err(error.unwrap_or_default())
+                };
+            }
+        }
+    };
+    let before = h.log_of(f.sid);
+    let refused = rewind(&mut h, "r1", true).await.unwrap_err();
+    assert!(refused.contains("forked from"), "{refused}");
+    assert_eq!(h.log_of(f.sid), before, "nothing was written");
+    assert!(h.ws.join("a.txt").exists(), "the folder was not touched");
+    rewind(&mut h, "r2", false).await.unwrap();
+    assert!(
+        h.log_of(f.sid)
+            .iter()
+            .any(|e| e.kind == "conversation_rewound")
+    );
+}

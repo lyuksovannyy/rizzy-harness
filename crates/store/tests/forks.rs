@@ -694,6 +694,17 @@ fn an_incognito_fork_is_not_indexed_nor_listed() {
     );
     let q = asker(&s, &w);
     assert!(s.earlier_chats("p", "u1", q, 10).unwrap().is_empty());
+    // Nor does a later chat's recall find it.
+    let found = s
+        .recall_search(
+            &["zzsecretneedle".to_string(), "zzsecretanswer".to_string()],
+            "u1",
+            &w,
+            [q, q],
+            10,
+        )
+        .unwrap();
+    assert!(found.is_empty(), "{found:?}");
 }
 
 /// The columns the fork's row keeps its state in, read off the file.
