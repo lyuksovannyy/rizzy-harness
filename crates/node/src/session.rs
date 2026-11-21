@@ -4949,6 +4949,21 @@ impl Session {
             && self.node.cfg.policy.limits.sub_agent_folder
                 == harness_core::subagent::SubFolder::Shared
             && self.parent_session.is_none();
+        if !wrote && writes && !shared_now {
+            // It worked in this chat's folder, and may not write there now.
+            let why = if self.parent_session.is_some() {
+                "a sub-agent's own sub-agents may only read: ask it to read, or make the change \
+                 yourself"
+            } else {
+                "this node now gives every sub-agent that changes files a copy of its own \
+                 (`sub_agent_folder = \"own\"`), and this one worked in this chat's folder. \
+                 Start a new one instead"
+            };
+            return Err(format!(
+                "@{started_as} `{child_id}` cannot be given a follow-up: its agent can change \
+                 files now, but {why}."
+            ));
+        }
         if wrote != writes && !shared_now {
             return Err(format!(
                 "@{started_as} `{child_id}` cannot be given a follow-up: its agent {} files now \

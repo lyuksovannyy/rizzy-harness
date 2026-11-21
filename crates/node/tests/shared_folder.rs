@@ -572,6 +572,41 @@ async fn an_edit_by_tag_on_rows_a_shared_child_did_not_change_lands_at_the_curre
 
 // ---- Follow-ups that are refused, and what they say -------------------------
 
+/// A sub-agent that worked in the chat's folder is given a follow-up on a
+/// node that now gives every writer a copy: refused, and the sentence says
+/// what happened (the node's setting; the sub-agent worked in the folder),
+/// not that it "could not change files when it was started". The state is
+/// reached by the agent gaining its write tools between the runs.
+#[tokio::test]
+async fn a_follow_up_to_a_sub_agent_that_worked_in_the_folder_says_what_the_node_does_now() {
+    use harness_core::subagent::SubFolder;
+    let mut r = Rig::with_policy(|p| p.limits.sub_agent_folder = SubFolder::Own).await;
+    r.git(&["init", "-q"]);
+    r.write("keep.txt", "v1\n");
+    r.git(&["add", "."]);
+    r.git(&["commit", "-qm", "init"]);
+    r.delegates = vec![Rig::spec("dev", &["read"], vec![])];
+    let (_, outs) = r.lead_turn("delegate: dev=read: keep.txt").await;
+    let child = child_id(&outs[0]);
+    r.delegates = vec![Rig::spec("dev", &["bash", "write"], vec![])];
+    let before = r.files();
+    let (_, outs) = r
+        .lead_turn(&format!("delegate: dev@{child}=run: echo x > x.txt"))
+        .await;
+    let out = &outs[0];
+    assert!(
+        !out.contains("could not change files when it was started"),
+        "{out}"
+    );
+    assert!(
+        out.contains("this node now gives every sub-agent that changes files a copy of its own")
+            && out.contains("this one worked in this chat's folder")
+            && out.contains("Start a new one"),
+        "{out}"
+    );
+    assert_eq!(r.files(), before);
+}
+
 /// A sub-agent's own sub-agent never writes in the chat's folder, on a
 /// follow-up either: the follow-up of a grandchild whose agent can change
 /// files now is refused, and nothing is written.
