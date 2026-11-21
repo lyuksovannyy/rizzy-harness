@@ -1477,6 +1477,7 @@ select.pill {
   min-height: 0;
 }
 .conv-head {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-2);
