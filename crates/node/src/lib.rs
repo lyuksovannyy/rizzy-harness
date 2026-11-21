@@ -47,6 +47,7 @@ fn starts_work(msg: &MasterToNode) -> bool {
     matches!(
         msg,
         MasterToNode::Create { .. }
+            | MasterToNode::Fork { .. }
             | MasterToNode::Prompt(_)
             | MasterToNode::Callback(_)
             | MasterToNode::Retry(_)
@@ -117,6 +118,8 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
     match msg {
         MasterToNode::Resume { session_id, .. }
         | MasterToNode::Create { session_id, .. }
+        // The new chat's lane, as a create's.
+        | MasterToNode::Fork { session_id, .. }
         | MasterToNode::SelectVariant { session_id, .. }
         | MasterToNode::Restore { session_id, .. }
         | MasterToNode::Delete { session_id, .. }
@@ -846,6 +849,9 @@ impl NodeRuntime {
             // A person's rewind of the conversation to an earlier message
             // and its undo (X.46), in chats of either profile.
             capabilities.push(harness_protocol::CAP_REWIND.into());
+            // A person's fork of a chat at a finished turn (C.2), in chats
+            // of either profile.
+            capabilities.push(harness_protocol::CAP_FORK.into());
             // The agents a message called after the first, asked one after
             // another (X.37).
             capabilities.push(harness_protocol::CAP_PEERS.into());
@@ -1691,6 +1697,21 @@ impl NodeRuntime {
                 )
                 .await
             }
+            MasterToNode::Fork {
+                session_id,
+                parent,
+                turn_id,
+                title,
+                ..
+            } => {
+                self.audit_with(
+                    "session.fork",
+                    session_id,
+                    serde_json::json!({ "parent": parent }),
+                )
+                .await;
+                self.fork(session_id, parent, &turn_id, &title).await
+            }
             MasterToNode::SelectVariant {
                 session_id,
                 group,
@@ -2147,6 +2168,32 @@ impl NodeRuntime {
         Ok(())
     }
 
+    /// Fork `parent` at the end of `turn_id` into `sid` (C.2): the new
+    /// chat's events are written whole (`Session::fork`), the session is
+    /// registered, and its events go to the master in order; the ack the
+    /// caller sends follows the last of them.
+    async fn fork(
+        &self,
+        sid: SessionId,
+        parent: SessionId,
+        turn_id: &str,
+        title: &str,
+    ) -> Result<(), String> {
+        let Some(p) = self.session(parent) else {
+            return Err("unknown session".into());
+        };
+        let (s, events) = p.fork(&self.inner, sid, turn_id, title).await?;
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(sid, s);
+        for event in events {
+            self.inner.publish_wait(NodeToMaster::Event { event }).await;
+        }
+        Ok(())
+    }
+
     /// Stop (SIGTERM or SIGINT, A.19): from now on new work is refused with
     /// [`NODE_STOPPING`]; every running turn is cancelled through its normal
     /// cancel path (a command gets SIGTERM, then its guard's kill; a pending
@@ -2323,9 +2370,13 @@ impl NodeRuntime {
             .store
             .call(move |s| {
                 let writes = match folder {
-                    Some(f) => s
-                        .events_since_turn_at(sid, i64::MIN, others::KINDS)
-                        .map(|e| others::write_span(&e, now).map(|(a, b)| (f, a, b)))?,
+                    Some(f) => {
+                        // Not what a fork copied from its parent (C.2).
+                        let through = s.fork_of(sid)?.map_or(0, |r| r.through_seq);
+                        let mut e = s.events_since_turn_at(sid, i64::MIN, others::KINDS)?;
+                        e.retain(|e| !harness_core::fork::inherited(through, e.seq));
+                        others::write_span(&e, now).map(|(a, b)| (f, a, b))
+                    }
                     None => None,
                 };
                 let existed = s.delete_session_leaving(

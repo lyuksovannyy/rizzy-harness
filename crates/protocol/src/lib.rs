@@ -69,6 +69,11 @@ pub const CAP_RETRY: &str = "retry";
 /// chats on nodes whose hello listed it.
 pub const CAP_REWIND: &str = "rewind";
 
+/// The node capability that announces `session.fork` (ADOPTION_PLAN C.2,
+/// docs/fork.md): a person's fork of a chat at the end of a completed turn.
+/// The master offers it only for chats on nodes whose hello listed it.
+pub const CAP_FORK: &str = "fork";
+
 /// The node capability that announces `session.diff` (X.12, PLAN.md T53).
 /// The master asks for a turn's changes only on nodes whose hello listed it.
 pub const CAP_DIFF: &str = "diff";
@@ -754,6 +759,10 @@ pub const RETRY_REFUSED: &str = "This turn can't be retried";
 /// begins (X.46): the master answers 409 with it.
 pub const REWIND_REFUSED: &str = "This chat can't be rewound there";
 
+/// How a node's refusal of a `session.fork` begins (C.2): the master
+/// answers 409 with it.
+pub const FORK_REFUSED: &str = "This chat can't be forked there";
+
 /// The most background ids one `session.callback` may name.
 pub const MAX_CALLBACK_IDS: usize = 64;
 
@@ -1276,6 +1285,25 @@ pub enum MasterToNode {
         session_id: SessionId,
         rewind_seq: u64,
     },
+    /// Fork a chat (ADOPTION_PLAN C.2, docs/fork.md; only to nodes with
+    /// [`CAP_FORK`]): a new chat `session_id` (minted by the master, like a
+    /// create's) on the same node, whose log is `parent`'s events up to the
+    /// end of the turn `turn_id`, at the same seqs, then its own. Sent only
+    /// for the parent's owner, on their click: nothing a model, a tool or a
+    /// routine does sends one. A request only: the node forks only a turn
+    /// `harness_core::fork::check` allows in its own log, into a folder its
+    /// own policy allows as at a create ([`FORK_REFUSED`]); the new chat's
+    /// events are written in one transaction and the ack follows the last
+    /// of them on the ordered link. `title` is the new chat's title (the
+    /// parent's, as the master shows it now, and a suffix).
+    #[serde(rename = "session.fork")]
+    Fork {
+        req_id: String,
+        session_id: SessionId,
+        parent: SessionId,
+        turn_id: String,
+        title: String,
+    },
     /// Write the chat's hand-off note now if one is due (X.16,
     /// docs/handoff-notes.md; only to nodes with [`CAP_HANDOFF`]). A
     /// request only: the node writes it only for a chat of its own that
@@ -1578,6 +1606,7 @@ impl MasterToNode {
     pub fn req_id(&self) -> Option<&str> {
         match self {
             MasterToNode::Create { req_id, .. }
+            | MasterToNode::Fork { req_id, .. }
             | MasterToNode::Prompt(PromptMsg { req_id, .. })
             | MasterToNode::Callback(CallbackMsg { req_id, .. })
             | MasterToNode::Retry(RetryMsg { req_id, .. })

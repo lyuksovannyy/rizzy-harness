@@ -19,6 +19,7 @@ mod favicon;
 pub mod files;
 pub mod forge;
 pub mod forge_repos;
+mod forks;
 mod handoff;
 mod http;
 pub mod levels;
@@ -73,6 +74,9 @@ pub use http::{router, router_with};
 pub use resolver::Resolver;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+/// A fork waits this many times longer for its ack: the node sends the whole
+/// copy of the chat before it.
+const FORK_ACK_FACTOR: u32 = 4;
 
 /// How many sub-agent chats of one depth a delete asks their node about at
 /// once.
@@ -692,6 +696,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::ArtifactStage { session_id, .. } => Some(*session_id),
         MasterToNode::Welcome { .. }
         | MasterToNode::Create { .. }
+        // The new chat does not exist yet: nothing is written to the parent.
+        | MasterToNode::Fork { .. }
         | MasterToNode::Cancel { .. }
         | MasterToNode::StopBackground { .. }
         // Removing a grant takes power away, like a denial.
@@ -1721,6 +1727,15 @@ impl Master {
         let landed = matches!(res, Ok(AppendOutcome::Applied | AppendOutcome::Duplicate));
         match res {
             Ok(AppendOutcome::Applied) => {
+                // A copy of its parent's event in a fork (C.2): mirrored and
+                // shown, and nothing it did the first time happens again
+                // (forks.rs). One branch, before every side effect below:
+                // one added later is skipped for a copy without anyone
+                // remembering to.
+                if forks::copied(self, &e).await {
+                    let _ = self.inner.live.send(Live::Event(e));
+                    return landed;
+                }
                 let structural = matches!(
                     e.kind.as_str(),
                     "session_created"
@@ -1965,6 +1980,7 @@ impl Master {
             master: self,
             send: note.and_then(|n| self.inner.connectors.calls.note_send(&msg, n)),
         };
+        let slow = matches!(msg, MasterToNode::Fork { .. });
         let sent = {
             let nodes = lock(&self.inner.nodes);
             // A revoked node gets nothing: no prompt, context or image
@@ -1987,7 +2003,11 @@ impl Master {
             Some(Err(true)) => return Err(CommandError::Timeout),
             Some(Err(false)) | None => return Err(CommandError::NodeOffline(node_id.into())),
         }
-        let ack_timeout = *lock(&self.inner.ack_timeout);
+        let mut ack_timeout = *lock(&self.inner.ack_timeout);
+        // A fork's ack follows every event of the copy on the ordered link.
+        if slow {
+            ack_timeout *= FORK_ACK_FACTOR;
+        }
         let acked = tokio::time::timeout(ack_timeout, rx).await;
         if matches!(acked, Ok(Ok(Ok(())))) {
             noted.send = None;

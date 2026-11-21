@@ -1967,7 +1967,9 @@ impl Store {
     }
 
     /// The events of `sid` after its last person's turn (a `turn_started`
-    /// without a `cause`) and its last `callback_refused`, of the kinds in
+    /// without a `cause`), its last `callback_refused` and its fork's
+    /// divider (`session_forked`: what waited in the parent is not the
+    /// fork's), of the kinds in
     /// `kinds` (T.8d step 3: what a callback turn could still take; a
     /// callback turn covers only the ends it names, so the reader folds
     /// those turns with `harness_core::event::waiting_ends`). One range
@@ -1983,7 +1985,7 @@ impl Store {
             conn.query_row(
                 "SELECT COALESCE(MAX(seq), 0) FROM events
                  WHERE session_id = ?1
-                   AND (kind = 'callback_refused'
+                   AND (kind IN ('callback_refused', 'session_forked')
                         OR (kind = 'turn_started'
                             AND CASE WHEN json_valid(payload)
                                 THEN json_type(payload, '$.cause') IS NULL

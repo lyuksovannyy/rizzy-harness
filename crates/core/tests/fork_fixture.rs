@@ -121,7 +121,15 @@ fn events() -> Vec<RawEvent> {
     p.turn("t3", "Third", "Three.", 300, &[]);
     let cut = fork::check(&p.events, "t2").unwrap();
     let new: SessionId = "01a19bf2-0000-7000-8000-00000000fa02".parse().unwrap();
-    let built = fork::build(&p.events, &cut, new, "/w/proj", 1_700_000_500_000).unwrap();
+    let built = fork::build(
+        &p.events,
+        &cut,
+        new,
+        &fork::title("Parent chat"),
+        "/w/proj",
+        1_700_000_500_000,
+    )
+    .unwrap();
     let mut f = Log {
         sid: new,
         events: built,

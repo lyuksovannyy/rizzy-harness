@@ -55,7 +55,7 @@ struct Body {
 
 /// The chat's own rows, or the 404 of one that is not the caller's: this
 /// is stricter than a prompt, which the API token may send to any chat.
-async fn owned(
+pub(super) async fn owned(
     m: &Master,
     who: &super::auth::Principal,
     id: &str,

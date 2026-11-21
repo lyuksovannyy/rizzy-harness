@@ -118,8 +118,8 @@ pub fn check(log: &[RawEvent], turn_id: &str) -> Result<Cut, String> {
 
 /// The events of the fork `new` of the chat whose log is `parent_log`
 /// (at least `1..=cut.through_seq`, contiguous), made at `now_ms`:
-/// 1. the parent's `session_created` with the fork's title, `cwd` (the
-///    node decides it) and `forked`;
+/// 1. the parent's `session_created` with the fork's `title` ([`title`] of
+///    the parent's), `cwd` (the node decides it) and `forked`;
 /// 2. the parent's events `2..=through_seq`, as they are, under the new id;
 /// 3. `session_forked`;
 /// 4. a `background_ended` ([`BackgroundReason::Forked`]) for each command
@@ -132,6 +132,7 @@ pub fn build(
     parent_log: &[RawEvent],
     cut: &Cut,
     new: SessionId,
+    title: &str,
     cwd: &str,
     now_ms: i64,
 ) -> Result<Vec<RawEvent>, String> {
@@ -153,7 +154,7 @@ pub fn build(
     if copy[n - 1].kind != "turn_ended" {
         return Err("the cut is not the end of a turn".into());
     }
-    created.title = title(&created.title);
+    created.title = title.to_string();
     created.cwd = cwd.to_string();
     created.forked = Some(ForkedFrom {
         parent,
@@ -404,7 +405,7 @@ mod tests {
         l.turn("t3");
         let cut = check(&l.events, "t2").unwrap();
         let new = SessionId::new();
-        let f = build(&l.events, &cut, new, "/w/other", 1234).unwrap();
+        let f = build(&l.events, &cut, new, &title("Parent"), "/w/other", 1234).unwrap();
         assert_eq!(f.len() as u64, t2 + 1);
         for (i, e) in f.iter().enumerate() {
             assert_eq!(e.seq, i as u64 + 1);
@@ -458,7 +459,7 @@ mod tests {
         // A later end is the parent's.
         l.bg_ended("bg-2");
         let cut = check(&l.events, "t1").unwrap();
-        let f = build(&l.events, &cut, SessionId::new(), "/w", 5).unwrap();
+        let f = build(&l.events, &cut, SessionId::new(), &title("Parent"), "/w", 5).unwrap();
         assert_eq!(f.len() as u64, end + 2, "the divider and one closing");
         let Ok(EventKind::BackgroundEnded(b)) = f[end as usize + 1].typed() else {
             panic!("{:?}", f.last());
@@ -485,15 +486,25 @@ mod tests {
         };
         let mut gap = l.events.clone();
         gap.remove(2);
-        assert!(build(&gap, &cut, SessionId::new(), "/w", 1).is_err());
-        assert!(build(&l.events[..2], &cut, SessionId::new(), "/w", 1).is_err());
+        assert!(build(&gap, &cut, SessionId::new(), &title("Parent"), "/w", 1).is_err());
+        assert!(
+            build(
+                &l.events[..2],
+                &cut,
+                SessionId::new(),
+                &title("Parent"),
+                "/w",
+                1
+            )
+            .is_err()
+        );
         let mid = Cut {
             through_seq: 3,
             turn_id: "t1".into(),
         };
-        assert!(build(&l.events, &mid, SessionId::new(), "/w", 1).is_err());
+        assert!(build(&l.events, &mid, SessionId::new(), &title("Parent"), "/w", 1).is_err());
         assert!(
-            build(&l.events, &cut, l.sid, "/w", 1).is_err(),
+            build(&l.events, &cut, l.sid, &title("Parent"), "/w", 1).is_err(),
             "not onto itself"
         );
     }
@@ -503,7 +514,7 @@ mod tests {
         let mut l = Log::new();
         l.turn("t1");
         let cut = check(&l.events, "t1").unwrap();
-        let mut f1 = build(&l.events, &cut, SessionId::new(), "/w", 5).unwrap();
+        let mut f1 = build(&l.events, &cut, SessionId::new(), &title("Parent"), "/w", 5).unwrap();
         let f1_id = f1[0].session_id;
         // The fork's own turn.
         let first = f1.len() as u64 + 1;
@@ -522,7 +533,15 @@ mod tests {
             });
         }
         let cut2 = check(&f1, "u1").unwrap();
-        let f2 = build(&f1, &cut2, SessionId::new(), "/w", 6).unwrap();
+        let f2 = build(
+            &f1,
+            &cut2,
+            SessionId::new(),
+            &title("Parent (fork)"),
+            "/w",
+            6,
+        )
+        .unwrap();
         let Ok(EventKind::SessionCreated(c)) = f2[0].typed() else {
             panic!()
         };
@@ -552,10 +571,49 @@ mod tests {
         }));
         let end = l.turn("t2");
         let cut = check(&l.events, "t2").unwrap();
-        let f = build(&l.events, &cut, SessionId::new(), "/w", 5).unwrap();
+        let f = build(&l.events, &cut, SessionId::new(), &title("Parent"), "/w", 5).unwrap();
         let parent = crate::view::SessionView::fold(&l.events).unwrap();
         let fork = crate::view::SessionView::fold(&f).unwrap();
         (parent, fork, end)
+    }
+
+    /// An end the parent had not been resumed for at the cut is the
+    /// parent's: the fork's divider clears what waits, as a person's turn
+    /// does, so the master's sweep and the node's check never resume the
+    /// fork for it. An end after the divider waits as ever.
+    #[test]
+    fn the_divider_clears_the_ends_that_waited_for_a_callback() {
+        let mut l = Log::new();
+        l.started("t1");
+        l.message("t1");
+        l.bg_started("bg-1", "t1");
+        // Ended while the turn ran, and not told to it: it would call back.
+        l.bg_ended("bg-1");
+        l.ended("t1");
+        assert_eq!(
+            crate::event::waiting_ends(&l.events).len(),
+            1,
+            "waits in the parent"
+        );
+        let cut = check(&l.events, "t1").unwrap();
+        let mut f = build(&l.events, &cut, SessionId::new(), &title("Parent"), "/w", 5).unwrap();
+        assert!(crate::event::waiting_ends(&f).is_empty(), "not the fork's");
+        let id = f[0].session_id;
+        let mut own = Log {
+            sid: id,
+            events: std::mem::take(&mut f),
+        };
+        own.bg_started("bg-2", "t9");
+        own.bg_ended("bg-2");
+        let waiting = crate::event::waiting_ends(&own.events);
+        assert_eq!(
+            waiting
+                .iter()
+                .map(|w| w.2.bg_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bg-2"],
+            "an end of its own waits"
+        );
     }
 
     #[test]
@@ -594,7 +652,7 @@ mod tests {
         let mut l = Log::new();
         let end = l.turn("t1");
         let cut = check(&l.events, "t1").unwrap();
-        let mut f = build(&l.events, &cut, SessionId::new(), "/w", 5).unwrap();
+        let mut f = build(&l.events, &cut, SessionId::new(), &title("Parent"), "/w", 5).unwrap();
         let id = f[0].session_id;
         let mut push = |k: EventKind| {
             let (kind, payload) = k.into_parts();
@@ -655,7 +713,7 @@ mod tests {
         }
         l.ended("t1");
         let cut = check(&l.events, "t1").unwrap();
-        let mut f = build(&l.events, &cut, SessionId::new(), "/w", 5).unwrap();
+        let mut f = build(&l.events, &cut, SessionId::new(), &title("Parent"), "/w", 5).unwrap();
         let id = f[0].session_id;
         for (k, p) in [
             ("turn_started", serde_json::json!({"turn_id": "u1"})),

@@ -106,7 +106,15 @@ fn mirrored(s: &Store) -> (Log, Vec<RawEvent>) {
     }
     s.claim_session(p.sid, Some("u1"), None).unwrap();
     let cut = fork::check(&p.events, "t1").unwrap();
-    let f = fork::build(&p.events, &cut, SessionId::new(), "/w", 5_000).unwrap();
+    let f = fork::build(
+        &p.events,
+        &cut,
+        SessionId::new(),
+        &fork::title("Parent chat"),
+        "/w",
+        5_000,
+    )
+    .unwrap();
     (p, f)
 }
 
@@ -230,6 +238,51 @@ fn usage_counts_what_a_fork_spent_and_not_what_it_copied() {
     let _ = p;
 }
 
+/// The master's callback watcher reads a chat's log from its last person's
+/// turn: a fork's divider is such a boundary, so an end the parent had not
+/// been resumed for at the cut is not waiting in the fork.
+#[test]
+fn the_callback_watcher_starts_after_the_divider() {
+    let s = store();
+    let mut p = parent_log();
+    p.raw("turn_started", json!({"turn_id": "t2"}));
+    p.raw("user_message", json!({"turn_id": "t2", "text": "go"}));
+    p.raw(
+        "background_started",
+        json!({"bg_id": "bg-1", "call_id": "c", "turn_id": "t2", "timeout_s": 60, "ends_by_ms": 1}),
+    );
+    p.raw(
+        "background_ended",
+        json!({"bg_id": "bg-1", "reason": "exited", "exit_code": 0, "confirmed": "ended",
+               "ran_ms": 1, "output_bytes": 0}),
+    );
+    p.raw(
+        "turn_ended",
+        json!({"turn_id": "t2", "reason": "completed"}),
+    );
+    for e in &p.events {
+        s.append(NODE, e).unwrap();
+    }
+    let kinds = ["background_ended", "turn_started"];
+    let waiting = |sid| {
+        let ends = s.events_since_last_person_turn(sid, &kinds).unwrap();
+        harness_core::event::waiting_ends(&ends).len()
+    };
+    assert_eq!(waiting(p.sid), 1, "the parent still waits for it");
+    let cut = fork::check(&p.events, "t2").unwrap();
+    let f = fork::build(
+        &p.events,
+        &cut,
+        SessionId::new(),
+        &fork::title("Parent chat"),
+        "/w",
+        9_000,
+    )
+    .unwrap();
+    append_all(&s, &f);
+    assert_eq!(waiting(f[0].session_id), 0, "the fork does not");
+}
+
 #[test]
 fn a_forks_row_is_idle_after_the_copy_whatever_the_parent_was_doing() {
     let s = store();
@@ -260,7 +313,15 @@ fn a_forks_row_is_idle_after_the_copy_whatever_the_parent_was_doing() {
         "the parent waits"
     );
     let cut = fork::check(&p.events, "t2").unwrap();
-    let f = fork::build(&p.events, &cut, SessionId::new(), "/w", 9_000).unwrap();
+    let f = fork::build(
+        &p.events,
+        &cut,
+        SessionId::new(),
+        &fork::title("Parent chat"),
+        "/w",
+        9_000,
+    )
+    .unwrap();
     append_all(&s, &f);
     let id = f[0].session_id;
     s.claim_session(id, Some("u1"), None).unwrap();
@@ -302,7 +363,15 @@ fn a_forks_events_and_images_are_written_in_one_transaction() {
     let cut = fork::check(&p.events, "t1").unwrap();
     // The cut is the first turn end; the later one is the parent's own.
     assert_eq!(cut.through_seq, 5);
-    let f = fork::build(&p.events, &cut, SessionId::new(), "/w", 5).unwrap();
+    let f = fork::build(
+        &p.events,
+        &cut,
+        SessionId::new(),
+        &fork::title("Parent chat"),
+        "/w",
+        5,
+    )
+    .unwrap();
     // `aa` is named by event 6, after the cut: not copied.
     s.write_fork(NODE, p.sid, &f).unwrap();
     let id = f[0].session_id.to_string();
@@ -314,7 +383,15 @@ fn a_forks_events_and_images_are_written_in_one_transaction() {
         through_seq: p.events.len() as u64,
         turn_id: "t1".into(),
     };
-    let f2 = fork::build(&p.events, &cut, SessionId::new(), "/w", 6).unwrap();
+    let f2 = fork::build(
+        &p.events,
+        &cut,
+        SessionId::new(),
+        &fork::title("Parent chat"),
+        "/w",
+        6,
+    )
+    .unwrap();
     s.write_fork(NODE, p.sid, &f2).unwrap();
     let id2 = f2[0].session_id.to_string();
     let got = s.session_images(&id2, &["aa".into(), "bb".into()]).unwrap();
@@ -330,7 +407,15 @@ fn a_forks_events_and_images_are_written_in_one_transaction() {
     );
 
     // All or nothing: a gap in the middle writes nothing, no row, no image.
-    let mut bad = fork::build(&p.events, &cut, SessionId::new(), "/w", 7).unwrap();
+    let mut bad = fork::build(
+        &p.events,
+        &cut,
+        SessionId::new(),
+        &fork::title("Parent chat"),
+        "/w",
+        7,
+    )
+    .unwrap();
     bad.remove(3);
     let bad_id = bad[0].session_id;
     assert!(s.write_fork(NODE, p.sid, &bad).is_err());

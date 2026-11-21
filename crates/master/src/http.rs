@@ -23,6 +23,7 @@ mod connections;
 mod custom_connectors;
 mod diff;
 mod files;
+mod fork;
 mod hooks;
 mod levels;
 mod links;
@@ -248,6 +249,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(compact::routes())
         .merge(retry::routes())
         .merge(rewind::routes())
+        .merge(fork::routes())
         .merge(storage::routes())
         .merge(usage::routes())
         .merge(links::routes())

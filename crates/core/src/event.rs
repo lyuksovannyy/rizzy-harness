@@ -841,7 +841,8 @@ pub fn callback_opening(bg_ids: &[String]) -> String {
 /// docs/background-commands.md §4.4): each end that may call back
 /// ([`BackgroundEnded::calls_back`]) with, after it, no person's turn (a
 /// `turn_started` without a cause), no `callback_refused` and no callback
-/// turn whose cause names it. In log order, as (seq, ts_ms, end). The
+/// turn whose cause names it, and no fork's divider (`session_forked`). In
+/// log order, as (seq, ts_ms, end). The
 /// master's watcher and the node's check both read the log through this,
 /// so they agree on what a turn covered: a callback turn covers exactly
 /// the ends it names, which matters only when more waited than one
@@ -852,6 +853,10 @@ pub fn waiting_ends(log: &[RawEvent]) -> Vec<(u64, i64, BackgroundEnded)> {
         match e.typed() {
             Ok(EventKind::TurnStarted(TurnStarted { cause: None, .. }))
             | Ok(EventKind::CallbackRefused(_)) => waiting.clear(),
+            // A fork's divider (C.2): what waited in its parent at the cut is
+            // the parent's. The person who forked is here, as for a turn of
+            // their own; the ends before it are never the fork's to resume.
+            Ok(EventKind::SessionForked(_)) => waiting.clear(),
             // A mention turn is a person's turn here: the person is present
             // and it reads the notes standing before it.
             Ok(EventKind::TurnStarted(TurnStarted {
