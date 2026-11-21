@@ -173,4 +173,27 @@ describe("chat title", () => {
     expect(host.querySelector("h1")!.textContent).toBe("a");
     expect(host.querySelector("button, input, [tabindex]")).toBeNull();
   });
+
+  test("focus returns to the title after Enter and after Escape, not after a click outside", async () => {
+    show();
+    open();
+    type("Applied by Enter");
+    await key("Enter");
+    expect(document.activeElement).toBe(trigger());
+    open();
+    await key("Escape");
+    expect(document.activeElement).toBe(trigger());
+    // An unchanged title closed by Enter returns it too.
+    show("Applied by Enter");
+    open();
+    await key("Enter");
+    expect(document.activeElement).toBe(trigger());
+    // A click outside leaves the focus where the person clicked.
+    open();
+    type("By a click");
+    (document.activeElement as HTMLElement | null)?.blur();
+    await clickOut();
+    expect(host.querySelector("input")).toBeNull();
+    expect(document.activeElement).not.toBe(trigger());
+  });
 });

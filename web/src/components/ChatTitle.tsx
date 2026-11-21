@@ -28,11 +28,20 @@ export function ChatTitle(props: { sessionId: string; title: string; canRename: 
   // (an unmounting field may fire one) must not apply anything.
   const closed = useRef(false);
   const inflight = useRef(false);
+  const btn = useRef<HTMLButtonElement>(null);
+  // Set by a key that closed the field (Enter, Escape): the title button
+  // takes the focus back when it is drawn again. A click outside does not
+  // set it, so the focus stays where the person clicked.
+  const refocus = useRef(false);
   const editing = draft !== null;
   useEffect(() => {
-    if (!editing) return;
-    input.current?.focus();
-    input.current?.select();
+    if (editing) {
+      input.current?.focus();
+      input.current?.select();
+    } else if (refocus.current) {
+      refocus.current = false;
+      btn.current?.focus();
+    }
   }, [editing]);
   const open = () => {
     // Selecting the title to copy it is not a click to rename.
@@ -42,21 +51,23 @@ export function ChatTitle(props: { sessionId: string; title: string; canRename: 
     setErr(null);
     setDraft(title);
   };
-  const cancel = () => {
+  const cancel = (byKey = false) => {
+    if (byKey) refocus.current = true;
     closed.current = true;
     setDraft(null);
     setErr(null);
   };
-  const apply = async () => {
+  const apply = async (byKey = false) => {
     if (draft === null || inflight.current || closed.current) return;
     const next = draft.trim();
-    if (!next || next === title) return cancel();
+    if (!next || next === title) return cancel(byKey);
     inflight.current = true;
     setBusy(true);
     setErr(null);
     try {
       const r = await pageApi.renameSession(props.sessionId, next);
       setSaved(r.title);
+      if (byKey) refocus.current = true;
       closed.current = true;
       setDraft(null);
     } catch (x) {
@@ -83,12 +94,12 @@ export function ChatTitle(props: { sessionId: string; title: string; canRename: 
             onKeyDown={(e) => {
               if (e.key === "Escape") {
                 e.preventDefault();
-                cancel();
+                cancel(true);
               } else if (e.key === "Enter") {
                 e.preventDefault();
                 // The Enter that confirms an IME composition is not ours.
                 if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-                void apply();
+                void apply(true);
               }
             }}
           />
@@ -105,6 +116,7 @@ export function ChatTitle(props: { sessionId: string; title: string; canRename: 
       <h1 className="ellipsis">
         {props.canRename ? (
           <button
+            ref={btn}
             type="button"
             className="chat-title-btn"
             title={t("conv.rename")}
