@@ -27,7 +27,8 @@
 use crate::RawEvent;
 use crate::SessionId;
 use crate::event::{
-    BackgroundConfirmed, BackgroundEnded, BackgroundReason, EventKind, ForkedFrom, SessionForked,
+    BackgroundConfirmed, BackgroundEnded, BackgroundReason, EventKind, ForkedFrom, PeersSkipReason,
+    PeersSkipped, SessionForked,
 };
 
 /// The event kinds [`check`] reads: a reader (the master, from its mirror)
@@ -162,6 +163,8 @@ pub fn check(log: &[RawEvent], turn_id: &str) -> Result<Cut, String> {
 ///    the parent's), `cwd` (the node decides it) and `forked`;
 /// 2. the parent's events `2..=through_seq`, as they are, under the new id;
 /// 3. `session_forked`;
+/// 3b. when the cut is inside a message that called several agents, a
+///    `peers_skipped` ([`PeersSkipReason::Forked`]) for those not yet asked;
 /// 4. a `background_ended` ([`BackgroundReason::Forked`]) for each command
 ///    or background agent started in the copy and not ended in it.
 ///
@@ -235,6 +238,16 @@ pub fn build(
         through_seq: cut.through_seq,
         turn_id: cut.turn_id.clone(),
     }));
+    // A cut inside a message that called several agents: the ones with no
+    // turn at the cut are not asked in the fork, and the log says so now
+    // rather than at a later node start (which would say "restarted").
+    if let Some((message_seq, agents)) = crate::mention::unasked(copy) {
+        push(EventKind::PeersSkipped(PeersSkipped {
+            message_seq,
+            agents,
+            reason: PeersSkipReason::Forked,
+        }));
+    }
     for (bg_id, _) in open {
         push(EventKind::BackgroundEnded(BackgroundEnded {
             bg_id,
@@ -536,6 +549,83 @@ mod tests {
         );
         let v = crate::view::SessionView::fold(&f).unwrap();
         assert!(v.running_background().is_empty());
+    }
+
+    /// A cut inside a message that called several agents: the agents that
+    /// had no turn at the cut are said not to be asked, once, in the fork,
+    /// with the reason that the chat was forked; so nothing about them
+    /// appears at a later node start (`mention::unasked`). A list that had
+    /// finished says nothing.
+    #[test]
+    fn a_cut_inside_a_list_of_agents_says_who_was_not_asked() {
+        let mut l = Log::new();
+        l.started("t1");
+        let m = l.push(EventKind::UserMessage(
+            serde_json::from_value(serde_json::json!({
+                "turn_id": "t1", "text": "@a @b @c go", "triggers": ["a", "b", "c"]
+            }))
+            .unwrap(),
+        ));
+        let end = l.ended("t1");
+        // The parent goes on with b's turn after the cut.
+        l.push(EventKind::TurnStarted(TurnStarted {
+            turn_id: "t2".into(),
+            agent: Some(AgentRef {
+                agent_id: "b".into(),
+                name: "b".into(),
+                prompt_hash: String::new(),
+                withheld: vec![],
+                effort: None,
+            }),
+            cause: Some(TurnCause::Mention(MentionCall {
+                message_seq: m,
+                by: CalledBy::Person,
+                tags: vec![],
+            })),
+            environment: None,
+            continued_by: None,
+            retry: None,
+        }));
+        l.ended("t2");
+        let cut = check(&l.events, "t1").unwrap();
+        let f = build(&l.events, &cut, SessionId::new(), &title("Parent"), "/w", 5).unwrap();
+        assert_eq!(f.len() as u64, end + 2, "the divider and the note");
+        let Ok(EventKind::PeersSkipped(p)) = f[end as usize + 1].typed() else {
+            panic!("{:?}", f.last());
+        };
+        assert_eq!(p.message_seq, m);
+        assert_eq!(p.agents, vec!["b".to_string(), "c".to_string()]);
+        assert_eq!(p.reason, PeersSkipReason::Forked);
+        assert_eq!(
+            crate::mention::unasked(&f),
+            None,
+            "a restart has nothing left to say"
+        );
+        // The parent finished the list: a cut after it says nothing.
+        l.started("t3");
+        l.ended("t3");
+        l.push(EventKind::TurnStarted(TurnStarted {
+            turn_id: "t4".into(),
+            agent: Some(AgentRef {
+                agent_id: "c".into(),
+                name: "c".into(),
+                prompt_hash: String::new(),
+                withheld: vec![],
+                effort: None,
+            }),
+            cause: Some(TurnCause::Mention(MentionCall {
+                message_seq: m,
+                by: CalledBy::Person,
+                tags: vec![],
+            })),
+            environment: None,
+            continued_by: None,
+            retry: None,
+        }));
+        let last = l.ended("t4");
+        let cut = check(&l.events, "t4").unwrap();
+        let f = build(&l.events, &cut, SessionId::new(), &title("Parent"), "/w", 5).unwrap();
+        assert_eq!(f.len() as u64, last + 1, "only the divider");
     }
 
     #[test]

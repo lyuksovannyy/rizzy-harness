@@ -195,7 +195,7 @@ const ENUMS: Record<string, string> = {
   todoStatus: "pending in_progress done",
   frame: "person task callback step",
   calledBy: "person",
-  peersReason: "stopped restarted unavailable",
+  peersReason: "stopped restarted unavailable forked",
 };
 
 const STRUCTS: Record<string, string> = {

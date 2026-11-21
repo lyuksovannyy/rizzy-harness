@@ -1019,3 +1019,72 @@ async fn a_fork_is_due_a_handoff_note_only_for_turns_of_its_own() {
     let id = handoff(&mut h, "h2", f.sid);
     assert_eq!(ack(&mut h, id).await, Ok(()), "its own turn changed a file");
 }
+
+/// A cut inside a message that called several agents: the agents with no
+/// turn at the cut are said not to be asked, in the fork, right after the
+/// divider ("forked"); a restart then has nothing left to say about them in
+/// the fork (it would have said "the node restarted"), while the parent,
+/// whose list the restart really cut, is told so. (The parent's log is
+/// written straight into the node's store: the agents' turns need a master.)
+#[tokio::test]
+async fn a_cut_inside_a_list_of_agents_is_said_in_the_fork_and_not_again_at_a_restart() {
+    let mut h = H::new().await;
+    let mut next = h.log().len() as u64;
+    let mut put = |h: &H, kind: &str, payload: serde_json::Value| {
+        next += 1;
+        h.store()
+            .append(
+                "local",
+                &RawEvent {
+                    session_id: h.sid,
+                    seq: next,
+                    ts_ms: 1,
+                    kind: kind.into(),
+                    payload,
+                },
+            )
+            .unwrap();
+    };
+    put(&h, "turn_started", serde_json::json!({"turn_id": "t1"}));
+    put(
+        &h,
+        "user_message",
+        serde_json::json!({"turn_id": "t1", "text": "@a @b @c go", "triggers": ["a", "b", "c"]}),
+    );
+    put(
+        &h,
+        "assistant_message",
+        serde_json::json!({"turn_id": "t1", "message_id": "m", "text": "a here"}),
+    );
+    put(
+        &h,
+        "turn_ended",
+        serde_json::json!({"turn_id": "t1", "reason": "completed"}),
+    );
+    let f = h.fork(h.sid, "t1").await;
+    f.result.clone().unwrap();
+    let log = h.log_of(f.sid);
+    let Ok(EventKind::PeersSkipped(p)) = log.last().unwrap().typed() else {
+        panic!("{:?}", log.last());
+    };
+    assert_eq!(p.agents, vec!["b".to_string(), "c".to_string()]);
+    assert_eq!(p.reason, PeersSkipReason::Forked);
+    let parent = h.log();
+    h.restart().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        h.log_of(f.sid),
+        log,
+        "the restart added nothing to the fork"
+    );
+    let after = h.log();
+    let Ok(EventKind::PeersSkipped(p)) = after.last().unwrap().typed() else {
+        panic!("{:?}", after.last());
+    };
+    assert_eq!(
+        p.reason,
+        PeersSkipReason::Restarted,
+        "the parent's list was cut"
+    );
+    assert_eq!(after.len(), parent.len() + 1);
+}

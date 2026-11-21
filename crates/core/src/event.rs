@@ -912,6 +912,10 @@ pub enum PeersSkipReason {
     /// The node could not start the next turn (its log, its limits, a
     /// stopping node).
     Unavailable,
+    /// The chat is a fork (C.2) cut inside the list: the agents had not
+    /// had their turn at the cut. Said by the fork itself, right after its
+    /// divider.
+    Forked,
 }
 
 /// The person took the conversation back to an earlier message of theirs

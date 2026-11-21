@@ -79,6 +79,7 @@ export const pages = {
   "conv.notAsked.stopped": "you stopped the turn",
   "conv.notAsked.restarted": "the node restarted",
   "conv.notAsked.unavailable": "the node could not start their turns",
+  "conv.notAsked.forked": "this chat was forked before their turns",
   "conv.waited": "{s} s",
   "conv.notSent": "Not sent: {why}.",
   "conv.retrySend": "Retry",

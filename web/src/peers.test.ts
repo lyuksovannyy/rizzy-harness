@@ -59,6 +59,12 @@ describe("a message that called several agents", () => {
     }
   });
 
+  it("reads the note a fork writes for agents it was cut before", () => {
+    const v = fold([ev(1, "peers_skipped", { message_seq: 2, agents: ["editor"], reason: "forked" })]);
+    expect(v.unknown_events).toBe(0);
+    expect(v.items).toEqual([{ type: "peers_skipped", agents: ["editor"], reason: "forked" }]);
+  });
+
   it("applies one event at a time as the live view does", () => {
     const v = fold(list.slice(0, 3));
     for (const e of list.slice(3)) apply(v, e);

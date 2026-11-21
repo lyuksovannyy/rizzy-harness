@@ -326,7 +326,7 @@ export type ItemKind =
   /** The turn of an agent the person's message called after the first (`turn_started.cause.mention`, X.37). */
   | { type: "called"; turn_id: string; agent: AgentRef | null; message_seq: number }
   /** Agents a message called that were not asked (`peers_skipped`): Stop, a restart or a node that could not. */
-  | { type: "peers_skipped"; agents: string[]; reason: "stopped" | "restarted" | "unavailable" }
+  | { type: "peers_skipped"; agents: string[]; reason: "stopped" | "restarted" | "unavailable" | "forked" }
   /** The person's Retry of the failed turn `of` (`turn_started.retry`, X.21): a new turn answering the same message. */
   | { type: "retry"; turn_id: string; of: string; reason: TurnEndReason; failed_model?: string; model?: string }
   /** The node did not resume the agent for these ends (`callback_refused`). */

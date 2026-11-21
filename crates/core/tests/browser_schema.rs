@@ -370,7 +370,8 @@ fn enums() -> Vec<(&'static [&'static str], Vec<String>)> {
             variants!(
                 PeersSkipReason::Stopped,
                 PeersSkipReason::Restarted,
-                PeersSkipReason::Unavailable
+                PeersSkipReason::Unavailable,
+                PeersSkipReason::Forked
             ),
         ),
         (
