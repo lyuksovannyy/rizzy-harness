@@ -56,6 +56,18 @@ impl SecretSet {
         }
     }
 
+    /// Whether a redacted value could be written as a JSON number, whole
+    /// or as a part of one: it is made of digits and the few signs a
+    /// number is written with. Only then does the event scrubber look at
+    /// numbers.
+    pub(crate) fn any_numeric(&self) -> bool {
+        let set = self.0.read().unwrap_or_else(|p| p.into_inner());
+        live(&set).iter().any(|s| {
+            s.iter()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'+' | b'e' | b'E'))
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.read().unwrap_or_else(|p| p.into_inner()).is_empty()
     }
