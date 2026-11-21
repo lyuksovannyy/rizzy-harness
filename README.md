@@ -4827,7 +4827,14 @@ skills, connectors (MCP servers), the project board, sub-agents, background sub-
 a sub-agent or both), change them, delete them, and change any agent's look.
 Built-in agents and agent files keep their name, handle, instructions and
 features: only their summary and **additional instructions** (added after
-their own) change there, and **Duplicate** makes an editable copy. **Write
+their own) change there, and **Duplicate** makes an editable copy. An
+agent's page also sets **the model it runs on and its fallbacks** (up to 8,
+tried in order): server admins change the server's chain, and in a workspace
+whoever may change that workspace's settings changes the workspace's, which
+replaces the server's for that agent there ("Use the server's chain" goes
+back). It is the same chain as Settings → AI providers and Workspace admin →
+Models, saved the same way; anyone else sees it read-only. In your Personal
+workspace the chains are the server's, set by the server's admin. **Write
 from instructions** asks the default model for a summary. An agent file can
 set `memory: false` (no recall, no `remember`), `project_memory: false` (no
 project facts in project chats), `background_subagents: true` (see

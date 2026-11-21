@@ -11,8 +11,9 @@ export type Route =
   | { kind: "session"; id: string }
   /** A project id, or "new" for the create form (docs/projects.md). */
   | { kind: "project"; id: string; tab?: ProjectTab }
-  /** Unchecked: Settings validates the section and tab against what the viewer sees. */
-  | { kind: "settings"; section?: string; tab?: string }
+  /** Unchecked: Settings validates the section and tab against what the viewer sees.
+   * `item` is what a panel has open in place (the workspace's Agents tab: an agent's id, or `new`). */
+  | { kind: "settings"; section?: string; tab?: string; item?: string }
   /** id null: the list; `new` (NEW_AGENT in lib/agents.ts): a new agent; else that agent's page. */
   | { kind: "agents"; id: string | null }
   /** id null: the list; `new`: the editor, empty; else that routine, or its runs. */
@@ -56,6 +57,9 @@ export function parseRoute(hash: string): Route {
   if (md) return { kind: "media", filter: (md[1] as MediaFilter | undefined) ?? null, id: md[2] ?? null };
   const art = hash.match(ARTIFACTS);
   if (art) return { kind: "artifacts", id: art[1] ?? null };
+  // The one panel that opens something in place: the workspace's Agents tab.
+  const wa = hash.match(/^#\/settings\/workspace\/agents\/([a-z0-9-]{1,32})$/);
+  if (wa) return { kind: "settings", section: "workspace", tab: "agents", item: wa[1]! };
   const s = hash.match(/^#\/settings(?:\/([a-z-]+))?(?:\/([a-z-]+))?$/);
   if (!s) return { kind: "home" };
   const [, section, tab] = s;
@@ -72,12 +76,12 @@ export function routeHash(r: Route): string {
   if (r.kind === "media") return `#/media${r.filter ? `/${r.filter}` : ""}${r.id ? `/${r.id}` : ""}`;
   if (r.kind === "artifacts") return `#/artifacts${r.id ? `/${r.id}` : ""}`;
   if (r.kind === "plugins") return "#/plugins";
-  if (r.kind === "settings") return `#/settings${r.section ? `/${r.section}${r.tab ? `/${r.tab}` : ""}` : ""}`;
+  if (r.kind === "settings") return `#/settings${r.section ? `/${r.section}${r.tab ? `/${r.tab}${r.item ? `/${r.item}` : ""}` : ""}` : ""}`;
   return "#/";
 }
 
-export function settingsHash(section: SectionId, tab?: TabId): string {
-  return routeHash({ kind: "settings", section, tab });
+export function settingsHash(section: SectionId, tab?: TabId, item?: string): string {
+  return routeHash({ kind: "settings", section, tab, item });
 }
 
 export const projectHash = (id: string, tab?: ProjectTab): string => routeHash({ kind: "project", id, tab });

@@ -4254,6 +4254,13 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .agent-name { font-weight: var(--w-medium); }
 .agent-list > li.bad .agent-name { color: var(--bad); }
 .agent-models .gone { color: var(--bad); }
+/* The chain's editor is a box of its own, like the switches above it: its
+   Save button then visibly belongs to it and not to the page's Save. */
+.agent-chain-editor-box {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: var(--space-3) var(--space-4);
+}
 .avatar-editor { margin-top: var(--space-3); padding: 12px; border: 1px solid var(--line); border-radius: var(--r-lg); }
 .avatar-preview { display: flex; align-items: center; gap: var(--space-4); flex-wrap: wrap; }
 .avatar-preview .seg { flex-wrap: wrap; border-radius: var(--r-lg); }

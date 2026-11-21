@@ -132,12 +132,12 @@ export default function Settings(props: {
   onWorkspaceLeft?: () => void;
   /** The section and tab the route asks for, unchecked; a new object for
    * every hash change, so following the same link twice still opens it. */
-  route?: { section?: string; tab?: string };
+  route?: { section?: string; tab?: string; item?: string };
   memoryVersion: number;
   nodes: NodeInfo[];
 }) {
   const sections = visibleSections(props.me);
-  const [want, setWant] = useState<{ section?: string; tab?: string }>(props.route ?? {});
+  const [want, setWant] = useState<{ section?: string; tab?: string; item?: string }>(props.route ?? {});
   const [seen, setSeen] = useState(props.route);
   if (seen !== props.route) {
     setSeen(props.route);
@@ -146,13 +146,16 @@ export default function Settings(props: {
   // What the viewer may not see falls back to what they may.
   const { section, tab } = pickTab(sections, want);
   const choose = (s: SectionId, x?: TabId) => setWant({ section: s, tab: x });
+  // What the Agents tab has open lives in the address too, so a reload comes back to it.
+  const item = section === "workspace" && tab === "agents" ? (want.item ?? null) : null;
+  const openItem = (id: string | null) => setWant({ section, tab, ...(id ? { item: id } : {}) });
   // The address names the panel shown, so a reload or a copied link comes
   // back to it; replaced, so Back still leaves Settings. Again on every route,
   // since an old path to the tab already shown changes no tab.
   useEffect(() => {
-    const h = settingsHash(section, tab);
+    const h = settingsHash(section, tab, item ?? undefined);
     if (location.hash.startsWith("#/settings") && location.hash !== h) history.replaceState(history.state, "", h);
-  }, [section, tab, props.route]);
+  }, [section, tab, item, props.route]);
   const tabs = sections.find((s) => s.id === section)!.tabs;
   const tabRow = useRevealTab(`${section}/${tab}`);
   const prefs = props.prefs;
@@ -202,7 +205,7 @@ export default function Settings(props: {
         <Suspense fallback={<div className="muted">Loading…</div>}>
           {prefs && tab === "profile" && <ProfileTab me={props.me} prefs={prefs} models={props.models} onSaved={props.onPrefs} />}
           {prefs && tab === "personalisation" && <PersonalisationTab prefs={prefs} onSaved={props.onPrefs} />}
-          {wsProps && tab === "agents" && <WorkspaceAgents {...wsProps} />}
+          {wsProps && tab === "agents" && <WorkspaceAgents {...wsProps} open={item} onOpen={openItem} />}
         </Suspense>
         {prefs && tab === "preferences" && (
           <PrefsEditor initial={prefs} models={props.models} onSaved={props.onPrefs}>

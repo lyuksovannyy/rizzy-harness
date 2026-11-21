@@ -57,7 +57,7 @@ const agent = (id: string, name: string, more: Partial<Agent> = {}): Agent => ({
 
 const member: Me = { user_id: "u", username: "alex", role: "member", exec_ceiling: "none" as const, must_change_password: false };
 
-function render(prefs: Partial<Prefs>, route: { section?: string; tab?: string } = { section: "account", tab: "preferences" }, me = member) {
+function render(prefs: Partial<Prefs>, route: { section?: string; tab?: string; item?: string } = { section: "account", tab: "preferences" }, me = member) {
   act(() =>
     root.render(
       <Settings
@@ -146,6 +146,26 @@ describe("the route", () => {
     render({}, { section: "server", tab: "users" });
     expect(shown().tab).toBe("Profile");
     expect(host.textContent).not.toContain("Users");
+  });
+
+  test("an agent open in the workspace's Agents tab is in the address, and only there", () => {
+    const ws = {
+      workspace_id: "w1",
+      name: "Acme",
+      personal: false,
+      role: "member" as const,
+      permissions: [],
+      members: 2,
+      exec_level: "host" as const,
+    };
+    history.replaceState(null, "", "#/settings/workspace/agents/coder");
+    render({}, { section: "workspace", tab: "agents", item: "coder" }, { ...member, workspace: ws });
+    expect(shown().tab).toBe("Agents");
+    expect(location.hash).toBe("#/settings/workspace/agents/coder");
+    // Another tab drops it.
+    history.replaceState(null, "", "#/settings/account/preferences/coder");
+    render({}, { section: "account", tab: "preferences", item: "coder" }, { ...member, workspace: ws });
+    expect(location.hash).toBe("#/settings/account/preferences");
   });
 
   test("a section without a tab opens its first", () => {
