@@ -2,11 +2,12 @@
 //! owner, 2026-11-21; PLAN.md T32, T57).
 //!
 //! The lead's turn checkpoint is a snapshot of the whole folder, so what a
-//! sub-agent the lead waited for wrote in that turn is in it: `files`,
-//! "Show changes" and Undo cover it, and T57 does not count the lead's own
-//! sub-agent as another chat. A background sub-agent is another chat for
-//! that rule (the lead did not wait for it); what it writes after the
-//! lead's turn is undone in its own chat, from its own checkpoints.
+//! sub-agent the lead's `delegate` call started wrote in that turn is in
+//! it: `files`, "Show changes" and Undo cover it, and T57 does not count
+//! it as another chat. Any other turn in a sub-agent's chat (a person's
+//! message to it) and what a background one writes outside the lead's
+//! turns are another chat's work; the latter is undone in its own chat,
+//! from its own checkpoints.
 
 #[path = "support/rig.rs"]
 mod support;
@@ -285,4 +286,173 @@ async fn a_rewind_across_a_background_childs_work_between_turns_asks_first() {
     let undo = r.restore_with(&first, true, true).await;
     assert_eq!(undo.result, Ok(()));
     assert_eq!(r.files(), before);
+}
+
+// ---- What a PERSON asks a sub-agent's chat to do is not the lead's work -----
+
+/// The first line of the child's session id, as the `delegate` result gives it.
+fn child_of(out: &str) -> SessionId {
+    out.strip_prefix("session: ")
+        .and_then(|r| r.lines().next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("no session line: {out}"))
+}
+
+/// A person's message to `sid`'s chat now (the master accepts one for a
+/// sub-agent's chat that is not running).
+fn prompt(r: &mut Rig, sid: SessionId, text: String) {
+    r.n += 1;
+    r.send(MasterToNode::Prompt(PromptMsg {
+        req_id: format!("p{}", r.n),
+        agent: Some(r.lead()),
+        ..PromptMsg::test(sid, text)
+    }));
+}
+
+/// Wait until `count` more turns have ended.
+async fn turns_end(r: &mut Rig, count: usize) {
+    for _ in 0..count {
+        r.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+    }
+}
+
+/// The `after` checkpoint's turn id of the last turn of `sid`.
+fn last_turn(r: &Rig, sid: SessionId) -> String {
+    r.seen
+        .iter()
+        .rev()
+        .filter(|e| e.session_id == sid)
+        .find_map(|e| match e.typed() {
+            Ok(EventKind::Checkpoint(c)) if c.phase == CheckpointPhase::After => Some(c.turn_id),
+            _ => None,
+        })
+        .expect("a turn checkpoint")
+}
+
+/// The lead's second turn: it writes `lead.txt` and waits a while.
+fn slow_lead_turn() -> String {
+    format!(
+        "script: {}",
+        json!([
+            {"tool": "write", "input": {"path": "lead.txt", "content": "lead\n"}},
+            {"tool": "bash", "input": {"command": "sleep 4"}},
+        ])
+    )
+}
+
+/// A finished sub-agent's chat is asked by a PERSON to make a file while
+/// the lead's next turn runs. The lead's Undo of that turn must not delete
+/// it silently: it is refused naming `direct.txt` (not the lead's own
+/// files), and "Undo anyway" puts everything back.
+#[tokio::test]
+async fn a_persons_message_to_a_finished_childs_chat_during_the_leads_turn_refuses_the_undo() {
+    let mut r = repo_rig().await;
+    let (_, outs) = r.lead_turn("delegate: dev=run: echo v2 > keep.txt").await;
+    let child = child_of(&outs[0]);
+    let lead = r.session_id();
+    let before = r.files();
+    prompt(&mut r, lead, slow_lead_turn());
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    prompt(&mut r, child, "run: echo direct > direct.txt".into());
+    turns_end(&mut r, 2).await;
+    assert_eq!(r.read("direct.txt").as_deref(), Some("direct\n"));
+    let turn = last_turn(&r, lead);
+    let mid = r.files();
+    let undo = r.restore(&turn, false).await;
+    let err = undo.result.expect_err("refused: a person's work in the child's chat");
+    assert!(
+        err.contains("another chat") && err.contains("`direct.txt`") && !err.contains("`lead.txt`"),
+        "{err}"
+    );
+    assert_eq!(r.files(), mid, "a refused undo changed the folder");
+    let undo = r.restore(&turn, true).await;
+    assert_eq!(undo.result, Ok(()));
+    assert!(r.read("direct.txt").is_none() && r.read("lead.txt").is_none());
+    assert_eq!(r.files(), before);
+}
+
+/// The same for a background sub-agent's chat that has ended.
+#[tokio::test]
+async fn a_persons_message_to_a_finished_background_childs_chat_refuses_the_undo_too() {
+    let mut r = repo_rig().await;
+    r.lead_caps = Some(DelegateCaps {
+        background: true,
+        ..Default::default()
+    });
+    let script = json!([
+        {"tool": "delegate", "input": {"agent": "dev", "background": true, "task": "run: echo fast > fast.txt"}},
+        {"tool": "bash", "input": {"command": "sleep 1"}},
+    ]);
+    let (_, outs) = r.lead_turn(&format!("script: {script}")).await;
+    let child = child_of(&outs[0]);
+    let lead = r.session_id();
+    prompt(&mut r, lead, slow_lead_turn());
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    prompt(&mut r, child, "run: echo direct > direct.txt".into());
+    turns_end(&mut r, 2).await;
+    let turn = last_turn(&r, lead);
+    let undo = r.restore(&turn, false).await;
+    let err = undo.result.expect_err("refused: a person's work in the child's chat");
+    assert!(err.contains("`direct.txt`") && !err.contains("`lead.txt`"), "{err}");
+    let undo = r.restore(&turn, true).await;
+    assert_eq!(undo.result, Ok(()));
+    assert!(r.read("direct.txt").is_none());
+}
+
+/// The person asked the child's chat BEFORE the lead's turn: not this
+/// turn's work at all, and its file stays.
+#[tokio::test]
+async fn a_persons_message_to_a_childs_chat_before_the_leads_turn_is_left_alone() {
+    let mut r = repo_rig().await;
+    let (_, outs) = r.lead_turn("delegate: dev=run: echo v2 > keep.txt").await;
+    let child = child_of(&outs[0]);
+    prompt(&mut r, child, "run: echo direct > direct.txt".into());
+    turns_end(&mut r, 1).await;
+    let own = json!([{"tool": "write", "input": {"path": "lead.txt", "content": "lead\n"}}]);
+    let (turn, _) = r.lead_turn(&format!("script: {own}")).await;
+    let turn = turn.id.expect("a turn checkpoint");
+    let undo = r.restore(&turn, false).await;
+    assert_eq!(undo.result, Ok(()));
+    assert!(r.read("lead.txt").is_none());
+    assert_eq!(r.read("direct.txt").as_deref(), Some("direct\n"));
+}
+
+/// A follow-up the lead sent through `delegate` is the lead's own work:
+/// its files are undone with the turn, without asking, and so are the
+/// files of the delegation's first turn.
+#[tokio::test]
+async fn a_follow_up_through_delegate_is_still_the_leads_own_work() {
+    let mut r = repo_rig().await;
+    let (_, outs) = r.lead_turn("delegate: dev=run: echo one > b.txt").await;
+    let child = child_of(&outs[0]);
+    let before = r.files();
+    let (turn, outs) = r
+        .lead_turn(&format!(
+            "delegate: dev@{child}=run: echo two >> b.txt; echo f > f.txt"
+        ))
+        .await;
+    assert!(outs[0].contains("worked in this chat's folder"), "{outs:#?}");
+    let turn = turn.id.expect("a turn checkpoint");
+    let undo = r.restore(&turn, false).await;
+    assert_eq!(undo.result, Ok(()), "{outs:#?}");
+    assert_eq!(r.files(), before);
+}
+
+/// The rewind's files part is the same restore: a person's work in the
+/// child's chat during the rewound turn asks first there too.
+#[tokio::test]
+async fn a_rewind_asks_first_about_a_persons_work_in_a_childs_chat_as_well() {
+    let mut r = repo_rig().await;
+    let (_, outs) = r.lead_turn("delegate: dev=run: echo v2 > keep.txt").await;
+    let child = child_of(&outs[0]);
+    let lead = r.session_id();
+    prompt(&mut r, lead, slow_lead_turn());
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    prompt(&mut r, child, "run: echo direct > direct.txt".into());
+    turns_end(&mut r, 2).await;
+    let turn = last_turn(&r, lead);
+    let undo = r.restore_with(&turn, false, true).await;
+    let err = undo.result.expect_err("refused");
+    assert!(err.contains("`direct.txt`") && !err.contains("`lead.txt`"), "{err}");
+    assert_eq!(r.read("direct.txt").as_deref(), Some("direct\n"));
 }

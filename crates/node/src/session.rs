@@ -4095,8 +4095,9 @@ impl Session {
 
     /// Other chats' work in this folder over `span` on the files an undo
     /// writes (`others::foreign_work`): the chats on this node whose folder
-    /// overlaps the checkpoint's, other than this one and its sub-agents,
-    /// and the write tombstones of deleted ones (pruned here once older
+    /// overlaps the checkpoint's, other than this one (its sub-agents count
+    /// for the turns its calls started them in: see the body), and the
+    /// write tombstones of deleted ones (pruned here once older
     /// than every checkpoint kept for this folder). None of the chats can
     /// be running: the folder is claimed (or, for a diff, it is a view).
     async fn foreign_work(
@@ -4113,34 +4114,32 @@ impl Session {
             .values()
             .map(|s| (s.id, s.parent_session, s.cwd.clone()))
             .collect();
-        let parent: HashMap<SessionId, Option<SessionId>> =
-            all.iter().map(|(id, p, _)| (*id, *p)).collect();
-        // This chat's sub-agents (and theirs) work for its turns, so what
-        // they write while one of its turns runs is the turn's (the
-        // checkpoint holds it, Undo takes it back). One the chat started in
-        // the background was not waited for: what it writes while no turn
-        // of the chat runs (between turns, or after the last) is another
-        // chat's, and a rewind across such a gap asks first (a shared one
-        // writes the same folder; PLAN.md T32, T57).
-        let (background, turns) = self.background_work().await;
-        // The chain from `id` up to this chat, and whether it passes a
-        // background start on the way (`None`: not this chat's at all).
-        let chain = |mut id: SessionId| -> Option<bool> {
-            let mut via_bg = false;
-            for _ in 0..64 {
-                if id == self.id {
-                    return Some(via_bg);
+        // This chat's sub-agents (and theirs) work for its turns only in the
+        // turns its own `delegate` calls started: the delegation's first
+        // turn and a follow-up it sent. What they write then is the turn's
+        // (the checkpoint holds it, Undo takes it back). Any other turn of
+        // theirs (a person's message to that chat, a callback) is another
+        // chat's work, and so is what a background one does outside this
+        // chat's turns (PLAN.md T32, T57).
+        let turns = self.turn_spans().await;
+        let mut own: HashMap<SessionId, Vec<(i64, i64)>> = HashMap::new();
+        own.insert(self.id, turns);
+        let mut todo = vec![self.id];
+        while let Some(up) = todo.pop() {
+            let up_own = own.get(&up).cloned().unwrap_or_default();
+            for (id, _, _) in all.iter().filter(|(_, p, _)| *p == Some(up)) {
+                if own.contains_key(id) {
+                    continue;
                 }
-                via_bg |= background.contains(&id);
-                id = parent.get(&id).copied().flatten()?;
+                let started = self.delegated_spans(*id).await;
+                own.insert(*id, crate::others::within(&started, &up_own));
+                todo.push(*id);
             }
-            None
-        };
+        }
         let root = real_path(&repo.root);
         let ids: Vec<(SessionId, PathBuf)> = all
             .iter()
-            // Its waited-for sub-agents are the chat itself.
-            .filter(|(id, _, _)| chain(*id) != Some(false))
+            .filter(|(id, _, _)| *id != self.id)
             .map(|(id, _, cwd)| (*id, real_path(cwd)))
             .filter(|(_, cwd)| overlaps(cwd, &root))
             .collect();
@@ -4159,9 +4158,9 @@ impl Session {
                 id: s.id,
                 cwd,
                 repo: theirs,
-                // A background sub-agent of this chat: only what it did
-                // outside this chat's turns is another chat's.
-                during: chain(s.id).map(|_| turns.clone()),
+                // A sub-agent of this chat: only what it did outside the
+                // turns this chat's calls started is another chat's.
+                during: own.get(&s.id).cloned(),
             });
         }
         let store = &self.node.cfg.store;
@@ -4186,32 +4185,20 @@ impl Session {
         crate::others::foreign_work(store, repo, others, &tombstones, span, touched).await
     }
 
-    /// The sub-agents this chat ever started in the background (its log's
-    /// `background_started` entries that name a child), and the time spans
-    /// of its own turns (an open one runs until now).
-    async fn background_work(&self) -> (std::collections::HashSet<SessionId>, Vec<(i64, i64)>) {
+    /// The time spans of this chat's own turns (an open one runs until now).
+    async fn turn_spans(&self) -> Vec<(i64, i64)> {
         let me = self.id;
         let events = self
             .node
             .cfg
             .store
-            .call(move |s| {
-                s.events_since_turn_at(
-                    me,
-                    i64::MIN,
-                    &["background_started", "turn_started", "turn_ended"],
-                )
-            })
+            .call(move |s| s.events_since_turn_at(me, i64::MIN, &["turn_started", "turn_ended"]))
             .await
             .unwrap_or_default();
-        let mut children = std::collections::HashSet::new();
         let mut open: HashMap<String, i64> = HashMap::new();
         let mut spans = Vec::new();
         for e in &events {
             match e.typed() {
-                Ok(EventKind::BackgroundStarted(b)) => {
-                    children.extend(b.child.map(|c| c.session));
-                }
                 Ok(EventKind::TurnStarted(t)) => {
                     open.insert(t.turn_id, e.ts_ms);
                 }
@@ -4224,7 +4211,53 @@ impl Session {
             }
         }
         spans.extend(open.into_values().map(|from| (from, i64::MAX)));
-        (children, spans)
+        spans
+    }
+
+    /// The time spans of the turns of the sub-agent chat `child` that its
+    /// parent's `delegate` call started: its first turn (nothing marks it
+    /// but its place in the log: a fork's turns before the fork are
+    /// another chat's copy, so a fork has none) and each follow-up
+    /// (`turn_started.continued_by` names the call). Every other turn in
+    /// that chat was started by someone else.
+    async fn delegated_spans(&self, child: SessionId) -> Vec<(i64, i64)> {
+        let events = self
+            .node
+            .cfg
+            .store
+            .call(move |s| {
+                s.events_since_turn_at(
+                    child,
+                    i64::MIN,
+                    &["session_created", "turn_started", "turn_ended"],
+                )
+            })
+            .await
+            .unwrap_or_default();
+        let mut forked = false;
+        let mut first = true;
+        let mut open: HashMap<String, i64> = HashMap::new();
+        let mut spans = Vec::new();
+        for e in &events {
+            match e.typed() {
+                Ok(EventKind::SessionCreated(c)) => forked = c.forked.is_some(),
+                Ok(EventKind::TurnStarted(t)) => {
+                    let delegated = t.continued_by.is_some() || (first && !forked);
+                    first = false;
+                    if delegated {
+                        open.insert(t.turn_id, e.ts_ms);
+                    }
+                }
+                Ok(EventKind::TurnEnded(t)) => {
+                    if let Some(from) = open.remove(&t.turn_id) {
+                        spans.push((from, e.ts_ms));
+                    }
+                }
+                _ => {}
+            }
+        }
+        spans.extend(open.into_values().map(|from| (from, i64::MAX)));
+        spans
     }
 
     /// Register a restore of `root` (the checkpoint's folder: the

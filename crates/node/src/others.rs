@@ -281,9 +281,10 @@ pub(crate) struct Other {
     pub id: SessionId,
     pub cwd: PathBuf,
     pub repo: Option<Repo>,
-    /// A background sub-agent of the undoing chat: the spans of that chat's
-    /// own turns, in which what it did is the turn's (the undo takes it
-    /// back); only what it did outside them is another chat's.
+    /// A sub-agent of the undoing chat: the spans in which what it did is
+    /// the undoing chat's own (the turns its `delegate` calls started,
+    /// inside the chat's own turns); only what it did outside them is
+    /// another chat's.
     pub during: Option<Vec<(i64, i64)>>,
 }
 
@@ -292,7 +293,8 @@ pub(crate) struct Other {
 fn outside(since: i64, end: i64, turns: &[(i64, i64)]) -> Vec<(i64, i64)> {
     let mut turns: Vec<(i64, i64)> = turns
         .iter()
-        .copied()
+        // A call that ended in the millisecond its turn did is the turn's.
+        .map(|(a, b)| (a.saturating_sub(1), b.saturating_add(1)))
         .filter(|(a, b)| *b >= since && *a <= end)
         .collect();
     turns.sort();
@@ -306,6 +308,20 @@ fn outside(since: i64, end: i64, turns: &[(i64, i64)]) -> Vec<(i64, i64)> {
     }
     if at < end {
         out.push((at, end));
+    }
+    out
+}
+
+/// The parts of `a` that lie inside `b` (both lists of spans).
+pub(crate) fn within(a: &[(i64, i64)], b: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    let mut out = Vec::new();
+    for (x0, x1) in a {
+        for (y0, y1) in b {
+            let (lo, hi) = (*x0.max(y0), *x1.min(y1));
+            if lo <= hi {
+                out.push((lo, hi));
+            }
+        }
     }
     out
 }
