@@ -70,6 +70,8 @@ struct Host {
     log: Log,
     store: Store,
     reads: Arc<Mutex<usize>>,
+    /// The node's `denied_tools` hold `history`.
+    denied: std::sync::atomic::AtomicBool,
 }
 
 impl Host {
@@ -79,6 +81,7 @@ impl Host {
             log: Default::default(),
             store: Default::default(),
             reads: Default::default(),
+            denied: Default::default(),
         }
     }
     fn push(&self, k: EventKind) -> u64 {
@@ -206,6 +209,9 @@ impl TurnHost for Host {
     }
     fn runs_unasked(&self, _: &str, risk: ToolRisk) -> bool {
         risk == ToolRisk::ReadOnly
+    }
+    fn tool_denied(&self, tool: &str) -> bool {
+        tool == "history" && self.denied.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn history(&self) -> Option<Arc<dyn HistorySource>> {
         Some(Arc::new(Own {
@@ -660,4 +666,28 @@ async fn the_summary_does_not_promise_a_tool_the_node_lacks() {
     );
     turn(&b, &host, ws.path(), agent(false, true), "t2", "go on").await;
     assert!(!system_of(&p.requests()[0]).contains("history"));
+}
+
+/// A tool the node denies (`denied_tools`) is not promised either, though
+/// it is registered and the agent has it.
+#[tokio::test]
+async fn the_summary_does_not_promise_a_tool_the_node_denies() {
+    let ws = tempfile::tempdir().unwrap();
+    let host = Host::new();
+    host.denied.store(true, std::sync::atomic::Ordering::SeqCst);
+    host.old_turn(1, "first", "a result", vec![]);
+    host.summarize("The first turn read a file.");
+    let p = Model::new("history", vec![]);
+    turn(
+        &backend(p.clone()),
+        &host,
+        ws.path(),
+        agent(false, true),
+        "t2",
+        "go on",
+    )
+    .await;
+    let system = system_of(&p.requests()[0]);
+    assert!(!system.contains("history"), "{system}");
+    assert!(system.contains("Summary of the earlier conversation:\nThe first turn read a file."));
 }
