@@ -1357,12 +1357,13 @@ impl NativeBackend {
         if declared.iter().any(|n| usable(n)) {
             return None;
         }
+        // `history` is every agent's own chat: not worth naming.
         let names: Vec<String> = declared
             .iter()
+            .filter(|n| *n != history::NAME)
             .map(|n| match n.as_str() {
                 "remember" => "memory".to_string(),
                 "recall" => "earlier chats search".to_string(),
-                "history" => "chat history".to_string(),
                 n => n.replace('_', " "),
             })
             .collect();

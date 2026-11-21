@@ -1861,6 +1861,8 @@ mod tests {
         assert!(names.contains(&"graph_query"), "{names:?}");
         // And `recall`, which the master answers (PLAN.md T55).
         assert!(names.contains(&"recall"), "{names:?}");
+        // And `history`, which the node answers from its own store (T91).
+        assert!(names.contains(&"history"), "{names:?}");
         // And the board tools, which the master answers too (PLAN.md T78).
         assert!(
             names.contains(&"board") && names.contains(&"board_edit"),
