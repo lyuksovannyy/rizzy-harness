@@ -1657,4 +1657,46 @@ mod round3 {
             }
         }
     }
+
+    /// What git itself writes (annotated tags, `pack-refs --all`, a pack,
+    /// a shallow file) passes the strict rules of stage 1 and comes out as a
+    /// correct fork.
+    #[tokio::test]
+    async fn what_git_writes_is_copied_and_the_fork_is_correct() {
+        let h = Hostile::new();
+        let repo = h.repo.clone();
+        let top = repo.parent().unwrap().canonicalize().unwrap();
+        for i in 0..5 {
+            std::fs::write(repo.join(format!("f{i}.txt")), format!("{i}\n")).unwrap();
+            sh(&repo, &["add", "."]);
+            sh(&repo, &["commit", "-qm", &format!("c{i}")]);
+        }
+        sh(&repo, &["tag", "-a", "v1", "-m", "annotated"]);
+        sh(&repo, &["tag", "light"]);
+        sh(&repo, &["branch", "feat/x"]);
+        sh(&repo, &["pack-refs", "--all"]);
+        sh(&repo, &["repack", "-adq"]);
+        let head = out(&repo, &["rev-parse", "HEAD"]);
+        let shadow = repo_for(&repo, Some(&h.base)).await.unwrap();
+        let (dest, outside) = (top.join("dest"), top.join("outside"));
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let res = fill(&Plan {
+            source: &repo,
+            dest: &dest,
+            outside: &outside,
+            branch: "fork/ab12cd34",
+            head: Some(&head),
+            shadow: &shadow,
+            snapshot: None,
+            timeout: Duration::from_secs(60),
+            max_bytes: 1 << 30,
+            max_entries: fork_copy::ENTRY_MAX,
+        })
+        .await;
+        res.unwrap_or_else(|e| panic!("refused: {e}"));
+        assert_eq!(out(&dest, &["rev-parse", "v1^{commit}"]), head);
+        assert_eq!(out(&dest, &["rev-parse", "light"]), head);
+        assert_eq!(out(&dest, &["rev-parse", "origin/feat/x"]), head);
+    }
 }

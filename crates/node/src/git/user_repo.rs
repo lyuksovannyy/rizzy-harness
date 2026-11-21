@@ -88,10 +88,11 @@ fn read_small(path: &Path, cap: u64) -> Option<String> {
 
 /// The most `HEAD` and a loose ref file may hold (a ref is under 100
 /// bytes; `HEAD` names one).
-const REF_MAX: u64 = 512;
+pub(super) const REF_MAX: u64 = 512;
 
-/// The most `packed-refs` may hold; a bigger one makes `HEAD` unknown.
-const PACKED_REFS_MAX: u64 = 1 << 20;
+/// The most `packed-refs` may hold (about 190,000 refs); a bigger one makes
+/// `HEAD` unknown. A fork's copy refuses the same size (`fork_sanitise`).
+pub(super) const PACKED_REFS_MAX: u64 = 16 << 20;
 
 /// `path` exists and leads nowhere else: no link on it (its canonical form
 /// is itself).

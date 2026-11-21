@@ -40,12 +40,13 @@
 
 use std::ffi::{OsStr, OsString};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use super::user_repo::{PACKED_REFS_MAX, REF_MAX};
 use nix::errno::Errno;
 use nix::fcntl::{OFlag, openat};
 use nix::sys::stat::{FileStat, Mode, SFlag, fstat, mkdirat};
@@ -142,6 +143,130 @@ fn probe(dir: BorrowedFd<'_>, name: &OsStr) -> Result<Option<(OwnedFd, FileStat,
         Err(Errno::ENOENT) => Ok(None),
         Err(e) => Err(format!("cannot look at .git/{}: {e}", shown_name())),
     }
+}
+
+/// Which tree of `.git` a walk is in: refs are parsed and rewritten, objects
+/// are bytes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tree {
+    Refs,
+    Objects,
+}
+
+/// The most `shallow` may hold.
+const SHALLOW_MAX: u64 = 16 << 20;
+
+/// A commit id as git writes it: 40 hex digits (64 for sha256, which is
+/// refused later by name, with its own sentence).
+fn hex_id(b: &[u8]) -> bool {
+    (b.len() == 40 || b.len() == 64) && b.iter().all(u8::is_ascii_hexdigit)
+}
+
+fn lower(b: &[u8]) -> Vec<u8> {
+    b.to_ascii_lowercase()
+}
+
+/// One component of a ref name by the rules of `git check-ref-format`: not
+/// empty, not starting with `.`, not ending with `.lock` or `.`, no `..`, no
+/// `@{`, no control character, space, `~ ^ : ? * [ \`.
+fn ref_component_ok(c: &[u8]) -> bool {
+    !c.is_empty()
+        && c.len() <= 255
+        && c[0] != b'.'
+        && !c.ends_with(b".lock")
+        && !c.ends_with(b".")
+        && !c.windows(2).any(|w| w == b".." || w == b"@{")
+        && c.iter()
+            .all(|b| *b >= 0x20 && *b != 0x7f && !b" ~^:?*[\\".contains(b))
+}
+
+/// A whole ref name under `refs/` (a symbolic ref's target, a name in
+/// `packed-refs`): `refs/` and components `git check-ref-format` accepts.
+fn ref_name_ok(n: &[u8]) -> bool {
+    n.len() <= 1024
+        && n.strip_prefix(b"refs/")
+            .is_some_and(|rest| rest.split(|b| *b == b'/').all(ref_component_ok))
+}
+
+/// A loose ref or `HEAD` as it is written again: 40 hex digits and a
+/// newline, or `ref: <name>` and a newline; at most [`REF_MAX`] bytes. `None`
+/// for anything else.
+fn parse_ref(data: &[u8]) -> Option<Vec<u8>> {
+    let line = data.strip_suffix(b"\n").unwrap_or(data);
+    if line.contains(&b'\n') {
+        return None;
+    }
+    if hex_id(line) {
+        return Some([&lower(line)[..], b"\n"].concat());
+    }
+    let name = line.strip_prefix(b"ref: ")?;
+    ref_name_ok(name).then(|| [b"ref: ", name, b"\n"].concat())
+}
+
+/// `packed-refs` as it is written again, from the lines that parse: the
+/// first line may be `# pack-refs with: <traits>` (traits git knows),
+/// `<id> <refname>` lines, each optionally followed by one `^<id>` peel
+/// line. A file that says `sorted` must be. `Err` is the number of the first
+/// line that is none of these.
+fn parse_packed(data: &[u8]) -> Result<Vec<u8>, usize> {
+    let mut out = Vec::with_capacity(data.len());
+    let (mut sorted, mut after_ref) = (false, false);
+    let mut last: Option<&[u8]> = None;
+    let mut lines = data.split(|b| *b == b'\n').enumerate().peekable();
+    while let Some((i, line)) = lines.next() {
+        let n = i + 1;
+        if line.is_empty() && lines.peek().is_none() {
+            break;
+        }
+        if let Some(traits) = line.strip_prefix(b"# pack-refs with:") {
+            if i != 0 {
+                return Err(n);
+            }
+            out.extend_from_slice(b"# pack-refs with:");
+            for t in traits.split(|b| *b == b' ').filter(|t| !t.is_empty()) {
+                if !matches!(t, b"peeled" | b"fully-peeled" | b"sorted") {
+                    return Err(n);
+                }
+                sorted |= t == b"sorted";
+                out.push(b' ');
+                out.extend_from_slice(t);
+            }
+            out.extend_from_slice(b" \n");
+        } else if let Some(id) = line.strip_prefix(b"^") {
+            if !(after_ref && hex_id(id)) {
+                return Err(n);
+            }
+            out.extend_from_slice(&[b"^", &lower(id)[..], b"\n"].concat());
+            after_ref = false;
+        } else {
+            let at = line.iter().position(|b| *b == b' ').ok_or(n)?;
+            let (id, name) = (&line[..at], &line[at + 1..]);
+            if !(hex_id(id) && ref_name_ok(name)) || (sorted && last.is_some_and(|l| l >= name)) {
+                return Err(n);
+            }
+            out.extend_from_slice(&[&lower(id)[..], b" ", name, b"\n"].concat());
+            last = Some(name);
+            after_ref = true;
+        }
+    }
+    Ok(out)
+}
+
+/// `shallow` as it is written again: one commit id per line. `Err` is the
+/// number of the first line that is not.
+fn parse_shallow(data: &[u8]) -> Result<Vec<u8>, usize> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut lines = data.split(|b| *b == b'\n').enumerate().peekable();
+    while let Some((i, line)) = lines.next() {
+        if line.is_empty() && lines.peek().is_none() {
+            break;
+        }
+        if !hex_id(line) {
+            return Err(i + 1);
+        }
+        out.extend_from_slice(&[&lower(line)[..], b"\n"].concat());
+    }
+    Ok(out)
 }
 
 struct Walk<'a> {
@@ -268,29 +393,145 @@ impl Walk<'_> {
         }
     }
 
-    /// One plain file of `src` into `dst`, when it is there.
-    fn copy_file(
+    /// A regular file of at most `cap` bytes, read whole (not counted: what
+    /// is written from it is).
+    fn read_capped(
+        &self,
+        src: BorrowedFd<'_>,
+        name: &str,
+        cap: u64,
+    ) -> Result<Option<Result<Vec<u8>, ()>>, String> {
+        use std::io::Read;
+        let Some(f) = self.open_file(src, OsStr::new(name), name)? else {
+            return Ok(None);
+        };
+        let mut data = Vec::new();
+        f.take(cap + 1)
+            .read_to_end(&mut data)
+            .map_err(|e| format!("cannot read .git/{}: {e}", shown(name)))?;
+        Ok(Some(if data.len() as u64 > cap {
+            Err(())
+        } else {
+            Ok(data)
+        }))
+    }
+
+    /// New file `name` in `dst` holding `bytes` (made with `O_EXCL`).
+    fn write_bytes(
+        &mut self,
+        dst: BorrowedFd<'_>,
+        name: &OsStr,
+        bytes: &[u8],
+        rel: &str,
+    ) -> Result<(), String> {
+        use std::io::Write;
+        self.count(bytes.len() as u64)?;
+        let out = openat(
+            dst,
+            name,
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(|e| format!("cannot write the copy of .git/{}: {e}", shown(rel)))?;
+        std::fs::File::from(out)
+            .write_all(bytes)
+            .map_err(|e| format!("cannot write the copy of .git/{}: {e}", shown(rel)))
+    }
+
+    /// `HEAD` or a loose ref `name` of `src` into `dst`: parsed, and written
+    /// again as the one line it must be; anything else is refused by name
+    /// (skipping it would give a fork without that branch), never quoted.
+    fn copy_ref(
         &mut self,
         src: BorrowedFd<'_>,
         dst: Option<BorrowedFd<'_>>,
-        name: &str,
+        name: &OsStr,
+        rel: &str,
     ) -> Result<bool, String> {
-        self.entry()?;
         let Some(dst) = dst else {
-            let Some((_p, st, k)) = probe(src, OsStr::new(name))? else {
+            let Some((_p, st, k)) = probe(src, name)? else {
                 return Ok(false);
             };
             if k != Kind::File {
-                return Err(refuse(name, k));
+                return Err(refuse(rel, k));
             }
             self.count(u64::try_from(st.st_size).unwrap_or(0))?;
             return Ok(true);
         };
-        match self.open_file(src, OsStr::new(name), name)? {
-            Some(f) => self
-                .write_new(f, dst, OsStr::new(name), name)
-                .map(|()| true),
-            None => Ok(false),
+        let not_a_ref = |why: &str| {
+            format!(
+                "the repository is not copied: .git/{} is not a ref ({why})",
+                shown(rel)
+            )
+        };
+        let Some(f) = self.open_file(src, name, rel)? else {
+            return Ok(false);
+        };
+        let mut data = Vec::new();
+        {
+            use std::io::Read;
+            f.take(REF_MAX + 1)
+                .read_to_end(&mut data)
+                .map_err(|e| format!("cannot read .git/{}: {e}", shown(rel)))?;
+        }
+        if data.starts_with(b"this repository uses the reftable format") {
+            return Err(
+                "the repository is not copied: it uses the reftable ref storage, which a \
+                 fork's own copy does not support yet"
+                    .into(),
+            );
+        }
+        if data.len() as u64 > REF_MAX {
+            return Err(not_a_ref(&format!("it is longer than {REF_MAX} bytes")));
+        }
+        let Some(line) = parse_ref(&data) else {
+            return Err(not_a_ref(
+                "a ref holds a 40-character commit id, or `ref: <name>`",
+            ));
+        };
+        self.write_bytes(dst, name, &line, rel)?;
+        Ok(true)
+    }
+
+    /// `packed-refs` or `shallow` of `src` into `dst`, rewritten from the
+    /// lines that parse; the first line that does not ends the copy by its
+    /// number.
+    fn copy_list(
+        &mut self,
+        src: BorrowedFd<'_>,
+        dst: Option<BorrowedFd<'_>>,
+        name: &str,
+    ) -> Result<(), String> {
+        self.entry()?;
+        let (cap, parse): (u64, fn(&[u8]) -> Result<Vec<u8>, usize>) = if name == "shallow" {
+            (SHALLOW_MAX, parse_shallow)
+        } else {
+            (PACKED_REFS_MAX, parse_packed)
+        };
+        let Some(dst) = dst else {
+            if let Some((_p, st, k)) = probe(src, OsStr::new(name))? {
+                if k != Kind::File {
+                    return Err(refuse(name, k));
+                }
+                self.count(u64::try_from(st.st_size).unwrap_or(0))?;
+            }
+            return Ok(());
+        };
+        match self.read_capped(src, name, cap)? {
+            None => Ok(()),
+            Some(Err(())) => Err(format!(
+                "the repository is not copied: .git/{name} is larger than {} MiB",
+                cap / (1024 * 1024)
+            )),
+            Some(Ok(data)) => {
+                let bytes = parse(&data).map_err(|line| {
+                    format!(
+                        "the repository is not copied: line {line} of .git/{name} is not a line \
+                         git writes there"
+                    )
+                })?;
+                self.write_bytes(dst, OsStr::new(name), &bytes, name)
+            }
         }
     }
 
@@ -337,6 +578,7 @@ impl Walk<'_> {
         rel: &str,
         depth: usize,
         skip: &[&str],
+        kind: Tree,
     ) -> Result<(), String> {
         if depth > DEPTH_MAX {
             return Err(format!(
@@ -375,6 +617,16 @@ impl Walk<'_> {
                 // Gone since the listing (a loose object packed away).
                 continue;
             };
+            if kind == Tree::Refs
+                && matches!(k, Kind::Dir | Kind::File)
+                && !ref_component_ok(name.as_bytes())
+            {
+                return Err(format!(
+                    "the repository is not copied: .git/{} has a name git does not accept for a \
+                     ref (see git check-ref-format)",
+                    shown(&child)
+                ));
+            }
             match k {
                 Kind::Dir => {
                     let d = match &dst {
@@ -383,7 +635,10 @@ impl Walk<'_> {
                     };
                     let s = openat(src.as_fd(), name.as_os_str(), dir_flags(), Mode::empty())
                         .map_err(|_| refuse(&child, Kind::Link))?;
-                    self.copy_tree(s, d, &child, depth + 1, skip)?;
+                    self.copy_tree(s, d, &child, depth + 1, skip, kind)?;
+                }
+                Kind::File if kind == Tree::Refs => {
+                    self.copy_ref(src.as_fd(), dst.as_ref().map(|d| d.as_fd()), &name, &child)?;
                 }
                 Kind::File => match &dst {
                     Some(dst) => {
@@ -485,7 +740,8 @@ fn walk(root: &Path, into: Option<&Path>, lim: &Limits) -> Result<(Data, u64), S
             _ => None,
         };
     }
-    if !w.copy_file(git.as_fd(), dst_fd, "HEAD")? {
+    w.entry()?;
+    if !w.copy_ref(git.as_fd(), dst_fd, OsStr::new("HEAD"), "HEAD")? {
         return Err("the repository is not copied: it has no HEAD file".into());
     }
     // Refs, loose then packed.
@@ -494,9 +750,9 @@ fn walk(root: &Path, into: Option<&Path>, lim: &Limits) -> Result<(Data, u64), S
         Some(d) => Some(w.make_dir(d, OsStr::new("refs"), "refs")?),
         None => None,
     };
-    w.copy_tree(refs_src, refs_dst, "refs", 1, &[])?;
-    w.copy_file(git.as_fd(), dst_fd, "packed-refs")?;
-    w.copy_file(git.as_fd(), dst_fd, "shallow")?;
+    w.copy_tree(refs_src, refs_dst, "refs", 1, &[], Tree::Refs)?;
+    w.copy_list(git.as_fd(), dst_fd, "packed-refs")?;
+    w.copy_list(git.as_fd(), dst_fd, "shallow")?;
     // The objects, after every ref that names them.
     let obj_src = w.open_dir(git.as_fd(), OsStr::new("objects"), "objects")?;
     let info = match probe(obj_src.as_fd(), OsStr::new("info"))? {
@@ -523,7 +779,7 @@ fn walk(root: &Path, into: Option<&Path>, lim: &Limits) -> Result<(Data, u64), S
         Some(d) => Some(w.make_dir(d, OsStr::new("objects"), "objects")?),
         None => None,
     };
-    w.copy_tree(obj_src, obj_dst, "objects", 1, &ALTERNATES)?;
+    w.copy_tree(obj_src, obj_dst, "objects", 1, &ALTERNATES, Tree::Objects)?;
     Ok((Data { config, exclude }, w.bytes))
 }
 
@@ -545,7 +801,7 @@ mod tests {
         std::fs::create_dir_all(git.join("refs/heads")).unwrap();
         std::fs::create_dir_all(git.join("objects/ab")).unwrap();
         std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        std::fs::write(git.join("refs/heads/main"), "a".repeat(40)).unwrap();
+        std::fs::write(git.join("refs/heads/main"), "a".repeat(40) + "\n").unwrap();
         std::fs::write(git.join("objects/ab/cdef"), "object bytes").unwrap();
         top.join("src")
     }
@@ -568,8 +824,8 @@ mod tests {
         }
         std::fs::write(git.join("config"), "[core]\n\tbare = false\n").unwrap();
         std::fs::write(git.join("index"), "i").unwrap();
-        std::fs::write(git.join("shallow"), "s\n").unwrap();
-        std::fs::write(git.join("packed-refs"), "# pack\n").unwrap();
+        std::fs::write(git.join("shallow"), "b".repeat(40) + "\n").unwrap();
+        std::fs::write(git.join("packed-refs"), "# pack-refs with: peeled \n").unwrap();
         let into = top.join("into");
         std::fs::create_dir(&into).unwrap();
         let data = copy(&root, &into, &limits(1 << 20, 1000)).unwrap();
@@ -690,5 +946,201 @@ mod tests {
         std::fs::create_dir(&into).unwrap();
         let e = copy(&root, &into, &limits(1 << 20, 1000)).unwrap_err();
         assert!(e.contains("nested deeper"), "{e}");
+    }
+
+    /// A parent with `files` (path under `.git`, bytes) written over the
+    /// plain `repo()`; the result of copying it.
+    fn copy_with(
+        files: &[(&str, &[u8])],
+    ) -> (Result<Data, String>, std::path::PathBuf, tempfile::TempDir) {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let root = repo(&top);
+        for (f, bytes) in files {
+            let p = root.join(".git").join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, bytes).unwrap();
+        }
+        let into = top.join("into");
+        std::fs::create_dir(&into).unwrap();
+        (copy(&root, &into, &limits(1 << 26, 100_000)), into, d)
+    }
+
+    const ID: &str = "0123456789abcdef0123456789abcdef01234567";
+    const SECRET: &str = "SECRET-IN-A-REF-FILE";
+
+    /// A loose ref is 40 hex characters and a newline or `ref: <name>`, at
+    /// most `REF_MAX` bytes: anything else is refused by name, never
+    /// skipped (the fork would lack a branch), and its bytes are not quoted.
+    #[test]
+    fn a_loose_ref_that_is_no_ref_is_refused_by_name() {
+        let big = vec![b'x'; 20 * 1024];
+        let mut binary: Vec<u8> = (0..3000u32).map(|i| (i * 7 % 256) as u8).collect();
+        binary.extend_from_slice(SECRET.as_bytes());
+        let word = format!("{SECRET}\n");
+        let two = format!("{ID}\n{ID}\n");
+        let sym_bad = format!("ref: refs/heads/a..b{SECRET}\n");
+        let sym_out = format!("ref: ../outside/{SECRET}\n");
+        for (what, bytes) in [
+            ("binary", binary.as_slice()),
+            ("big", big.as_slice()),
+            ("word", word.as_bytes()),
+            ("two ids", two.as_bytes()),
+            ("short id", b"abc123\n"),
+            ("empty", b""),
+            ("bad symref", sym_bad.as_bytes()),
+            ("symref outside refs", sym_out.as_bytes()),
+        ] {
+            let (r, _, _d) = copy_with(&[("refs/heads/junk", bytes)]);
+            let e = r.err().unwrap_or_else(|| panic!("{what}: was copied"));
+            assert!(e.contains("refs/heads/junk"), "{what}: {e}");
+            assert!(!e.contains(SECRET), "{what}: quotes the file: {e}");
+        }
+    }
+
+    #[test]
+    fn plain_refs_are_copied() {
+        let (r, into, _d) = copy_with(&[
+            ("refs/heads/a", format!("{ID}\n").as_bytes()),
+            ("refs/heads/b", ID.as_bytes()),
+            ("refs/remotes/o/HEAD", b"ref: refs/remotes/o/main\n"),
+            ("refs/heads/$(touch-x)", format!("{ID}\n").as_bytes()),
+            ("refs/heads/;y", format!("{ID}\n").as_bytes()),
+            ("refs/heads/--upload-pack=z", format!("{ID}\n").as_bytes()),
+            ("refs/heads/a`b`", format!("{ID}\n").as_bytes()),
+            ("refs/heads/feat/ok", format!("{ID}\n").as_bytes()),
+        ]);
+        r.unwrap();
+        for f in [
+            "a",
+            "b",
+            "$(touch-x)",
+            ";y",
+            "--upload-pack=z",
+            "a`b`",
+            "feat/ok",
+        ] {
+            let t = std::fs::read_to_string(into.join("refs/heads").join(f)).unwrap();
+            assert_eq!(t, format!("{ID}\n"), "{f}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(into.join("refs/remotes/o/HEAD")).unwrap(),
+            "ref: refs/remotes/o/main\n"
+        );
+    }
+
+    /// A ref name git's `check-ref-format` would not accept is refused by
+    /// its position, whatever the file holds.
+    #[test]
+    fn a_ref_name_check_ref_format_refuses_is_refused() {
+        for name in [
+            "refs/heads/a..b",
+            "refs/heads/x.lock",
+            "refs/heads/.hidden",
+            "refs/heads/a~b",
+            "refs/heads/a^b",
+            "refs/heads/a:b",
+            "refs/heads/a?b",
+            "refs/heads/a*b",
+            "refs/heads/a[b",
+            "refs/heads/a b",
+            "refs/heads/a\\b",
+            "refs/heads/trail.",
+            "refs/heads/at@{x",
+            "refs/heads/d.lock/x",
+            "refs/heads/tab\there",
+        ] {
+            let (r, _, _d) = copy_with(&[(name, format!("{ID}\n").as_bytes())]);
+            let e = r.err().unwrap_or_else(|| panic!("{name:?}: was copied"));
+            assert!(
+                e.contains("refs/heads/") && e.contains("name"),
+                "{name:?}: {e}"
+            );
+        }
+    }
+
+    /// `HEAD` follows the same rule.
+    #[test]
+    fn head_is_a_commit_id_or_a_symbolic_ref() {
+        let (r, _, _d) = copy_with(&[("HEAD", format!("{SECRET}\n").as_bytes())]);
+        let e = r.unwrap_err();
+        assert!(e.contains("HEAD") && !e.contains(SECRET), "{e}");
+        let (r, _, _d) = copy_with(&[("HEAD", format!("{ID}\n").as_bytes())]);
+        r.unwrap();
+    }
+
+    /// `packed-refs` is rewritten from the lines that parse; any other line
+    /// is refused by its number, never by its content.
+    #[test]
+    fn packed_refs_is_rewritten_and_a_bad_line_is_refused_by_number() {
+        let id2 = "fedcba9876543210fedcba9876543210fedcba98";
+        let good = format!(
+            "# pack-refs with: peeled fully-peeled sorted \n{ID} refs/heads/a\n{id2} refs/tags/t\n^{ID}\n"
+        );
+        let (r, into, _d) = copy_with(&[("packed-refs", good.as_bytes())]);
+        r.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(into.join("packed-refs")).unwrap(),
+            good
+        );
+        for (what, text) in [
+            (
+                "junk line",
+                format!("# pack-refs with: peeled \n{ID} refs/heads/a\n{SECRET}\n"),
+            ),
+            ("bad name", format!("{ID} refs/heads/a..b{SECRET}\n")),
+            ("outside refs", format!("{ID} HEAD{SECRET}\n")),
+            ("short id", format!("abc refs/heads/a{SECRET}\n")),
+            ("peel first", format!("^{ID}\n")),
+            ("two peels", format!("{ID} refs/heads/a\n^{ID}\n^{ID}\n")),
+            (
+                "blank line",
+                format!("{ID} refs/heads/a\n\n{ID} refs/heads/b\n"),
+            ),
+            (
+                "late header",
+                format!("{ID} refs/heads/a\n# pack-refs with: peeled \n"),
+            ),
+            ("odd trait", format!("# pack-refs with: {SECRET} \n")),
+            (
+                "claims sorted",
+                format!("# pack-refs with: sorted \n{ID} refs/heads/b\n{ID} refs/heads/a\n"),
+            ),
+            (
+                "too big",
+                "# pack-refs with: peeled \n".to_string()
+                    + &format!("{ID} refs/heads/a\n").repeat(500_000),
+            ),
+        ] {
+            let (r, _, _d) = copy_with(&[("packed-refs", text.as_bytes())]);
+            let e = r.err().unwrap_or_else(|| panic!("{what}: was copied"));
+            assert!(e.contains("packed-refs"), "{what}: {e}");
+            assert!(!e.contains(SECRET), "{what}: quotes the file: {e}");
+            if what != "too big" {
+                assert!(e.contains("line "), "{what}: names no line: {e}");
+            }
+        }
+    }
+
+    /// `shallow` holds commit ids and nothing else.
+    #[test]
+    fn shallow_is_commit_ids_only() {
+        let (r, into, _d) = copy_with(&[("shallow", format!("{ID}\n").as_bytes())]);
+        r.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(into.join("shallow")).unwrap(),
+            format!("{ID}\n")
+        );
+        for text in [
+            format!("{ID}\n{SECRET}\n"),
+            format!("{SECRET}\n"),
+            format!("{ID}\n\n"),
+            format!("{ID} x\n"),
+        ] {
+            let (r, _, _d) = copy_with(&[("shallow", text.as_bytes())]);
+            let e = r.err().unwrap_or_else(|| panic!("{text:?}: was copied"));
+            assert!(e.contains("shallow") && e.contains("line "), "{e}");
+            assert!(!e.contains(SECRET), "{e}");
+        }
     }
 }
