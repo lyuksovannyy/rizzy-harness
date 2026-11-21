@@ -1,6 +1,8 @@
 // Phase 7 end-to-end: memory. Onboarding turns on embeddings (fake server),
-// the model proposes a memory, the user confirms it, a later chat recalls it
-// by meaning ("puppy" finds "dog").
+// the model's `remember` call from the person's own message in their Personal
+// workspace is kept at once (the chat says so, with Undo and a link to the
+// list), a later chat recalls it by meaning ("puppy" finds "dog"), Forget
+// removes it.
 // Usage: node web/e2e/phase7.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -74,30 +76,21 @@ const emb = http.createServer((req, res) => {
     const toml = fs.readFileSync(`${S}/data/config.toml`, 'utf8');
     check(toml.includes(embUrl) && toml.includes('preset = "fast"'), 'memory config saved');
 
-    // The model proposes a memory; Home offers to review it.
+    // The model's remember call is kept at once: the chat says so, with Undo.
     await p.fill('.composer textarea', 'remember: Alex has a dog named Pixel');
     await p.click('.mode-switch button:has-text("Ask")');
     await p.keyboard.press('Enter');
-    await p.waitForSelector('text=Tool said: Proposed.');
-    await p.click('.new-chat');
-    await p.waitForSelector('.review-link');
-    log('home:', await p.innerText('.review-link'));
-    await p.click('.review-link');
-    await p.waitForSelector('.fact.proposed:has-text("Pixel")');
+    await p.waitForSelector('text=Tool said: Sent to memory');
+    await p.waitForSelector('.memory-fact:has-text("Pixel")');
+    await p.waitForSelector('button.memory-undo');
+    log('kept at once, with Undo:', (await p.innerText('.memory-undo')).trim());
+    await p.screenshot({ path: `${S}/p7-1b-kept.png` });
+    await p.click('.memory-review');
+    await p.waitForSelector('.fact.active:has-text("Pixel")');
+    check((await p.locator('.fact.proposed').count()) === 0, 'nothing waits for review');
     await p.screenshot({ path: `${S}/p7-2-review.png` });
 
-    // Not used before confirming.
-    await p.click('.new-chat');
-    await p.fill('.composer textarea', 'memory? how is my puppy doing');
-    await p.click('.mode-switch button:has-text("Ask")');
-    await p.keyboard.press('Enter');
-    await p.waitForSelector('text=Memory: nothing recalled.');
-    log('unconfirmed proposal not recalled');
-
-    // Confirm; now "puppy" recalls the dog fact by meaning.
-    await p.goto(`${URL_}#/settings/account/memory`);
-    await p.click('.fact.proposed button:has-text("Remember")');
-    await p.waitForSelector('.fact.active:has-text("Pixel")');
+    // A later chat recalls it: "puppy" finds the dog fact by meaning.
     await p.click('.new-chat');
     await p.fill('.composer textarea', 'memory? how is my puppy doing');
     await p.click('.mode-switch button:has-text("Ask")');
