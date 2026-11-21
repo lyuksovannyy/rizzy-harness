@@ -1,7 +1,8 @@
 # Forking a chat
 
 ADOPTION_PLAN C.2 and X.48 (part 1: the conversation), PLAN.md T92, README "Fork a chat".
-Part 2, a checkout of its own for the fork's files, is a later change; until then both chats share one folder.
+A fork works in its parent's folder: it is another continuation of the same conversation, not another copy of the files (the owner's decision of 2026-11-21).
+A separate copy of the repository per fork was built and reviewed on the branch `feat/fork-checkout` (pull request 213, closed unmerged) and is not wanted.
 
 ## What a fork is
 
@@ -73,3 +74,8 @@ The caller still gets the timeout error and finds the fork in the list.
 Both chats share the parent's folder.
 The page says so; the T57 rules keep one chat's undo from reverting the other's work.
 `Session::fork_folder` is the one place that decides the fork's folder.
+
+## Titles
+
+A fork is titled after the chat it comes from: "X (fork)", then "X (fork 2)", "X (fork 3)", counted over every fork of the same original chat, so a fork of a fork is the next number and never "X (fork) (fork)".
+Two forks started at the same instant can get the same number; their ids differ.

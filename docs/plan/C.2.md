@@ -18,7 +18,7 @@ The first event is the parent's `session_created` with `forked {parent, through_
 A turn that is not finished is not a cut (it is refused, never closed); background commands at the cut are closed by `background_ended` with reason `forked`.
 The child starts with no grants, and the approval mode is the parent's at the cut clamped by the node; usage starts at zero (a copy is skipped by the folds and the store).
 `session_forks (session_id, parent_id, through_seq, created_ms)` is migration 3, with no hash column and no foreign key; deleting a parent deletes no fork.
-Files are not seeded: both chats share the folder until part 2.
+Files are not seeded: both chats share the folder, by the owner's decision of 2026-11-21 (a fork is another continuation of the conversation; the own-copy work of pull request 213 was closed unmerged).
 A cross-node fork stays with N.5 and the note's lossy seed.
 
 ## Tests it commits to
