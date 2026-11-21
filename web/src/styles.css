@@ -1657,6 +1657,7 @@ select.pill {
   padding: 10px 16px;
   border-radius: var(--r-lg);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   max-width: 80%;
 }
 .author {
@@ -1667,6 +1668,12 @@ select.pill {
 }
 .md {
   line-height: var(--lh-prose);
+  overflow-wrap: anywhere;
+}
+/* Code keeps its own horizontal scroll. */
+.md pre,
+.md pre code {
+  overflow-wrap: normal;
 }
 .md > :first-child {
   margin-top: 0;
