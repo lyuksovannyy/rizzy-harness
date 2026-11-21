@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::event::*;
+use crate::pins::{Book, Pin, Who};
 use crate::policy::Decision;
 
 /// One block of a step's thinking as the view keeps it: its kind
@@ -102,6 +103,10 @@ pub enum Item {
         /// Set by the final `assistant_message`; deltas never carry blocks.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         blocks: Vec<UiBlock>,
+        /// The seq of the final `assistant_message`: what a pin names
+        /// (`message_pinned`). 0 while the message streams.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        seq: u64,
     },
     /// A step's thinking (`assistant_message.thinking`, X.25), before
     /// what the step said: each block's kind and readable text only (no
@@ -141,6 +146,14 @@ pub enum Item {
     TurnEnd {
         turn_id: String,
         reason: TurnEndReason,
+        /// When the turn ended: the `turn_ended` event's time, ms since
+        /// the epoch (a copied turn of a fork keeps its parent's time).
+        at: i64,
+        /// What the turn used, as the header's "this turn" holds it: its
+        /// final usage, or the last running figure of one that ended
+        /// without. Foreground sub-agents are included (`store::usage`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
     },
     /// The chat switched agent or model at the message after it.
     AgentChanged {
@@ -253,11 +266,14 @@ pub struct Items {
     mark: Vec<Option<u64>>,
     /// The seq of the event being folded.
     now: u64,
+    /// Its time (`RawEvent::ts_ms`).
+    now_ms: i64,
 }
 
 impl Items {
-    fn at(&mut self, seq: u64) {
+    fn at(&mut self, seq: u64, ts_ms: i64) {
         self.now = seq;
+        self.now_ms = ts_ms;
     }
 
     fn push(&mut self, item: Item) {
@@ -490,6 +506,14 @@ pub struct SessionView {
     /// The chat's rewinds, in the order they were made (X.46).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rewinds: Vec<RewindInfo>,
+    /// The pinned messages (`message_pinned`, docs/pins.md) in log order,
+    /// without those a rewind hides. Absent when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pins: Vec<Pin>,
+    /// The messages a pin can name and which are marked (not part of the
+    /// view's wire shape).
+    #[serde(skip)]
+    book: Book,
     /// The rewinds that count (not part of the view's wire shape).
     #[serde(skip)]
     ranges: crate::rewind::Ranges,
@@ -585,7 +609,7 @@ impl SessionView {
         }
         self.session_id = Some(e.session_id);
         self.head_seq = e.seq;
-        self.items.at(e.seq);
+        self.items.at(e.seq, e.ts_ms);
         match e.typed() {
             Ok(k) => self.apply_kind(k, e.seq),
             Err(_) => self.unknown_events += 1,
@@ -689,6 +713,8 @@ impl SessionView {
             }
             EventKind::UserMessage(m) => {
                 self.no_more_undo();
+                self.book
+                    .message(seq, Who::User, &m.text, &m.turn_id, self.items.now_ms);
                 if !m.queued {
                     self.messages.insert(seq, m.turn_id.clone());
                 }
@@ -735,10 +761,12 @@ impl SessionView {
                         author: d.author,
                         variant: d.variant,
                         blocks: vec![],
+                        seq: 0,
                     }),
                 }
             }
             EventKind::AssistantMessage(m) => {
+                let ts = self.items.now_ms;
                 // Its thinking, before what the step said (X.25).
                 if let Some(t) = &m.thinking {
                     let item = Item::Thinking {
@@ -763,8 +791,13 @@ impl SessionView {
                         author,
                         variant,
                         blocks,
+                        seq: at_seq,
                         ..
                     }) => {
+                        if !m.text.is_empty() {
+                            self.book.message(seq, Who::Assistant, &m.text, &m.turn_id, ts);
+                        }
+                        *at_seq = seq;
                         *text = m.text;
                         *done = true;
                         *blocks = m.blocks;
@@ -777,6 +810,7 @@ impl SessionView {
                     }
                     _ => {
                         if !m.text.is_empty() {
+                            self.book.message(seq, Who::Assistant, &m.text, &m.turn_id, ts);
                             self.items.push(Item::Assistant {
                                 message_id: m.message_id,
                                 text: m.text,
@@ -784,6 +818,7 @@ impl SessionView {
                                 author: m.author,
                                 variant: m.variant,
                                 blocks: m.blocks,
+                                seq,
                             })
                         }
                     }
@@ -945,11 +980,14 @@ impl SessionView {
                 // The turn that ended, also when it reported none (an
                 // interrupted one): never an older turn's as the last.
                 self.turn_usage = t.usage.as_ref().or(running.as_ref()).map(Usage::capped);
+                let at = self.items.now_ms;
                 self.running_turn = None;
                 self.running_agent = None;
                 self.items.push(Item::TurnEnd {
                     turn_id: t.turn_id,
                     reason: t.reason,
+                    at,
+                    usage: self.turn_usage.clone(),
                 });
             }
             EventKind::TurnUsage(t) => {
@@ -1087,7 +1125,12 @@ impl SessionView {
                     });
                     self.items.remark(&self.ranges);
                     self.retodo();
+                    self.repin();
                 }
+            }
+            EventKind::MessagePinned(p) => {
+                self.book.pin(seq, p.message_seq, p.pinned);
+                self.repin();
             }
             EventKind::SessionForked(f) => self.items.push(Item::Forked {
                 parent: f.parent,
@@ -1102,6 +1145,7 @@ impl SessionView {
                 self.ranges.remove(u.rewind_seq);
                 self.items.remark(&self.ranges);
                 self.retodo();
+                self.repin();
             }
             EventKind::TodoUpdated(t) => {
                 self.todos.push((seq, t.items.clone()));
@@ -1203,6 +1247,15 @@ impl SessionView {
     /// The task list as the rewinds that count leave it: the latest
     /// `todo_updated` none of them holds (what the model is shown too,
     /// `todo::as_of` over `rewind::visible`).
+    fn repin(&mut self) {
+        self.pins = self
+            .book
+            .list(&self.ranges)
+            .into_iter()
+            .filter(|p| p.rewound.is_none())
+            .collect();
+    }
+
     fn retodo(&mut self) {
         self.todo = self
             .todos

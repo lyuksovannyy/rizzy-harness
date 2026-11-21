@@ -194,6 +194,7 @@ pub const KEPT: &[(&str, &[&str])] = &[
     ("conversation_rewind_undone", &[]),
     // `turn_id`: the turn the copy ends with, shown in the divider.
     ("session_forked", &["turn_id"]),
+    ("message_pinned", &[]),
 ];
 
 /// The keys of the harness's own context sections (`agent-native`'s

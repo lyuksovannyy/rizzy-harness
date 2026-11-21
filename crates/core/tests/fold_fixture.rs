@@ -7,7 +7,7 @@ use harness_core::artifacts::{ArtifactMeta, GitInfo, StagedBy};
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision, ExecMode};
 use harness_core::todo::{TodoItem, TodoStatus};
-use harness_core::view::SessionView;
+use harness_core::view::{Item, SessionView};
 use harness_core::{RawEvent, SessionId};
 use serde_json::json;
 
@@ -1256,12 +1256,27 @@ fn events() -> Vec<RawEvent> {
             items: vec![todo("Lost with the rewind", TodoStatus::InProgress)],
         }),
     );
+    // Pins (docs/pins.md): the kept answer stays pinned, the person's own
+    // message is pinned and unpinned (the latest wins), the lost answer is
+    // pinned and then hidden by the rewind below (not listed), and one that
+    // names no message counts for nothing.
+    for (message_seq, pinned) in [
+        (second + 1, true),
+        (second, true),
+        (second, false),
+        (third + 1, true),
+        (9999, true),
+    ] {
+        kinds.push(EventKind::MessagePinned(MessagePinned {
+            message_seq,
+            pinned,
+        }));
+    }
     kinds.push(EventKind::ConversationRewound(ConversationRewound {
         message_seq: third,
         turn_id: "t92".into(),
         files: true,
     }));
-    let _ = second;
     // The wait the earlier tests read is still the last thing said.
     kinds.push(EventKind::ModelRetry(ModelRetry {
         turn_id: "t6".into(),
@@ -1645,4 +1660,84 @@ fn a_rewound_task_list_does_not_count_and_an_undo_brings_it_back() {
     let vis = harness_core::rewind::visible(&log[..rewind as usize]);
     let model = harness_core::todo::latest(&vis).unwrap();
     assert_eq!(model[0].content, "before");
+}
+
+/// Pins (docs/pins.md): the view lists the pinned messages in log order,
+/// the latest event for a message wins, a pin of a rewound message is not
+/// listed, and one that names no message is ignored. The shared fixture
+/// carries the same for the TypeScript fold.
+#[test]
+fn the_view_lists_pins_and_a_rewind_hides_them() {
+    let evs = events();
+    let view = serde_json::to_value(SessionView::fold(&evs).unwrap()).unwrap();
+    let pins = view["pins"].as_array().expect("pins listed");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pins[0]["who"], "assistant");
+    assert_eq!(pins[0]["text"], "Kept.");
+    assert_eq!(pins[0]["turn_id"], "t91");
+    let kept = view["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["message_id"] == "m-t91")
+        .unwrap();
+    assert_eq!(pins[0]["seq"], kept["seq"], "the item carries the seq a pin names");
+    // Without the last rewind the lost answer is listed too.
+    let last = evs
+        .iter()
+        .rfind(|e| e.kind == "conversation_rewound")
+        .unwrap()
+        .seq;
+    let cut: Vec<RawEvent> = evs.iter().take_while(|e| e.seq < last).cloned().collect();
+    let v = SessionView::fold(&cut).unwrap();
+    assert_eq!(v.pins.len(), 2);
+}
+
+/// A turn's end carries when it ended and what the turn used (the row
+/// under an answer reads both); an end with no usage carries none.
+#[test]
+fn a_turn_end_carries_its_time_and_usage() {
+    let sid = SessionId::new();
+    let mk = |seq: u64, k: EventKind| {
+        let (kind, payload) = k.into_parts();
+        RawEvent {
+            session_id: sid,
+            seq,
+            ts_ms: 5_000 + seq as i64,
+            kind,
+            payload,
+        }
+    };
+    let usage = Usage {
+        input_tokens: 10,
+        output_tokens: 2,
+        ..Usage::default()
+    };
+    let mut v = SessionView::default();
+    for (i, k) in [
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "a".into(),
+            reason: TurnEndReason::Completed,
+            usage: Some(usage.clone()),
+        }),
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "b".into(),
+            reason: TurnEndReason::Interrupted,
+            usage: None,
+        }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        v.apply(&mk(i as u64 + 1, k)).unwrap();
+    }
+    let ends: Vec<(i64, Option<u64>)> = v
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::TurnEnd { at, usage, .. } => Some((*at, usage.as_ref().map(|u| u.input_tokens))),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, vec![(5_001, Some(10)), (5_002, None)]);
 }
