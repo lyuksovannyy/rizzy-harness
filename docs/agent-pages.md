@@ -133,9 +133,9 @@ true) and `available_as: [agent, subagent]` (default both). The Teamlead and the
 `available_as: [agent]` (an orchestrator can't run as a sub-agent anyway, because delegation is
 one level deep), Scout `[subagent]`.
 
-Not switches, but worth knowing: model and fallbacks stay in Settings (per-agent chains), and
-effort, `ui` level and delegation caps stay frontmatter-only. The page shows the model chain
-read-only.
+Not switches, but worth knowing: effort, `ui` level and delegation caps stay frontmatter-only.
+The model chain (a main model and up to 8 fallbacks) is edited on the page too (X.50, below), and
+still in Settings, which is the all-agents view of the same chains.
 
 ## Memory scopes: what they could mean
 
@@ -284,6 +284,8 @@ fills the field; nothing is saved until the user presses Save.
 
 - Sidebar entry "Agents" under the workspace switcher; routes `#/agents`, `#/agents/new`,
   `#/agents/<id>` in `web/src/lib/routes.ts` (the old `#/settings/server/agents` opens the list).
+  A workspace's agent opened in Settings → Workspace → Agents has the route
+  `#/settings/workspace/agents/<id|new>`, so a reload comes back to it.
   The Server → Agents tab is gone: its avatar editor moved to `AvatarEditor.tsx`, and its model
   line to the agent page.
 - The list page and the agent page as above, plus Duplicate for built-in and file agents.
@@ -294,6 +296,33 @@ fills the field; nothing is saved until the user presses Save.
 - `GET /api/agents/{id}`, `POST /api/agents` and `PATCH /api/agents/{id}` take `?workspace=<id>` or
   `?scope=server` like `/api/agents`, so the model line on the page follows the same workspace's
   chains as the list (through the scope's `Resolver`). The edits themselves stay server-wide.
+- **Models on the page (X.50).** Where the viewer may change the agent's chain in the scope the
+  page is opened in, the Models block is an editor: the main model (or none of its own: "Use the
+  default model" at the server, "Use the server's chain" in a workspace; for an agent the workspace
+  made, "Use the default model", since the server has no chain for it), the fallbacks in order
+  (add, remove, move; at most 8, none repeating the main model or another), unavailable models
+  marked as Settings marks them, and a Save that shows what the server answered. For an agent the
+  viewer edits whole (its own custom agent) the page's one Save saves the agent and then its chain
+  (if the chain fails the agent stays saved, the page says "@id was saved, but its models were not
+  saved" and Save tries the chain again only); for the others (built in, files, a server agent seen
+  from a workspace: only the chain and the additional instructions change) the block keeps its own
+  "Save models". The chain the editor starts from is read where it will be written, never from the
+  page's own listing, which is in the active workspace's scope: the server's chain from a listing at
+  `?scope=server`, a workspace's own chain from its settings document (`agent_models[id]`; absent
+  means "use the server's chain"). If that read fails the block is not an editor: the read-only line,
+  the reason and "Try again"; a Save never writes a guess. An untouched editor sends nothing. It
+  saves through the routes Settings uses and adds none: at the server `PUT /api/admin/agent-models`
+  with only this agent's entry (server admins), in a workspace `PATCH /api/workspaces/{id}` with
+  the settings read again just before and sent whole with this agent's chain changed (the workspace's
+  `settings` permission, the one that gates its agent edits: `require_agent_editor` and
+  `workspaces::patch` both ask `Perm::Settings`), so another agent's chain or another setting
+  changed meanwhile survives. In a workspace the page says whether the workspace's chain or the
+  server's is in effect. A Personal workspace has no settings of its own (that `PATCH` refuses it):
+  its server admin edits the server's chain from the page, everyone else reads one line saying the
+  server's admin sets it, and an agent made in a Personal workspace has no chain to set. Anyone
+  else sees the chain read-only with who sets it. A new agent's form shows the same block; its chain
+  is saved right after the agent is made (it needs the agent's id), and if that save fails the page
+  says the agent exists and its models were not saved, keeps everything typed and offers a retry.
 - In `Master::prompt`, the agent is checked against the chat's workspace `Resolver`: a chat whose
   agent was deleted refuses the prompt until another agent is chosen, and an agent with memory off gets
   neither recall nor `remember`, in the same condition as incognito and the workspace's "use my

@@ -4,7 +4,7 @@ import { t } from "../lib/i18n";
 import { isTag, marked, mentionable, pickable } from "../lib/agents";
 import { activeMention, filterAgents, matchedAlias, insertMention, isPathToken, leadingMention } from "../lib/mentions";
 import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
-import { modelLabel, offeredModels, resolveModel } from "../lib/models";
+import { modelLabel, offeredModels, rawModel, resolveModel } from "../lib/models";
 import { radioKeys, radioTab } from "../lib/radios";
 import { api } from "../api";
 import { readDraft, writeDraft } from "../lib/drafts";
@@ -164,6 +164,10 @@ export function Composer(props: {
   compacting?: boolean;
   /** The page's live connection, in a chat. */
   link?: ConnState;
+  /** Session: the chat's figures (tokens, context, cost, quota), shown at
+   * the right of the strip under the box. The chat draws them; the home
+   * screen has no session and passes none. */
+  figures?: React.ReactNode;
 }) {
   const home = props.where === "home";
   const [text, setText] = useState(() => (props.draft ? readDraft(props.draft) : ""));
@@ -839,6 +843,59 @@ export function Composer(props: {
               />
             </>
           )}
+          {props.running && props.onStop && !props.readOnly ? (
+            // Inside the box's row: a line under the strip would move the box when a turn starts or ends.
+            <span className="composer-hint muted" title={t("composer.runningHint")}>
+              {t("composer.runningHint")}
+            </span>
+          ) : (
+            <span className="spacer" />
+          )}
+          {props.voice && mode !== "search" && (
+            <button
+              type="button"
+              className={`icon mic ${rec}`}
+              aria-label={rec === "recording" ? "stop dictation" : "dictate"}
+              title={rec === "recording" ? "Stop and transcribe" : "Dictate (audio goes to this server's transcription service)"}
+              disabled={rec === "transcribing"}
+              onClick={() => void toggleMic()}
+            >
+              {rec === "recording" ? (
+                <Square size={16} />
+              ) : rec === "transcribing" ? (
+                <Loader2 size={18} className="spin" />
+              ) : (
+                <Mic size={18} />
+              )}
+            </button>
+          )}
+          {(props.running || props.compacting) && props.onStop && (
+            <button type="button" className="send stop" onClick={props.onStop} aria-label={t("composer.stop")}>
+              <Square size={16} fill="currentColor" />
+            </button>
+          )}
+          {/* While a turn runs, Send joins Stop once there is something to send. */}
+          {(!((props.running || props.compacting) && props.onStop) || !!text.trim()) && (
+            <button
+              type="button"
+              className="send"
+              onClick={() => void submit()}
+              disabled={!!busy || uploading > 0 || sendingImages || !text.trim() || !!props.readOnly}
+              aria-label={t("composer.send")}
+            >
+              <ArrowUp size={18} />
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="composer-strip" role="group" aria-label={t("composer.strip")}>
+        {/* A sentence, so a line of its own above the controls (they stay one row). */}
+        {!home && props.approval && !props.readOnly && props.choosing && props.modeNote && (
+          <span className="approval-pending-note small muted" role="note">
+            {props.modeNote}
+          </span>
+        )}
+        <div className="strip-controls">
           {mode !== "search" && props.agents.length > 0 && (
             <span
               className={`agent-pick${pickedAlert ? " bad" : ""}`}
@@ -864,6 +921,12 @@ export function Composer(props: {
               />
             </span>
           )}
+          {/* What answers in this chat (it was in the chat's header): read-only. */}
+          {!home && props.sessionModel && (
+            <span className="strip-model" title={t("strip.model", { id: props.sessionModel })}>
+              {rawModel(props.sessionModel)}
+            </span>
+          )}
           {!home && props.approval && !props.readOnly && (
             <Suspense fallback={null}>
               <ApprovalModePick
@@ -877,11 +940,6 @@ export function Composer(props: {
                 }}
               />
             </Suspense>
-          )}
-          {!home && props.approval && !props.readOnly && props.choosing && props.modeNote && (
-            <span className="approval-pending-note small muted" role="note">
-              {props.modeNote}
-            </span>
           )}
           {!home && props.steps && !props.readOnly && (
             <Suspense fallback={null}>
@@ -941,25 +999,6 @@ export function Composer(props: {
                 </option>
               ))}
             </select>
-          )}
-          <span className="spacer" />
-          {props.voice && mode !== "search" && (
-            <button
-              type="button"
-              className={`icon mic ${rec}`}
-              aria-label={rec === "recording" ? "stop dictation" : "dictate"}
-              title={rec === "recording" ? "Stop and transcribe" : "Dictate (audio goes to this server's transcription service)"}
-              disabled={rec === "transcribing"}
-              onClick={() => void toggleMic()}
-            >
-              {rec === "recording" ? (
-                <Square size={16} />
-              ) : rec === "transcribing" ? (
-                <Loader2 size={18} className="spin" />
-              ) : (
-                <Mic size={18} />
-              )}
-            </button>
           )}
           {searching && (
             <>
@@ -1048,24 +1087,12 @@ export function Composer(props: {
               })}
             </div>
           )}
-          {(props.running || props.compacting) && props.onStop && (
-            <button type="button" className="send stop" onClick={props.onStop} aria-label={t("composer.stop")}>
-              <Square size={16} fill="currentColor" />
-            </button>
-          )}
-          {/* While a turn runs, Send joins Stop once there is something to send. */}
-          {(!((props.running || props.compacting) && props.onStop) || !!text.trim()) && (
-            <button
-              type="button"
-              className="send"
-              onClick={() => void submit()}
-              disabled={!!busy || uploading > 0 || sendingImages || !text.trim() || !!props.readOnly}
-              aria-label={t("composer.send")}
-            >
-              <ArrowUp size={18} />
-            </button>
-          )}
         </div>
+        {props.figures && <div className="strip-figures">{props.figures}</div>}
+        {/* Room for the second line while another mode is on: the strip then
+            grows downward only, and the box does not move (the home screen
+            centres its column). The page's CSS gives it its height. */}
+        {home && mode !== "agentic" && enabled.includes("agentic") && <div className="agentic-slot" aria-hidden="true" />}
         {home && mode === "agentic" && (
           <div className="composer-row agentic-row">
             <label>
@@ -1130,7 +1157,6 @@ export function Composer(props: {
       </div>
       {home && props.agenticBlocked && <div className="hint muted">{props.agenticBlocked}</div>}
       {props.readOnly && <div className="hint muted">{t("conv.readOnly", { reason: props.readOnly })}</div>}
-      {props.running && props.onStop && !props.readOnly && <div className="hint muted composer-hint">{t("composer.runningHint")}</div>}
       {err && <div className="error-text">{err}</div>}
     </div>
   );

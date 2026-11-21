@@ -101,11 +101,14 @@ let PAGE = null;
 
     // 2. The meter: a known window (the chat above ran on demo::mock).
     await p.click(row);
-    await p.waitForSelector('.conv-head .context-meter');
-    const known = await p.innerText('.conv-head .context-meter');
-    log('meter:', known);
-    check(/^\d+% of 32k · summary at 50%$/.test(known), `share and summary point (${known})`);
-    check((await p.locator('.conv-head .window-unknown').count()) === 0, 'no "window unknown" for a known window');
+    await p.waitForSelector('.composer-strip .context-meter');
+    const known = await p.innerText('.composer-strip .context-meter');
+    // The strip shows the ring and its percentage; the share of the window and the summary point are its hover text.
+    const knownTitle = await p.getAttribute('.composer-strip .context-meter', 'title');
+    log('meter:', known, '|', knownTitle);
+    check(/^\d+%$/.test(known.trim()), `the ring's percentage (${known})`);
+    check(/^\d+% of 32k · summary at 50%\./.test(knownTitle), `share and summary point (${knownTitle})`);
+    check((await p.locator('.composer-strip .window-unknown').count()) === 0, 'no "window unknown" for a known window');
     await p.screenshot({ path: `${S}/v-2-meter.png` });
 
     // A model without a window: a visible "window unknown" saying how to set it.
@@ -116,9 +119,9 @@ let PAGE = null;
       return made.session_id;
     });
     await p.goto(`${URL_}#/s/${plain}`);
-    await p.waitForSelector('.conv-head .window-unknown', { timeout: 20000 });
-    const title = await p.getAttribute('.conv-head .context-meter', 'title');
-    log('unknown window:', await p.innerText('.conv-head .context-meter'));
+    await p.waitForSelector('.composer-strip .window-unknown', { timeout: 20000 });
+    const title = await p.getAttribute('.composer-strip .context-meter', 'title');
+    log('unknown window:', await p.innerText('.composer-strip .context-meter'));
     check(title.includes('context = <tokens>') && title.includes('24,000'), `how to set it (${title})`);
     await p.screenshot({ path: `${S}/v-3-unknown.png` });
 

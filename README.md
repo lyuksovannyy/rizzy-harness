@@ -137,8 +137,9 @@ in the draft until it is sent.
 
 **Writing while the agent works.** The reply box stays open while a turn
 runs: Enter (or Send, next to Stop) sends the message at once, and a line under
-the box says what happens to it ("Read after the current step. Stop
-interrupts."). The node stores the message before it says yes, so a message
+the box says what happens to it, in small muted type inside its bottom row
+("Read after the current step. Stop interrupts."), so the box does not move
+when a turn starts or ends. The node stores the message before it says yes, so a message
 that was taken is never lost, and the chat shows it where you sent it, marked
 "sent while working" until the agent has read it. The agent reads it before
 its next model request, right after the results of the tools it was running,
@@ -392,11 +393,19 @@ agents (with Stop while its turn runs; the banner above links back to the main
 chat). Only chats in the open workspace notify, and a
 second tab may notify while another tab shows the chat.
 
-A chat is titled from its first message. The pencil next to the title in the
-chat's header renames it (Enter saves, Escape cancels; at most 200
-characters, control and hidden characters dropped); only you can rename your
-chats, and the new title is what the list and search show. The download
-button next to it saves the chat as a Markdown file: your messages, the
+A chat is titled from its first message. A click on the title in the chat's
+header (or Enter or F2 when it has keyboard focus) turns it into a field, with
+no buttons: Enter or a click outside applies, Escape cancels (a blank or
+unchanged title does nothing; at most 200 characters, control and hidden
+characters dropped); only you can rename your chats, and the new title is what
+the list and search show. After the title, in muted type, the header says
+**project · node · how commands run** (for example `test-project · local ·
+sandbox`; hover it for the chat's folder). The project there is the picker that
+moves the chat into another project or out ("No project", in muted words,
+when it has none); a plain chat with no folder shows only what applies. On a
+narrow screen the header is two lines: the title and the buttons, then the
+suffix, whole. The download
+button at the right saves the chat as a Markdown file: your messages, the
 answers, and each tool call as one line (tick **Include tool outputs** for
 their full output). The file is made in your browser from what the chat
 shows; nothing is fetched for it. It holds the model's text as the model
@@ -741,8 +750,8 @@ archives, documents and media, each name with its versions. In an agentic
 chat an agent calls `publish` (Software Developer, Senior Teamlead and Writer
 have it, and any custom agent
 that may edit files or run commands); in `ask` mode you approve each publish. You can also
-use **Save as artifact** on a file a tool card shows, or the field in the chat
-header. The node copies the file (a folder is packed as `.tar.gz`), the
+use **Save as artifact** on a file a tool card shows, or **Save a file as
+artifact…** on a command's card, which takes any path in the chat's folder. The node copies the file (a folder is packed as `.tar.gz`), the
 server pulls it and checks its size and sha256, and the chat card turns into
 Download / Open in Artifacts.
 
@@ -903,25 +912,37 @@ into the form, not yet saved, changes neither the listing nor the marks.
 
 ### What a chat costs (an estimate)
 
-The chat header shows the tokens a chat used and, once the server has prices,
-an estimate of what it cost: `≈ $0.42 (last turn $0.03)`. The figures move
+Under the message box, at the right of the small strip that holds the agent,
+approval-mode and step-limit pickers, the chat shows its figures: the tokens
+it used in and out (`12k in · 1.2k out`), a ring with how full the model's
+context window is (hover: the window and where older turns are summarised),
+and, once the server has prices, an estimate of what it cost:
+`≈ $0.42 (last turn $0.03)`. A "quota" placeholder stands last: it shows no
+number yet and says on hover and keyboard focus that your plan's quota will
+show there later. The strip is also where the home screen puts the model,
+effort, mode and search controls (it has no figures: there is no chat yet); on
+a narrow screen the figures wrap under the controls. The chat header is one line:
+the title, then the project, the node and the shell (see above); the agent and the
+model are in the strip (the model as a small muted label after the agent picker,
+its full id on hover); a sub-agent's chat, which has no box, gets the same strip
+read-only. The figures move
 after each model reply while a turn runs, not only when it ends (they are an
 estimate: the provider's own count for the whole turn replaces the running
 one when the turn ends, and a turn stopped by a restart keeps what it had
 reached). The chat's figure includes its sub-agents. A foreground
 sub-agent's cost is written into the chat's own log only when its result
-returns, but the header already adds the latest known total of each
+returns, but the figures already add the latest known total of each
 foreground sub-agent of the turn from the moment it is seen running until
 its result is in (read from its own log, which this tab follows for the side
 panel; several run in parallel and their results come together), so a long
-delegate moves the header instead of freezing it and then jumping. The node
+delegate moves the figures instead of freezing them and then jumping. The node
 logs the chat's total that takes a sub-agent in only after that sub-agent's
 result, so nothing is counted twice. Within one open view of a running turn
-the header never shows less than it showed (tokens and the cost estimate
+the figures never show less than they showed (tokens and the cost estimate
 each); after a page reload, or coming back from another chat mid-turn, it
 can show less for a moment until the sub-agent's log has replayed. A
 sub-agent whose run fails without a result the chat takes in is shown while
-it runs and leaves the figure when the turn ends: the header then drops to
+it runs and leaves the figure when the turn ends: the figures then drop to
 the log's figure, which is the truth. Background sub-agents are not part of
 the turn and are not added while they run. One level only: a sub-agent's own
 sub-agents are not added while they run. A row in the side panel shows that sub-agent's own
@@ -1195,7 +1216,7 @@ built-in command: a skill named `compact` is still offered to the agent,
 but `/compact` never loads it. The chat shows "Summarising
 the chat for the model…" until the summary appears ("summarised for the
 model at your request", with your focus and the summary under it), and the
-context meter drops to the new size. It works between turns only (a running
+context ring drops to the new size. It works between turns only (a running
 turn shortens its own context when it must; Stop it first if you want to
 summarise now), one at a time, and no message is sent while it runs; Stop
 shows while it runs and cancels it. A message you sent during the last turn
@@ -2009,8 +2030,8 @@ that warning first. Every request for `host`, granted or refused by any
 check, is written to the audit log (who, the workspace, the node, the
 outcome; never chat content). A routine's chat always asks for `sandbox`. A connected node must have announced the mode it is sent: one
 from before modes gets no agent chat, and the refusal says what to do on
-the node; a node that is away is "not connected", as before. The chat's header names its mode and
-the gaps its node announced at connect (network off without a namespace,
+the node; a node that is away is "not connected", as before. The chat's header names its mode, and
+its hover text says the gaps its node announced at connect (network off without a namespace,
 or not applied at all; the socket gap below Linux 7.1; no `/proc` of its
 own); which modes a node offers is shown only to accounts that may run
 agent chats.
@@ -2372,7 +2393,7 @@ offers ("execution modes"). `[execution] sandbox` decides when the
 sandbox mode is offered:
 
 - `"auto"` (default): where the probe passes at start, with any gap
-  above named in the log and in `doctor`, and in the chat's header as its
+  above named in the log and in `doctor`, and in the hover text of the chat header's mode as its
   node announced it at connect (the network, socket and `/proc` gaps). Where bubblewrap
   does not work, the sandbox mode is not offered (no command runs with
   Landlock alone in it): the node offers `host` if `[execution] host =
@@ -2744,7 +2765,7 @@ it does not stop one already running (a follow-up). What bounds it: the chat's o
 the node's `max_steps`, the repeated-call guard (the same call with the same
 result is refused and then ends the turn), the model stream timeouts, Stop,
 and the provider's own rate and spending limits. A chat's owner can set the
-chat's own limit, from 1 up to the node's, in the composer next to the
+chat's own limit, from 1 up to the node's, in the strip under the box, next to the
 approval mode ("N steps"): the node clamps whatever it is sent, records it in
 the chat (shown as "Step limit: N"), keeps it across a restart, and applies
 it from the running turn's next request (a limit below what the turn has
@@ -3259,8 +3280,8 @@ A project groups chats around one piece of work inside a workspace:
 **Projects** in the sidebar → **+**, then pick a
 name, an icon, an accent and a board template. In a team workspace owners and
 admins manage projects; every member sees them and works in them with their
-own chats. Start chats from the project's page, or add a chat from its header's
-project picker. Every message in a project's chats gets, after the history:
+own chats. Start chats from the project's page, or add a chat from the project
+name after its title in the chat's header (the picker). Every message in a project's chats gets, after the history:
 the project's **instructions** (Settings tab, up to 4,000 characters), the
 project's confirmed **memory**, and the open cards of its **board**. Memory
 comes whole, newest first, up to about 4,000 characters, so "continue" in a
@@ -4840,7 +4861,14 @@ skills, connectors (MCP servers), the project board, sub-agents, background sub-
 a sub-agent or both), change them, delete them, and change any agent's look.
 Built-in agents and agent files keep their name, handle, instructions and
 features: only their summary and **additional instructions** (added after
-their own) change there, and **Duplicate** makes an editable copy. **Write
+their own) change there, and **Duplicate** makes an editable copy. An
+agent's page also sets **the model it runs on and its fallbacks** (up to 8,
+tried in order): server admins change the server's chain, and in a workspace
+whoever may change that workspace's settings changes the workspace's, which
+replaces the server's for that agent there ("Use the server's chain" goes
+back). It is the same chain as Settings → AI providers and Workspace admin →
+Models, saved the same way; anyone else sees it read-only. In your Personal
+workspace the chains are the server's, set by the server's admin. **Write
 from instructions** asks the default model for a summary. An agent file can
 set `memory: false` (no recall, no `remember`), `project_memory: false` (no
 project facts in project chats), `background_subagents: true` (see

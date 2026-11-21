@@ -112,7 +112,7 @@ the gaps of those modes (`harness_protocol::GAPS`):
 
 The master keeps the known ones in its node list (`exec_modes`,
 `exec_gaps`) and shows them only to accounts whose ceiling runs agent chats
-(review L-i); the chat header names the chat's mode and says its gaps in
+(review L-i); the chat header names the chat's mode and says its gaps (on hover) in
 plain words (reviews T8B-3, L-e). **The hello is a snapshot** of the node
 at connect: a gap closed later by the step up (the network namespace) is
 still shown until the node's next hello.

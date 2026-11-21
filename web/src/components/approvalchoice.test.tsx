@@ -521,6 +521,6 @@ describe("the mode picker while a choice is up", () => {
     expect(host.querySelector(".approval-pending-note")).toBeNull();
     await show(view([tool(1)]), { nodes });
     await act(async () => void (await new Promise((r) => setTimeout(r, 0))));
-    expect(host.querySelector(".composer .approval-pending-note")?.textContent).toMatch(/call above still waits for your answer/);
+    expect(host.querySelector(".composer-strip .approval-pending-note")?.textContent).toMatch(/call above still waits for your answer/);
   });
 });

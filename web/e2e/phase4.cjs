@@ -101,8 +101,11 @@ const check = (cond, msg) => { if (!cond) throw new Error(msg); };
     // Learning reaches the server as weights only.
     await p.keyboard.press('Enter');
     await p.waitForSelector('.conversation');
-    await sleep(1500);
-    const cls = await p.evaluate(() => fetch('/api/me/classifier').then((r) => r.json()));
+    // The bar learns once the send went through, saved a second later (a
+    // debounce): wait for the second label, not a fixed time after the chat opens.
+    const getCls = () => p.evaluate(() => fetch('/api/me/classifier').then((r) => r.json()));
+    let cls = await getCls();
+    for (const end = Date.now() + 20000; !(cls && cls.labels >= 2) && Date.now() < end; ) { await sleep(500); cls = await getCls(); }
     log('classifier labels stored:', cls && cls.labels, '| keys:', cls && Object.keys(cls).join(','));
     check(cls && cls.labels >= 2, 'classifier state saved');
     check(!JSON.stringify(cls).includes('youtube'), 'no text stored');

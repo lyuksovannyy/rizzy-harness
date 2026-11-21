@@ -16,6 +16,9 @@ export function useClassifier(agenticAllowed: boolean, save: (st: ClassifierStat
   const saved = useRef<unknown>(undefined);
   const [ready, setReady] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // What is learned and not yet sent: sent when the hook goes (the shell is
+  // remounted by a workspace switch), not dropped with its timer.
+  const pending = useRef<(() => void) | null>(null);
   useEffect(() => {
     let live = true;
     void import("./classifier").then((m) => {
@@ -27,6 +30,8 @@ export function useClassifier(agenticAllowed: boolean, save: (st: ClassifierStat
     return () => {
       live = false;
       if (timer.current) clearTimeout(timer.current);
+      pending.current?.();
+      pending.current = null;
     };
   }, []);
   /** The saved state from the server. */
@@ -49,7 +54,12 @@ export function useClassifier(agenticAllowed: boolean, save: (st: ClassifierStat
       c.record(st, text, mode, agenticAllowed);
       // Only weights and accuracy counters are saved, never the text.
       if (timer.current) clearTimeout(timer.current);
-      timer.current = setTimeout(() => save(c.serialize(st)), 1000);
+      const send = () => {
+        pending.current = null;
+        save(c.serialize(st));
+      };
+      pending.current = send;
+      timer.current = setTimeout(send, 1000);
     },
     [agenticAllowed, save],
   );
