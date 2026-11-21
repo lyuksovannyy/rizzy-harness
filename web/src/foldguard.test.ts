@@ -163,7 +163,10 @@ const item: Check = (x, at) => {
   OBJ(x, at);
   const c = ITEM[(x as { type: string }).type];
   if (!c) fail(`${at}.type`, x);
-  c!(x, at);
+  // A rewound item (X.46) carries the seq of the rewind, whatever it is.
+  const { rewound, ...rest } = x as { rewound?: unknown };
+  if (rewound !== undefined) N(rewound, `${at}.rewound`);
+  c!(rest, at);
 };
 const viewCheck = rec({
   session_id: nul(S),
@@ -205,6 +208,9 @@ const viewCheck = rec({
   "?chat_allows": map(rec({ tool: S, input: ANY })),
   "?turn_usage": usage,
   "?follow_ups": arr(S),
+  "?rewinds": arr(
+    rec({ seq: N, message_seq: N, turn_id: S, turns: N, files: B, undone: B, can_undo: B }),
+  ),
 });
 const wellTyped = (v: SessionView) => viewCheck(v, "view");
 

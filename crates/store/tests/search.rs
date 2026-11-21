@@ -239,3 +239,156 @@ fn a_retry_indexes_its_message_once() {
     assert_eq!(text.matches("invoices").count(), 1, "{text}");
     assert_eq!(s.search("\"invoices\"", None, None, 10).unwrap().len(), 1);
 }
+
+/// A user `u1` and their team workspace.
+fn team(s: &Store) -> String {
+    s.create_user(&harness_store::NewUser {
+        user_id: "u1".into(),
+        username: "u1".into(),
+        password_hash: "$argon2id$x".into(),
+        role: harness_store::Role::Member,
+        exec_ceiling: harness_core::policy::ExecLevel::None,
+        must_change_password: false,
+    })
+    .unwrap();
+    s.create_workspace("Team", "u1").unwrap().workspace_id
+}
+
+/// A chat with two finished turns, and the events a rewind to the second
+/// message adds. Returns (chat, seq of the second message, next seq).
+fn two_turns(s: &Store, incognito: bool, ws: &str) -> (SessionId, u64, u64) {
+    let sid = SessionId::new();
+    let mut p = json!({"title": "Schema work", "cwd": "", "model": "m", "backend": "native", "node_id": "master", "profile": "chat", "approval_mode": "ask"});
+    if incognito {
+        p["incognito"] = json!(true);
+    }
+    s.append("master", &ev(sid, 1, "session_created", p))
+        .unwrap();
+    s.claim_session(sid, Some("u1"), Some(ws)).unwrap();
+    let evs = [
+        ("turn_started", json!({"turn_id": "t1"})),
+        (
+            "user_message",
+            json!({"turn_id": "t1", "text": "keep the invoices table"}),
+        ),
+        (
+            "assistant_message",
+            json!({"turn_id": "t1", "message_id": "m1", "text": "Kept it."}),
+        ),
+        (
+            "turn_ended",
+            json!({"turn_id": "t1", "reason": "completed"}),
+        ),
+        ("turn_started", json!({"turn_id": "t2"})),
+        (
+            "user_message",
+            json!({"turn_id": "t2", "text": "now drop the zebrafish column"}),
+        ),
+        (
+            "assistant_message",
+            json!({"turn_id": "t2", "message_id": "m2", "text": "Dropped zebrafish."}),
+        ),
+        (
+            "turn_ended",
+            json!({"turn_id": "t2", "reason": "completed"}),
+        ),
+    ];
+    for (i, (kind, p)) in evs.into_iter().enumerate() {
+        s.append("master", &ev(sid, i as u64 + 2, kind, p)).unwrap();
+    }
+    // seqs: created 1, t1 start 2, message 3, reply 4, end 5, t2 start 6,
+    // message 7, reply 8, end 9.
+    (sid, 7, 10)
+}
+
+/// A rewind takes the rewound turns' text out of search and recall (the
+/// model must not reach it through another chat); the undo puts it back;
+/// what was before the cut stays throughout (X.46, T90).
+#[test]
+fn a_rewind_takes_its_text_out_of_the_index_and_an_undo_puts_it_back() {
+    let s = Store::open_in_memory().unwrap();
+    let ws = team(&s);
+    let (sid, msg, next) = two_turns(&s, false, &ws);
+    let hits = |q: &str| s.search(q, None, None, 10).unwrap().len();
+    let recall = |q: &str| {
+        s.recall_search(
+            &[q.to_string()],
+            "u1",
+            &ws,
+            [SessionId::new(), SessionId::new()],
+            10,
+        )
+        .unwrap()
+        .len()
+    };
+    assert_eq!(hits("\"zebrafish\""), 1);
+    assert_eq!(recall("\"zebrafish\""), 1);
+    s.append(
+        "master",
+        &ev(
+            sid,
+            next,
+            "conversation_rewound",
+            json!({"message_seq": msg, "turn_id": "t2", "files": false}),
+        ),
+    )
+    .unwrap();
+    assert_eq!(hits("\"zebrafish\""), 0, "search");
+    assert_eq!(recall("\"zebrafish\""), 0, "recall");
+    assert_eq!(hits("\"invoices\""), 1, "before the cut stays");
+    assert_eq!(hits("\"Schema\""), 1, "the title stays");
+    assert!(!s.session_search_text(sid).unwrap().contains("zebrafish"));
+    // The index equals a rebuild from the log.
+    let live = s.session_search_text(sid).unwrap();
+    s.rebuild_search_index().unwrap();
+    assert_eq!(s.session_search_text(sid).unwrap(), live);
+    assert_eq!(hits("\"zebrafish\""), 0);
+
+    s.append(
+        "master",
+        &ev(
+            sid,
+            next + 1,
+            "conversation_rewind_undone",
+            json!({"rewind_seq": next}),
+        ),
+    )
+    .unwrap();
+    assert_eq!(hits("\"zebrafish\""), 1, "undone");
+    assert_eq!(recall("\"zebrafish\""), 1, "recall, undone");
+    assert_eq!(hits("\"invoices\""), 1);
+    // A message after the rewind is indexed as it is appended.
+    s.append(
+        "master",
+        &ev(
+            sid,
+            next + 2,
+            "user_message",
+            json!({"turn_id": "t3", "text": "mention the quokka"}),
+        ),
+    )
+    .unwrap();
+    assert_eq!(hits("\"quokka\""), 1);
+}
+
+/// An incognito chat is never indexed, a rewind or not.
+#[test]
+fn a_rewind_does_not_index_an_incognito_chat() {
+    let s = Store::open_in_memory().unwrap();
+    let ws = team(&s);
+    let (sid, msg, next) = two_turns(&s, true, &ws);
+    for (i, (k, p)) in [
+        (
+            "conversation_rewound",
+            json!({"message_seq": msg, "turn_id": "t2", "files": false}),
+        ),
+        ("conversation_rewind_undone", json!({"rewind_seq": next})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        s.append("master", &ev(sid, next + i as u64, k, p)).unwrap();
+        assert_eq!(s.search("\"invoices\"", None, None, 10).unwrap().len(), 0);
+        assert_eq!(s.session_search_text(sid).unwrap(), "");
+    }
+}

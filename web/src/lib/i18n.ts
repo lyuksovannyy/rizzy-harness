@@ -66,6 +66,7 @@ const en = {
   "composer.tooManyMentions": "A message mentions at most 16 agents and names",
   "composer.tooMany": "A message calls at most 4 agents",
   "conv.followUp": "follow-up from the chat that started this sub-agent",
+  "conv.rewound": "rewound: not part of the conversation any more",
   "composer.readOnly": "Read-only",
   "agentic.noGrant": "Your account's level is {level}: no agent chats. Ask a server admin.",
   "agentic.noRole": "Your level in {workspace} is {level}: no agent chats. Ask one of its admins.",

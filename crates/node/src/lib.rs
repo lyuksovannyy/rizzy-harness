@@ -50,6 +50,7 @@ fn starts_work(msg: &MasterToNode) -> bool {
             | MasterToNode::Prompt(_)
             | MasterToNode::Callback(_)
             | MasterToNode::Retry(_)
+            | MasterToNode::Rewind { .. }
             | MasterToNode::Handoff { .. }
             | MasterToNode::Compact { .. }
             | MasterToNode::Restore { .. }
@@ -122,6 +123,8 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Prompt(PromptMsg { session_id, .. })
         | MasterToNode::Callback(CallbackMsg { session_id, .. })
         | MasterToNode::Retry(RetryMsg { session_id, .. })
+        | MasterToNode::Rewind { session_id, .. }
+        | MasterToNode::RewindUndo { session_id, .. }
         | MasterToNode::Handoff { session_id, .. }
         | MasterToNode::Compact { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
@@ -840,6 +843,9 @@ impl NodeRuntime {
             // A person's Retry of a failed last turn (X.21), in chats of
             // either profile.
             capabilities.push(harness_protocol::CAP_RETRY.into());
+            // A person's rewind of the conversation to an earlier message
+            // and its undo (X.46), in chats of either profile.
+            capabilities.push(harness_protocol::CAP_REWIND.into());
             // The agents a message called after the first, asked one after
             // another (X.37).
             capabilities.push(harness_protocol::CAP_PEERS.into());
@@ -1811,6 +1817,30 @@ impl NodeRuntime {
                         Ok(()) => s.retry(&turn_id, agent, agent_named, extra).await,
                         Err(e) => Err(e),
                     },
+                    None => Err("unknown session".into()),
+                }
+            }
+            MasterToNode::Rewind {
+                session_id,
+                message_seq,
+                files,
+                force,
+                ..
+            } => {
+                self.audit("session.rewind", session_id).await;
+                match self.session(session_id) {
+                    Some(s) => s.rewind(message_seq, files, force).await,
+                    None => Err("unknown session".into()),
+                }
+            }
+            MasterToNode::RewindUndo {
+                session_id,
+                rewind_seq,
+                ..
+            } => {
+                self.audit("session.rewind_undo", session_id).await;
+                match self.session(session_id) {
+                    Some(s) => s.rewind_undo(rewind_seq).await,
                     None => Err("unknown session".into()),
                 }
             }

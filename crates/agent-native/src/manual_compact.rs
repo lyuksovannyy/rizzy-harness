@@ -55,6 +55,8 @@ pub fn failed_reason(why: &str) -> String {
 /// Whether a `/compact` of `history` could make a summary: the plain
 /// answer when it could not. Pure, from the log alone.
 pub fn check(history: &[RawEvent]) -> Result<(), String> {
+    // Rewound turns are not part of the chat (X.46).
+    let history = &*harness_core::rewind::visible(history);
     // The breaker: failures since the last turn or summary.
     let since = history
         .iter()
@@ -140,8 +142,13 @@ impl NativeBackend {
             cancel,
         } = ctx;
         let collect = Collect::default();
-        let (prev, recent) = split_summary(&history);
-        let tctx = turn_ctx(session_id, &history, &model, cancel, &collect);
+        // What a summary covers is the chat as it stands after its rewinds
+        // (X.46): a summary in a rewound range is not one, and a rewound
+        // turn is not summarised.
+        let visible = harness_core::rewind::visible(&history);
+        let history: &[RawEvent] = &visible;
+        let (prev, recent) = split_summary(history);
+        let tctx = turn_ctx(session_id, history, &model, cancel, &collect);
         let mut usage = Usage::default();
         let mut failures = 0u32;
         let mut manual = Manual { focus, miss: None };
@@ -179,7 +186,7 @@ impl NativeBackend {
                 provider::estimate_tokens(&[ChatMsg::System(p.into())])
             });
         let summary = provider::estimate_tokens(&[ChatMsg::System(text.clone())]);
-        let reported = last_context(&history);
+        let reported = last_context(history);
         let tokens_after = match reported {
             Some(r) => r.saturating_sub(replaced) + summary,
             None => summary + provider::estimate_tokens(&sized(&recent[covered.len()..])),

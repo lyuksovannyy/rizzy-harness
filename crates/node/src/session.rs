@@ -689,7 +689,7 @@ impl Session {
             queue: tokio::sync::Mutex::new(()),
             // Sent while a turn ran that a restart cut: the next turn reads
             // them (X.5).
-            pending: Mutex::new(unread(&events)),
+            pending: Mutex::new(rewind_op::unread_visible(&events)),
             queued_context: Mutex::new(None),
             turn_env: Mutex::new(None),
             note: Mutex::new(None),
@@ -2713,7 +2713,7 @@ impl Session {
             .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
             .await
             .map_err(|e| e.to_string())?;
-        let queued = unread(&history);
+        let queued = rewind_op::unread_visible(&history);
         if msg.is_none() && queued.is_empty() {
             // The log is the authority: nothing waits.
             self.pending
@@ -3711,6 +3711,20 @@ impl Session {
                 ids.join(", ")
             ));
         }
+        self.restore_checked(turn_id, force, rewind).await
+    }
+
+    /// [`Self::restore`] after the caller made sure nothing of this chat
+    /// runs: no turn, no background command. A caller that holds the turn
+    /// slot itself (a conversation rewind that also puts the files back,
+    /// `session_rewind.rs`) cannot go through `restore`, which would see
+    /// its own claim as a running turn.
+    pub(crate) async fn restore_checked(
+        &self,
+        turn_id: &str,
+        force: bool,
+        rewind: bool,
+    ) -> Result<(), String> {
         self.check_cwd_still_allowed()?;
         let id = self.id;
         let events = self
@@ -5492,6 +5506,28 @@ impl TurnHost for Session {
             return Ok(Vec::new());
         };
         let queued = std::mem::take(&mut *self.bg_queue.lock().unwrap_or_else(|p| p.into_inner()));
+        // The end of a command a rewound turn started is not the model's
+        // to read (X.46): recorded as not delivered, outside the history.
+        let queued = if queued.is_empty() {
+            queued
+        } else {
+            // Only the kinds the rule reads: the whole log holds every
+            // command's output, and reading it here for each turn that has
+            // an end to hand over would cost a second copy of it.
+            let log = match self.read_rewind_kinds().await {
+                Ok(l) => l,
+                Err(e) => {
+                    self.bg_queue
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .extend(queued);
+                    return Err(harness_core::backend::LogError(e));
+                }
+            };
+            let (kept, gone) = rewind_op::split_rewound_ends(&log, queued);
+            self.record_background(gone).await;
+            kept
+        };
         let mut out = Vec::new();
         let mut rest = queued.into_iter();
         while let Some(e) = rest.next() {
@@ -6079,6 +6115,11 @@ mod diff;
 mod peers;
 #[path = "session_retry.rs"]
 mod retry;
+
+/// A person's rewind of the conversation to an earlier message (X.46); its
+/// own file.
+#[path = "session_rewind.rs"]
+mod rewind_op;
 
 /// The chat's agent switch: refused while it works, recorded at the next
 /// turn; its own file.

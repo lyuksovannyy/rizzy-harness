@@ -336,6 +336,17 @@ export default function Conversation(props: {
     }
     if (el == null || el === false) return null;
     const key = isValidElement(el) && el.key != null ? el.key : i;
+    // Taken out of the conversation by a rewind (X.46): still readable, muted,
+    // with one line saying so above the first of a run.
+    if (it.rewound !== undefined) {
+      const first = view?.items[i - 1]?.rewound !== it.rewound;
+      el = (
+        <div className="rewound">
+          {first && <div className="rewound-mark muted small">{t("conv.rewound")}</div>}
+          {el}
+        </div>
+      );
+    }
     return (
       <RowBoundary key={key} item={it} sessionId={sessionId} canAnswer={!blocked}>
         {el}

@@ -34,6 +34,7 @@ mod profile;
 mod projects;
 mod providers;
 mod retry;
+mod rewind;
 mod routines;
 mod sessions;
 mod skills;
@@ -246,6 +247,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(step_limit::routes())
         .merge(compact::routes())
         .merge(retry::routes())
+        .merge(rewind::routes())
         .merge(storage::routes())
         .merge(usage::routes())
         .merge(links::routes())

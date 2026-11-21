@@ -228,7 +228,11 @@ export interface StagedArtifact {
   meta: ArtifactMeta;
 }
 
-export type Item =
+/** One block of the chat. A rewound one (X.46) carries the seq of the rewind
+ * that hides it (`conversation_rewound`): shown muted, never sent to the model. */
+export type Item = ItemKind & { rewound?: number };
+
+export type ItemKind =
   | {
       type: "user";
       turn_id: string;
@@ -371,6 +375,24 @@ export interface SessionView {
   /** A sub-agent's turns that were follow-ups from its parent chat
    * (`turn_started.continued_by`, T68); absent when none. */
   follow_ups?: string[];
+  /** The chat's rewinds (X.46), in the order they were made; absent when none. */
+  rewinds?: RewindInfo[];
+}
+
+/** One rewind of the chat (`conversation_rewound`) as the view lists it. */
+export interface RewindInfo {
+  /** The rewind event's own seq. */
+  seq: number;
+  /** The message it went back to, and that message's turn. */
+  message_seq: number;
+  turn_id: string;
+  /** The turns it took out of the conversation. */
+  turns: number;
+  /** Whether the files were put back too. */
+  files: boolean;
+  undone: boolean;
+  /** Not undone, and no message, turn or summary came after it. */
+  can_undo: boolean;
 }
 
 export type RetryReason = "rate_limit" | "overloaded" | "server_error" | "network" | "no_answer";

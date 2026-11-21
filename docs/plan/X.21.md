@@ -10,7 +10,7 @@ Retry a turn that failed (research gap list: "rewind to a message: files + conve
 The model gets the message once, the failed attempt's steps (its calls ran: they stay, so nothing is repeated blindly), then one harness opening saying so with the attempt's error quoted (after OpenClaw's restart resume prompt and DeepSeek's "outcome unknown" closers; research round 2), rebuilt byte for byte from the log; the retry has its own checkpoint (Undo of it undoes it only).
 Never automatic (the loop's `model_retry` is).
 Tests: `node/tests/retry.rs`, `master/tests/it/retry_http.rs`, `core/src/retry.rs`, `agent-native/tests/turn_compaction_review.rs` (`a_retry_after_a_failed_turn_rebuilds_at_every_step`), `store/tests/search.rs`, the fold fixture, `web/src/lib/retry.test.ts`, `web/src/components/conversation.test.tsx`.
-Left for rewinding the conversation (a larger change): editing the message first, cutting the failed attempt out of what the model sees, retrying an older turn, putting the prompt back in the composer.
+Left for rewinding the conversation (a larger change, now row [X.46](X.46.md)): editing the message first, cutting the failed attempt out of what the model sees, retrying an older turn, putting the prompt back in the composer.
 
 ## Invariants
 

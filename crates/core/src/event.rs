@@ -107,6 +107,8 @@ pub enum EventKind {
     ImagesWithheld(ImagesWithheld),
     ThinkingWithheld(ThinkingWithheld),
     PeersSkipped(PeersSkipped),
+    ConversationRewound(ConversationRewound),
+    ConversationRewindUndone(ConversationRewindUndone),
 }
 
 impl EventKind {
@@ -168,6 +170,8 @@ impl EventKind {
             EventKind::ImagesWithheld(_) => "images_withheld",
             EventKind::ThinkingWithheld(_) => "thinking_withheld",
             EventKind::PeersSkipped(_) => "peers_skipped",
+            EventKind::ConversationRewound(_) => "conversation_rewound",
+            EventKind::ConversationRewindUndone(_) => "conversation_rewind_undone",
         }
     }
 }
@@ -857,6 +861,35 @@ pub enum PeersSkipReason {
     /// The node could not start the next turn (its log, its limits, a
     /// stopping node).
     Unavailable,
+}
+
+/// The person took the conversation back to an earlier message of theirs
+/// (`conversation_rewound`, ADOPTION_PLAN X.46, docs/rewind.md): every
+/// event of the log with `message_seq <= seq <` this event's own seq is
+/// rewound, which the folds honour ([`crate::rewind`] is the one rule).
+/// Nothing is deleted and the seqs stay contiguous. Written by the node
+/// only, for the chat's owner (`session.rewind`), after its own checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationRewound {
+    /// The seq of the person's `user_message` the chat went back to: the
+    /// first rewound event.
+    pub message_seq: u64,
+    /// The turn that message opened (for the chat's words and the files
+    /// part).
+    pub turn_id: String,
+    /// Whether the files part was asked for and done: the folder was put
+    /// back to before the rewound turns, as "Rewind files to before this
+    /// turn" does. Recorded false when no rewound turn had a checkpoint.
+    #[serde(default)]
+    pub files: bool,
+}
+
+/// The person put back what a rewind removed (`conversation_rewind_undone`):
+/// the range of the `conversation_rewound` at `rewind_seq` counts again.
+/// Only until the next message or turn; files are never touched by it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationRewindUndone {
+    pub rewind_seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -877,3 +877,104 @@ fn running_clones_count_against_the_limit_and_become_their_project() {
         Some("restarted")
     );
 }
+
+/// A rewound turn's reply or note is not what another chat of the project
+/// is shown (X.46, T90): the earlier chat reads as it does without them,
+/// and again with them after the undo.
+#[test]
+fn earlier_chats_skip_what_a_rewind_took_out() {
+    let (s, w) = store();
+    project(&s, "p", &w);
+    let none = json!({});
+    let started = |t: &str| ("turn_started", json!({"turn_id": t}));
+    let asked = |t: &str, text: &str| ("user_message", json!({"turn_id": t, "text": text}));
+    let ended = |t: &str| ("turn_ended", json!({"turn_id": t, "reason": "completed"}));
+    // seqs: 1 created, 2 start t1, 3 msg, 4 reply, 5 end, 6 start t2,
+    // 7 msg, 8 reply, 9 summary-free note, 10 end.
+    let first = chat_with(
+        &s,
+        "u1",
+        &w,
+        Some("p"),
+        100,
+        none.clone(),
+        &[
+            started("t1"),
+            asked("t1", "first"),
+            said("kept reply"),
+            ended("t1"),
+            started("t2"),
+            asked("t2", "second"),
+            said("rewound zebrafish reply"),
+            ended("t2"),
+        ],
+    );
+    let noted = chat_with(
+        &s,
+        "u1",
+        &w,
+        Some("p"),
+        200,
+        none.clone(),
+        &[
+            started("t1"),
+            asked("t1", "first"),
+            said("kept note reply"),
+            ended("t1"),
+            started("t2"),
+            asked("t2", "second"),
+            ended("t2"),
+            (
+                "handoff_written",
+                json!({"through_seq": 8, "text": "Status:\nrewound zebrafish note"}),
+            ),
+        ],
+    );
+    let me = chat_with(&s, "u1", &w, Some("p"), 900, none, &[]);
+    let rewind = |sid: SessionId, seq: u64, msg: u64| {
+        s.append(
+            "n1",
+            &RawEvent {
+                session_id: sid,
+                seq,
+                ts_ms: 1000 + seq as i64,
+                kind: "conversation_rewound".into(),
+                payload: json!({"message_seq": msg, "turn_id": "t2", "files": false}),
+            },
+        )
+        .unwrap();
+    };
+    let text_of = |sid: SessionId| {
+        let got = s.earlier_chats("p", "u1", me, 5).unwrap();
+        got.into_iter()
+            .find(|c| c.session_id == sid)
+            .map(|c| c.text)
+    };
+    assert_eq!(text_of(first), Some(Some("rewound zebrafish reply".into())));
+    rewind(first, 10, 7);
+    rewind(noted, 10, 7);
+    assert_eq!(text_of(first), Some(Some("kept reply".into())));
+    // The note is rewound with the turn that held it: the chat has no
+    // note, and its last visible reply stands in.
+    let n = text_of(noted).expect("listed").unwrap_or_default();
+    assert!(!n.contains("zebrafish"), "{n}");
+    assert_eq!(n, "kept note reply");
+    for (sid, seq) in [(first, 11), (noted, 11)] {
+        s.append(
+            "n1",
+            &RawEvent {
+                session_id: sid,
+                seq,
+                ts_ms: 2000,
+                kind: "conversation_rewind_undone".into(),
+                payload: json!({"rewind_seq": 10}),
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(text_of(first), Some(Some("rewound zebrafish reply".into())));
+    assert_eq!(
+        text_of(noted),
+        Some(Some("Status:\nrewound zebrafish note".into()))
+    );
+}

@@ -551,11 +551,11 @@ impl Store {
             )?
             .collect::<rusqlite::Result<_>>()?;
         let mut summary = conn.prepare_cached(
-            "SELECT payload FROM events WHERE session_id = ?1 AND kind = 'history_summarized'
-             ORDER BY seq DESC LIMIT 1",
+            "SELECT seq, payload FROM events WHERE session_id = ?1 AND kind = 'history_summarized'
+             ORDER BY seq DESC",
         )?;
         let mut replies = conn.prepare_cached(
-            "SELECT payload FROM events WHERE session_id = ?1 AND kind = 'assistant_message'
+            "SELECT seq, payload FROM events WHERE session_id = ?1 AND kind = 'assistant_message'
              ORDER BY seq DESC",
         )?;
         let text_of = |payload: &str| -> Result<Option<String>> {
@@ -577,6 +577,9 @@ impl Store {
             // log (X.16): kind-filtered, so a long chat's deltas and tool
             // output are never read.
             let log = crate::handoff::handoff_log_in(&conn, id)?;
+            // What a rewind took out is not read (T90): the one rule, from
+            // the rewinds the log holds.
+            let ranges = harness_core::rewind::rewound(&log);
             let facts = harness_core::handoff::Facts::from_log(&log);
             let facts = if facts.worth() {
                 facts.lines()
@@ -586,27 +589,37 @@ impl Store {
             let last_end = log
                 .iter()
                 .rev()
-                .find(|e| e.kind == "turn_ended")
+                .find(|e| e.kind == "turn_ended" && !ranges.holds(e.seq))
                 .map_or(0, |e| e.seq);
-            let note = log.iter().rev().find_map(|e| match e.typed() {
-                Ok(harness_core::event::EventKind::HandoffWritten(h)) => {
-                    h.text.map(|t| (t, e.seq < last_end))
-                }
-                _ => None,
-            });
+            let note = log
+                .iter()
+                .rev()
+                .filter(|e| !ranges.holds(e.seq))
+                .find_map(|e| match e.typed() {
+                    Ok(harness_core::event::EventKind::HandoffWritten(h)) => {
+                        h.text.map(|t| (t, e.seq < last_end))
+                    }
+                    _ => None,
+                });
             let mut stale = false;
             let found = match note {
                 Some((t, s)) => {
                     stale = s;
                     Some((t, EarlierSource::Note))
                 }
-                None => match summary
-                    .query_row(params![sid], |r| r.get::<_, String>(0))
-                    .optional()?
-                {
-                    Some(p) => text_of(&p)?.map(|t| (t, EarlierSource::Summary)),
-                    None => None,
-                },
+                None => {
+                    let mut rows = summary.query(params![sid])?;
+                    let mut found = None;
+                    while let Some(row) = rows.next()? {
+                        if ranges.holds(row.get::<_, i64>(0)? as u64) {
+                            continue;
+                        }
+                        found = text_of(&row.get::<_, String>(1)?)?
+                            .map(|t| (t, EarlierSource::Summary));
+                        break;
+                    }
+                    found
+                }
             };
             let found = match found {
                 Some(f) => Some(f),
@@ -614,7 +627,10 @@ impl Store {
                     let mut rows = replies.query(params![sid])?;
                     let mut last = None;
                     while let Some(row) = rows.next()? {
-                        if let Some(t) = text_of(&row.get::<_, String>(0)?)? {
+                        if ranges.holds(row.get::<_, i64>(0)? as u64) {
+                            continue;
+                        }
+                        if let Some(t) = text_of(&row.get::<_, String>(1)?)? {
                             last = Some((t, EarlierSource::LastReply));
                             break;
                         }

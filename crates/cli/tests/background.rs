@@ -1187,6 +1187,27 @@ async fn a_dev_server_answers_in_the_next_step_and_a_later_turn() {
     });
     let acks = n.until_ack().await;
     assert!(acks.contains("bg-1") && acks.contains("running"), "{acks}");
+    // So is a rewind of the conversation (X.46): the command would end
+    // after it, for something a rewound turn started.
+    let first_message = n
+        .seen
+        .iter()
+        .find(|e| e.kind == "user_message")
+        .expect("a message")
+        .seq;
+    n.send(harness_protocol::MasterToNode::Rewind {
+        req_id: "r2".into(),
+        session_id: n.sid,
+        message_seq: first_message,
+        files: false,
+        force: false,
+    });
+    let acks = n.until_ack().await;
+    assert!(
+        acks.starts_with(harness_protocol::REWIND_REFUSED) && acks.contains("bg-1"),
+        "{acks}"
+    );
+    assert!(n.seen.iter().all(|e| e.kind != "conversation_rewound"));
     // The agent stops it in a third turn; its end is recorded, and the
     // model is not told again (its stop's result was the end).
     n.turn(json!([{"tool": "bash_stop", "input": {"id": "bg-1"}}]))

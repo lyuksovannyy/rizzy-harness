@@ -681,6 +681,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         MasterToNode::Prompt(PromptMsg { session_id, .. })
         | MasterToNode::Callback(CallbackMsg { session_id, .. })
         | MasterToNode::Retry(RetryMsg { session_id, .. })
+        | MasterToNode::Rewind { session_id, .. }
+        | MasterToNode::RewindUndo { session_id, .. }
         | MasterToNode::Handoff { session_id, .. }
         | MasterToNode::Compact { session_id, .. }
         | MasterToNode::SelectVariant { session_id, .. }
@@ -3036,6 +3038,37 @@ impl Master {
             turn_id,
             force,
             rewind,
+        })
+        .await
+    }
+
+    /// Take a chat back to the person's message at `message_seq` on its
+    /// owning node (X.46); the node decides again.
+    pub async fn rewind(
+        &self,
+        sid: SessionId,
+        message_seq: u64,
+        files: bool,
+        force: bool,
+    ) -> Result<(), CommandError> {
+        let node = self.owner(sid).await?;
+        self.send_command(&node, |req_id| MasterToNode::Rewind {
+            req_id,
+            session_id: sid,
+            message_seq,
+            files,
+            force,
+        })
+        .await
+    }
+
+    /// Put back what the rewind at `rewind_seq` took out (X.46).
+    pub async fn rewind_undo(&self, sid: SessionId, rewind_seq: u64) -> Result<(), CommandError> {
+        let node = self.owner(sid).await?;
+        self.send_command(&node, |req_id| MasterToNode::RewindUndo {
+            req_id,
+            session_id: sid,
+            rewind_seq,
         })
         .await
     }

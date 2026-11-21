@@ -70,6 +70,7 @@ mod remote_nodes;
 mod rename_http;
 mod replies_http;
 mod retry_http;
+mod rewind_http;
 mod routines_http;
 mod seams_http;
 mod search_http;

@@ -1052,7 +1052,15 @@ impl Store {
             }
             _ => {}
         }
-        if let Some((col, text)) = index_text(&e.kind, &e.payload) {
+        if matches!(
+            e.kind.as_str(),
+            "conversation_rewound" | "conversation_rewind_undone"
+        ) {
+            // The chat's index follows what its log shows now: this one
+            // chat, in this transaction.
+            tx.execute("DELETE FROM chat_fts WHERE session_id = ?1", params![sid])?;
+            Self::index_chat(&tx, &sid)?;
+        } else if let Some((col, text)) = index_text(&e.kind, &e.payload) {
             let incognito: bool = tx.query_row(
                 "SELECT incognito FROM sessions WHERE session_id = ?1",
                 params![sid],
@@ -1131,28 +1139,78 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM chat_fts", [])?;
-        // A chat's title is its row's (a rename changes only that).
-        let rows: Vec<(String, String, String)> = {
+        let chats: Vec<String> = {
             let mut stmt = tx.prepare(
-                "SELECT e.session_id, e.kind,
-                        CASE WHEN e.kind = 'session_created'
-                             THEN json_object('title', s.title) ELSE e.payload END
-                 FROM events e
-                 JOIN sessions s ON s.session_id = e.session_id
-                 WHERE s.incognito = 0
-                   AND e.kind IN ('session_created', 'user_message', 'assistant_message')
-                 ORDER BY e.session_id, e.seq",
+                "SELECT session_id FROM sessions WHERE incognito = 0 ORDER BY session_id",
             )?;
-            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            stmt.query_map([], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
-        for (sid, kind, payload) in rows {
-            let payload: serde_json::Value = serde_json::from_str(&payload)?;
-            if let Some((col, text)) = index_text(&kind, &payload) {
-                Self::index_row(&tx, &sid, col, &text)?;
-            }
+        for sid in chats {
+            Self::index_chat(&tx, &sid)?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Index one chat from its log, assuming it has no rows: its title
+    /// (the row's: a rename changes only that) and the messages that
+    /// count, those no rewind of the chat holds (`harness_core::rewind`,
+    /// the one rule; a rewound turn's text is not what search and recall
+    /// hand the model from another chat). Nothing for an incognito chat.
+    fn index_chat(conn: &Connection, sid: &str) -> Result<()> {
+        let title: Option<(String, bool)> = conn
+            .query_row(
+                "SELECT title, incognito FROM sessions WHERE session_id = ?1",
+                params![sid],
+                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+            )
+            .optional()?;
+        let Some((title, false)) = title else {
+            return Ok(());
+        };
+        let id: SessionId = sid
+            .parse()
+            .map_err(|_| StoreError::Corrupt(format!("session id {sid}")))?;
+        let rows: Vec<RawEvent> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT seq, ts_ms, kind, payload FROM events
+                 WHERE session_id = ?1 AND kind IN ('user_message', 'assistant_message',
+                       'conversation_rewound', 'conversation_rewind_undone')
+                 ORDER BY seq",
+            )?;
+            let rows = stmt.query_map(params![sid], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (seq, ts_ms, kind, payload) = row?;
+                out.push(RawEvent {
+                    session_id: id,
+                    seq: seq as u64,
+                    ts_ms,
+                    kind,
+                    payload: serde_json::from_str(&payload)?,
+                });
+            }
+            out
+        };
+        if let Some((col, text)) =
+            index_text("session_created", &serde_json::json!({"title": title}))
+        {
+            Self::index_row(conn, sid, col, &text)?;
+        }
+        let ranges = harness_core::rewind::rewound(&rows);
+        for e in rows.iter().filter(|e| !ranges.holds(e.seq)) {
+            if let Some((col, text)) = index_text(&e.kind, &e.payload) {
+                Self::index_row(conn, sid, col, &text)?;
+            }
+        }
         Ok(())
     }
 

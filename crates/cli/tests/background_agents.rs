@@ -873,6 +873,29 @@ async fn a_host_chat_starts_lists_and_hears_a_background_sub_agent() {
             .get("bg-1")
             .is_some_and(|b| b.child.is_some() && !b.ended)
     );
+    // A rewind of the conversation is refused while the sub-agent runs
+    // (X.46): `restore` looks at commands only, this looks at sub-agents
+    // too, which write into the folder as well.
+    let first = raw.iter().find(|e| e.kind == "user_message").unwrap().seq;
+    n.n += 1;
+    let req = format!("rw{}", n.n);
+    n.send(
+        json!({"type": "session.rewind", "req_id": req, "session_id": sid,
+        "message_seq": first, "files": false, "force": false}),
+    );
+    let why = loop {
+        match n.next().await {
+            harness_protocol::NodeToMaster::Ack { req_id, ok, error } if req_id == req => {
+                assert!(!ok, "a rewind went through under a running sub-agent");
+                break error.unwrap_or_default();
+            }
+            _ => {}
+        }
+    };
+    assert!(
+        why.starts_with(harness_protocol::REWIND_REFUSED) && why.contains("bg-1"),
+        "{why}"
+    );
     std::fs::write(n.ws.join("go"), "").unwrap();
     let end = n.ended(sid, "bg-1").await;
     assert_eq!(end.reason, BackgroundReason::Finished, "{end:?}");

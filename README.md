@@ -272,7 +272,36 @@ summary runs, in a sub-agent's chat, or on a routine's own run (the routine
 retries a run its node missed by its own rules; run it again otherwise). It is
 never automatic: a failing provider is already retried inside the turn, and
 Retry is your decision after that gave up. It does not rewind the
-conversation or let you edit the message first.
+conversation or let you edit the message first (see **Rewind** below).
+
+**Rewind.** You can take a chat back to one of your earlier messages: that
+message and everything after it (the answers, the tool calls and results,
+what the agent had read) stop being part of the conversation. The agent is not
+sent them any more, so it does not act on a plan you dropped or remember a
+file it read there: it has to read a file again before it edits it. Nothing is
+deleted: the removed turns stay in the chat, muted under a line saying they were
+rewound, and **you can put them back until you send the next message**. You
+choose whether the files go back too, as **Rewind files to before this turn**
+does today (refused, with the reason, and nothing rewound, if you edited a file
+since or another chat worked in the folder; **Undo anyway** is the same
+`force`); if you leave the files, the agent's next turn (whatever starts it)
+is told the conversation was taken back and, when the removed turns still
+changed files, which ones and that they are as they were left. A rewind
+is refused while an answer, a `/compact` or a background command or
+sub-agent of the chat is running, in a sub-agent's chat, to a message that a
+summary already replaced (compacted chats cannot be taken back past the
+summary), and to a message you sent while an answer was running (take the
+chat back to the message that started that answer). **It does not undo:** what
+commands did outside the folder, web requests, memory the agent saved,
+tasks it moved, files it published, other chats it started or the cost; and
+putting a rewind back never changes files. The removed text leaves search and
+what the agent can recall from earlier chats (and comes back with the undo).
+Only you can do
+it, never the agent. The buttons (per message "Rewind to here", the choice of
+conversation, files or both, the prompt back in the box) come with the next
+change; this version has the server side (`POST /api/sessions/{id}/rewind` with
+`{message_seq, files, force}`, and `.../rewind/{seq}/undo`) and shows rewound
+turns muted. Design: `docs/rewind.md`.
 
 When a turn completes or fails in a chat you are not looking at (another chat
 is open, or the tab is hidden), the chat gets a dot in the sidebar until you

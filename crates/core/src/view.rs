@@ -233,6 +233,123 @@ pub enum Item {
     },
 }
 
+/// The chat's items, each with the seq of the event that made it and, once
+/// a rewind hides it (`conversation_rewound`, X.46), the seq of that rewind:
+/// written to the browser as the item's `rewound` field. A slice to every
+/// reader; only the fold adds to it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Items {
+    list: Vec<Item>,
+    /// The seq of the event each item was made from.
+    born: Vec<u64>,
+    /// The earliest rewind that hides each item.
+    mark: Vec<Option<u64>>,
+    /// The seq of the event being folded.
+    now: u64,
+}
+
+impl Items {
+    fn at(&mut self, seq: u64) {
+        self.now = seq;
+    }
+
+    fn push(&mut self, item: Item) {
+        self.list.push(item);
+        self.born.push(self.now);
+        self.mark.push(None);
+    }
+
+    fn insert(&mut self, at: usize, item: Item) {
+        self.list.insert(at, item);
+        self.born.insert(at, self.now);
+        self.mark.insert(at, None);
+    }
+
+    /// Mark each item as `ranges` says: after a rewind or an undo.
+    fn remark(&mut self, ranges: &crate::rewind::Ranges) {
+        for (m, b) in self.mark.iter_mut().zip(&self.born) {
+            *m = ranges.by(*b);
+        }
+    }
+
+    /// The seq of the rewind that hides item `i`.
+    pub fn rewound(&self, i: usize) -> Option<u64> {
+        self.mark.get(i).copied().flatten()
+    }
+}
+
+impl std::ops::Deref for Items {
+    type Target = [Item];
+    fn deref(&self) -> &[Item] {
+        &self.list
+    }
+}
+
+impl std::ops::DerefMut for Items {
+    fn deref_mut(&mut self) -> &mut [Item] {
+        &mut self.list
+    }
+}
+
+impl<'a> IntoIterator for &'a Items {
+    type Item = &'a Item;
+    type IntoIter = std::slice::Iter<'a, Item>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.list.iter()
+    }
+}
+
+impl PartialEq<Vec<Item>> for Items {
+    fn eq(&self, other: &Vec<Item>) -> bool {
+        self.list == *other
+    }
+}
+
+impl<const N: usize> PartialEq<[Item; N]> for Items {
+    fn eq(&self, other: &[Item; N]) -> bool {
+        self.list == *other
+    }
+}
+
+impl Serialize for Items {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeSeq};
+        let mut seq = s.serialize_seq(Some(self.list.len()))?;
+        for (i, item) in self.list.iter().enumerate() {
+            match self.mark.get(i).copied().flatten() {
+                None => seq.serialize_element(item)?,
+                Some(by) => {
+                    let mut v = serde_json::to_value(item).map_err(S::Error::custom)?;
+                    if let Value::Object(o) = &mut v {
+                        o.insert("rewound".into(), by.into());
+                    }
+                    seq.serialize_element(&v)?;
+                }
+            }
+        }
+        seq.end()
+    }
+}
+
+/// One rewind of the chat as the view lists it (`conversation_rewound`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RewindInfo {
+    /// The rewind event's own seq.
+    pub seq: u64,
+    /// The message it went back to, and that message's turn.
+    pub message_seq: u64,
+    pub turn_id: String,
+    /// The turns it took out of the conversation (the message's own and
+    /// every one that started after it).
+    pub turns: u32,
+    /// Whether the files were put back too.
+    pub files: bool,
+    /// Put back by `conversation_rewind_undone`.
+    pub undone: bool,
+    /// Not undone, and nothing (a message, a turn, a summary) came after it.
+    pub can_undo: bool,
+}
+
 /// A message sent while a turn ran: its seq, which `queued_delivered`
 /// names, and whether that has happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,7 +409,7 @@ pub struct SessionView {
     pub session_id: Option<SessionId>,
     pub head_seq: u64,
     pub meta: Option<SessionCreated>,
-    pub items: Vec<Item>,
+    pub items: Items,
     pub running_turn: Option<String>,
     /// Approval ids awaiting a decision, in request order.
     pub pending_approvals: Vec<String>,
@@ -363,6 +480,24 @@ pub struct SessionView {
     /// first run is not one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub follow_ups: Vec<String>,
+    /// The chat's rewinds, in the order they were made (X.46).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rewinds: Vec<RewindInfo>,
+    /// The rewinds that count (not part of the view's wire shape).
+    #[serde(skip)]
+    ranges: crate::rewind::Ranges,
+    /// Every turn's start (seq, turn id), for a rewind's turn count.
+    #[serde(skip)]
+    turn_starts: Vec<(u64, String)>,
+    /// The person's messages that opened a turn (not queued ones), by seq:
+    /// a rewind counts only when it names one of its turn
+    /// (`rewind::counts`; the fold sees the whole log).
+    #[serde(skip)]
+    messages: std::collections::HashMap<u64, String>,
+    /// Every `todo_updated` (seq, its list): a rewind takes the list the
+    /// rewound turns set back, and an undo brings it back.
+    #[serde(skip)]
+    todos: Vec<(u64, Vec<crate::todo::TodoItem>)>,
 }
 
 /// One background command as the log shows it.
@@ -439,6 +574,7 @@ impl SessionView {
         }
         self.session_id = Some(e.session_id);
         self.head_seq = e.seq;
+        self.items.at(e.seq);
         match e.typed() {
             Ok(k) => self.apply_kind(k, e.seq),
             Err(_) => self.unknown_events += 1,
@@ -458,6 +594,14 @@ impl SessionView {
     fn settle(&mut self, u: &Usage) {
         self.settled.add(u);
         self.show_usage();
+    }
+
+    /// A message, a turn or a summary after a rewind: it can no longer be
+    /// put back (`rewind::check_undo`).
+    fn no_more_undo(&mut self) {
+        for r in &mut self.rewinds {
+            r.can_undo = false;
+        }
     }
 
     fn tool_mut(&mut self, call_id: &str) -> Option<&mut Item> {
@@ -488,6 +632,8 @@ impl SessionView {
                 self.meta = Some(m);
             }
             EventKind::TurnStarted(t) => {
+                self.turn_starts.push((seq, t.turn_id.clone()));
+                self.no_more_undo();
                 if t.continued_by.is_some() {
                     self.follow_ups.push(t.turn_id.clone());
                 }
@@ -524,23 +670,29 @@ impl SessionView {
                 self.running_turn = Some(t.turn_id);
                 self.running_agent = t.agent;
             }
-            EventKind::UserMessage(m) => self.items.push(Item::User {
-                turn_id: m.turn_id,
-                text: m.text,
-                attachments: m.attachments.into_iter().map(|a| a.name).collect(),
-                files: m.files.into_iter().map(|f| f.path).collect(),
-                reply: m.reply,
-                images: m.images,
-                queued: m.queued.then_some(Queued { seq, read: false }),
-                triggers: m.triggers,
-                tags: m.tags,
-            }),
+            EventKind::UserMessage(m) => {
+                self.no_more_undo();
+                if !m.queued {
+                    self.messages.insert(seq, m.turn_id.clone());
+                }
+                self.items.push(Item::User {
+                    turn_id: m.turn_id,
+                    text: m.text,
+                    attachments: m.attachments.into_iter().map(|a| a.name).collect(),
+                    files: m.files.into_iter().map(|f| f.path).collect(),
+                    reply: m.reply,
+                    images: m.images,
+                    queued: m.queued.then_some(Queued { seq, read: false }),
+                    triggers: m.triggers,
+                    tags: m.tags,
+                });
+            }
             EventKind::PeersSkipped(p) => self.items.push(Item::PeersSkipped {
                 agents: p.agents,
                 reason: p.reason,
             }),
             EventKind::QueuedDelivered(d) => {
-                for it in &mut self.items {
+                for it in self.items.iter_mut() {
                     if let Item::User {
                         queued: Some(q), ..
                     } = it
@@ -821,6 +973,7 @@ impl SessionView {
                 self.variant_selection.insert(v.group, v.message_id);
             }
             EventKind::HistorySummarized(h) => {
+                self.no_more_undo();
                 // A person's `/compact`: its cost is the chat's, like a
                 // hand-off note's, and the meter shows the shorter context
                 // until the next turn reports its own (X.20).
@@ -881,7 +1034,46 @@ impl SessionView {
                     },
                 );
             }
-            EventKind::TodoUpdated(t) => self.todo = t.items,
+            EventKind::ConversationRewound(r) => {
+                // The target's own start stands before its message.
+                let turns = 1 + self
+                    .turn_starts
+                    .iter()
+                    .filter(|(s, t)| r.message_seq < *s && *s < seq && *t != r.turn_id)
+                    .map(|(_, t)| t)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len() as u32;
+                // One that names no message of its turn counts for nothing
+                // and is not listed.
+                if self.messages.get(&r.message_seq) == Some(&r.turn_id)
+                    && self.ranges.add(seq, r.message_seq, &r.turn_id)
+                {
+                    self.rewinds.push(RewindInfo {
+                        seq,
+                        message_seq: r.message_seq,
+                        turn_id: r.turn_id,
+                        turns,
+                        files: r.files,
+                        undone: false,
+                        can_undo: true,
+                    });
+                    self.items.remark(&self.ranges);
+                    self.retodo();
+                }
+            }
+            EventKind::ConversationRewindUndone(u) => {
+                if let Some(r) = self.rewinds.iter_mut().find(|r| r.seq == u.rewind_seq) {
+                    r.undone = true;
+                    r.can_undo = false;
+                }
+                self.ranges.remove(u.rewind_seq);
+                self.items.remark(&self.ranges);
+                self.retodo();
+            }
+            EventKind::TodoUpdated(t) => {
+                self.todos.push((seq, t.items.clone()));
+                self.todo = t.items;
+            }
             // What the model was sent with the turn's message; the chat
             // never showed it (X.1).
             EventKind::ContextSent(_) => {}
@@ -969,6 +1161,19 @@ impl SessionView {
 
     /// An agent's staged file joins its `publish` card; the user's (or one
     /// whose call is not in the log) stands alone.
+    /// The task list as the rewinds that count leave it: the latest
+    /// `todo_updated` none of them holds (what the model is shown too,
+    /// `todo::as_of` over `rewind::visible`).
+    fn retodo(&mut self) {
+        self.todo = self
+            .todos
+            .iter()
+            .rev()
+            .find(|(seq, _)| !self.ranges.holds(*seq))
+            .map(|(_, items)| items.clone())
+            .unwrap_or_default();
+    }
+
     fn stage(&mut self, a: Box<ArtifactStaged>) {
         let card = match (&a.call_id, a.by) {
             (Some(c), crate::artifacts::StagedBy::Agent) => self.tool_mut(c),
