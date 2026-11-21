@@ -25,3 +25,7 @@ test("the side panel's drawer on a narrow screen has an opaque surface", () => {
 test("the tool card's held-approval sentence is padded like the card's other lines", () => {
   expect(rule(read("../styles.css"), ".approval-held")).toMatch(/padding:\s*0 14px 10px/);
 });
+
+test("'window unknown' is not underlined: nothing there is a link", () => {
+  expect(rule(read("../styles.css"), ".meter .window-unknown")).not.toMatch(/underline/);
+});
