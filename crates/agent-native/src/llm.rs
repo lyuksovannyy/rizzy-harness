@@ -152,6 +152,7 @@ fn user_parts(text: &str, images: &[ImagePart]) -> Vec<ContentPart> {
 fn tool_image_parts(m: &ChatMsg) -> Vec<ContentPart> {
     let ChatMsg::ToolImage {
         call_id,
+        tool,
         image,
         state,
         ..
@@ -162,11 +163,12 @@ fn tool_image_parts(m: &ChatMsg) -> Vec<ContentPart> {
     match state {
         ImageState::Withheld => vec![],
         ImageState::Missing => vec![ContentPart::Text(crate::images::tool_missing_line(
+            tool,
             &image.name,
         ))],
         ImageState::Shown => match image.data.clone() {
             Some(data) => vec![
-                ContentPart::Text(crate::images::tool_image_line(&image.name, call_id)),
+                ContentPart::Text(crate::images::tool_image_line(tool, &image.name, call_id)),
                 ContentPart::Binary(Binary::from_base64(
                     image.mime.clone(),
                     data,
@@ -174,6 +176,7 @@ fn tool_image_parts(m: &ChatMsg) -> Vec<ContentPart> {
                 )),
             ],
             None => vec![ContentPart::Text(crate::images::tool_missing_line(
+                tool,
                 &image.name,
             ))],
         },
@@ -1204,6 +1207,7 @@ mod tests {
     fn tool_images_shown_lost_and_withheld() {
         let img = |c: &str, data: Option<&str>, state: ImageState| ChatMsg::ToolImage {
             call_id: c.into(),
+            tool: "read".into(),
             image: ImagePart {
                 sha256: c.into(),
                 mime: "image/png".into(),
@@ -1261,7 +1265,7 @@ mod tests {
         assert_eq!(parts.len(), 4, "{parts:?}");
         assert!(matches!(&parts[1], ContentPart::Binary(_)));
         assert!(texts[0].contains("\"a.png\"") && texts[0].contains("not the person's words"));
-        assert_eq!(texts[1], crate::images::tool_missing_line("c.png"));
+        assert_eq!(texts[1], crate::images::tool_missing_line("read", "c.png"));
         assert_eq!(
             texts[2],
             crate::images::tool_withheld_line(&["b.png".into(), "d.png".into()])
@@ -1286,6 +1290,66 @@ mod tests {
         assert!(
             matches!(&r.messages[1].content.parts()[..], [ContentPart::Text(t)] if t.contains("\"b.png\""))
         );
+    }
+
+    /// What the line over an image says is decided by the tool that
+    /// returned it, never by the file's name: a `read` of a file called
+    /// like a `history` image keeps `read`'s wording.
+    #[test]
+    fn an_image_line_follows_the_tool_not_the_file_name() {
+        use harness_core::event::{EventKind, ToolImage};
+        let line_over = |tool: &str, input: serde_json::Value| -> String {
+            let mut log = crate::history_tests::Log::new();
+            log.turn(None, "look", &[(tool, input, "")], "seen");
+            let at = log
+                .events
+                .iter()
+                .position(|e| e.kind == "tool_call_finished")
+                .unwrap();
+            let EventKind::ToolCallFinished(mut f) = log.events[at].typed().unwrap() else {
+                unreachable!()
+            };
+            f.image = Some(ToolImage {
+                sha256: "ab".repeat(32),
+                mime: "image/png".into(),
+                width: 1,
+                height: 1,
+                bytes: 3,
+            });
+            log.events[at].payload = EventKind::ToolCallFinished(f).into_parts().1;
+            let mut msgs = crate::rebuild(&log.events, &Default::default());
+            for m in &mut msgs {
+                if let ChatMsg::ToolImage { image, .. } = m {
+                    image.data = Some("aGk=".into());
+                }
+            }
+            let r = to_genai(&ChatRequest {
+                model: "m".into(),
+                messages: msgs,
+                tools: vec![],
+                effort: None,
+                cache: false,
+                limits: None,
+                no_tool_calls: false,
+                max_tokens: None,
+            });
+            r.messages
+                .iter()
+                .flat_map(|m| m.content.parts().to_vec())
+                .filter_map(|p| match p {
+                    ContentPart::Text(t) if t.contains("returned") => Some(t),
+                    _ => None,
+                })
+                .next()
+                .expect("a line over the image")
+        };
+        let read = line_over(
+            "read",
+            serde_json::json!({"path": "history turn 1 image 1"}),
+        );
+        assert!(read.contains("`read` returned"), "{read}");
+        let history = line_over("history", serde_json::json!({"turn": 1, "image": 1}));
+        assert!(history.contains("`history` returned"), "{history}");
     }
 
     fn user(t: &str) -> ChatMsg {

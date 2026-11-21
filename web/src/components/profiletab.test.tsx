@@ -292,7 +292,7 @@ describe("Workspace settings → Agents", () => {
     expect(pageApi.deleteAgent).toHaveBeenCalledWith("mine", { workspace: "w1" });
     expect(button("Delete mine")).toBeUndefined();
     // A row opens the agent's page here, in this workspace's scope.
-    const f = { memory: true, project_memory: true, personalisation: true, recall: false, board: false, web: true, read_files: false, edit_files: false, commands: false, read_only_commands: false, mcp: false, skills: true, delegate: false, background_subagents: false, as_agent: true, as_subagent: true };
+    const f = { memory: true, project_memory: true, personalisation: true, history: true, recall: false, board: false, web: true, read_files: false, edit_files: false, commands: false, read_only_commands: false, mcp: false, skills: true, delegate: false, background_subagents: false, as_agent: true, as_subagent: true };
     pageApi.agent.mockResolvedValue({ ...agent("coder"), origin: "builtin", features: f, prompt: "P", summary: "", instructions: "", description_default: "" });
     await act(async () => host.querySelector<HTMLButtonElement>(".agent-open")!.click());
     expect(pageApi.agent).toHaveBeenCalledWith("coder", { workspace: "w1" });

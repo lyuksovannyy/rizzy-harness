@@ -180,6 +180,13 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
+    /// Where this session's `history` calls read its own chat (the node's
+    /// store, bound to this session, PLAN.md T91); `None` where there is
+    /// none (tests, a runtime without a store).
+    fn history(&self) -> Option<std::sync::Arc<dyn crate::history::HistorySource>> {
+        None
+    }
+
     /// Where this session's `board` and `board_edit` calls go (the node's
     /// link to the master, bound to this session); `None` where there is
     /// none (tests, a runtime without a master).

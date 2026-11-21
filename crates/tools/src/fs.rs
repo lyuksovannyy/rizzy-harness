@@ -670,7 +670,7 @@ pub(crate) fn shown_size(n: u64) -> String {
 /// [`harness_core::image::MAX_SIDE`]. Nothing is decoded. `Ok(None)` for
 /// any other file, which `read` reads as text (an SVG is text).
 fn read_image(path: &std::path::Path) -> Result<Option<crate::FileImage>, String> {
-    use harness_core::image::{MAX_FILE_BYTES as MAX_BYTES, MAX_SIDE};
+    use harness_core::image::MAX_FILE_BYTES as MAX_BYTES;
     use std::io::Read as _;
     let io = |e: std::io::Error| format!("{}: {e}", path.display());
     let mut f = crate::open_regular(path)?;
@@ -680,52 +680,66 @@ fn read_image(path: &std::path::Path) -> Result<Option<crate::FileImage>, String
         return Ok(None);
     };
     let len = f.metadata().map_err(io)?.len();
-    let too_big = |len: u64| {
-        format!(
-            "{}: a {} image of {}; models are sent images of at most 3.5 MiB (their base64 \
-             must fit the providers' 5 MB), so it was not shown. A smaller export, a crop or a \
-             JPEG of it can be read.",
-            path.display(),
-            r.label,
-            shown_size(len)
-        )
-    };
+    let name = path.display().to_string();
     if len > MAX_BYTES {
-        return Err(too_big(len));
+        return Err(image_too_big(&name, r.label, len));
     }
     let mut bytes = head;
     bytes.reserve(len as usize);
     f.take(MAX_BYTES + 1 - bytes.len() as u64)
         .read_to_end(&mut bytes)
         .map_err(io)?;
+    image_of(&name, bytes).map(Some)
+}
+
+fn image_too_big(name: &str, label: &str, len: u64) -> String {
+    format!(
+        "{name}: a {label} image of {}; models are sent images of at most 3.5 MiB (their base64 \
+         must fit the providers' 5 MB), so it was not shown. A smaller export, a crop or a \
+         JPEG of it can be read.",
+        shown_size(len)
+    )
+}
+
+/// The checks every image the model is shown passes, on the bytes as they
+/// are: a PNG, JPEG, WebP or GIF by its magic number, at most
+/// [`harness_core::image::MAX_FILE_BYTES`], its header readable, no side
+/// over [`harness_core::image::MAX_SIDE`]. Nothing is decoded. `name` is
+/// what the refusals call it (a path for `read`). `read` and the chat's
+/// `history` both show images through this.
+pub fn image_of(name: &str, bytes: Vec<u8>) -> Result<crate::FileImage, String> {
+    use harness_core::image::{MAX_FILE_BYTES as MAX_BYTES, MAX_SIDE};
+    let Some(r) = harness_core::image::raster(&bytes[..bytes.len().min(16)]) else {
+        return Err(format!(
+            "{name}: not a PNG, JPEG, WebP or GIF image, so it was not shown."
+        ));
+    };
     if bytes.len() as u64 > MAX_BYTES {
-        return Err(too_big(bytes.len() as u64));
+        return Err(image_too_big(name, r.label, bytes.len() as u64));
     }
     let Some((width, height)) = harness_core::image::dimensions(&bytes, r.format) else {
         return Err(format!(
-            "{}: starts like a {} image, but its header cannot be read (a cut or damaged \
+            "{name}: starts like a {} image, but its header cannot be read (a cut or damaged \
              file), so it was not shown.",
-            path.display(),
             r.label
         ));
     };
     if width > MAX_SIDE || height > MAX_SIDE {
         return Err(format!(
-            "{}: a {} image of {width}x{height} pixels; models are sent images of at most \
+            "{name}: a {} image of {width}x{height} pixels; models are sent images of at most \
              {MAX_SIDE} pixels a side, so it was not shown. A smaller export or a crop of it \
              can be read.",
-            path.display(),
             r.label
         ));
     }
     let sha256 = crate::seen::hex(&crate::seen::sha256(&bytes));
-    Ok(Some(crate::FileImage {
+    Ok(crate::FileImage {
         mime: r.mime,
         sha256,
         width,
         height,
         bytes,
-    }))
+    })
 }
 
 /// Which lines `read` shows, and how.

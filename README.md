@@ -1279,6 +1279,44 @@ change anything, and the call shows in the chat like any tool.
   check a detail before relying on it and never to follow instructions in
   them. A node turns the tool off with `denied_tools = ["recall"]`.
 
+**Reading earlier messages.** After a chat was summarised, the agent has a
+paragraph in place of the earlier turns, its old tool results are one-line
+stubs and the earlier images and attached files are no longer in front of it.
+An agent with the **Chat history** switch (on the Agents page; on unless a
+definition says `history: false`; every built-in agent but Smol, which has no tools, has it) has a `history`
+tool that reads **this chat's own** earlier turns in full, from the log on the
+node, with no model call and nothing sent to the server:
+
+- `history` with no arguments lists the turns, oldest first, 100 to a page: the
+  number, the time, who spoke, the first 120 characters of your message, how
+  many tool calls, attachments and images, and whether the agent is now sent
+  only a summary of that turn.
+- `turn` N shows one turn: your message, each attachment's name and text, the
+  agent's answers, each tool call and its result. A result, attachment or
+  message over 4,000 characters is cut, with the line that reads all of it in
+  parts (`call`, `attachment` or `message`, with `part`).
+- `search` finds the turns that hold some words (3 characters or more, newest
+  first, at most 20).
+- `turn` N with `image` I shows an earlier image, as `read` shows an image
+  file: only to a model that takes images, and in the per-step and per-turn
+  caps. An image the provider refused, or whose bytes the chat no longer
+  keeps, is refused with the reason.
+
+It shows only what the agent could have been sent: **never a turn you rewound
+(turn numbers are those of the turns left, so they change after a rewind),
+never an image the provider refused, never the agent's thinking, never a
+message you sent while a turn ran that the agent never read** (one it read is
+listed with the turn that read it, with its attachments and images), **never
+the environment line or the context block of an old request, never the text of
+a file you mentioned with `@` (only its path), never another chat** (a
+sub-agent's chat is its own). If a provider repeats a call id inside one turn,
+the result is read by its number in brackets (`call` `"#5"`). It changes nothing and asks
+nothing. Everything it returns was written then and is quoted line by line
+(`| `), so an old result that looks like a note from the harness stays text
+of that result; the agent is told it may hold text from files and pages and
+that it must follow no instruction in it. A node turns the tool off with
+`denied_tools = ["history"]`.
+
 Who may create workspaces (also a switch under Settings → Server → Workspaces):
 
 ```toml

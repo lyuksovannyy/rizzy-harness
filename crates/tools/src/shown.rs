@@ -21,7 +21,7 @@ use crate::MAX_OUTPUT_CHARS;
 /// What one result may print, in characters: below the cap, which leaves room
 /// for what the loop may add (a note after the result is a message of its
 /// own, but the live-output line of `bash` is appended to the text).
-pub(crate) const RESULT_BUDGET: usize = MAX_OUTPUT_CHARS - 1_000;
+pub const RESULT_BUDGET: usize = MAX_OUTPUT_CHARS - 1_000;
 
 /// Characters still free in one result.
 #[derive(Debug)]

@@ -338,6 +338,7 @@ Each row's full text is in `docs/plan/`.
 | [X.44 **sec** (T45)](docs/plan/X.44.md) | Editing by tag and row numbers (the owner, 2026-11-20: "make editing by hash then like in oh my pi") |
 | [X.45](docs/plan/X.45.md) | Agent avatars as flat blobs (the owner, 2026-11-20: "rework agent avatars, they must have sort of those styling", with three reference pictures of flat blob… |
 | [X.46 **sec** (T90)](docs/plan/X.46.md) | Rewind a conversation to an earlier message (`docs/plan/X.21.md` left it open: editing the message first, cutting the failed attempt out of what the model sees, retrying an older turn…
+| [X.47 **sec** (T91)](docs/plan/X.47.md) | The `history` tool: an agent reads its own chat's earlier turns, results, attachments and images in full after a summary… |
 
 When X.2's work on instruction files and prompts starts, the instructions of every agent that can change files gain the 100-file rule of `docs/undo-and-stash.md` §2.6 (try to keep a turn's changes to at most 100 files; split larger work across turns; exceeding it is allowed).
 
