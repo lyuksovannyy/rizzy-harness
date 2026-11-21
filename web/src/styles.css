@@ -1477,130 +1477,157 @@ select.pill {
   min-height: 0;
 }
 .conv-head {
+  position: relative;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--space-2);
   padding: 10px 16px 8px;
   border-bottom: 1px solid var(--line);
 }
+/* One line: the title, then its muted suffix. The title gives way first (an
+   ellipsis, with a floor); the suffix's parts shrink only after it. */
 .conv-title {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
 }
-/* The title and its Rename button on one line; the title is cut, not wrapped. */
-.chat-title-row {
-  flex-wrap: nowrap;
+.conv-actions {
+  display: flex;
+  align-items: center;
   gap: var(--space-1);
-  min-width: 0;
+  flex: none;
 }
-.chat-title-row h1 {
-  min-width: 0;
-}
-.chat-rename {
+.chat-title-row {
+  flex: 0 1000 auto;
   flex-wrap: nowrap;
-}
-.chat-rename input {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--text-lg);
-  font-weight: var(--w-semibold);
+  gap: var(--space-2);
+  min-width: 8ch;
 }
 .conv-title h1 {
   font-size: var(--text-lg);
   font-weight: var(--w-semibold);
   letter-spacing: -0.01em;
   margin: 0;
-}
-.conv-meta {
-  display: flex;
-  gap: var(--space-3);
-  align-items: center;
-  font-size: var(--text-sm);
   min-width: 0;
 }
-/* The meta row (agent, model, node, mode, folder, meter) is never allowed past
-   its column or under the buttons: what can give way does, with an ellipsis
-   and a small floor, in this order: the folder path (gives up the most), the
-   model id, the mode's notes, the agent's name, and only when nothing else is
-   left the meter and the node and mode badges. Weights scale with an item's own
-   width, so these are ratios, not a strict queue; they stay well above 1 so the
-   last ones left still shrink the whole overflow. */
-.conv-meta > * {
-  flex: none;
-  white-space: nowrap;
-}
-.conv-meta > .ellipsis,
-.conv-meta > .meta-model,
-.conv-meta > .exec-gaps,
-.conv-meta > .conv-agent,
-.conv-meta > .meter,
-.conv-meta > .badge {
+/* The title is a button that looks like text: it reads as the title, and a
+   click or Enter turns it into the field below, the same size and font. */
+.chat-title-btn {
+  all: unset;
+  display: block;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: text;
+  border-radius: var(--r-sm);
 }
-.conv-meta > .ellipsis {
-  flex: 0 1000000000000 auto;
-  min-width: 5ch;
+.chat-title-btn:hover {
+  background: var(--bg-hover);
 }
-.conv-meta > .meta-model {
-  flex: 0 100000000 auto;
-  min-width: 7ch;
+.chat-title-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
-.conv-meta > .exec-gaps {
-  flex: 0 100000000 auto;
-  min-width: 5ch;
-}
-.conv-meta > .conv-agent {
-  flex: 0 10000 auto;
-  min-width: 7ch;
-}
-.conv-meta > .meter {
-  flex: 0 100 auto;
-  min-width: 10ch;
-}
-.conv-meta > .badge {
-  flex: 0 20 auto;
-  min-width: 5ch;
-}
-.conv-agent > .ellipsis {
-  flex: 0 1 auto;
+.chat-title-edit {
+  display: flex;
   min-width: 0;
 }
-.conv-agent > :not(.ellipsis) {
-  flex: none;
+.chat-title-edit input {
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  padding: 0 4px;
+  margin: 0 -4px;
+  min-width: 6ch;
+  max-width: 100%;
+  min-height: 0;
+  height: auto;
+  line-height: inherit;
 }
-/* Up to 1100px the row drops under the title and the buttons, at full width,
-   and wraps, several items to a line. Nothing is shortened while it fits on a
-   line of its own; an item wider than the whole row gets an ellipsis. */
-@media (max-width: 1100px) {
+/* "project · node · how commands run": small, muted, after the title. */
+.chat-suffix {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0 var(--space-1-5);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.chat-part {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.chat-part > * {
+  min-width: 0;
+}
+/* The badges are plain words here, not pills. */
+.chat-suffix .badge {
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 24ch;
+}
+.chat-suffix .badge-offline {
+  color: var(--bad);
+}
+.chat-suffix .badge-warn {
+  color: var(--warn);
+}
+/* The project control: the chip, without its pill. */
+.chat-suffix .project-chip {
+  border: none;
+  padding: 0;
+  max-width: 24ch;
+  font-size: inherit;
+  color: inherit;
+  border-radius: var(--r-sm);
+}
+.chat-suffix .project-chip.on {
+  color: inherit;
+}
+.chat-suffix .project-chip:hover {
+  background: none;
+  color: var(--fg);
+  text-decoration: underline;
+}
+/* Narrow: two tidy lines. The title and the buttons first; under them the
+   suffix, whole (it wraps, it is never cut). */
+@media (max-width: 600px) {
   .conv-head {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "title actions" "suffix suffix";
+    column-gap: var(--space-2);
+    row-gap: 0;
   }
   .conv-title {
     display: contents;
   }
-  .conv-title > :not(.conv-meta) {
-    flex: 1 1 0;
+  .chat-title-row {
+    grid-area: title;
     min-width: 0;
   }
-  .conv-meta {
-    order: 9;
-    flex: 1 1 100%;
+  .conv-actions {
+    grid-area: actions;
+  }
+  .chat-suffix {
+    grid-area: suffix;
     flex-wrap: wrap;
-    gap: 2px var(--space-2);
+    white-space: normal;
   }
-  .conv-meta > *,
-  .conv-meta > .ellipsis,
-  .conv-meta > .meta-model,
-  .conv-meta > .exec-gaps,
-  .conv-meta > .conv-agent,
-  .conv-meta > .meter,
-  .conv-meta > .badge {
-    flex: 0 1 auto;
-    min-width: 0;
+  .chat-part {
+    flex: 0 0 auto;
     max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 }
 .timeline {
@@ -1630,6 +1657,7 @@ select.pill {
   padding: 10px 16px;
   border-radius: var(--r-lg);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   max-width: 80%;
 }
 .author {
@@ -1640,6 +1668,12 @@ select.pill {
 }
 .md {
   line-height: var(--lh-prose);
+  overflow-wrap: anywhere;
+}
+/* Code keeps its own horizontal scroll. */
+.md pre,
+.md pre code {
+  overflow-wrap: normal;
 }
 .md > :first-child {
   margin-top: 0;
@@ -3626,6 +3660,135 @@ button.swatch:hover:not(:disabled) {
 .meter {
   font-variant-numeric: tabular-nums;
 }
+/* The strip under the composer's box (Composer.tsx): the controls the box
+   used to carry at the left, the chat's figures at the right; small and
+   muted. One line while it fits, then the figures wrap under the controls.
+   The figures' line height is fixed, so figures arriving move nothing. */
+.composer-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px var(--space-3);
+  margin-top: 4px;
+  padding: 0 6px;
+  font-size: var(--text-xs);
+  line-height: 20px;
+  color: var(--fg-2);
+}
+/* A sentence while a choice waits: a line of its own above the controls. */
+.composer-strip > .approval-pending-note { order: -1; flex: 1 1 100%; max-width: none; align-self: stretch; }
+/* The running hint sits in the box's row (muted, at most two lines in the
+   row's own height), so a turn starting or ending moves nothing. */
+.composer-row .composer-hint {
+  flex: 1;
+  min-width: 0;
+  padding: 0 var(--space-2);
+  font-size: var(--text-2xs);
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.composer-strip.alone { flex: 1; justify-content: flex-end; margin: 0; }
+.strip-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--space-1);
+  min-width: 0;
+}
+.strip-controls:empty { display: none; }
+.strip-figures { margin-left: auto; min-width: 0; }
+/* The pickers read as part of the strip: the strip's size and colour. */
+.composer-strip .pill,
+.composer-strip select.pill,
+.composer-strip .select.compact .select-button {
+  font-size: var(--text-xs);
+  line-height: 18px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  color: var(--fg-2);
+}
+.composer-strip .pill:hover:not(:disabled),
+.composer-strip .select.compact .select-button:hover:not(:disabled) { color: var(--fg); }
+.composer-strip .pill.override { color: var(--accent-fg); }
+.composer-strip .pill.incognito.on { color: var(--fg); }
+.composer-strip .mode-switch { font-size: var(--text-xs); }
+/* The new chat's place (node, project, shell, approval) is a second line. */
+.composer-strip .agentic-row {
+  order: 3;
+  flex: 1 1 100%;
+  border-top: none;
+  margin-top: 0;
+  padding-top: 0;
+  font-size: var(--text-xs);
+}
+/* Room kept for that line while another mode is on (the home screen centres
+   its column, so a line that appears would move the box). The project page
+   is top-anchored and needs none. */
+.agentic-slot { display: none; }
+.home .composer-strip .agentic-slot { display: block; order: 3; flex: 1 1 100%; height: 24px; }
+/* The line wraps on a narrow screen: one line each for node and project, and
+   commands and approval, then one each (measured in the browser). */
+@media (max-width: 600px) { .home .composer-strip .agentic-slot { height: 54px; } }
+@media (max-width: 340px) { .home .composer-strip .agentic-slot { height: 84px; } }
+/* What answers in this chat: a read-only label after the agent picker. */
+.strip-model {
+  padding: 0 var(--space-1-5);
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+/* A chat with no composer: the same strip, read-only, where the box would be. */
+.composer-strip.readonly .strip-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+}
+.composer-strip.readonly .strip-agent.bad { color: var(--bad); }
+.session-figures {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0 var(--space-3);
+  white-space: nowrap;
+}
+.session-figures .figure,
+.session-figures .context-meter,
+.session-figures .cost-meter { display: inline-flex; align-items: center; gap: 5px; }
+.session-figures .ring { flex: none; }
+.session-figures .ring-track { fill: none; stroke: var(--fill); stroke-width: 2; }
+.session-figures .ring-fill { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.session-figures .ring.high .ring-fill { stroke: var(--warn); }
+/* The quota is not known yet: a dashed ring, so it reads as a placeholder. */
+.session-figures .ring-empty .ring-track { stroke: currentColor; stroke-dasharray: 2 2.4; opacity: 0.7; }
+.figure-quota { position: relative; cursor: help; border-radius: var(--r-sm); }
+.figure-quota:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.figure-tip {
+  display: none;
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  width: max-content;
+  max-width: min(260px, calc(100vw - 32px));
+  padding: 6px 9px;
+  white-space: normal;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-1);
+  color: var(--fg);
+  font-weight: var(--w-regular);
+  line-height: 1.4;
+}
+.figure-quota:hover:not([data-dismissed]) .figure-tip,
+.figure-quota:focus-visible:not([data-dismissed]) .figure-tip { display: block; }
 /* The window is not known: the summary point is a fixed guess (hover says how to set it). */
 .meter .window-unknown {
   color: var(--warn);
@@ -3931,6 +4094,12 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
   border: 1px solid var(--line);
   border-radius: 8px;
   font-size: var(--text-xs);
+}
+/* Narrow: from the strip's left edge, so it cannot leave the screen. */
+.composer-strip { position: relative; }
+@media (max-width: 600px) {
+  .step-pick { position: static; }
+  .step-pop { left: 6px; right: auto; width: min(240px, calc(100% - 12px)); }
 }
 .step-pop label { display: flex; flex-direction: column; gap: 4px; flex: 1; }
 .step-pop input { width: 100%; }
@@ -5591,3 +5760,9 @@ button.pp-row:hover:not(:disabled),
 .delegate-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 4px; }
 .form label.delegate-option { display: flex; flex-direction: row; gap: 8px; align-items: baseline; font-weight: normal; }
 .tag-only-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+/* Narrow: the note, then the strip across the full width as in a chat that has a composer. */
+@media (max-width: 600px) {
+  .tag-only-row { flex-wrap: wrap; }
+  .tag-only-row > .tag-only { flex: 1 1 100%; margin: 0; }
+  .tag-only-row > .composer-strip.alone { flex: 1 1 100%; justify-content: space-between; }
+}

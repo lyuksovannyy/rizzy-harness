@@ -54,3 +54,22 @@ test("what the server sent first is applied once the code is in; learning is sav
   m.stop();
   vi.useRealTimers();
 });
+
+test("learning still waiting for its second is saved when the hook goes (a workspace switch remounts the shell)", async () => {
+  vi.useFakeTimers();
+  const save = vi.fn();
+  const m = mount(save);
+  await act(async () => vi.dynamicImportSettled());
+  act(() => m.out.api!.learn("explain rust lifetimes", "ask"));
+  expect(save).not.toHaveBeenCalled();
+  m.stop();
+  expect(save).toHaveBeenCalledTimes(1);
+  expect((save.mock.calls[0]![0] as { labels: number }).labels).toBe(1);
+  // Nothing pending: nothing saved at the end.
+  save.mockClear();
+  const idle = mount(save);
+  await act(async () => vi.dynamicImportSettled());
+  idle.stop();
+  expect(save).not.toHaveBeenCalled();
+  vi.useRealTimers();
+});

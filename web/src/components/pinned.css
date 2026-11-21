@@ -1,6 +1,8 @@
 /* The chat header's "Pinned (n)" list and the mark on a pinned message (PinnedList.tsx). */
 .pinned-wrap {
-  position: relative;
+  /* Not the anchor: the list hangs from the header's right edge, so it
+     stays on the screen at every width. */
+  position: static;
   display: inline-flex;
   align-items: center;
   align-self: flex-start;
@@ -14,9 +16,9 @@
 .pinned-pop {
   position: absolute;
   z-index: 30;
-  top: calc(100% + 6px);
-  right: 0;
-  width: min(26rem, calc(100vw - 2rem));
+  top: calc(100% + 4px);
+  right: var(--space-4);
+  width: min(26rem, calc(100% - 2 * var(--space-4)));
   max-height: 60vh;
   overflow: auto;
   padding: var(--space-2);

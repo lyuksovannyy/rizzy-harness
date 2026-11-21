@@ -25,7 +25,7 @@ holds the files is described in [media.md](media.md).
    also in Coder's and Writer's lists). It is a mutating tool: in `ask` mode the user approves
    each call, node.toml `denied_tools` can block it, and a turn may publish at most 10 files
    (counted on the node). Chat-runtime sessions never get it.
-2. **"Save as artifact"** on a file a tool card shows, or the chat header's field:
+2. **"Save as artifact"** on a file a tool card shows, or **Save a file as artifact…** on a bash card (any path in the chat's folder):
    `POST /api/sessions/{id}/artifacts {path, name?}`. The user clicked, so there is no approval;
    the node checks the path and acks at once (its refusal is the 409's text), then copies in the
    background and records `artifact_staged` or `artifact_stage_failed` in the chat.

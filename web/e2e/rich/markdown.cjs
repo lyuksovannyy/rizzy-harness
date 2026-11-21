@@ -130,7 +130,7 @@ module.exports = async function markdown(t) {
 
   // Copy gives the Markdown as rendered: no hidden character, math normalised.
   await demo.hover();
-  await demo.locator('.msg-actions button').click();
+  await demo.locator('.msg-actions button', { hasText: /^\s*Copy\s*$/ }).click();
   await p.waitForSelector('.msg-actions button:has-text("Copied")');
   const copied = await p.evaluate(() => navigator.clipboard.readText());
   check(copied.includes('```rust') && copied.includes('$$a^2+b^2=c^2$$') && copied.includes('abcdef') && !HIDDEN.test(copied),

@@ -223,11 +223,11 @@ describe("a fork", () => {
     expect(buttons.filter((b) => b === "Show changes").length).toBe(1);
   });
 
-  test("a fresh fork's header says 0 tokens spent and the context the model will be sent", async () => {
+  test("a fresh fork's strip says 0 tokens spent and the context the model will be sent", async () => {
     session.mockResolvedValue({ title: "Parent chat" });
     await render(fixture.events.slice(0, 16));
-    const meter = host.querySelector(".conv-meta .meter");
-    expect(meter?.textContent).toContain("0 tokens");
+    const meter = host.querySelector(".composer-strip .session-figures");
+    expect(meter?.textContent).toContain("0 in · 0 out");
     expect(meter?.querySelector(".context-meter")?.textContent).toContain("205");
   });
 
