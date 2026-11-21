@@ -112,7 +112,12 @@ describe("the header's content", () => {
 
   test("no project: what the chip showed (its add control, muted); no projects at all: nothing there", () => {
     draw({ row: row({ project_id: null }) });
-    expect(visible()).toEqual(["Project", "local", "sandbox"]);
+    expect(visible()).toEqual(["No project", "local", "sandbox"]);
+    // Quiet: words only, no folder icon, the same control underneath.
+    const chip = suffix()!.querySelector(".project-chip")!;
+    expect(chip.classList.contains("on")).toBe(false);
+    expect(chip.querySelector("svg")).toBeNull();
+    expect(chip.querySelector("select")).not.toBeNull();
     expect(suffix()!.querySelector(".sr-only")!.textContent).toBe("In no project, on node local, sandboxed, folder /src/app");
     draw({ row: row({ project_id: null }), projects: [] });
     expect(visible()).toEqual(["local", "sandbox"]);

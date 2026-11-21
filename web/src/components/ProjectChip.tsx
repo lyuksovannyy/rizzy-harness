@@ -2,7 +2,7 @@
 // chat into another one or out (docs/projects.md). A native select keeps it
 // small and keyboard-friendly; the icon sits on top of it. Also what a
 // project-scoped `remember` shows in the chat.
-import { BookmarkPlus, FolderPlus } from "lucide-react";
+import { BookmarkPlus } from "lucide-react";
 import { useState } from "react";
 import { projectsApi, type ProjectSummary } from "../lib/projects";
 import { ProjectIcon } from "../lib/projectIcons";
@@ -55,9 +55,9 @@ export function ProjectChip({ row, projects }: { row: SessionRow; projects: Proj
     projectsApi.setChatProject(row.session_id, id || null).catch((e: Error) => setError(e.message));
   };
   return (
-    <label className={`project-chip ${current ? "on" : ""}`} title={error ?? (current ? `In ${current.name}` : "Add to a project")}>
-      {current ? <ProjectIcon icon={current.icon} accent={current.accent} size={14} /> : <FolderPlus size={14} aria-hidden />}
-      <span className="ellipsis">{current ? current.name : "Project"}</span>
+    <label className={`project-chip ${current ? "on" : "none"}`} title={error ?? (current ? `In ${current.name}` : "Add to a project")}>
+      {current && <ProjectIcon icon={current.icon} accent={current.accent} size={14} />}
+      <span className="ellipsis">{current ? current.name : "No project"}</span>
       <select aria-label="Project" value={current?.project_id ?? ""} onChange={(e) => move(e.target.value)}>
         <option value="">No project</option>
         {projects.map((p) => (
