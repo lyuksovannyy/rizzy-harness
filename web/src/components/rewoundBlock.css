@@ -14,3 +14,7 @@
   border-left: 2px solid var(--line);
   opacity: 0.6;
 }
+/* The block's own actions are buttons that look like buttons (a browser
+   run found the muted link style read as part of the sentence). */
+.rewound-btn { font-size: inherit; padding: 2px 10px; }
+.rewound-files { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }

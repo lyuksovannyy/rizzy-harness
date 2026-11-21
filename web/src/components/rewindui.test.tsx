@@ -255,7 +255,8 @@ describe("the choice, inline", () => {
     await click(named("Rewind conversation and files"));
     const anyway = named("Rewind anyway")!;
     expect(anyway.closest("[role=alert]")).toBeNull();
-    expect(anyway.className).toBe("link");
+    // A button that looks like one: the muted link style read as part of the sentence.
+    expect(anyway.className).not.toContain("link");
     const panel = host.querySelector(".rewind-panel")!;
     expect(panel.querySelector("[role=alert]")!.textContent).toBe("these files changed after the turn; undo would overwrite that: `a.rs`");
     expect(panel.textContent).toContain("Another chat changed these files since. Rewind the files anyway?");

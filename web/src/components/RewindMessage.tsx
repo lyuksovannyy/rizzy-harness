@@ -131,7 +131,7 @@ export function RewindMessage(props: {
                 <>
                   <p className="small muted">{t("rewind.anywayHelp")}</p>
                   <div className="rewind-buttons row wrap">
-                    <button type="button" className="link" disabled={busy} onClick={() => void run(asked.current, true)}>
+                    <button type="button" disabled={busy} onClick={() => void run(asked.current, true)}>
                       {t("rewind.anyway")}
                     </button>
                   </div>

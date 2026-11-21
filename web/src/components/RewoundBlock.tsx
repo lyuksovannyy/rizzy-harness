@@ -73,12 +73,12 @@ export function RewoundBlock(props: {
           {props.turns === 1 ? t("rewind.turn") : t("rewind.turns", { n: String(props.turns) })}
         </button>
         {props.canUndo && (
-          <button type="button" className="link" disabled={busy} onClick={() => void undo()}>
+          <button type="button" className="rewound-btn" disabled={busy} onClick={() => void undo()}>
             {t("rewind.undo")}
           </button>
         )}
         {props.putBack && (
-          <button type="button" className="link" onClick={props.putBack}>
+          <button type="button" className="rewound-btn" onClick={props.putBack}>
             {t("rewind.putBack")}
           </button>
         )}
@@ -87,7 +87,7 @@ export function RewoundBlock(props: {
       {props.filesBack && !gone && (
         <div className="small muted rewound-files">
           {t("rewind.filesBack")}{" "}
-          <button type="button" className="link" disabled={busy || props.running} onClick={() => void bringBack(false)}>
+          <button type="button" className="rewound-btn" disabled={busy || props.running} onClick={() => void bringBack(false)}>
             {t("rewind.bringBack")}
           </button>
         </div>
@@ -96,7 +96,7 @@ export function RewoundBlock(props: {
         <div className="error-text small" role="alert">
           {filesErr}{" "}
           {forceable(filesErr) && (
-            <button type="button" className="link" disabled={busy} onClick={() => void bringBack(true)}>
+            <button type="button" className="rewound-btn" disabled={busy} onClick={() => void bringBack(true)}>
               {t("rewind.bringBackAnyway")}
             </button>
           )}
