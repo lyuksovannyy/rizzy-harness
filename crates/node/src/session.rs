@@ -4307,10 +4307,48 @@ impl Session {
         if reg.iter().any(|r| overlaps(r, &root)) {
             return Err(UNDO_RUNNING.into());
         }
-        if others
+        let busy: Vec<&Arc<Session>> = others
             .iter()
-            .any(|(s, cwd)| overlaps(cwd, &root) && s.is_running())
-        {
+            .filter(|(s, cwd)| overlaps(cwd, &root) && s.is_running())
+            .map(|(s, _)| s)
+            .collect();
+        if !busy.is_empty() {
+            // This chat's own background sub-agents (none of its foreground
+            // ones can run: its own turn does not): say which, and what to do.
+            let mine = |s: &Session| {
+                let mut at = s.parent_session;
+                for _ in 0..64 {
+                    match at {
+                        Some(id) if id == self.id => return true,
+                        Some(id) => {
+                            at = others
+                                .iter()
+                                .find(|(o, _)| o.id == id)
+                                .and_then(|(o, _)| o.parent_session);
+                        }
+                        None => return false,
+                    }
+                }
+                false
+            };
+            if busy.iter().all(|s| mine(s)) {
+                let mut names: Vec<String> = busy
+                    .iter()
+                    .map(|s| format!("@{}", s.running_agent().unwrap_or_else(|| "agent".into())))
+                    .collect();
+                names.sort();
+                names.dedup();
+                let (what, verb) = if names.len() == 1 {
+                    ("sub-agent", "is")
+                } else {
+                    ("sub-agents", "are")
+                };
+                return Err(format!(
+                    "its background {what} {} {verb} still working in this folder: stop it or \
+                     wait for it, then undo",
+                    names.join(", ")
+                ));
+            }
             return Err(
                 "another chat is working in this folder right now; wait for it to finish \
                  or cancel it"
@@ -5380,6 +5418,15 @@ impl Session {
     /// The chat's folder as recorded.
     pub(crate) fn cwd(&self) -> &std::path::Path {
         &self.cwd
+    }
+
+    /// The agent of the running turn, if one runs under an agent.
+    fn running_agent(&self) -> Option<String> {
+        self.turn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .and_then(|t| t.agent_id.clone())
     }
 
     pub(crate) fn is_running(&self) -> bool {

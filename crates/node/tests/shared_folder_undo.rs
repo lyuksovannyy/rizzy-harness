@@ -359,7 +359,9 @@ async fn a_persons_message_to_a_finished_childs_chat_during_the_leads_turn_refus
     let turn = last_turn(&r, lead);
     let mid = r.files();
     let undo = r.restore(&turn, false).await;
-    let err = undo.result.expect_err("refused: a person's work in the child's chat");
+    let err = undo
+        .result
+        .expect_err("refused: a person's work in the child's chat");
     assert!(
         err.contains("another chat") && err.contains("`direct.txt`") && !err.contains("`lead.txt`"),
         "{err}"
@@ -392,8 +394,13 @@ async fn a_persons_message_to_a_finished_background_childs_chat_refuses_the_undo
     turns_end(&mut r, 2).await;
     let turn = last_turn(&r, lead);
     let undo = r.restore(&turn, false).await;
-    let err = undo.result.expect_err("refused: a person's work in the child's chat");
-    assert!(err.contains("`direct.txt`") && !err.contains("`lead.txt`"), "{err}");
+    let err = undo
+        .result
+        .expect_err("refused: a person's work in the child's chat");
+    assert!(
+        err.contains("`direct.txt`") && !err.contains("`lead.txt`"),
+        "{err}"
+    );
     let undo = r.restore(&turn, true).await;
     assert_eq!(undo.result, Ok(()));
     assert!(r.read("direct.txt").is_none());
@@ -431,7 +438,10 @@ async fn a_follow_up_through_delegate_is_still_the_leads_own_work() {
             "delegate: dev@{child}=run: echo two >> b.txt; echo f > f.txt"
         ))
         .await;
-    assert!(outs[0].contains("worked in this chat's folder"), "{outs:#?}");
+    assert!(
+        outs[0].contains("worked in this chat's folder"),
+        "{outs:#?}"
+    );
     let turn = turn.id.expect("a turn checkpoint");
     let undo = r.restore(&turn, false).await;
     assert_eq!(undo.result, Ok(()), "{outs:#?}");
@@ -453,6 +463,75 @@ async fn a_rewind_asks_first_about_a_persons_work_in_a_childs_chat_as_well() {
     let turn = last_turn(&r, lead);
     let undo = r.restore_with(&turn, false, true).await;
     let err = undo.result.expect_err("refused");
-    assert!(err.contains("`direct.txt`") && !err.contains("`lead.txt`"), "{err}");
+    assert!(
+        err.contains("`direct.txt`") && !err.contains("`lead.txt`"),
+        "{err}"
+    );
     assert_eq!(r.read("direct.txt").as_deref(), Some("direct\n"));
+}
+
+// ---- An Undo while a sub-agent still works in the folder --------------------
+
+/// A background shared sub-agent still running when the lead undoes its
+/// turn: refused (a restore under a writer is not safe), and the sentence
+/// says what is true and what to do: it names the sub-agent.
+#[tokio::test]
+async fn an_undo_while_a_background_sub_agent_runs_names_it_and_says_what_to_do() {
+    let mut r = repo_rig().await;
+    r.lead_caps = Some(DelegateCaps {
+        background: true,
+        ..Default::default()
+    });
+    let script = json!([
+        {"tool": "write", "input": {"path": "own.txt", "content": "lead\n"}},
+        {"tool": "delegate", "input": {
+            "agent": "dev", "background": true, "task": "run: sleep 3; echo late > late.txt"
+        }},
+    ]);
+    let (turn, _) = r.lead_turn(&format!("script: {script}")).await;
+    let turn = turn.id.expect("a turn checkpoint");
+    let undo = r.restore(&turn, false).await;
+    let err = undo.result.expect_err("refused while the sub-agent works");
+    assert!(
+        err.contains(
+            "its background sub-agent @dev is still working in this folder: stop it or wait \
+             for it, then undo"
+        ),
+        "{err}"
+    );
+    assert_eq!(r.read("own.txt").as_deref(), Some("lead\n"));
+    r.until(|k| matches!(k, EventKind::BackgroundEnded(_)))
+        .await;
+    let undo = r.restore(&turn, false).await;
+    assert_eq!(undo.result, Ok(()));
+}
+
+/// Another chat (not this chat's sub-agent) running in the folder keeps
+/// today's sentence.
+#[tokio::test]
+async fn an_undo_while_a_different_chat_runs_keeps_the_old_sentence() {
+    let mut r = repo_rig().await;
+    let a = r.session_id();
+    let b = r.new_chat().await;
+    let own = json!([{"tool": "write", "input": {"path": "own.txt", "content": "A\n"}}]);
+    let (turn, _) = r.lead_turn(&format!("script: {own}")).await;
+    let turn = turn.id.expect("a turn checkpoint");
+    prompt(
+        &mut r,
+        b,
+        format!(
+            "script: {}",
+            json!([{"tool": "bash", "input": {"command": "sleep 3"}}])
+        ),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    let undo = r.restore_of(a, &turn, false, false).await;
+    let err = undo.result.expect_err("refused while another chat works");
+    assert!(
+        err.contains(
+            "another chat is working in this folder right now; wait for it to finish or cancel it"
+        ),
+        "{err}"
+    );
+    turns_end(&mut r, 1).await;
 }
