@@ -248,5 +248,18 @@ describe("a fork", () => {
     const notes = [...host.querySelectorAll(".approval-note")].map((n) => n.textContent);
     expect(notes).toEqual(["Allowed in the chat this was forked from", "Allowed for this chat"]);
   });
+
+  test("the folder note is a plain line at the top of the conversation, not a banner over it", async () => {
+    session.mockResolvedValue({ title: "Parent chat" });
+    await render(fixture.events);
+    const note = host.querySelector("[data-testid=fork-note]")!;
+    expect(note.classList.contains("incognito-banner")).toBe(false);
+    expect(note.parentElement?.classList.contains("column")).toBe(true);
+    expect(note.parentElement?.firstElementChild).toBe(note);
+    const at = css.indexOf(".fork-note {");
+    const rule = css.slice(at, css.indexOf("}", at));
+    expect(at).toBeGreaterThan(0);
+    expect(rule).not.toMatch(/position:\s*(sticky|fixed|absolute)/);
+  });
 });
 
