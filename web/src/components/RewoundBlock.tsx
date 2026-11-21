@@ -1,12 +1,14 @@
 // Turns a rewind took out of the conversation (X.46), as one block:
 // "N turns rewound", closed, opened to read them (muted, with nothing to
 // click inside). The block of a rewind that can still be undone offers
-// "Undo rewind" and, when the box did not take the message back by itself,
-// "Put the message back in the box". Loads with the conversation chunk.
+// "Undo rewind" and, when the box does not hold the message, "Put the message
+// back in the box". While the files a rewind took back are still back, one
+// line says so with "Bring the files back". Loads with the conversation chunk.
 import { ChevronRight } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { pageApi } from "../apiPages";
 import { errText } from "../lib/errorText";
+import { forceable } from "../lib/rewind";
 import { t } from "../lib/i18n";
 import "../lib/i18nPages";
 import "./rewoundBlock.css";
@@ -18,8 +20,12 @@ export function RewoundBlock(props: {
   turns: number;
   /** The rewind can be put back, and the viewer may do it now. */
   canUndo: boolean;
-  /** The files went back too. */
-  filesToo: boolean;
+  /** The files this rewind took back are still back: the checkpoint that
+   * holds what the restore replaced. Absent when there is nothing to bring
+   * back (no files part, brought back already, or the viewer may not). */
+  filesBack?: string;
+  /** A turn runs: the restore would be refused. */
+  running?: boolean;
   /** Attachments of the message that the box cannot take back: attached again by hand. */
   lost: string[];
   /** The box may be given the message on request; absent once it was. */
@@ -36,6 +42,24 @@ export function RewoundBlock(props: {
       await pageApi.undoRewind(props.sessionId, props.rewind);
     } catch (x) {
       setErr(errText(x));
+    } finally {
+      setBusy(false);
+    }
+  };
+  // The restore the rewind made, put back: the existing restore route with the
+  // id it saved, through the same refusals as any undo.
+  const [gone, setGone] = useState(false);
+  const [filesErr, setFilesErr] = useState<string | null>(null);
+  const bringBack = async (force: boolean) => {
+    if (!props.filesBack) return;
+    setBusy(true);
+    setFilesErr(null);
+    try {
+      await pageApi.restoreTurn(props.sessionId, props.filesBack, force, false);
+    } catch (x) {
+      const m = errText(x);
+      if (m.includes("no longer kept")) setGone(true);
+      setFilesErr(m);
     } finally {
       setBusy(false);
     }
@@ -60,7 +84,24 @@ export function RewoundBlock(props: {
         )}
       </div>
       {!!props.lost.length && <div className="small muted">{t("rewind.attachAgain", { names: props.lost.join(", ") })}</div>}
-      {props.filesToo && <div className="small muted">{t("rewind.filesToo")}</div>}
+      {props.filesBack && !gone && (
+        <div className="small muted rewound-files">
+          {t("rewind.filesBack")}{" "}
+          <button type="button" className="link" disabled={busy || props.running} onClick={() => void bringBack(false)}>
+            {t("rewind.bringBack")}
+          </button>
+        </div>
+      )}
+      {filesErr && (
+        <div className="error-text small" role="alert">
+          {filesErr}{" "}
+          {forceable(filesErr) && (
+            <button type="button" className="link" disabled={busy} onClick={() => void bringBack(true)}>
+              {t("rewind.bringBackAnyway")}
+            </button>
+          )}
+        </div>
+      )}
       {err && (
         <div className="error-text small" role="alert">
           {err}

@@ -25,12 +25,13 @@ vi.mock("../api", () => ({
 }));
 const rewind = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const undoRewind = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
+const restoreTurn = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 vi.mock("../apiPages", () => ({
   pageApi: {
     deleteSession: vi.fn(),
     approve: vi.fn(),
     turnDiff: vi.fn(() => Promise.resolve({ files: [] })),
-    restoreTurn: vi.fn(() => Promise.resolve({ ok: true })),
+    restoreTurn: (...a: unknown[]) => restoreTurn(...a),
     retryTurn: vi.fn(() => Promise.resolve({ ok: true })),
     rewind: (...a: unknown[]) => rewind(...a),
     undoRewind: (...a: unknown[]) => undoRewind(...a),
@@ -69,6 +70,7 @@ beforeEach(() => {
   localStorage.clear();
   rewind.mockReset().mockResolvedValue({ ok: true });
   undoRewind.mockReset().mockResolvedValue({ ok: true });
+  restoreTurn.mockReset().mockResolvedValue({ ok: true });
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -318,7 +320,7 @@ describe("the rewound block", () => {
     expect(body.textContent).not.toContain("Undo file changes");
     expect(body.textContent).not.toContain("Rewind files to before this turn");
     expect(body.querySelector(".msg-actions, .rewind-slot, .undo")).toBeNull();
-    // Whatever is shown of a turn is inert, but its end line, which holds the one way back for files.
+    // Whatever is shown of a turn is inert.
     const holding = (text: string) => [...body.children].find((c) => c.textContent?.includes(text))!;
     for (const text of ["second", "t2 answer", "third"]) expect(holding(text).hasAttribute("inert")).toBe(true);
     expect(body.querySelectorAll("button")).toHaveLength(0);
@@ -358,22 +360,62 @@ describe("the rewound block", () => {
     expect(host.querySelector(".rewound-toggle")).not.toBeNull();
   });
 
-  test("a rewind that took the files back says where they come back; the way back is inside the turn", async () => {
-    const files = [created, ...turn(2, "t1", "first"), ev(6, "checkpoint", { turn_id: "t1", phase: "after", git_ref: "r1", files: ["a.rs"] }), ...turn(7, "t2", "second")];
-    const log = [
-      ...files,
-      ev(11, "checkpoint", { turn_id: "restore-1", phase: "before_restore", git_ref: "saved1" }),
-      ev(12, "checkpoint", { turn_id: "t1", phase: "restored", git_ref: "r1" }),
-      ev(13, "conversation_rewound", { message_seq: 3, turn_id: "t1", files: true }),
-    ];
-    await show(log);
-    expect(host.querySelector(".rewound-block")!.textContent).toContain(
-      "Files were rewound too. “Undo rewind” leaves them as they are; “Put back what this undo replaced”, in the turns below, brings them back.",
-    );
+  // The restore a "conversation and files" rewind made: its saved state is `restore-1`.
+  const filesBack = () => [
+    created,
+    ...turn(2, "t1", "first"),
+    ev(6, "checkpoint", { turn_id: "t1", phase: "after", git_ref: "r1", files: ["a.rs"] }),
+    ...turn(7, "t2", "second"),
+    ev(11, "checkpoint", { turn_id: "restore-1", phase: "before_restore", git_ref: "saved1" }),
+    ev(12, "checkpoint", { turn_id: "t1", phase: "restored", git_ref: "r1" }),
+    ev(13, "conversation_rewound", { message_seq: 3, turn_id: "t1", files: true }),
+  ];
+
+  test("a rewind that took the files back says so on the block, with the way back as one button there", async () => {
+    await show(filesBack());
+    const block = host.querySelector(".rewound-block")!;
+    expect(block.textContent).toContain("Files went back to before this message.");
+    expect(block.textContent).not.toContain("Put back what this undo replaced");
+    await click(named("Bring the files back"));
+    expect(restoreTurn).toHaveBeenCalledWith(SID, "restore-1", false, false);
+    // Nothing of the old per-turn link inside the opened block.
     await click(host.querySelector(".rewound-toggle")!);
-    const body = host.querySelector(".rewound-body")!;
-    expect(body.textContent).toContain("Put back what this undo replaced");
-    expect(body.textContent).not.toContain("Undo file changes");
+    expect(host.querySelector(".rewound-body")!.textContent).not.toContain("Put back");
+    expect(host.querySelector(".rewound-body")!.textContent).not.toContain("Undo file changes");
+  });
+
+  test("once the files are back there is no files line and no button, also after a new message", async () => {
+    const back = [...filesBack(), ev(14, "checkpoint", { turn_id: "restore-2", phase: "before_restore", git_ref: "saved2" }), ev(15, "checkpoint", { turn_id: "restore-1", phase: "restored", git_ref: "saved1" })];
+    await show(back);
+    expect(host.querySelector(".rewound-block")!.textContent).not.toMatch(/Files (went|were)/);
+    expect(named("Bring the files back")).toBeUndefined();
+    await show([...back, ...turn(16, "t3", "third")]);
+    expect(host.querySelector(".rewound-block")!.textContent).not.toMatch(/Files (went|were)/);
+  });
+
+  test("the line stays after a new message while the files are still back", async () => {
+    await show([...filesBack(), ...turn(14, "t3", "third")]);
+    expect(host.querySelector(".rewound-block")!.textContent).toContain("Files went back to before this message.");
+  });
+
+  test("a rewind without a files part has no files line", async () => {
+    await show([...two, rewound(10, 7, "t2")]);
+    expect(host.querySelector(".rewound-block")!.textContent).not.toMatch(/Files (went|were)/);
+    expect(named("Bring the files back")).toBeUndefined();
+  });
+
+  test("a refused bring-back says why and offers the forced one", async () => {
+    restoreTurn.mockRejectedValueOnce(new Error("these files changed after the turn; undo would overwrite that: `a.rs`"));
+    await show(filesBack());
+    await click(named("Bring the files back"));
+    expect(host.querySelector(".rewound-block [role=alert]")!.textContent).toContain("changed after the turn");
+    await click(named("Bring them back anyway"));
+    expect(restoreTurn).toHaveBeenLastCalledWith(SID, "restore-1", true, false);
+  });
+
+  test("the files line is not offered to a viewer who may not drive the chat", async () => {
+    await show(filesBack(), row({ blocked: "not yours here" } as Partial<SessionRow>));
+    expect(named("Bring the files back")).toBeUndefined();
   });
 });
 

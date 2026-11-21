@@ -296,7 +296,9 @@ summary), and to a message you sent while an answer was running (take the
 chat back to the message that started that answer). **It does not undo:** what
 commands did outside the folder, web requests, memory the agent saved,
 tasks it moved, files it published, other chats it started or the cost; and
-putting a rewind back never changes files. The removed text leaves search and
+putting a rewind back never changes files (the block says "Files went back to
+before this message." with a button "Bring the files back", for as long as
+they are back). The removed text leaves search and
 what the agent can recall from earlier chats (and comes back with the undo).
 Only you can do
 it, never the agent. Your message goes back into the box (its text and its

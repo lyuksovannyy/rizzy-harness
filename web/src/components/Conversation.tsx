@@ -127,9 +127,6 @@ function Undo(props: {
   /** After an undo: the checkpoint it saved first. Restoring it puts back
    * what the undo replaced (an undo of the undo: the node's same checks). */
   saved?: string;
-  /** In a rewound turn (X.46): only the way back for files a rewind put
-   * back, since nothing else in a turn out of the conversation is acted on. */
-  only?: boolean;
 }) {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -174,13 +171,6 @@ function Undo(props: {
       )}
     </div>
   );
-  if (props.only)
-    return (
-      <div className="undo small">
-        {putBack}
-        {failed}
-      </div>
-    );
   return (
     <div className="undo small">
       <details>
@@ -367,9 +357,8 @@ export default function Conversation(props: {
   const rewoundRow = (it: Item, i: number, el: ReactNode): ReactNode => {
     if (el != null && el !== false) {
       const key = isValidElement(el) && el.key != null ? el.key : i;
-      // A turn's end line holds the one way back for files a rewind put back.
       heldRun.push(
-        <div key={key} inert={it.type !== "turn_end"}>
+        <div key={key} inert>
           <RowBoundary item={it} sessionId={sessionId} canAnswer={false}>
             {el}
           </RowBoundary>
@@ -383,6 +372,17 @@ export default function Conversation(props: {
     const seq = seqAt(view, run.start);
     // The message the rewind went back to leads its run; what it can be sent again with.
     const said = info?.can_undo && first?.type === "user" && seq === info.message_seq ? resend(first) : null;
+    // The files this rewind took back and nobody put back yet: the restore
+    // it made saved the folder first, and its turns carry that id (the fold's
+    // checkpoints, as the Undo block reads them). Computed here, per render.
+    let filesBack: string | undefined;
+    if (info?.files && !blocked) {
+      for (let k = run.start; k <= run.end && !filesBack; k++) {
+        const x = view.items[k]!;
+        const c = x.type === "turn_end" ? own(view.checkpoints, x.turn_id) : undefined;
+        if (c?.restored && c.saved) filesBack = c.saved;
+      }
+    }
     return (
       <RewoundBlock
         key={`rw${run.rewind}-${run.start}`}
@@ -390,7 +390,8 @@ export default function Conversation(props: {
         rewind={run.rewind}
         turns={run.turns}
         canUndo={!!info?.can_undo && !blocked && !running && !!props.row && view.items.findLastIndex((x) => x.rewound === run.rewind) === i}
-        filesToo={!!info?.files}
+        filesBack={filesBack}
+        running={running}
         lost={said?.lost ?? []}
         putBack={said && info && !refilled.includes(info.message_seq) ? () => putRewound(info.message_seq, said) : undefined}
       >
@@ -1024,27 +1025,12 @@ export default function Conversation(props: {
                       const c = own(view.checkpoints, x.turn_id);
                       return !!c && c.files.length > 0 && !c.restored;
                     });
-                    // In a rewound turn only the way back for files a rewind put back.
+                    // In a rewound turn nothing is acted on: the rewound block
+                    // holds the way back for the files.
                     const gone = it.rewound !== undefined;
-                    const undo = gone ? (
-                      cp?.restored && cp.saved ? (
-                        <Undo
-                          key={`u${i}`}
-                          only
-                          sessionId={sessionId}
-                          turnId={it.turn_id}
-                          files={cp.files}
-                          restored
-                          running={running}
-                          laterChanges={false}
-                          blocked={!!blocked}
-                          saved={cp.saved}
-                          onShow={() => {}}
-                        />
-                      ) : null
-                    ) :
-                      // Only a rewind would show for a turn that changed nothing.
-                      cp && cp.after && (cp.files.length > 0 || (laterChanges && !blocked)) ? (
+                    // Only a rewind would show for a turn that changed nothing.
+                    const undo =
+                      !gone && cp && cp.after && (cp.files.length > 0 || (laterChanges && !blocked)) ? (
                         <Undo
                           key={`u${i}`}
                           sessionId={sessionId}
