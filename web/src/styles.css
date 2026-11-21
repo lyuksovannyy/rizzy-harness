@@ -2124,6 +2124,32 @@ pre.diff .del {
   font-size: var(--text-xs);
   color: var(--fg-2);
 }
+/* A fork's divider and the link to fork a turn (C.2). */
+.fork-divider {
+  margin: var(--space-3) 0;
+}
+/* Not always needed, so as quiet as the copy action under an answer: seen
+   when the turn's end line (or the answer above it) is hovered or the link
+   has focus, always on touch, and while it has an error to show. */
+.fork-line {
+  text-align: center;
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-standard);
+}
+.turn-end:hover .fork-line,
+.msg.assistant:hover + .turn-end .fork-line,
+.fork-line:focus-within,
+.fork-line.shown {
+  opacity: 1;
+}
+@media (hover: none) {
+  .fork-line {
+    opacity: 1;
+  }
+}
+.inherited-changes {
+  text-align: center;
+}
 .divider.r-interrupted,
 .divider.r-stopped,
 .divider.r-cancelled,

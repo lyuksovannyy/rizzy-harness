@@ -323,6 +323,7 @@ fn enums() -> Vec<(&'static [&'static str], Vec<String>)> {
                 R::SessionDeleted,
                 R::NodeStopping,
                 R::NodeRestarted,
+                R::Forked,
                 R::Finished
             ),
         ),
@@ -369,7 +370,8 @@ fn enums() -> Vec<(&'static [&'static str], Vec<String>)> {
             variants!(
                 PeersSkipReason::Stopped,
                 PeersSkipReason::Restarted,
-                PeersSkipReason::Unavailable
+                PeersSkipReason::Unavailable,
+                PeersSkipReason::Forked
             ),
         ),
         (
@@ -416,6 +418,8 @@ fn thought_kinds() -> Vec<String> {
 /// Restricted strings that are ids (a `SessionId` is a UUID), not enums.
 const IDS: &[&str] = &[
     "session_created.parent_session",
+    "session_created.forked.parent",
+    "session_forked.parent",
     "background_started.child.session",
     "background_ended.child.session",
 ];

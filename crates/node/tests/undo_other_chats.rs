@@ -745,6 +745,7 @@ fn seed_other_chat(store: &Store, ws: &Path, turns: u64, age_ms: i64) {
             .unwrap();
     };
     put(EventKind::SessionCreated(SessionCreated {
+        forked: None,
         exec_mode: None,
         no_callbacks: false,
         profile: Profile::Agentic,

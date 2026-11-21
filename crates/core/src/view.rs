@@ -185,6 +185,13 @@ pub enum Item {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
     },
+    /// A fork's divider (`session_forked`, C.2): the events before it are
+    /// the parent's, copied. The chat shows "forked from <parent> here".
+    Forked {
+        parent: SessionId,
+        through_seq: u64,
+        turn_id: String,
+    },
     /// A turn the harness started because background commands ended while
     /// the chat was idle (`turn_started.cause`): where a person's message
     /// would be. No text: the chat names the ends from their own items.
@@ -540,6 +547,10 @@ pub struct CheckpointState {
     /// when that restore is itself undone (X.42).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved: Option<String>,
+    /// Copied from the chat this one was forked from: its refs are that
+    /// chat's, so the fork cannot restore it (`fork::inherited`, C.2).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inherited: bool,
 }
 
 /// How many saved ids' undone flags the fold remembers: the checkpoints a
@@ -612,6 +623,12 @@ impl SessionView {
     }
 
     fn apply_kind(&mut self, k: EventKind, seq: u64) {
+        // A copy of the parent's event (C.2): it costs this chat nothing
+        // and grants nothing; the rest of the fold is the parent's.
+        let inh = self
+            .meta
+            .as_ref()
+            .is_some_and(|m| crate::fork::inherited(crate::fork::through(m), seq));
         // Anything the turn shows next means the wait is over.
         if matches!(
             k,
@@ -842,6 +859,7 @@ impl SessionView {
             EventKind::Checkpoint(c) => {
                 let turn = c.turn_id.clone();
                 let st = self.checkpoints.entry(c.turn_id).or_default();
+                st.inherited |= inh;
                 if !c.excluded.is_empty() {
                     st.excluded.extend(c.excluded);
                     st.excluded.sort();
@@ -911,12 +929,16 @@ impl SessionView {
                     _ => None,
                 };
                 if let Some(u) = &t.usage {
-                    self.settled.add(u);
+                    if !inh {
+                        self.settled.add(u);
+                    }
                     self.context_tokens = u.context_tokens;
                     self.context_window = u.window;
                     self.summary_at = u.summary_at;
                     self.context_model = u.model.clone();
-                } else if let Some(u) = &running {
+                } else if let Some(u) = &running
+                    && !inh
+                {
                     self.settled.add(u);
                 }
                 self.show_usage();
@@ -956,7 +978,9 @@ impl SessionView {
                 self.summary_at = u.summary_at;
                 self.context_model = u.model.clone();
                 self.turn_usage = Some(u.clone());
-                self.live = Some((t.turn_id, u));
+                if !inh {
+                    self.live = Some((t.turn_id, u));
+                }
                 self.show_usage();
             }
             EventKind::Error(e) => self.items.push(Item::Error {
@@ -977,7 +1001,9 @@ impl SessionView {
                 // A person's `/compact`: its cost is the chat's, like a
                 // hand-off note's, and the meter shows the shorter context
                 // until the next turn reports its own (X.20).
-                if let Some(u) = &h.usage {
+                if let Some(u) = &h.usage
+                    && !inh
+                {
                     self.settle(u);
                 }
                 if let Some(n) = h.tokens_after {
@@ -991,7 +1017,9 @@ impl SessionView {
                 })
             }
             EventKind::CompactFailed(c) => {
-                if let Some(u) = &c.usage {
+                if let Some(u) = &c.usage
+                    && !inh
+                {
                     self.settle(u);
                 }
                 self.items.push(Item::Error {
@@ -1061,6 +1089,11 @@ impl SessionView {
                     self.retodo();
                 }
             }
+            EventKind::SessionForked(f) => self.items.push(Item::Forked {
+                parent: f.parent,
+                through_seq: f.through_seq,
+                turn_id: f.turn_id,
+            }),
             EventKind::ConversationRewindUndone(u) => {
                 if let Some(r) = self.rewinds.iter_mut().find(|r| r.seq == u.rewind_seq) {
                     r.undone = true;
@@ -1078,6 +1111,8 @@ impl SessionView {
             // never showed it (X.1).
             EventKind::ContextSent(_) => {}
             EventKind::ThinkingWithheld(_) => {}
+            // Grants are bound to the parent's folder: none is inherited.
+            EventKind::ChatAllowAdded(_) if inh => {}
             EventKind::ChatAllowAdded(g) => {
                 self.chat_allows.insert(
                     g.grant_id,
@@ -1109,7 +1144,9 @@ impl SessionView {
             EventKind::HandoffWritten(h) => {
                 // Its cost is the chat's, like a turn's (only the sums: the
                 // context size stays the last turn's).
-                if let Some(u) = &h.usage {
+                if let Some(u) = &h.usage
+                    && !inh
+                {
                     self.settle(u);
                 }
                 self.items.push(Item::Handoff {
@@ -1131,7 +1168,9 @@ impl SessionView {
                     Some(c) => {
                         // Its cost is the chat's, as a foreground
                         // sub-agent's is its parent turn's.
-                        if let Some(u) = &c.usage {
+                        if let Some(u) = &c.usage
+                            && !inh
+                        {
                             self.settle(u);
                         }
                         (c.result, Some(c.agent_id))
@@ -1314,6 +1353,7 @@ mod tests {
         use crate::policy::ApprovalMode;
         let sid = SessionId::new();
         let created = SessionCreated {
+            forked: None,
             title: "t".into(),
             cwd: "/w".into(),
             model: "m".into(),

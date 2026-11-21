@@ -597,6 +597,7 @@ impl Session {
         });
         Self::record_ends(&s, ends);
         s.append(EventKind::SessionCreated(SessionCreated {
+            forked: None,
             no_callbacks,
             profile,
             agent_id,
@@ -629,12 +630,16 @@ impl Session {
         // The log's latest mode (the fold applies `approval_mode_changed`),
         // clamped again: node.toml may have been tightened since.
         let mode = node.cfg.policy.effective_mode(Some(meta.approval_mode));
+        // A fork's copied checkpoints are its parent's (C.2): the fork's
+        // first turn has no state of its own to go from.
+        let copied = harness_core::fork::through(&meta);
         let last_state = events.iter().rev().find_map(|e| match e.typed() {
             Ok(EventKind::Checkpoint(c))
-                if !matches!(
-                    c.phase,
-                    CheckpointPhase::Before | CheckpointPhase::BeforeRestore
-                ) =>
+                if !harness_core::fork::inherited(copied, e.seq)
+                    && !matches!(
+                        c.phase,
+                        CheckpointPhase::Before | CheckpointPhase::BeforeRestore
+                    ) =>
             {
                 Some(c.git_ref)
             }
@@ -657,7 +662,12 @@ impl Session {
         // (stored scrubbed, and a path's link may lead elsewhere now: review
         // H1, H2). A grant without a valid key covers nothing.
         let mut grants: HashMap<String, harness_tools::CallKey> = HashMap::new();
-        for e in &events {
+        // None of a fork's copied events grants anything: grants are bound
+        // to the parent's folder (C.2).
+        for e in events
+            .iter()
+            .filter(|e| !harness_core::fork::inherited(copied, e.seq))
+        {
             match e.typed() {
                 Ok(EventKind::ChatAllowAdded(g)) => {
                     if let Some(k) = harness_tools::CallKey::from_hex(&g.key) {
@@ -2382,7 +2392,10 @@ impl Session {
                 return Err(e.to_string());
             }
         };
-        if !harness_core::handoff::due(&history) {
+        // What a fork copied is its parent's, which has its own note: due
+        // only for turns of the fork's own (the model still reads it all).
+        let own = harness_core::fork::own(&history, harness_core::fork::through_of(&history));
+        if !harness_core::handoff::due(&own) {
             self.end_note(&cancel);
             return Err(HANDOFF_NOTHING.into());
         }
@@ -3739,6 +3752,15 @@ impl Session {
             .checkpoints
             .get(turn_id)
             .ok_or("this turn has no checkpoint")?;
+        // A fork's copied turns are its parent's: their snapshots belong to
+        // that chat (C.2). The fork's own turns undo as any.
+        if cp.inherited {
+            return Err(
+                "this turn came from the chat this one was forked from; its changes are undone \
+                 there, not here"
+                    .into(),
+            );
+        }
         let incomplete = || "this turn's checkpoint is incomplete".to_string();
         let before = cp.before.clone().ok_or_else(incomplete)?;
         // A restore that failed after saving the folder: its
@@ -6127,6 +6149,10 @@ mod retry;
 /// own file.
 #[path = "session_rewind.rs"]
 mod rewind_op;
+
+/// A person's fork of a chat at a finished turn (C.2); its own file.
+#[path = "session_fork.rs"]
+mod fork_op;
 
 /// The chat's agent switch: refused while it works, recorded at the next
 /// turn; its own file.

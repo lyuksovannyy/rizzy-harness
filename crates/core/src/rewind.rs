@@ -750,6 +750,7 @@ mod tests {
     fn a_sub_agents_chat_is_refused() {
         let mut l = Log::new();
         l.push(EventKind::SessionCreated(SessionCreated {
+            forked: None,
             title: "t".into(),
             cwd: "/w".into(),
             model: "m".into(),

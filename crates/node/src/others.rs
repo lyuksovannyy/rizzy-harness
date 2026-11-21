@@ -309,8 +309,15 @@ pub(crate) async fn foreign_work(
         let their_root = real(&theirs.root);
         // A path of theirs as ours, if it is in this folder.
         let ours = |p: &str| relative(&root, &their_root.join(p));
+        // What a fork copied is its parent's work, at the parent's times
+        // (C.2): not this chat's, whatever the clock says.
         let events = store
-            .call(move |s| s.events_since_turn_at(sid, since - LOOK_BACK_MS, KINDS))
+            .call(move |s| {
+                let through = s.fork_of(sid)?.map_or(0, |f| f.through_seq);
+                let mut events = s.events_since_turn_at(sid, since - LOOK_BACK_MS, KINDS)?;
+                events.retain(|e| !harness_core::fork::inherited(through, e.seq));
+                Ok::<_, harness_store::StoreError>(events)
+            })
             .await;
         let mut mine = BTreeSet::new();
         let mut unlisted = false;

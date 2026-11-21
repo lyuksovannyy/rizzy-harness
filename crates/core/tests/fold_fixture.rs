@@ -76,6 +76,7 @@ fn events() -> Vec<RawEvent> {
     let t = || "t1".to_string();
     let mut kinds = vec![
         EventKind::SessionCreated(SessionCreated {
+ forked: None,
             // The fold keeps the session's mode (N.10a).
             exec_mode: Some(ExecMode::Sandbox),
             no_callbacks: false,

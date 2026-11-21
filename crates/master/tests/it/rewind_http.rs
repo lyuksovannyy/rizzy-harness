@@ -64,6 +64,7 @@ impl Fake {
 
     fn created(&mut self, sid: SessionId, parent: Option<SessionId>) {
         let k = EventKind::SessionCreated(SessionCreated {
+            forked: None,
             exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
             no_callbacks: false,
             title: "t".into(),

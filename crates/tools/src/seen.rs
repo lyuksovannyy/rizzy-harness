@@ -576,7 +576,21 @@ impl SeenStore {
                 latest.insert(PathBuf::from(&f.path), (sha, seq));
             }
         };
-        for e in history {
+        // A fork starts with no file read: what its copied events saw is
+        // what its parent saw, and the files may differ now (C.2).
+        let copied = history
+            .first()
+            .and_then(|e| match e.typed() {
+                Ok(harness_core::EventKind::SessionCreated(c)) => {
+                    Some(harness_core::fork::through(&c))
+                }
+                _ => None,
+            })
+            .unwrap_or(0);
+        for e in history
+            .iter()
+            .filter(|e| !harness_core::fork::inherited(copied, e.seq))
+        {
             if e.kind == "tool_call_finished"
                 && let Some(s) = e.payload.get("seen")
             {
@@ -1077,6 +1091,46 @@ mod tests {
         first.session(sid).record(Path::new("/w/b"), b"y");
         first.sync(sid, &log);
         assert!(first.session(sid).get(Path::new("/w/b")).is_none());
+    }
+
+    /// ADOPTION_PLAN C.2: a fork starts with no file read. What its copied
+    /// events saw is what its parent saw, and the files may differ now; its
+    /// own reads count as any chat's.
+    #[test]
+    fn a_fork_starts_with_an_empty_table_and_its_own_reads_count() {
+        let sid = SessionId::new();
+        let parent = SessionId::new();
+        let creation = RawEvent {
+            session_id: sid,
+            seq: 1,
+            ts_ms: 0,
+            kind: "session_created".into(),
+            payload: serde_json::json!({
+                "title": "t (fork)", "cwd": "/w", "model": "m", "backend": "b",
+                "node_id": "n", "approval_mode": "ask", "profile": "agentic",
+                "forked": {"parent": parent.to_string(), "through_seq": 4},
+            }),
+        };
+        let store = Arc::new(SeenStore::default());
+        let t = store.session(sid);
+        let theirs = t.record(Path::new("/w/theirs"), b"parent's read\n");
+        let own = t.record(Path::new("/w/own"), b"fork's read\n");
+        let log = vec![
+            creation,
+            raw(sid, 2, finished(theirs)),
+            raw(sid, 5, finished(own)),
+        ];
+        store.sync(sid, &log);
+        assert!(
+            store.session(sid).get(Path::new("/w/theirs")).is_none(),
+            "a copied read is not a read here"
+        );
+        assert!(store.session(sid).get(Path::new("/w/own")).is_some());
+        // A chat that is no fork keeps both.
+        let mut plain = log.clone();
+        plain[0].payload.as_object_mut().unwrap().remove("forked");
+        store.sync(sid, &plain);
+        assert!(store.session(sid).get(Path::new("/w/theirs")).is_some());
     }
 
     #[test]

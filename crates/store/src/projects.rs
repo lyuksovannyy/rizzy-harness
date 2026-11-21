@@ -577,6 +577,10 @@ impl Store {
             // log (X.16): kind-filtered, so a long chat's deltas and tool
             // output are never read.
             let log = crate::handoff::handoff_log_in(&conn, id)?;
+            // A fork's copies are its parent's (it has its own entry): the
+            // reply, the summary, the note and the facts are the fork's
+            // own events' only, and a fork with none says nothing yet.
+            let through = crate::session_forks::through(&conn, &sid)?;
             // What a rewind took out is not read (T90): the one rule, from
             // the rewinds the log holds.
             let ranges = harness_core::rewind::rewound(&log);
@@ -611,7 +615,8 @@ impl Store {
                     let mut rows = summary.query(params![sid])?;
                     let mut found = None;
                     while let Some(row) = rows.next()? {
-                        if ranges.holds(row.get::<_, i64>(0)? as u64) {
+                        let seq = row.get::<_, i64>(0)? as u64;
+                        if ranges.holds(seq) || harness_core::fork::inherited(through, seq) {
                             continue;
                         }
                         found = text_of(&row.get::<_, String>(1)?)?
@@ -627,7 +632,8 @@ impl Store {
                     let mut rows = replies.query(params![sid])?;
                     let mut last = None;
                     while let Some(row) = rows.next()? {
-                        if ranges.holds(row.get::<_, i64>(0)? as u64) {
+                        let seq = row.get::<_, i64>(0)? as u64;
+                        if ranges.holds(seq) || harness_core::fork::inherited(through, seq) {
                             continue;
                         }
                         if let Some(t) = text_of(&row.get::<_, String>(1)?)? {

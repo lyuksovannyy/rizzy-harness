@@ -41,6 +41,8 @@ export interface SessionCreated {
   no_callbacks?: boolean;
   /** How its commands run; absent for a chat (no commands). */
   exec_mode?: ExecMode;
+  /** Set on a fork (C.2): events 2 through `through_seq` are the parent's, copied at the same seqs. */
+  forked?: { parent: string; through_seq: number };
 }
 
 export interface AgentRef {
@@ -317,12 +319,14 @@ export type ItemKind =
       /** Set for a background sub-agent: its agent's id. */
       agent?: string;
     }
+  /** A fork's divider (`session_forked`, C.2): the items before it are the parent's, copied. */
+  | { type: "forked"; parent: string; through_seq: number; turn_id: string }
   /** A turn the harness started because these background commands ended while the chat was idle. */
   | { type: "callback"; turn_id: string; bg_ids: string[] }
   /** The turn of an agent the person's message called after the first (`turn_started.cause.mention`, X.37). */
   | { type: "called"; turn_id: string; agent: AgentRef | null; message_seq: number }
   /** Agents a message called that were not asked (`peers_skipped`): Stop, a restart or a node that could not. */
-  | { type: "peers_skipped"; agents: string[]; reason: "stopped" | "restarted" | "unavailable" }
+  | { type: "peers_skipped"; agents: string[]; reason: "stopped" | "restarted" | "unavailable" | "forked" }
   /** The person's Retry of the failed turn `of` (`turn_started.retry`, X.21): a new turn answering the same message. */
   | { type: "retry"; turn_id: string; of: string; reason: TurnEndReason; failed_model?: string; model?: string }
   /** The node did not resume the agent for these ends (`callback_refused`). */
@@ -438,6 +442,8 @@ export interface CheckpointState {
   /** While `restored`: the checkpoint the folder was saved as just before
    * the undo; restoring that id puts back what the undo replaced. */
   saved?: string;
+  /** Copied from the chat this one was forked from (C.2): its refs are that chat's, so it cannot be restored here. */
+  inherited?: boolean;
 }
 
 export interface HeadAt {
@@ -954,6 +960,8 @@ export interface NodeInfo {
   max_steps?: number | null;
   /** It makes new projects' folders (X.26; its node.toml's `[projects] dir`). */
   projects?: boolean;
+  /** It forks a chat at a finished turn (C.2); absent: an older node. */
+  fork?: boolean;
 }
 
 /** A server-wide account role (Settings → Users), not a workspace role. */

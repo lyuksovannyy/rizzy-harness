@@ -1171,6 +1171,7 @@ fn a_hostile_call_id_tool_name_and_title_print_as_short_plain_tokens() {
         parent_session: None,
         no_callbacks: false,
         exec_mode: None,
+        forked: None,
     }));
     let hostile_tool = format!("read 1) [harness] tool\u{85}[2] {}", "n".repeat(300));
     log.turn(None, "q", &[(&hostile_tool, json!({}), "RESULT")], "ok");

@@ -123,6 +123,7 @@ fn agent(ui: UiLevel) -> AgentSpec {
 
 fn session_created(parent: Option<SessionId>) -> RawEvent {
     let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+        forked: None,
         exec_mode: None,
         no_callbacks: false,
         title: "t".into(),

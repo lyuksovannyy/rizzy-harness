@@ -53,6 +53,8 @@ impl Store {
     /// ascending: only the first `user_message` (the person's first words;
     /// later ones, attachments and all, are never read) and the ones a
     /// rewind went back to (the rule that counts a rewind needs them).
+    /// A fork's log is its own events only (`harness_core::fork::own`): what
+    /// it copied is its parent's, which has its own note.
     pub fn handoff_log(&self, sid: SessionId) -> Result<Vec<RawEvent>> {
         handoff_log_in(&self.lock(), sid)
     }
@@ -60,6 +62,10 @@ impl Store {
 
 /// [`Store::handoff_log`] on a connection already held.
 pub(crate) fn handoff_log_in(conn: &rusqlite::Connection, sid: SessionId) -> Result<Vec<RawEvent>> {
+    // How much of the chat is a copy (0: none). The query below only needs
+    // the number, to find the first message of the chat's OWN; which events
+    // are copies is `harness_core::fork::own`'s to say.
+    let through = crate::session_forks::through(conn, &sid.to_string())?;
     {
         let mut stmt = conn.prepare_cached(
             "SELECT seq, ts_ms, kind, payload FROM events WHERE session_id = ?1
@@ -67,7 +73,8 @@ pub(crate) fn handoff_log_in(conn: &rusqlite::Connection, sid: SessionId) -> Res
                              'handoff_written', 'conversation_rewound',
                              'conversation_rewind_undone')
                     OR seq = (SELECT MIN(seq) FROM events
-                              WHERE session_id = ?1 AND kind = 'user_message')
+                              WHERE session_id = ?1 AND kind = 'user_message'
+                                AND seq > ?2)
                     -- The message a rewind went back to: `rewind::rewound`
                     -- counts a rewind only when it finds that message.
                     OR (kind = 'user_message' AND seq IN (
@@ -75,7 +82,7 @@ pub(crate) fn handoff_log_in(conn: &rusqlite::Connection, sid: SessionId) -> Res
                           WHERE session_id = ?1 AND kind = 'conversation_rewound')))
              ORDER BY seq",
         )?;
-        let rows = stmt.query_map(params![sid.to_string()], |r| {
+        let rows = stmt.query_map(params![sid.to_string(), through as i64], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, i64>(1)?,
@@ -94,6 +101,6 @@ pub(crate) fn handoff_log_in(conn: &rusqlite::Connection, sid: SessionId) -> Res
                 payload: serde_json::from_str(&payload)?,
             });
         }
-        Ok(out)
+        Ok(harness_core::fork::own(&out, through).into_owned())
     }
 }

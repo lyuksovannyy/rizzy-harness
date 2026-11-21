@@ -109,6 +109,7 @@ pub enum EventKind {
     PeersSkipped(PeersSkipped),
     ConversationRewound(ConversationRewound),
     ConversationRewindUndone(ConversationRewindUndone),
+    SessionForked(SessionForked),
 }
 
 impl EventKind {
@@ -172,6 +173,7 @@ impl EventKind {
             EventKind::PeersSkipped(_) => "peers_skipped",
             EventKind::ConversationRewound(_) => "conversation_rewound",
             EventKind::ConversationRewindUndone(_) => "conversation_rewind_undone",
+            EventKind::SessionForked(_) => "session_forked",
         }
     }
 }
@@ -244,6 +246,10 @@ pub enum BackgroundReason {
     NodeStopping,
     /// Found started and not ended when the node started again.
     NodeRestarted,
+    /// Copied into a fork while it still ran in the chat the fork was made
+    /// from (`session_forked`, ADOPTION_PLAN C.2): it belongs to that chat,
+    /// never runs here and never calls back.
+    Forked,
     /// A background sub-agent's turn ended by itself: it finished, failed
     /// or hit its own step or token cap (X.24). Never a command's.
     Finished,
@@ -261,6 +267,7 @@ impl BackgroundReason {
             Self::SessionDeleted => "was stopped because the chat was deleted",
             Self::NodeStopping => "was stopped because the node stopped",
             Self::NodeRestarted => "ended with the node (it restarted)",
+            Self::Forked => "belongs to the chat this one was forked from",
             Self::Finished => "finished",
         }
     }
@@ -338,6 +345,20 @@ impl BackgroundEnded {
     /// `None` for an end the agent ordered itself: its `bash_stop` result
     /// was the end.
     pub fn model_note(&self) -> Option<String> {
+        // A fork closes what ran in its parent at the cut (C.2): the note
+        // says whose it is, for a command and a sub-agent alike (a
+        // sub-agent's session is the parent's, not to be continued here).
+        if self.reason == BackgroundReason::Forked {
+            let what = match &self.child {
+                Some(c) => format!("Background sub-agent {} (@{})", self.bg_id, c.agent_id),
+                None => format!("Background command {}", self.bg_id),
+            };
+            return Some(format!(
+                "{NOTE_LEAD} {what} was still running in the chat this one was forked from when \
+                 it was forked. It belongs to that chat: it is not running here, and nothing it \
+                 prints or reports reaches this chat."
+            ));
+        }
         if let Some(c) = &self.child {
             return Some(self.child_note(c));
         }
@@ -515,6 +536,31 @@ pub struct SessionCreated {
     /// runs nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_mode: Option<crate::policy::ExecMode>,
+    /// Set when this chat is a fork: its first `through_seq` events are
+    /// copies of that chat's, at the same seqs ([`crate::fork`] is the one
+    /// rule). Not `parent_session`, which means "sub-agent of".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked: Option<ForkedFrom>,
+}
+
+/// Where a fork's copied events come from (`session_created.forked`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkedFrom {
+    pub parent: crate::SessionId,
+    /// The seq, in the parent and in this chat, of the `turn_ended` the
+    /// copy stops at: events `2..=through_seq` are the parent's.
+    pub through_seq: u64,
+}
+
+/// The divider of a fork (`session_forked`, right after the copied events):
+/// "forked from the parent here". Written by the node only, for the chat's
+/// owner (`session.fork`); the anchor of what the node closed at the cut.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionForked {
+    pub parent: crate::SessionId,
+    pub through_seq: u64,
+    /// The turn the copy ends with.
+    pub turn_id: String,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -795,7 +841,8 @@ pub fn callback_opening(bg_ids: &[String]) -> String {
 /// docs/background-commands.md §4.4): each end that may call back
 /// ([`BackgroundEnded::calls_back`]) with, after it, no person's turn (a
 /// `turn_started` without a cause), no `callback_refused` and no callback
-/// turn whose cause names it. In log order, as (seq, ts_ms, end). The
+/// turn whose cause names it, and no fork's divider (`session_forked`). In
+/// log order, as (seq, ts_ms, end). The
 /// master's watcher and the node's check both read the log through this,
 /// so they agree on what a turn covered: a callback turn covers exactly
 /// the ends it names, which matters only when more waited than one
@@ -806,6 +853,10 @@ pub fn waiting_ends(log: &[RawEvent]) -> Vec<(u64, i64, BackgroundEnded)> {
         match e.typed() {
             Ok(EventKind::TurnStarted(TurnStarted { cause: None, .. }))
             | Ok(EventKind::CallbackRefused(_)) => waiting.clear(),
+            // A fork's divider (C.2): what waited in its parent at the cut is
+            // the parent's. The person who forked is here, as for a turn of
+            // their own; the ends before it are never the fork's to resume.
+            Ok(EventKind::SessionForked(_)) => waiting.clear(),
             // A mention turn is a person's turn here: the person is present
             // and it reads the notes standing before it.
             Ok(EventKind::TurnStarted(TurnStarted {
@@ -861,6 +912,10 @@ pub enum PeersSkipReason {
     /// The node could not start the next turn (its log, its limits, a
     /// stopping node).
     Unavailable,
+    /// The chat is a fork (C.2) cut inside the list: the agents had not
+    /// had their turn at the cut. Said by the fork itself, right after its
+    /// divider.
+    Forked,
 }
 
 /// The person took the conversation back to an earlier message of theirs
@@ -2555,6 +2610,7 @@ mod tests {
         };
         let kinds = vec![
             EventKind::SessionCreated(SessionCreated {
+                forked: None,
                 exec_mode: None,
                 no_callbacks: false,
                 title: "t".into(),

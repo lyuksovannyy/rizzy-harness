@@ -8,6 +8,7 @@ pub mod board;
 pub mod connectors;
 pub mod event;
 pub mod folder;
+pub mod fork;
 pub mod handoff;
 pub mod history;
 pub mod identity;

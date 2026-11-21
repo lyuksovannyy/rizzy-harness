@@ -23,6 +23,7 @@ pub mod profile_images;
 pub mod project_clones;
 mod projects;
 pub mod routines;
+pub mod session_forks;
 pub mod session_images;
 pub mod stored_skills;
 pub mod usage;
@@ -517,7 +518,7 @@ CREATE INDEX IF NOT EXISTS session_workspaces_ws ON session_workspaces(workspace
 /// last one leaves, as recorded (`schema/<n>.sql`, n = `MIGRATIONS.len()`).
 pub const DB_SCHEMA: migrate::Schema<'static> = migrate::Schema {
     steps: MIGRATIONS,
-    recorded: include_str!("../schema/2.sql"),
+    recorded: include_str!("../schema/3.sql"),
 };
 
 /// The schema of `master.db`, `chat.db` and `node.db`, one entry per version.
@@ -543,6 +544,8 @@ pub const MIGRATIONS: &[migrate::Migration] = &[
     ],
     // 2: projects being cloned (X.27 step 3).
     &[project_clones::SCHEMA],
+    // 3: the lineage of forked chats (ADOPTION_PLAN C.2).
+    &[session_forks::SCHEMA],
 ];
 
 /// A session's effective workspace: its `session_workspaces` row while the
@@ -819,6 +822,25 @@ impl Store {
     pub fn append(&self, owner: &str, e: &RawEvent) -> Result<AppendOutcome> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
+        let out = Self::append_in(&tx, owner, e)?;
+        // An event taken, and a first divergence (which records itself),
+        // are committed; every other outcome changed nothing.
+        if matches!(
+            out,
+            AppendOutcome::Applied | AppendOutcome::Diverged { first: true, .. }
+        ) {
+            tx.commit()?;
+        }
+        Ok(out)
+    }
+
+    /// [`Self::append`] inside the caller's transaction, which the caller
+    /// commits: a fork's events are written as one (`write_fork`).
+    pub(crate) fn append_in(
+        tx: &rusqlite::Transaction<'_>,
+        owner: &str,
+        e: &RawEvent,
+    ) -> Result<AppendOutcome> {
         let sid = e.session_id.to_string();
         // Checked here, in the transaction that would store the frame, so
         // frames queued before a revoke are refused too. Only the mirror has
@@ -882,14 +904,13 @@ impl Store {
         if e.seq <= head {
             // Only a resend reaches this (the owning node's own appends are
             // always head + 1), so the extra read is off the hot path.
-            if same_as_stored(&tx, &sid, e)? {
+            if same_as_stored(tx, &sid, e)? {
                 return Ok(AppendOutcome::Duplicate);
             }
             tx.execute(
                 "UPDATE sessions SET diverged_seq = ?2 WHERE session_id = ?1",
                 params![sid, e.seq as i64],
             )?;
-            tx.commit()?;
             return Ok(AppendOutcome::Diverged {
                 seq: e.seq,
                 first: true,
@@ -912,16 +933,30 @@ impl Store {
                 params![sid, owner, e.ts_ms],
             )?;
         }
-        // A hand-off note (X.16) is bookkeeping written once the chat has
-        // been idle: it does not make the chat "last active" (the list's
-        // order, the earlier chats' dates), so the chat does not jump to
-        // the top of the list ten minutes after the person left it.
-        tx.execute(
-            "UPDATE sessions SET head_seq = ?2,
-                 updated_ms = CASE WHEN ?4 = 'handoff_written' THEN updated_ms ELSE ?3 END
-             WHERE session_id = ?1",
-            params![sid, e.seq as i64, e.ts_ms, e.kind],
-        )?;
+        // A copy of a fork's parent's event (C.2) is replicated and nothing
+        // more: the row's state (running, asks, attention, "finished", the
+        // time it was last active) is the parent's story, not the new
+        // chat's, and the divider sets it once, idle. The first event is
+        // never a copy.
+        let copy =
+            e.seq >= 2 && harness_core::fork::inherited(session_forks::through(tx, &sid)?, e.seq);
+        if copy {
+            tx.execute(
+                "UPDATE sessions SET head_seq = ?2 WHERE session_id = ?1",
+                params![sid, e.seq as i64],
+            )?;
+        } else {
+            // A hand-off note (X.16) is bookkeeping written once the chat has
+            // been idle: it does not make the chat "last active" (the list's
+            // order, the earlier chats' dates), so the chat does not jump to
+            // the top of the list ten minutes after the person left it.
+            tx.execute(
+                "UPDATE sessions SET head_seq = ?2,
+                     updated_ms = CASE WHEN ?4 = 'handoff_written' THEN updated_ms ELSE ?3 END
+                 WHERE session_id = ?1",
+                params![sid, e.seq as i64, e.ts_ms, e.kind],
+            )?;
+        }
         match e.kind.as_str() {
             "session_created" => {
                 let s = |k: &str| {
@@ -960,6 +995,8 @@ impl Store {
                     "UPDATE sessions SET title = ?2, cwd = ?3, model = ?4, agent_id = ?5, profile = ?6, incognito = ?7, parent_id = ?8, exec_mode = ?9 WHERE session_id = ?1",
                     params![sid, title, s("cwd"), s("model"), opt("agent_id"), opt("profile"), is_incognito(&e.payload), parent, opt("exec_mode")],
                 )?;
+                // A fork's lineage appears with the fork (C.2).
+                session_forks::on_created(tx, &sid, e)?;
                 // A sub-agent's session belongs to whoever owns its parent,
                 // so the two have the same owner by construction; only into
                 // an empty owner: no event changes one once set.
@@ -991,7 +1028,7 @@ impl Store {
                     params![sid, agent],
                 )?;
             }
-            "turn_started" => {
+            "turn_started" if !copy => {
                 // Only a callback turn is "nobody's": the turn of an agent a
                 // person's message called (`cause.mention`, X.37) finishes
                 // for the person like any other.
@@ -1005,7 +1042,7 @@ impl Store {
                     params![sid, callback],
                 )?;
             }
-            "turn_ended" => {
+            "turn_ended" if !copy => {
                 let reason = e.payload.get("reason").and_then(|v| v.as_str());
                 // A turn that used its step budget ends with its account,
                 // which may ask the person (`limit`, as `completed`).
@@ -1024,7 +1061,7 @@ impl Store {
                     params![sid, completed, e.seq as i64, tells],
                 )?;
             }
-            "assistant_message" => {
+            "assistant_message" if !copy => {
                 let text = e
                     .payload
                     .get("text")
@@ -1038,16 +1075,28 @@ impl Store {
                     )?;
                 }
             }
-            "approval_requested" => {
+            "approval_requested" if !copy => {
                 tx.execute(
                     "UPDATE sessions SET pending_approvals = pending_approvals + 1, attention_seq = ?2 WHERE session_id = ?1",
                     params![sid, e.seq as i64],
                 )?;
             }
-            "approval_resolved" => {
+            "approval_resolved" if !copy => {
                 tx.execute(
                     "UPDATE sessions SET pending_approvals = MAX(0, pending_approvals - 1) WHERE session_id = ?1",
                     params![sid],
+                )?;
+            }
+            // A fork starts idle (C.2): the copied events left the state
+            // columns alone (an approval nobody answered, a question the
+            // parent asked, "finished, unread" are the parent's to show),
+            // and the row is set here, once, as of the moment it was made.
+            "session_forked" => {
+                tx.execute(
+                    "UPDATE sessions SET running = 0, pending_approvals = 0, asks_user = 0,
+                         finished_seq = 0, turn_callback = 0, attention_seq = 0, last_asks = 0,
+                         updated_ms = ?2 WHERE session_id = ?1",
+                    params![sid, e.ts_ms],
                 )?;
             }
             _ => {}
@@ -1059,18 +1108,18 @@ impl Store {
             // The chat's index follows what its log shows now: this one
             // chat, in this transaction.
             tx.execute("DELETE FROM chat_fts WHERE session_id = ?1", params![sid])?;
-            Self::index_chat(&tx, &sid)?;
+            Self::index_chat(tx, &sid)?;
         } else if let Some((col, text)) = index_text(&e.kind, &e.payload) {
             let incognito: bool = tx.query_row(
                 "SELECT incognito FROM sessions WHERE session_id = ?1",
                 params![sid],
                 |r| r.get::<_, i64>(0).map(|v| v != 0),
             )?;
-            if !incognito {
-                Self::index_row(&tx, &sid, col, &text)?;
+            // What a fork copied is in the index already, under the parent.
+            if !incognito && !copy {
+                Self::index_row(tx, &sid, col, &text)?;
             }
         }
-        tx.commit()?;
         Ok(AppendOutcome::Applied)
     }
 
@@ -1206,7 +1255,12 @@ impl Store {
             Self::index_row(conn, sid, col, &text)?;
         }
         let ranges = harness_core::rewind::rewound(&rows);
-        for e in rows.iter().filter(|e| !ranges.holds(e.seq)) {
+        // What a fork copied is the parent's to find (C.2).
+        let through = session_forks::through(conn, sid)?;
+        for e in rows
+            .iter()
+            .filter(|e| !ranges.holds(e.seq) && !harness_core::fork::inherited(through, e.seq))
+        {
             if let Some((col, text)) = index_text(&e.kind, &e.payload) {
                 Self::index_row(conn, sid, col, &text)?;
             }
@@ -1428,6 +1482,7 @@ impl Store {
         routines::on_session_deleted(&tx, &id)?;
         media::on_session_deleted(&tx, &id)?;
         session_images::on_session_deleted(&tx, &id)?;
+        session_forks::on_session_deleted(&tx, &id)?;
         custom_connectors::on_session_deleted(&tx, &id)?;
         tx.commit()?;
         Ok(n > 0)
@@ -1925,7 +1980,9 @@ impl Store {
     }
 
     /// The events of `sid` after its last person's turn (a `turn_started`
-    /// without a `cause`) and its last `callback_refused`, of the kinds in
+    /// without a `cause`), its last `callback_refused` and its fork's
+    /// divider (`session_forked`: what waited in the parent is not the
+    /// fork's), of the kinds in
     /// `kinds` (T.8d step 3: what a callback turn could still take; a
     /// callback turn covers only the ends it names, so the reader folds
     /// those turns with `harness_core::event::waiting_ends`). One range
@@ -1941,7 +1998,7 @@ impl Store {
             conn.query_row(
                 "SELECT COALESCE(MAX(seq), 0) FROM events
                  WHERE session_id = ?1
-                   AND (kind = 'callback_refused'
+                   AND (kind IN ('callback_refused', 'session_forked')
                         OR (kind = 'turn_started'
                             AND CASE WHEN json_valid(payload)
                                 THEN json_type(payload, '$.cause') IS NULL

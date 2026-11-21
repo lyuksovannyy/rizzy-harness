@@ -309,6 +309,35 @@ attach them again. The routes are `POST /api/sessions/{id}/rewind` with
 `{message_seq, files, force}`, and `.../rewind/{seq}/undo`. Design:
 `docs/rewind.md`.
 
+**Fork a chat.** On the end line of a finished turn, **Fork from here** (shown
+when you hover the end line or tab to it, always on touch) starts a new chat
+that begins with this conversation up to there, every message, answer, tool
+call and result as it was, and goes its own way; this chat stays as it is,
+whatever it is doing. The new chat is yours alone (nobody else can fork your
+chat, admins included, and the agent cannot), on the same node and in the same
+workspace and project, titled like the chat with "(fork)" after it. It keeps
+the approval mode this chat had at that turn (the node's ceiling still
+applies), starts with no "allow for this chat" grants, asks before it edits a
+file the agent has not read again, and its cost counts only from its own first
+turn. **Both chats work in the same folder** (the page says so under the
+title): what one changes is in the other's files, and Undo in one chat refuses
+over the other's work as it does between any two chats. The turns it copied
+show their changed files "before the fork" and cannot be undone or shown there;
+undo them in the chat they came from. Rewinding the fork to a message it copied
+works for the conversation, but "Rewind files" there is refused, for the same
+reason. A command still running in the original at the cut stays the
+original's: the fork is told so; so is a cut inside a message that called
+several agents (the ones not yet asked are named, not asked later). Not forked:
+a sub-agent's chat, a routine's own run, a turn that is still running, a turn a
+rewind took out. A fork of an incognito chat is incognito too: not indexed, not
+found by search or recall, not in a project's earlier chats. In a project, the
+fork is listed under earlier chats and given a hand-off note only for what it
+did itself, once it has done something; what it copied is the original's. A
+fork of a fork works; deleting the original leaves the fork as it is, with its
+divider saying the original is gone. A copy of the original's memory, files it
+published or sub-agent chats is not made. Files in a checkout of their own come
+with the next change. Design: `docs/fork.md`.
+
 When a turn completes or fails in a chat you are not looking at (another chat
 is open, or the tab is hidden), the chat gets a dot in the sidebar until you
 open it, and with **Desktop notifications** on (Settings → Account →

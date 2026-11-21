@@ -19,6 +19,7 @@ mod favicon;
 pub mod files;
 pub mod forge;
 pub mod forge_repos;
+mod forks;
 mod handoff;
 mod http;
 pub mod levels;
@@ -73,6 +74,9 @@ pub use http::{router, router_with};
 pub use resolver::Resolver;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+/// A fork waits this many times longer for its ack: the node sends the whole
+/// copy of the chat before it.
+const FORK_ACK_FACTOR: u32 = 4;
 
 /// How many sub-agent chats of one depth a delete asks their node about at
 /// once.
@@ -208,6 +212,9 @@ pub struct NodeInfo {
     /// UI offers; the node refuses whatever this says when its node.toml
     /// does not allow it.
     pub projects: bool,
+    /// Whether it forks a chat at a finished turn (`fork`, C.2): what the
+    /// UI offers; the master and the node refuse whatever this says.
+    pub fork: bool,
 }
 
 /// The approval modes in a hello's capabilities (T50): its ceiling and its
@@ -692,6 +699,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::ArtifactStage { session_id, .. } => Some(*session_id),
         MasterToNode::Welcome { .. }
         | MasterToNode::Create { .. }
+        // The new chat does not exist yet: nothing is written to the parent.
+        | MasterToNode::Fork { .. }
         | MasterToNode::Cancel { .. }
         | MasterToNode::StopBackground { .. }
         // Removing a grant takes power away, like a denial.
@@ -1360,6 +1369,7 @@ impl Master {
                     default_approval: None,
                     max_steps: None,
                     projects: false,
+                    fork: false,
                 },
                 tx: None,
                 resuming: HashSet::new(),
@@ -1382,6 +1392,7 @@ impl Master {
             entry.info.projects = capabilities
                 .iter()
                 .any(|c| c == harness_protocol::CAP_PROJECTS);
+            entry.info.fork = capabilities.iter().any(|c| c == harness_protocol::CAP_FORK);
             entry.capabilities = capabilities;
             entry.tx = Some(link.to_node.clone());
             entry.resuming.clear();
@@ -1715,12 +1726,39 @@ impl Master {
     /// The replication rule (PLAN.md §3). True when the event is in the
     /// mirror now (taken, or already there).
     async fn apply(&self, node_id: &str, e: RawEvent) -> bool {
+        // How much of this chat is its parent's copies (C.2, forks.rs),
+        // asked BEFORE the event is taken: a read that fails stops the event
+        // here (it is not in the mirror, so the node sends it again) and is
+        // never taken for "not a fork" (which would run the copies' side
+        // effects). The first event is nobody's copy and says what the chat
+        // is: what was known of the id is dropped.
+        let through = if e.seq < 2 {
+            forks::forget(e.session_id);
+            0
+        } else {
+            match forks::through(self, e.session_id).await {
+                Ok(t) => t,
+                Err(err) => {
+                    tracing::warn!(node = %node_id, session = %e.session_id, error = %err, "could not read a chat's lineage; the event is not taken");
+                    return false;
+                }
+            }
+        };
         let owner = node_id.to_string();
         let ev = e.clone();
         let res = self.inner.mirror.call(move |s| s.append(&owner, &ev)).await;
         let landed = matches!(res, Ok(AppendOutcome::Applied | AppendOutcome::Duplicate));
         match res {
             Ok(AppendOutcome::Applied) => {
+                // A copy of its parent's event in a fork (C.2): mirrored and
+                // shown, and nothing it did the first time happens again
+                // (forks.rs). One branch, before every side effect below:
+                // one added later is skipped for a copy without anyone
+                // remembering to.
+                if harness_core::fork::inherited(through, e.seq) {
+                    let _ = self.inner.live.send(Live::Event(e));
+                    return landed;
+                }
                 let structural = matches!(
                     e.kind.as_str(),
                     "session_created"
@@ -1804,26 +1842,39 @@ impl Master {
             .call(move |s| {
                 let key = create_intent_key(sid);
                 let Some(v) = s.kv_get(&key)? else {
-                    return Ok(false);
+                    return Ok(None);
                 };
                 if intent_expired(&v, harness_core::now_ms()) {
                     s.kv_delete(&key)?;
-                    return Ok(false);
+                    return Ok(None);
                 }
                 let v: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
                 if v["node"].as_str() != Some(node.as_str()) {
-                    return Ok(false);
+                    return Ok(None);
                 }
                 s.claim_session(sid, v["owner"].as_str(), v["workspace"].as_str())?;
+                // What the create does after its ack: the model follows the
+                // defaults, and the chat joins its project (only where it
+                // landed: the link is refused otherwise).
+                if v["auto"].as_bool() == Some(true) {
+                    s.kv_set(&auto_model_key(sid), "1")?;
+                }
+                let linked = match v["project"].as_str() {
+                    Some(p) => s.link_new_session(sid, p)?,
+                    None => false,
+                };
                 s.kv_delete(&key)?;
-                Ok::<_, harness_store::StoreError>(true)
+                Ok::<_, harness_store::StoreError>(Some(linked))
             })
             .await;
         match res {
-            Ok(true) => {
-                tracing::info!(node = %node_id, session = %sid, "a chat that arrived after its create was claimed for whoever asked for it")
+            Ok(Some(linked)) => {
+                tracing::info!(node = %node_id, session = %sid, "a chat that arrived after its create was claimed for whoever asked for it");
+                if linked {
+                    self.nudge(Live::ProjectsChanged(Audience::Chat(sid)));
+                }
             }
-            Ok(false) => {}
+            Ok(None) => {}
             Err(e) => {
                 tracing::warn!(node = %node_id, session = %sid, error = %e, "could not claim a late chat")
             }
@@ -1965,6 +2016,7 @@ impl Master {
             master: self,
             send: note.and_then(|n| self.inner.connectors.calls.note_send(&msg, n)),
         };
+        let slow = matches!(msg, MasterToNode::Fork { .. });
         let sent = {
             let nodes = lock(&self.inner.nodes);
             // A revoked node gets nothing: no prompt, context or image
@@ -1987,7 +2039,11 @@ impl Master {
             Some(Err(true)) => return Err(CommandError::Timeout),
             Some(Err(false)) | None => return Err(CommandError::NodeOffline(node_id.into())),
         }
-        let ack_timeout = *lock(&self.inner.ack_timeout);
+        let mut ack_timeout = *lock(&self.inner.ack_timeout);
+        // A fork's ack follows every event of the copy on the ordered link.
+        if slow {
+            ack_timeout *= FORK_ACK_FACTOR;
+        }
         let acked = tokio::time::timeout(ack_timeout, rx).await;
         if matches!(acked, Ok(Ok(Ok(())))) {
             noted.send = None;
@@ -2121,9 +2177,12 @@ impl Master {
         // for them when it lands, instead of staying a chat nobody owns
         // (Gate 3 review P-6).
         let now = harness_core::now_ms();
+        // The project and the follow-the-defaults mark go with it: a chat
+        // that lands late gets them as one whose ack came in time does.
         let intent = (owner.is_some() || workspace.is_some()).then(|| {
-            serde_json::json!({"node": node_id, "owner": owner, "workspace": workspace, "at": now})
-                .to_string()
+            serde_json::json!({"node": node_id, "owner": owner, "workspace": workspace,
+                "at": now, "project": project, "auto": chosen.is_none()})
+            .to_string()
         });
         let key = create_intent_key(sid);
         let v = intent.clone();
@@ -3231,6 +3290,7 @@ impl Master {
         self.inner.board.forget(sid);
         self.inner.stored_skills.forget(sid);
         self.inner.connectors.calls.forget(sid);
+        forks::forget(sid);
         let res = self
             .inner
             .mirror

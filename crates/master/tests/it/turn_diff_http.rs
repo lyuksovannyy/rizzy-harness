@@ -125,55 +125,56 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                msg = commands.recv() => {
-                    let Some(msg) = msg else { return };
-                    keep.lock().unwrap().push(msg.clone());
-                    match &msg {
-                        MasterToNode::Create { session_id, exec_mode, .. } => {
-                            let (kind, payload) = EventKind::SessionCreated(SessionCreated {
-                                exec_mode: *exec_mode,
-                                no_callbacks: false,
-                                title: "t".into(),
-                                cwd: "/w".into(),
-                                model: "demo::mock".into(),
-                                backend: "native".into(),
-                                node_id: node.clone(),
-                                approval_mode: ApprovalMode::Ask,
-                                profile: Profile::Agentic,
-                                agent_id: None,
-                                incognito: false,
-                                parent_session: None,
-                            })
-                            .into_parts();
-                            let _ = tx.try_send(NodeToMaster::Event {
-                                event: RawEvent {
-                                    session_id: *session_id,
-                                    seq: 1,
-                                    ts_ms: harness_core::now_ms(),
-                                    kind,
-                                    payload,
-                                },
-                            });
-                        }
-                        // Held: the test answers it (or not) itself.
-                        MasterToNode::Diff { turn_id, .. } if turn_id == "hold" => {}
-                        MasterToNode::Diff { req_id, turn_id, .. } => {
-                            let pruned = turn_id == "pruned";
-                            let _ = tx.try_send(NodeToMaster::DiffResult {
-                                req_id: req_id.clone(),
-                                diff: (!pruned).then(|| Box::new(sample())),
-                                error: pruned.then(|| PRUNED.into()),
-                            });
-                        }
-                        _ => {}
-                    }
-                    if let Some(req_id) = msg.req_id() {
-                        let _ = tx.try_send(NodeToMaster::Ack { req_id: req_id.into(), ok: true, error: None });
-                    }
-                }
-                m = said.recv() => if let Some(m) = m { let _ = tx.try_send(m); },
-                _ = left.recv() => return,
-            }
+                           msg = commands.recv() => {
+                               let Some(msg) = msg else { return };
+                               keep.lock().unwrap().push(msg.clone());
+                               match &msg {
+                                   MasterToNode::Create { session_id, exec_mode, .. } => {
+                                       let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+            forked: None,
+                                           exec_mode: *exec_mode,
+                                           no_callbacks: false,
+                                           title: "t".into(),
+                                           cwd: "/w".into(),
+                                           model: "demo::mock".into(),
+                                           backend: "native".into(),
+                                           node_id: node.clone(),
+                                           approval_mode: ApprovalMode::Ask,
+                                           profile: Profile::Agentic,
+                                           agent_id: None,
+                                           incognito: false,
+                                           parent_session: None,
+                                       })
+                                       .into_parts();
+                                       let _ = tx.try_send(NodeToMaster::Event {
+                                           event: RawEvent {
+                                               session_id: *session_id,
+                                               seq: 1,
+                                               ts_ms: harness_core::now_ms(),
+                                               kind,
+                                               payload,
+                                           },
+                                       });
+                                   }
+                                   // Held: the test answers it (or not) itself.
+                                   MasterToNode::Diff { turn_id, .. } if turn_id == "hold" => {}
+                                   MasterToNode::Diff { req_id, turn_id, .. } => {
+                                       let pruned = turn_id == "pruned";
+                                       let _ = tx.try_send(NodeToMaster::DiffResult {
+                                           req_id: req_id.clone(),
+                                           diff: (!pruned).then(|| Box::new(sample())),
+                                           error: pruned.then(|| PRUNED.into()),
+                                       });
+                                   }
+                                   _ => {}
+                               }
+                               if let Some(req_id) = msg.req_id() {
+                                   let _ = tx.try_send(NodeToMaster::Ack { req_id: req_id.into(), ok: true, error: None });
+                               }
+                           }
+                           m = said.recv() => if let Some(m) = m { let _ = tx.try_send(m); },
+                           _ = left.recv() => return,
+                       }
         }
     });
     (NodeLink { to_node, from_node }, Fake { seen, leave, say })

@@ -11,6 +11,16 @@ The child starts at `ask`, no grants, no allowance, zero counters. `session_fork
 Same-node forks may seed files from the cut's checkpoint.
 Explicit head only if B.6 says so. `05` §6.2; `06` §6 items 1, 2, 8.
 
+## What was built (part 1, X.48)
+
+The same-node fork, built differently from the note's lossy seed: the child's log is the parent's events `2..=T` copied whole at the same `seq` (not `history_imported` batches), so every `seq` inside a payload stays right, the model's history for the fork is the parent's byte for byte, and no second code path reads it.
+The first event is the parent's `session_created` with `forked {parent, through_seq}`; `session_forked {parent, through_seq, turn_id}` is the divider; the note's `root`, `parent_node_id`, `cut` and `lossy` are not needed (same node, whole copy).
+A turn that is not finished is not a cut (it is refused, never closed); background commands at the cut are closed by `background_ended` with reason `forked`.
+The child starts with no grants, and the approval mode is the parent's at the cut clamped by the node; usage starts at zero (a copy is skipped by the folds and the store).
+`session_forks (session_id, parent_id, through_seq, created_ms)` is migration 3, with no hash column and no foreign key; deleting a parent deletes no fork.
+Files are not seeded: both chats share the folder until part 2.
+A cross-node fork stays with N.5 and the note's lossy seed.
+
 ## Tests it commits to
 
 Lineage first; no unmirrored tail; non-owner gets 404; the child asks for what the parent had allowed; no fork during a running turn.

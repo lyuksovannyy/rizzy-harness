@@ -56,6 +56,8 @@ import { ExecBadge } from "./ExecBadge";
 import { compactTokens, ContextMeter } from "./ContextMeter";
 import { CostMeter } from "./CostMeter";
 import { RetryNote } from "./RetryNote";
+import { ForkChat, ForkDivider, ForkNote, InheritedChanges } from "./ForkChat";
+import { canFork } from "../lib/fork";
 import { RewindMessage } from "./RewindMessage";
 import { RewoundBlock } from "./RewoundBlock";
 import { TurnStatus, turnState } from "./TurnStatus";
@@ -736,6 +738,7 @@ export default function Conversation(props: {
           <SaveAsArtifact autoFocus />
         </div>
       )}
+      {agentic && meta?.forked && <ForkNote parent={meta.forked.parent} />}
       {routine?.untrusted && (
         <div className="incognito-banner untrusted-banner" role="note">
           <span>Contains data from an external event, so memory and web tools stay off in this chat.</span>
@@ -983,6 +986,8 @@ export default function Conversation(props: {
                         {it.tail && <pre>{showHidden(it.tail)}</pre>}
                       </details>
                     );
+                  case "forked":
+                    return <ForkDivider key={i} parent={it.parent} />;
                   case "agent_changed":
                     return (
                       <div key={i} className="divider">
@@ -1069,7 +1074,11 @@ export default function Conversation(props: {
                     const gone = it.rewound !== undefined;
                     // A turn that changed no files has no Undo block, restored or not.
                     const undo =
-                      !gone && cp && cp.after && cp.files.length > 0 ? (
+                      // A turn copied from the chat this one was forked from: its
+                      // files are named, with nothing to undo here.
+                      !gone && cp && cp.after && cp.inherited && cp.files.length > 0 ? (
+                        <InheritedChanges key={`u${i}`} files={cp.files} />
+                      ) : !gone && cp && cp.after && !cp.inherited && cp.files.length > 0 ? (
                         <Undo
                           key={`u${i}`}
                           sessionId={sessionId}
@@ -1101,15 +1110,30 @@ export default function Conversation(props: {
                       !meta?.parent_session &&
                       !(routine && items.findIndex((x) => x.type === "turn_end") === i) &&
                       canRetry(items, i);
+                    const fork = canFork(view, i, {
+                      row: props.row,
+                      node,
+                      blocked: blocked ?? null,
+                      routine: !!routine,
+                      subAgent: !!props.row?.parent_id || !!meta?.parent_session,
+                    }) ? (
+                      <ForkChat sessionId={sessionId} turnId={it.turn_id} />
+                    ) : null;
                     return it.reason === "completed" ? (
-                      undo
+                      undo || fork ? (
+                        <div key={i} className="turn-end">
+                          {undo}
+                          {fork}
+                        </div>
+                      ) : null
                     ) : (
-                      <div key={i}>
+                      <div key={i} className="turn-end">
                         <div className={`divider r-${it.reason}`}>
                           {it.reason === "limit" ? rt("ui.turn.limit") : `turn ${it.reason}`}
                           {retry && <RetryTurn sessionId={sessionId} turnId={it.turn_id} />}
                         </div>
                         {undo}
+                        {fork}
                       </div>
                     );
                   }
