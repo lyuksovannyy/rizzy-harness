@@ -4,6 +4,7 @@
 // the divider where a fork's own conversation begins (a link to the parent,
 // a plain line once the parent is gone); the note that a fork shares its
 // parent's folder; an inherited turn's changes without an Undo.
+import css from "../styles.css?raw";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import forkFixture from "../__fixtures__/fork.json";
@@ -137,6 +138,41 @@ describe("Fork from here", () => {
     await render(log);
     expect(links()).toEqual(["Fork from here"]);
     expect(host.querySelectorAll(".fork-line").length).toBe(1);
+  });
+});
+
+describe("Fork from here is quiet", () => {
+  const rule = (selector: string) => {
+    const at = css.indexOf(`${selector} {`);
+    return at < 0 ? "" : css.slice(at, css.indexOf("}", at));
+  };
+
+  test("is hidden until the turn's end line is hovered or the link has focus, and always there on touch", () => {
+    expect(rule(".fork-line")).toMatch(/opacity:\s*0;/);
+    const shown = /([^{}]*)\{\s*opacity:\s*1;\s*\}/g;
+    const selectors = [...css.matchAll(shown)].map((m) => m[1]).join(" ");
+    expect(selectors).toContain(".turn-end:hover .fork-line");
+    expect(selectors).toContain(".fork-line:focus-within");
+    expect(selectors).toContain(".fork-line.shown");
+    const touch = css.slice(css.indexOf("@media (hover: none)", css.indexOf(".fork-line {")));
+    expect(touch.slice(0, touch.indexOf("}\n}"))).toMatch(/\.fork-line\s*\{\s*opacity:\s*1;/);
+  });
+
+  test("sits in the end line the rule hovers, right after the answer, and stays reachable", async () => {
+    await render(plain());
+    const line = host.querySelector(".turn-end");
+    expect(line?.querySelector(".fork-line button")?.textContent).toBe("Fork from here");
+    expect(host.querySelector(".msg.assistant + .turn-end")).toBe(line);
+    const button = line?.querySelector("button") as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    expect(button.tabIndex).toBe(0);
+  });
+
+  test("shows itself when it has something to say", async () => {
+    forkChat.mockRejectedValue(new Error("This chat can't be forked there: nope"));
+    await render(plain());
+    await act(async () => (host.querySelector(".fork-line button") as HTMLButtonElement).click());
+    expect(host.querySelector(".fork-line")?.classList.contains("shown")).toBe(true);
   });
 });
 

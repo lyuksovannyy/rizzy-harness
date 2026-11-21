@@ -1000,13 +1000,13 @@ export default function Conversation(props: {
                     ) : null;
                     return it.reason === "completed" ? (
                       undo || fork ? (
-                        <div key={i}>
+                        <div key={i} className="turn-end">
                           {undo}
                           {fork}
                         </div>
                       ) : null
                     ) : (
-                      <div key={i}>
+                      <div key={i} className="turn-end">
                         <div className={`divider r-${it.reason}`}>
                           {it.reason === "limit" ? rt("ui.turn.limit") : `turn ${it.reason}`}
                           {retry && <RetryTurn sessionId={sessionId} turnId={it.turn_id} />}

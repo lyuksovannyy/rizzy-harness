@@ -27,7 +27,7 @@ export function ForkChat(props: { sessionId: string; turnId: string }) {
     }
   };
   return (
-    <div className="fork-line small">
+    <div className={`fork-line small${err || busy ? " shown" : ""}`}>
       <button
         type="button"
         className="link"
