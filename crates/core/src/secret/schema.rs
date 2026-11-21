@@ -184,6 +184,10 @@ pub const KEPT: &[(&str, &[&str])] = &[
     ("images_withheld", &["turn_id"]),
     ("thinking_withheld", &["turn_id", "model"]),
     ("peers_skipped", &["agents[]"]),
+    // `turn_id`: the turn the rewound message opened, read with the files
+    // part (`session_rewind.rs`) and shown in the chat's words.
+    ("conversation_rewound", &["turn_id"]),
+    ("conversation_rewind_undone", &[]),
 ];
 
 /// The keys of the harness's own context sections (`agent-native`'s

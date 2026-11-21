@@ -43,6 +43,8 @@ pub const KINDS: &[&str] = &[
     "checkpoint",
     "todo_updated",
     "handoff_written",
+    "conversation_rewound",
+    "conversation_rewind_undone",
 ];
 
 /// The fixed part of a chat's note, from its log.
@@ -63,6 +65,9 @@ pub struct Facts {
 
 impl Facts {
     pub fn from_log(log: &[RawEvent]) -> Facts {
+        // Rewound turns are absent (X.45); what they did to the files is
+        // not (their checkpoints stay, `rewind::visible`).
+        let log = &*crate::rewind::visible(log);
         let mut f = Facts::default();
         // Per turn, in order: its changed files; undone turns are dropped.
         let mut changed: Vec<(String, Vec<String>)> = Vec::new();
@@ -227,6 +232,7 @@ pub fn latest(log: &[RawEvent]) -> Option<(u64, crate::event::HandoffWritten)> {
 /// node writes it from its own head; the master asks once the chat has
 /// been idle [`IDLE_MS`]. Reads only [`KINDS`].
 pub fn due(log: &[RawEvent]) -> bool {
+    let log = &*crate::rewind::visible(log);
     let Some(end) = log.iter().rposition(|e| e.kind == "turn_ended") else {
         return false;
     };
@@ -495,5 +501,32 @@ mod tests {
         assert!(c.chars().count() <= NOTE_CHARS, "{}", c.chars().count());
         assert_eq!(c, format!("{}…", "a".repeat(1000)));
         assert_eq!(cut_note("  short \n"), "short");
+    }
+
+    /// X.45: a rewound turn is absent from the note (what was asked, the
+    /// turn count, how it ended), but the files it changed and nobody put
+    /// back are still changed.
+    #[test]
+    fn a_rewound_turn_is_absent_but_its_files_stay() {
+        let l = log(vec![
+            started("t1"),
+            said("t1", "first"),
+            after("t1", &["a.rs"]),
+            ended("t1", TurnEndReason::Completed),
+            started("t2"),
+            said("t2", "second"),
+            after("t2", &["b.rs"]),
+            ended("t2", TurnEndReason::Error),
+            EventKind::ConversationRewound(ConversationRewound {
+                message_seq: 6,
+                turn_id: "t2".into(),
+                files: false,
+            }),
+        ]);
+        let f = Facts::from_log(&l);
+        assert_eq!(f.turns, 1);
+        assert_eq!(f.ended, Some(TurnEndReason::Completed));
+        assert_eq!(f.asked.as_deref(), Some("first"));
+        assert_eq!(f.files, vec!["a.rs", "b.rs"]);
     }
 }

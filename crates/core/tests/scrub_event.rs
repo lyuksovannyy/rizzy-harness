@@ -171,6 +171,8 @@ const FREE: &[(&str, &[&str])] = &[
     ("images_withheld", &["calls.*", "reason"]),
     ("thinking_withheld", &["reason"]),
     ("peers_skipped", &[]),
+    ("conversation_rewound", &[]),
+    ("conversation_rewind_undone", &[]),
 ];
 
 /// `path` (segments; an array index is `*`) is free in `kind`. `deeper`:

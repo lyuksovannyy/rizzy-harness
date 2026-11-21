@@ -1098,6 +1098,30 @@
         "type": "string"
       }
     ],
+    "conversation_rewind_undone": [
+      {
+        "path": "rewind_seq",
+        "required": true,
+        "type": "number"
+      }
+    ],
+    "conversation_rewound": [
+      {
+        "path": "files",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "path": "message_seq",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
     "error": [
       {
         "path": "message",

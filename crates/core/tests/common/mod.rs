@@ -466,6 +466,12 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             agents: vec![s()],
             reason: PeersSkipReason::Restarted,
         }),
+        EventKind::ConversationRewound(ConversationRewound {
+            message_seq: 2,
+            turn_id: s(),
+            files: true,
+        }),
+        EventKind::ConversationRewindUndone(ConversationRewindUndone { rewind_seq: 3 }),
     ]
 }
 
@@ -537,6 +543,8 @@ pub fn slot(k: &EventKind) -> usize {
         EventKind::ThinkingWithheld(_) => 35,
         EventKind::PeersSkipped(_) => 36,
         EventKind::TurnUsage(_) => 37,
+        EventKind::ConversationRewound(_) => 38,
+        EventKind::ConversationRewindUndone(_) => 39,
     }
 }
-pub const KINDS: usize = 38;
+pub const KINDS: usize = 40;

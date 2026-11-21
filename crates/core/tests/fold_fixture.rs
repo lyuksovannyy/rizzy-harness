@@ -1189,6 +1189,78 @@ fn events() -> Vec<RawEvent> {
             }),
         ],
     );
+    // X.45: a turn rewound and put back (its items stay unmarked), then a
+    // turn rewound for good over its own and the turn before (marked with
+    // the later rewind; the earlier one's items were never hidden).
+    let turn_of = |id: &str, text: &str, answer: &str| {
+        [
+            EventKind::TurnStarted(TurnStarted {
+                turn_id: id.into(),
+                agent: None,
+                cause: None,
+                environment: None,
+                continued_by: None,
+                retry: None,
+            }),
+            EventKind::UserMessage(UserMessage {
+                turn_id: id.into(),
+                text: text.into(),
+                attachments: vec![],
+                reply: None,
+                images: vec![],
+                queued: false,
+                triggers: vec![],
+                tags: vec![],
+                files: vec![],
+            }),
+            EventKind::AssistantMessage(AssistantMessage {
+                turn_id: id.into(),
+                message_id: format!("m-{id}"),
+                text: answer.into(),
+                tool_calls: vec![],
+                author: None,
+                variant: None,
+                blocks: vec![],
+                thinking: None,
+            }),
+            EventKind::TurnEnded(TurnEnded {
+                turn_id: id.into(),
+                reason: TurnEndReason::Completed,
+                usage: None,
+            }),
+        ]
+    };
+    let first = kinds.len() as u64 + 2;
+    kinds.extend(turn_of("t90", "Take this back", "Taken."));
+    kinds.push(EventKind::ConversationRewound(ConversationRewound {
+        message_seq: first,
+        turn_id: "t90".into(),
+        files: false,
+    }));
+    let undone = kinds.len() as u64;
+    kinds.push(EventKind::ConversationRewindUndone(
+        ConversationRewindUndone { rewind_seq: undone },
+    ));
+    let second = kinds.len() as u64 + 2;
+    kinds.extend(turn_of("t91", "Keep this one", "Kept."));
+    let third = kinds.len() as u64 + 2;
+    kinds.extend(turn_of("t92", "Then lose this", "Lost."));
+    kinds.push(EventKind::ConversationRewound(ConversationRewound {
+        message_seq: third,
+        turn_id: "t92".into(),
+        files: true,
+    }));
+    let _ = second;
+    // The wait the earlier tests read is still the last thing said.
+    kinds.push(EventKind::ModelRetry(ModelRetry {
+        turn_id: "t6".into(),
+        model: "openai::gpt-4o".into(),
+        attempt: 2,
+        of: 3,
+        at_ms: 1_700_000_004_000,
+        wait_ms: 4000,
+        reason: RetryReason::NoAnswer,
+    }));
     let mut out: Vec<RawEvent> = kinds
         .into_iter()
         .enumerate()
@@ -1438,4 +1510,47 @@ fn the_fold_keeps_an_approvals_preview() {
         .collect();
     assert_eq!(previews.len(), 1, "{previews:?}");
     assert!(previews[0].contains("<script>x</script>"));
+}
+
+/// X.45: a rewind marks the items of its range with its own seq; one that
+/// was undone marks nothing; the view lists the rewinds, the later one
+/// still open to an undo. The shared fixture carries the same.
+#[test]
+fn a_rewind_marks_its_range_and_an_undo_unmarks_it() {
+    let evs = events();
+    let view = serde_json::to_value(SessionView::fold(&evs).unwrap()).unwrap();
+    let items = view["items"].as_array().unwrap();
+    let rewinds: Vec<&RawEvent> = evs
+        .iter()
+        .filter(|e| e.kind == "conversation_rewound")
+        .collect();
+    let (first, last) = (rewinds[0].seq, rewinds[1].seq);
+    let user = |text: &str| items.iter().find(|i| i["text"] == text).unwrap();
+    assert!(user("Take this back").get("rewound").is_none(), "undone");
+    assert!(user("Keep this one").get("rewound").is_none());
+    assert_eq!(user("Then lose this")["rewound"], last);
+    let lost = items.iter().find(|i| i["message_id"] == "m-t92").unwrap();
+    assert_eq!(lost["rewound"], last);
+    let end = items
+        .iter()
+        .rfind(|i| i["type"] == "turn_end" && i["turn_id"] == "t92")
+        .unwrap();
+    assert_eq!(end["rewound"], last);
+    // Items from before the range are not marked at all.
+    assert!(items[0].get("rewound").is_none());
+    let list = view["rewinds"].as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0]["seq"], first);
+    assert_eq!(list[0]["undone"], true);
+    assert_eq!(list[0]["can_undo"], false);
+    assert_eq!(list[0]["turns"], 1);
+    assert_eq!(list[1]["seq"], last);
+    assert_eq!(list[1]["turn_id"], "t92");
+    assert_eq!(list[1]["files"], true);
+    assert_eq!(list[1]["undone"], false);
+    assert_eq!(list[1]["can_undo"], true);
+    // Usage and the other state fold as if nothing was rewound.
+    assert!(SessionView::default().rewinds.is_empty());
+    let empty = serde_json::to_value(SessionView::default()).unwrap();
+    assert!(empty.get("rewinds").is_none());
 }
