@@ -2124,6 +2124,21 @@ pre.diff .del {
   font-size: var(--text-xs);
   color: var(--fg-2);
 }
+/* A fork's divider and the link to fork a turn (C.2). */
+.fork-divider {
+  margin: var(--space-3) 0;
+}
+.fork-line {
+  text-align: center;
+  opacity: 0.6;
+}
+.fork-line:hover,
+.fork-line:focus-within {
+  opacity: 1;
+}
+.inherited-changes {
+  text-align: center;
+}
 .divider.r-interrupted,
 .divider.r-stopped,
 .divider.r-cancelled,

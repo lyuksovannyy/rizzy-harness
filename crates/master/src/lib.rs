@@ -212,6 +212,9 @@ pub struct NodeInfo {
     /// UI offers; the node refuses whatever this says when its node.toml
     /// does not allow it.
     pub projects: bool,
+    /// Whether it forks a chat at a finished turn (`fork`, C.2): what the
+    /// UI offers; the master and the node refuse whatever this says.
+    pub fork: bool,
 }
 
 /// The approval modes in a hello's capabilities (T50): its ceiling and its
@@ -1366,6 +1369,7 @@ impl Master {
                     default_approval: None,
                     max_steps: None,
                     projects: false,
+                    fork: false,
                 },
                 tx: None,
                 resuming: HashSet::new(),
@@ -1388,6 +1392,7 @@ impl Master {
             entry.info.projects = capabilities
                 .iter()
                 .any(|c| c == harness_protocol::CAP_PROJECTS);
+            entry.info.fork = capabilities.iter().any(|c| c == harness_protocol::CAP_FORK);
             entry.capabilities = capabilities;
             entry.tx = Some(link.to_node.clone());
             entry.resuming.clear();

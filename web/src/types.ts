@@ -958,6 +958,8 @@ export interface NodeInfo {
   max_steps?: number | null;
   /** It makes new projects' folders (X.26; its node.toml's `[projects] dir`). */
   projects?: boolean;
+  /** It forks a chat at a finished turn (C.2); absent: an older node. */
+  fork?: boolean;
 }
 
 /** A server-wide account role (Settings → Users), not a workspace role. */

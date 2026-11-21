@@ -820,3 +820,22 @@ async fn a_copied_background_end_calls_nothing_back_in_the_fork() {
         .collect();
     assert_eq!(mine, vec![(new, vec!["bg-2".to_string()])]);
 }
+
+/// The page offers a fork only where the node announced `fork`: the nodes
+/// list says which do.
+#[tokio::test]
+async fn the_nodes_list_says_which_nodes_fork() {
+    let t = start().await;
+    let (st, v) = req(&t, Method::GET, "/api/nodes", None, &t.alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let nodes = v["nodes"].as_array().or(v.as_array()).unwrap();
+    let fork_of = |id: &str| {
+        nodes
+            .iter()
+            .find(|n| n["node_id"] == id)
+            .unwrap_or_else(|| panic!("{v}"))["fork"]
+            .clone()
+    };
+    assert_eq!(fork_of("local"), json!(true));
+    assert_eq!(fork_of("old"), json!(false));
+}
