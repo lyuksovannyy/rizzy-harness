@@ -57,6 +57,7 @@ mod model_cache_http;
 mod orchestration;
 mod pdf_http;
 mod peers_http;
+mod pins_http;
 mod plugins_http;
 mod prices_http;
 mod profile_http;

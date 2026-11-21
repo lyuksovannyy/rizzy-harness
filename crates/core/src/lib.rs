@@ -14,6 +14,7 @@ pub mod history;
 pub mod identity;
 pub mod image;
 pub mod mention;
+pub mod pins;
 pub mod policy;
 pub mod recall;
 pub mod refs;

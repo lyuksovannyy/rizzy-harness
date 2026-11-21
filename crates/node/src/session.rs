@@ -6150,6 +6150,10 @@ mod retry;
 #[path = "session_rewind.rs"]
 mod rewind_op;
 
+/// The owner's bookmark on a message (docs/pins.md); its own file.
+#[path = "session_pin.rs"]
+mod pin_op;
+
 /// A person's fork of a chat at a finished turn (C.2); its own file.
 #[path = "session_fork.rs"]
 mod fork_op;

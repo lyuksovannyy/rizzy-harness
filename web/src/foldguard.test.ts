@@ -107,6 +107,7 @@ const ITEM: Record<string, Check> = {
     author: nul(S),
     variant: nul(rec({ group: S, index: N, "?model": S })),
     "?blocks": arr(rec({ ordinal: N, hash: S, id: S, type: S, "?spec": ANY, "?error": S })),
+    "?seq": N,
   }),
   thinking: rec({ type: S, message_id: S, blocks: arr(rec({ type: S, "?text": S })) }),
   tool: rec({
@@ -133,7 +134,7 @@ const ITEM: Record<string, Check> = {
     "?staged": staged,
   }),
   error: rec({ type: S, message: S }),
-  turn_end: rec({ type: S, turn_id: S, reason: S }),
+  turn_end: rec({ type: S, turn_id: S, reason: S, at: N, "?usage": usage }),
   agent_changed: rec({ type: S, agent: agentRef, "?model": nul(S) }),
   approval_mode_changed: rec({ type: S, mode: S, "?requested": S }),
   step_limit_changed: rec({ type: S, max_steps: N, "?requested": N }),
@@ -211,6 +212,7 @@ const viewCheck = rec({
   "?rewinds": arr(
     rec({ seq: N, message_seq: N, turn_id: S, turns: N, files: B, undone: B, can_undo: B }),
   ),
+  "?pins": arr(rec({ seq: N, who: S, text: S, turn_id: S, at: N })),
 });
 const wellTyped = (v: SessionView) => viewCheck(v, "view");
 
