@@ -295,6 +295,34 @@ async fn memory_alone_does_not_make_a_delegate_available() {
     );
 }
 
+/// An agent whose only tool is `history` has nothing to do a task with, as
+/// one that declares none: it is not refused (a tool-less agent never is).
+#[tokio::test]
+async fn an_agent_whose_only_tool_is_history_is_offered_and_runs() {
+    let all = vec![spec("reader", list(&["history"]))];
+    let (offered, started, _) = run(&["history"], vec![], all, "delegate: reader=go").await;
+    assert_eq!(offered, ["reader"]);
+    assert_eq!(started, 1);
+}
+
+/// `history` is every agent's own chat: next to a tool the node lacks it
+/// does not make the delegate available, and the refusal does not name it.
+#[tokio::test]
+async fn history_does_not_make_a_delegate_available_nor_is_it_named() {
+    let all = vec![
+        spec("reader", list(&["history", "web_search"])),
+        spec("scout", list(&["read"])),
+    ];
+    let (offered, started, outs) = run(&["history"], vec![], all, "delegate: reader=go").await;
+    assert_eq!(offered, ["scout"]);
+    assert_eq!(started, 0, "no child session");
+    assert!(outs[0].starts_with("@reader was not started"), "{outs:?}");
+    assert!(
+        outs[0].contains("(web search)") && !outs[0].contains("history"),
+        "{outs:?}"
+    );
+}
+
 /// The node's own `denied_tools` count as "not available there".
 #[tokio::test]
 async fn a_tool_the_node_denies_does_not_count() {

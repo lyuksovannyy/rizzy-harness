@@ -46,6 +46,7 @@ mod search;
 mod search_tag_tests;
 pub mod seen;
 mod shown;
+pub use shown::RESULT_BUDGET;
 #[cfg(test)]
 mod shown_tests;
 pub mod skills;
@@ -71,7 +72,7 @@ pub use bash::{
 pub use board::{Board, BoardEdit, render as render_board};
 pub use edit::Edit;
 pub use env::ToolEnv;
-pub use fs::{Read, Write};
+pub use fs::{Read, Write, image_of};
 pub use outline::Outline;
 pub use outputs::{OutputStore, SessionOutputs, ToolOutput};
 pub use publish::Publish;
@@ -239,6 +240,9 @@ pub struct ToolCtx {
     /// Where `recall` sends its query: the session's link to the master
     /// (`TurnHost::recall`); `None` where there is none.
     pub recall: Option<Arc<dyn harness_core::recall::RecallSource>>,
+    /// Where `history` reads the session's own chat (`TurnHost::history`);
+    /// `None` where there is none.
+    pub history: Option<Arc<dyn harness_core::history::HistorySource>>,
     /// Where `board` and `board_edit` send their requests: the session's
     /// link to the master (`TurnHost::board`); `None` where there is none.
     pub board: Option<Arc<dyn harness_core::board::BoardSource>>,
@@ -337,6 +341,7 @@ impl ToolCtx {
             skills: None,
             seen: Default::default(),
             recall: None,
+            history: None,
             board: None,
             stored_skills: None,
             read_offered: true,

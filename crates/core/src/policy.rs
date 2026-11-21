@@ -404,6 +404,7 @@ mod tests {
             ("remember", true),
             ("read", false),
             ("recall", false),
+            ("history", false),
             ("web_fetch", false),
             ("todo", false),
             // The loop's, per agent.

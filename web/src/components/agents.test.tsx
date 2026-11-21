@@ -175,7 +175,7 @@ describe("an agent's page", () => {
     expect(api.agent).toHaveBeenCalledWith("coder", "server");
     expect(host.querySelector("h1")!.textContent).toBe("Coder");
     expect(host.querySelector("pre.agent-prompt")!.textContent).toBe("You are careful.");
-    expect(switches().length).toBe(18);
+    expect(switches().length).toBe(19);
     expect(switches().every((s) => s.disabled)).toBe(true);
     expect(sw("Change files").checked).toBe(true);
     expect(button("Duplicate")).toBeDefined();
@@ -242,6 +242,39 @@ describe("an agent's page", () => {
     // Without permission it is shown, not changed.
     await show(member, "reviewer");
     expect(sw("Personalisation").disabled).toBe(true);
+  });
+
+  test("Chat history is its own switch: on for a new agent, saved when turned off", async () => {
+    expect(NEW_FEATURES.history).toBe(true);
+    api.agent.mockResolvedValue(detail(coder));
+    await show(admin, "coder");
+    // A built-in shows its own and keeps it.
+    expect(sw("Chat history").checked).toBe(true);
+    expect(sw("Chat history").disabled).toBe(true);
+    expect(host.textContent).toContain("Read this chat's earlier messages in full");
+    api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it.", features: NEW_FEATURES }));
+    await show(admin, "reviewer");
+    expect(sw("Chat history").checked).toBe(true);
+    act(() => sw("Chat history").click());
+    api.updateAgent.mockResolvedValue(detail(reviewer));
+    await act(async () => button("Save")!.click());
+    expect(api.updateAgent).toHaveBeenCalledWith(
+      "reviewer",
+      { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, history: false } },
+      "server",
+    );
+    // Without permission it is shown, not changed.
+    await show(member, "reviewer");
+    expect(sw("Chat history").disabled).toBe(true);
+  });
+
+  test("An agent with no tools shows Chat history off: it has none to read with", async () => {
+    // Smol: `tools: []`, so the server reports the switch off, and the page shows what it reports.
+    const smol = agent("smol", { features: { ...ALL, history: false, memory: false, project_memory: false } });
+    api.agent.mockResolvedValue(detail(smol));
+    await show(admin, "smol", [smol]);
+    expect(sw("Chat history").checked).toBe(false);
+    expect(sw("Chat history").disabled).toBe(true);
   });
 
   test("Connectors is its own switch: off for a new agent, saved when turned on", async () => {

@@ -9,6 +9,7 @@ pub mod connectors;
 pub mod event;
 pub mod folder;
 pub mod handoff;
+pub mod history;
 pub mod identity;
 pub mod image;
 pub mod mention;
