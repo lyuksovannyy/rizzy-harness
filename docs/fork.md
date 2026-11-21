@@ -93,7 +93,7 @@ The reasoning, the quoted documentation, the minimum git version and the proof a
 **What the copy is.**
 The clone's own config: remote `origin` is the parent's path, to fetch from, and its `pushurl` is a path that does not exist (`/nonexistent/no-push--bring-work-back-with-git-fetch-from-the-parent`), so `git push` from the fork fails with git's own message naming it.
 Work comes back by running `git fetch <fork folder> fork/<short id>` in the parent, never by pushing into it: a push runs `receive-pack` in the parent, with the hooks and config an agent may have written there, as the person.
-Plus remote `upstream` when the parent had a usable `origin` URL (read as data, validated; the user name and password of an https URL are dropped).
+Plus remote `upstream` when the parent had a usable `origin` URL (read as data, validated; the user name and password of an https URL and the password of any other URL are dropped, and a URL with a query or a fragment, or an `http://` one, gives no `upstream`).
 The branch is at the commit the parent's HEAD was on at the cut: the log's `head_moved` of the last turn at or before the cut, else the HEAD the first later turn that moved it found, else the parent's HEAD now (and the chat says so).
 The working files are the cut's: the `after` checkpoint of the last turn at or before the cut that has one, written from the shadow by the checkpoint writers; with none, the branch's commit as it is.
 The index is the branch's commit, so what the parent had uncommitted at the cut is uncommitted in the fork.

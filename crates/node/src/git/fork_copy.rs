@@ -246,30 +246,49 @@ fn branch_ok(b: &str) -> bool {
 /// The URL of a remote the parent had, accepted as `upstream` only when it
 /// is plain text of a transport a person would use: https, ssh (a URL or
 /// scp-like `user@host:path`) or a file (a path or `file://`). No control
-/// character, not starting with `-`, no `::` (git's `ext::` and other
-/// remote helpers), no whitespace, not longer than 2000 bytes. The user
-/// name and password of an https URL are dropped (they are the parent's
-/// credentials, not the fork's); an https URL with no host is no URL.
+/// character, not starting with `-`, no `::` (git's `ext::` and other remote
+/// helpers), no whitespace, not longer than 2000 bytes; no `?` or `#`
+/// (a token may sit in a query or a fragment); not `http://`, git:// or any
+/// other scheme. The user name and password of an https URL are dropped
+/// (they are the parent's credentials, not the fork's), and of any other URL
+/// only the password (`ssh://user:pw@host/x` becomes `ssh://user@host/x`); a
+/// scp-like form has no password in git's syntax, so one whose user part
+/// holds a `:` is no URL; a URL with no host is no URL. `None` means the fork
+/// has no `upstream`; it is never a reason to refuse the fork.
 pub(crate) fn upstream_url(u: &str) -> Option<String> {
     let u = u.trim_end_matches('\n');
     if u.is_empty()
         || u.len() > 2000
         || u.starts_with('-')
         || u.contains("::")
+        || u.contains(['?', '#'])
         || u.chars().any(|c| c.is_control() || c.is_whitespace())
     {
         return None;
     }
     let url_scheme = u.split_once("://").map(|(s, _)| s.to_ascii_lowercase());
     match url_scheme.as_deref() {
-        Some("https") => {
-            let rest = &u["https://".len()..];
-            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        Some(scheme @ ("https" | "ssh" | "file")) => {
+            let rest = &u[scheme.len() + "://".len()..];
+            let end = rest.find('/').unwrap_or(rest.len());
             let (auth, tail) = rest.split_at(end);
-            let host = auth.rsplit_once('@').map_or(auth, |(_, h)| h);
-            (!host.is_empty() && !host.starts_with(':')).then(|| format!("https://{host}{tail}"))
+            let (userinfo, host) = match auth.rsplit_once('@') {
+                Some((ui, h)) => (Some(ui), h),
+                None => (None, auth),
+            };
+            if scheme != "file" && (host.is_empty() || host.starts_with(':')) {
+                return None;
+            }
+            // https: no user at all; others: the user name, no password.
+            let user = match (scheme, userinfo) {
+                ("https", _) | (_, None) => None,
+                (_, Some(ui)) => Some(ui.split(':').next().unwrap_or("")).filter(|n| !n.is_empty()),
+            };
+            Some(match user {
+                Some(n) => format!("{scheme}://{n}@{host}{tail}"),
+                None => format!("{scheme}://{host}{tail}"),
+            })
         }
-        Some("ssh" | "file") => Some(u.to_string()),
         Some(_) => None,
         None => {
             if u.starts_with('/') {
@@ -277,6 +296,16 @@ pub(crate) fn upstream_url(u: &str) -> Option<String> {
             }
             // scp-like: `[user@]host:path`, the host with no `/` before the colon.
             let (host, path) = u.split_once(':')?;
+            // A `:` in the user part (`user:pw@host:path`) is a password git
+            // cannot carry in this form: the part before the last `@` of the
+            // text up to the first `/` must have no colon.
+            let seg = u.split('/').next().unwrap_or(u);
+            if seg
+                .rsplit_once('@')
+                .is_some_and(|(user, _)| user.contains(':'))
+            {
+                return None;
+            }
             (!host.is_empty()
                 && !path.is_empty()
                 && !host.contains('/')
@@ -1065,9 +1094,10 @@ mod tests {
                 Some("https://example.invalid/a.git"),
             ),
             (
-                "https://u:p@example.invalid:8443/a.git?x=1",
-                Some("https://example.invalid:8443/a.git?x=1"),
+                "https://u:p@example.invalid:8443/a.git",
+                Some("https://example.invalid:8443/a.git"),
             ),
+            ("https://u:p@example.invalid:8443/a.git?x=1", None),
             ("https://u:p@host", Some("https://host")),
             (
                 "https://example.invalid/a@b.git",

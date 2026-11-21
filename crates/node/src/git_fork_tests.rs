@@ -1699,4 +1699,69 @@ mod round3 {
         assert_eq!(out(&dest, &["rev-parse", "light"]), head);
         assert_eq!(out(&dest, &["rev-parse", "origin/feat/x"]), head);
     }
+
+    /// The `upstream` URL: a password in userinfo is stripped in every scheme,
+    /// a URL that may carry a token (query, fragment) or no transport git
+    /// should use unauthenticated (`http://`) gives no `upstream` (the fork
+    /// is not refused), and the forms git runs programs for stay refused.
+    #[test]
+    fn the_upstream_url_loses_passwords_and_tokens() {
+        for (url, want) in [
+            (
+                "ssh://user:pw@host.invalid/a.git",
+                Some("ssh://user@host.invalid/a.git"),
+            ),
+            (
+                "ssh://user@host.invalid/a.git",
+                Some("ssh://user@host.invalid/a.git"),
+            ),
+            (
+                "ssh://:pw@host.invalid/a.git",
+                Some("ssh://host.invalid/a.git"),
+            ),
+            (
+                "ssh://host.invalid:2222/a.git",
+                Some("ssh://host.invalid:2222/a.git"),
+            ),
+            (
+                "ssh://u:p:q@host.invalid/a@b.git",
+                Some("ssh://u@host.invalid/a@b.git"),
+            ),
+            ("file://u:pw@host/a.git", Some("file://u@host/a.git")),
+            (
+                "https://u:pw@host.invalid/a.git",
+                Some("https://host.invalid/a.git"),
+            ),
+            (
+                "git@host.invalid:team/a.git",
+                Some("git@host.invalid:team/a.git"),
+            ),
+            ("host.invalid:a.git", Some("host.invalid:a.git")),
+            (
+                "git@host.invalid:team/a@b.git",
+                Some("git@host.invalid:team/a@b.git"),
+            ),
+            ("/srv/git/a.git", Some("/srv/git/a.git")),
+            // scp-like with a colon in the user part: refused.
+            ("user:pw@host.invalid:a.git", None),
+            ("user:pw@host.invalid:team/a.git", None),
+            // A query or a fragment may hold a token: no upstream.
+            ("https://host.invalid/a.git?token=abc", None),
+            ("https://host.invalid/a.git#abc", None),
+            ("ssh://git@host.invalid/a.git?x=1", None),
+            ("git@host.invalid:a.git#x", None),
+            ("/srv/git/a.git?x", None),
+            // http: no upstream.
+            ("http://host.invalid/a.git", None),
+            ("HTTP://host.invalid/a.git", None),
+            // Still refused.
+            ("ext::sh -c touch", None),
+            ("fd::17", None),
+            ("-oProxyCommand=x", None),
+            ("https://host.invalid/a\u{1}b", None),
+            ("https://host.invalid/a b", None),
+        ] {
+            assert_eq!(upstream_url(url).as_deref(), want, "{url:?}");
+        }
+    }
 }
