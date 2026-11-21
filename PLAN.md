@@ -801,6 +801,7 @@ Each row's full text is in `docs/threats/`.
 | [T88](docs/threats/T88.md) | **The agent's commits carry the person's identity** (the 2026-11-19 readiness trial, item 3; README "What an agent's commits are signed with"): every… |
 | [T89](docs/threats/T89.md) | **An agent that holds a repository's files and a shell's output also has the web**… |
 | [T90](docs/threats/T90.md) | **A person's rewind of the conversation changes what the model is sent, and what a chat's log means, by one event**… |
+| [T91](docs/threats/T91.md) | **An agent reads its own chat's earlier turns in full**… |
 
 Numbers T15 and T31 were never used; rows are never renumbered.
 
@@ -994,6 +995,14 @@ Numbers T15 and T31 were never used; rows are never renumbered.
   connector runs is decided by where its data lives: a repository, files or a local network
   mean the node (forge accounts X.27, `node.toml` servers, project servers X.36); an online
   account means the master, so its token never reaches a node.
+* **`history` is node code, not a master service (2026-11-21, X.47, T91).**
+  An agent reads its own chat's earlier turns through a tool that runs on the session's
+  node against the node's own store: no request over the link, no switch on the master.
+  The conversation it reads is the model's own rebuild with compaction and shortening off
+  (`Rebuild::unshortened`), so what was taken out of the model's sight on purpose (a rewound
+  range, a refused image) stays out; old text is quoted behind `| `; every answer is inside
+  the tool-result budget. It is a per-agent switch like the others (`Features.history`, on
+  when absent).
 
 ## 6. Licences of references
 
