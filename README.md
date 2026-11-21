@@ -315,13 +315,42 @@ that begins with this conversation up to there, every message, answer, tool
 call and result as it was, and goes its own way; this chat stays as it is,
 whatever it is doing. The new chat is yours alone (nobody else can fork your
 chat, admins included, and the agent cannot), on the same node and in the same
-workspace and project, titled like the chat with "(fork)" after it. It keeps
+workspace and project, titled like the chat with "(fork)" after it ("(fork 2)",
+"(fork 3)" for the next ones of the same chat; a fork of a fork is the next
+number, not "(fork) (fork)"). It keeps
 the approval mode this chat had at that turn (the node's ceiling still
 applies), starts with no "allow for this chat" grants, asks before it edits a
 file the agent has not read again, and its cost counts only from its own first
-turn. **Both chats work in the same folder** (the page says so under the
-title): what one changes is in the other's files, and Undo in one chat refuses
-over the other's work as it does between any two chats. The turns it copied
+turn.
+
+**Where the fork's files live** is your choice when the chat works in a folder
+and its node can make one (it needs a projects folder, `[projects] dir` in its
+node.toml, which is also where cloned repositories go). **In its own copy of the
+repository** is the default: the node clones this repository into its projects
+folder, in `<repository name>-fork-<id>` (the page shows the folder under the
+title), on a branch `fork/<id>` that starts at the commit the repository was on
+at that turn, and writes the files as they were at that turn, so what the agent
+had changed and not committed is there, uncommitted, and a file it deleted
+afterwards is back. **Not copied:** files git ignores (build output,
+`node_modules`, `.env`), repositories nested in it and submodule contents,
+stashes, and the original's git hooks and local config. The copy is made from
+outside the original repository, by the node, without running anything from its
+`.git`; a repository the node cannot copy that way (not a git repository, a
+`.git` that is a file or a link, borrowed objects, a checkpoint the node no
+longer keeps, no room on the disk, a git older than 2.45.1) is refused with the
+reason, and the fork can then go **in the same folder**, where both chats work
+in the same files (the page says so under the title): what one changes is in the
+other's files, and Undo in one chat refuses over the other's work as it does
+between any two chats. To bring work back from an own copy, run
+`git fetch <the fork's folder> fork/<id>` in the original (or `git push` from
+the fork: its `origin` is the original, its `upstream` the original's own
+`origin`). **Deleting a fork's chat keeps its folder on disk** (the files are
+yours; the delete dialog says where); remove it yourself. The node keeps only
+the latest checkpoints of a chat, so a fork of a turn whose checkpoint is gone
+can only share the folder. The API is `POST /api/sessions/{id}/fork` with
+`{turn_id, checkout}`, `checkout` being `own` or `shared` (left out: `shared`).
+
+The turns it copied
 show their changed files "before the fork" and cannot be undone or shown there;
 undo them in the chat they came from. Rewinding the fork to a message it copied
 works for the conversation, but "Rewind files" there is refused, for the same
@@ -335,8 +364,7 @@ fork is listed under earlier chats and given a hand-off note only for what it
 did itself, once it has done something; what it copied is the original's. A
 fork of a fork works; deleting the original leaves the fork as it is, with its
 divider saying the original is gone. A copy of the original's memory, files it
-published or sub-agent chats is not made. Files in a checkout of their own come
-with the next change. Design: `docs/fork.md`.
+published or sub-agent chats is not made. Design: `docs/fork.md`.
 
 When a turn completes or fails in a chat you are not looking at (another chat
 is open, or the tab is hidden), the chat gets a dot in the sidebar until you

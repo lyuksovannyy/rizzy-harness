@@ -18,8 +18,16 @@ The first event is the parent's `session_created` with `forked {parent, through_
 A turn that is not finished is not a cut (it is refused, never closed); background commands at the cut are closed by `background_ended` with reason `forked`.
 The child starts with no grants, and the approval mode is the parent's at the cut clamped by the node; usage starts at zero (a copy is skipped by the folds and the store).
 `session_forks (session_id, parent_id, through_seq, created_ms)` is migration 3, with no hash column and no foreign key; deleting a parent deletes no fork.
-Files are not seeded: both chats share the folder until part 2.
+Files are not seeded in part 1: both chats share the folder.
 A cross-node fork stays with N.5 and the note's lossy seed.
+
+## What was built (part 2: the fork's own folder)
+
+The note said "same-node forks may seed files from the cut's checkpoint". Built as a clone of the parent's repository, made from outside it (`git clone --no-local --no-checkout --template=`, the hardened runner, cwd outside both folders), in the node's projects folder, with the working files written from the cut's checkpoint and the index set to the branch's commit, so the parent's uncommitted work shows as uncommitted in the fork.
+Not a `git worktree add`: it would run inside a repository an agent may have written (config, hooks), and the node is not sandboxed (PLAN.md T92 has the quoted documentation and the minimum git version).
+The person chooses where the files live: `session.fork` carries `checkout: "own" | "shared"`; `session_created.forked.own_folder` records it; the node refuses an own copy with a sentence where it cannot and "the same folder" stays possible.
+A fork's title is numbered per original chat: "X (fork)", "X (fork 2)".
+Design: `docs/fork.md`.
 
 ## Tests it commits to
 

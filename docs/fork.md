@@ -1,7 +1,7 @@
 # Forking a chat
 
-ADOPTION_PLAN C.2 and X.48 (part 1: the conversation), PLAN.md T92, README "Fork a chat".
-Part 2, a checkout of its own for the fork's files, is a later change; until then both chats share one folder.
+ADOPTION_PLAN C.2 and X.48, PLAN.md T92, README "Fork a chat".
+Part 1 is the conversation; part 2 (below, "Files") gives a fork a folder of its own where the person chooses it.
 
 ## What a fork is
 
@@ -70,6 +70,45 @@ The caller still gets the timeout error and finds the fork in the list.
 
 ## Files
 
-Both chats share the parent's folder.
-The page says so; the T57 rules keep one chat's undo from reverting the other's work.
-`Session::fork_folder` is the one place that decides the fork's folder.
+`session.fork` carries `checkout`: `shared` (part 1: the fork works in the parent's folder; the page says so, and the T57 rules keep one chat's undo from reverting the other's work) or `own`.
+`Session::fork_folder` decides the shared folder; `Session::own_copy` and `crates/node/src/fork_checkout.rs` decide the own one.
+
+### An own copy
+
+A clone of the parent's repository, made from outside it, in the node's projects folder (`[projects] dir`, where forge clones go), named `<repository name>-fork-<short id>`, with a branch `fork/<short id>`.
+The fork's folder is the same sub-folder of the copy that the parent worked in.
+
+**Why not `git worktree add`.**
+It runs inside the parent's repository: it reads that repository's config (shared by all worktrees) and runs its `post-checkout` hook.
+An agent in a sandboxed chat can write `.git/config` and `.git/hooks` of its folder, and the node is not sandboxed.
+The node's git has always run in a shadow repository of its own for that reason (`crates/node/src/git.rs`).
+So the only command that touches the parent is `git clone --no-local --no-checkout --template= -- <root> <dest>`, run by the hardened runner with its working directory outside both folders: git's documented safe way to copy an untrusted repository.
+The reasoning, the quoted documentation, the minimum git version and the proof are in `docs/threats/T92.md`.
+
+**What the copy is.**
+The clone's own config (remote `origin` is the parent's path: `git fetch <fork>` in the parent or `git push` from the fork brings work back), plus remote `upstream` when the parent had a usable `origin` URL (read as data, validated).
+The branch is at the commit the parent's HEAD was on at the cut: the log's `head_moved` of the last turn at or before the cut, else the HEAD the first later turn that moved it found, else the parent's HEAD now (and the chat says so).
+The working files are the cut's: the `after` checkpoint of the last turn at or before the cut that has one, written from the shadow by the checkpoint writers; with none, the branch's commit as it is.
+The index is the branch's commit, so what the parent had uncommitted at the cut is uncommitted in the fork.
+Not copied: files git ignores, nested repositories and submodule contents, stashes, the parent's hooks and local config.
+The parent's `info/exclude` is copied (patterns), so the same files stay ignored.
+
+**Refused, with a sentence that says which and that "the same folder" is possible:** a chat with no folder, a folder that is no git repository (or a `.git` the node does not read: a file, a link, a `commondir`, borrowed objects), no projects folder, no checkpoint store, a pruned checkpoint, a git below the minimum, no room on the disk, a copy over `clone_max_mb` or `clone_timeout_s`, more folders than `projects_per_hour`.
+Nothing is written before the checks; a failure removes the build folder; the chat is written only after the folder exists, and a copy whose chat could not be written is removed.
+
+**Running.**
+The copy runs in the new chat's lane (nothing else uses it yet), off every other chat's, behind a small limit on copies at once (two; the rest wait).
+The master waits for the ack as long as a node may take to copy; the page shows "Making the copy…" and does not close the choice meanwhile, and opens the chat when the node answers.
+A refusal shows in the choice, which stays open with "In the same folder" as the likely next click.
+
+### The choice in the page
+
+"Fork from here" opens a small inline choice (modelled on the rewind choice) where the chat is agentic and its node announced `fork_own`: "In its own copy of the repository" (the default; where it goes, and that ignored files are not copied) or "In the same folder".
+Where the node cannot, the link forks at once into the same folder, as in part 1.
+The page cannot tell beforehand whether the folder is a git repository, so the default is the own copy, and a refusal flips the default.
+The fork's header shows its folder as any chat's; the note under it says "shares its folder" only for a shared fork and, for an own copy, where it is and what was not copied; `session_created.forked.own_folder` says which.
+Deleting a fork's chat never deletes its folder (the files are the person's); the delete dialog says where it is.
+
+### Titles
+
+A fork's title is the parent's with a trailing " (fork)" or " (fork N)" taken off, then " (fork)" for the first fork of the original chat and " (fork 2)", " (fork 3)" ... after it, counted over the whole family (`session_forks`), so a fork of a fork is the next number of the same original.

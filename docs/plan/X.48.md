@@ -14,7 +14,11 @@ A copy costs the fork nothing, grants nothing, and its checkpoints cannot be res
 The lineage is `session_forks`, migration 3 with its own recorded `schema/3.sql`.
 Tests: `core/src/fork.rs`, `core/tests/fork_fixture.rs`, `store/tests/forks.rs`, `store/tests/migrations.rs`, `node/tests/fork.rs` (a restart right after the fork, the parent still running, a fork of a fork, of a compacted chat, after a rewind, a folder the node no longer allows), `master/tests/it/fork_http.rs` (one test per side effect), `web/src/fork.test.ts`, `web/src/components/forkchat.test.tsx`.
 Fix round: grants and images are proven on the node; "earlier chats" and hand-off notes read a fork's own events only (`harness_core::fork::own`); the lineage is read before an event is taken and a failed or early read is never cached; the guard has a test per effect that fails without it; a copied event leaves the fork's row state alone; a late-acked fork (and an ordinary create) still joins its project and the model defaults; a cut inside a message that called several agents is said in the fork (`peers_skipped`, reason `forked`); "Fork from here" shows on hover and focus.
-Left for part 2: a fork's own checkout of the files (today both chats share the folder, and the page says so).
+Part 2 (the fork's own folder): `session.fork` carries `checkout: "own" | "shared"` (capability `fork_own`); an own copy is a clone of the parent's repository made from outside it in the node's projects folder (`git/fork_copy.rs`, `fork_checkout.rs`), and the node's git never runs in the parent's repository (the hostile-repository test, `git_fork_tests.rs`, fails with a marker if the clone is replaced by `git worktree add` or a plain clone).
+Its files are the cut's checkpoint, its index the branch's commit; ignored files, nested repositories, stashes and the parent's hooks and config are not copied.
+The folder is built in the node's staging folder (swept at every start) and moved in with a no-replace rename; a failure leaves no chat and no folder; deleting the chat keeps the folder.
+`session_created.forked.own_folder`, the page's choice (`ForkChoice.tsx`) and the fork titles "X (fork)", "X (fork 2)" are part of it, and `history` search leaves the running turn out.
+Tests: `node/src/git_fork_tests.rs`, `node/src/fork_checkout.rs`, `node/tests/fork_checkout.rs`, `master/tests/it/fork_http.rs`, `store/tests/forks.rs`, `agent-native/src/history_tests.rs`, `web/src/components/forkchoice.test.tsx`.
 
 ## Invariants
 
