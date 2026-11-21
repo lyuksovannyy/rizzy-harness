@@ -484,6 +484,15 @@ impl Grants {
         self.chats.remove(&sid);
         self.order.retain(|s| *s != sid);
     }
+
+    /// Tests: what the tables hold for chat `sid`, as (sends not matched
+    /// yet, turns).
+    #[cfg(test)]
+    pub(crate) fn held(&self, sid: SessionId) -> (usize, usize) {
+        self.chats
+            .get(&sid)
+            .map_or((0, 0), |c| (c.sent.len(), c.turns.len()))
+    }
 }
 
 #[cfg(test)]

@@ -165,6 +165,12 @@ impl State {
         }
     }
 
+    /// Tests: [`super::grant::Grants::held`].
+    #[cfg(test)]
+    pub(crate) fn held(&self, sid: SessionId) -> (usize, usize) {
+        lock(&self.grants).held(sid)
+    }
+
     /// That send failed: it is gone.
     pub fn unsent(&self, sid: SessionId, id: u64) {
         lock(&self.grants).unsent(sid, id)

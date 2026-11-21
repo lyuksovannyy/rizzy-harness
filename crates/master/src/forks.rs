@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use harness_core::{RawEvent, SessionId, fork};
+use harness_core::{SessionId, fork};
 use harness_protocol::MasterToNode;
 use harness_store::SessionRow;
 
@@ -188,6 +188,7 @@ pub(crate) async fn fork_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use harness_core::RawEvent;
 
     fn cache() -> Mutex<HashMap<SessionId, u64>> {
         Mutex::default()
@@ -230,6 +231,88 @@ mod tests {
             let again: Result<u64, &str> = resolve(&c, sid, || Err("not asked again"));
             assert_eq!(again, Ok(want));
         }
+    }
+
+    /// The guard is the protection: a fork's copied turn events move no
+    /// connector grant state (a send recorded for the chat, not yet matched
+    /// by a message, stays unmatched), and the fork's own events still do.
+    /// (Without the guard the copied `user_message` takes the send and the
+    /// copied `turn_started` makes a turn: a copy would grant.)
+    #[tokio::test]
+    async fn copied_turn_events_move_no_connector_grant_state() {
+        use crate::auth::Auth;
+        use crate::connectors::call::Note;
+        use harness_core::Secret;
+        use harness_protocol::PromptMsg;
+        let m = Master::new(
+            harness_store::Store::open_in_memory().unwrap(),
+            Auth::new(Secret::new("t".into()), vec![], false),
+        );
+        let sid = SessionId::new();
+        // The master sent the fork's chat a message of its owner's, which no
+        // event has matched yet.
+        let sent = MasterToNode::Prompt(PromptMsg::test(sid, "first"));
+        m.inner
+            .connectors
+            .calls
+            .note_send(&sent, Note::Chat { owner: true })
+            .unwrap();
+        assert_eq!(m.inner.connectors.calls.held(sid), (1, 0));
+        let at = |seq: u64, kind: &str, payload: serde_json::Value| RawEvent {
+            session_id: sid,
+            seq,
+            ts_ms: 1,
+            kind: kind.into(),
+            payload,
+        };
+        let evs = [
+            at(
+                1,
+                "session_created",
+                serde_json::json!({"title": "t (fork)", "cwd": "/w", "model": "m",
+                    "forked": {"parent": SessionId::new(), "through_seq": 4}}),
+            ),
+            at(2, "turn_started", serde_json::json!({"turn_id": "t1"})),
+            at(
+                3,
+                "user_message",
+                serde_json::json!({"turn_id": "t1", "text": "first"}),
+            ),
+            at(
+                4,
+                "turn_ended",
+                serde_json::json!({"turn_id": "t1", "reason": "completed"}),
+            ),
+        ];
+        for e in evs {
+            assert!(m.apply("n", e).await);
+        }
+        assert_eq!(
+            m.inner.connectors.calls.held(sid),
+            (1, 0),
+            "the copy took the send or made a turn"
+        );
+        // The fork's own turn does move it.
+        assert!(
+            m.apply(
+                "n",
+                at(
+                    5,
+                    "session_forked",
+                    serde_json::json!({
+                    "parent": SessionId::new(), "through_seq": 4, "turn_id": "t1"})
+                )
+            )
+            .await
+        );
+        assert!(
+            m.apply(
+                "n",
+                at(6, "turn_started", serde_json::json!({"turn_id": "t2"}))
+            )
+            .await
+        );
+        assert_eq!(m.inner.connectors.calls.held(sid), (1, 1));
     }
 
     /// A deleted chat's entry is dropped.

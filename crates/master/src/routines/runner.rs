@@ -1137,6 +1137,11 @@ async fn watch_events(m: &Master, mut rx: tokio::sync::broadcast::Receiver<Live>
 }
 
 async fn on_event(m: &Master, e: &RawEvent) {
+    // A fork's copied events (C.2) arrive here too (`Live::Event`), and need
+    // no guard: everything below is keyed by `h.bound`, the chats this
+    // module launched a run in, or by `run_by_child_session`, which joins on
+    // `sessions.parent_id`. A fork is a new chat with neither (a routine's
+    // own run is not forked: `harness_core::fork::check`).
     let Some(h) = handle(m) else { return };
     match e.kind.as_str() {
         "turn_started" => turn_started(m, h, e).await,

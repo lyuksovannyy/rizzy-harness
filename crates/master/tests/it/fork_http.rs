@@ -970,3 +970,75 @@ async fn a_failed_lineage_read_is_not_cached_and_the_copy_is_not_applied() {
         "the copy filed nothing, as copies do not"
     );
 }
+
+/// The guard is the protection, not the divider: a long copy whose
+/// `background_ended` (one that would call back) is applied well before the
+/// divider arrives resumes nothing and records no refusal in the fork.
+/// (With the guard off the callback watcher looks at the fork after its
+/// settling time, finds the copied end waiting, and either resumes the fork
+/// or records that it did not.)
+#[tokio::test]
+async fn a_copied_background_end_applied_before_the_divider_calls_nothing_back() {
+    let t = start().await;
+    let owner = account_id(&t).await;
+    let parent = SessionId::new();
+    let new = SessionId::new();
+    let (kind, payload) = forked_created(parent, 6);
+    t.local.put(new, &kind, payload);
+    for _ in 0..500 {
+        if t.store.session(new).unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    t.store.claim_session(new, Some(&owner), None).unwrap();
+    t.local.put(new, "turn_started", json!({"turn_id": "tb"}));
+    t.local.put(
+        new,
+        "user_message",
+        json!({"turn_id": "tb", "text": "start it"}),
+    );
+    t.local.put(
+        new,
+        "background_started",
+        json!({"bg_id": "bg-1", "call_id": "c", "turn_id": "tb", "timeout_s": 60,
+               "ends_by_ms": harness_core::now_ms() + 60_000}),
+    );
+    t.local.put(
+        new,
+        "background_ended",
+        json!({"bg_id": "bg-1", "reason": "exited", "exit_code": 0, "confirmed": "ended",
+               "ran_ms": 1, "output_bytes": 0, "tail": "", "tail_cut": false, "delivered": false}),
+    );
+    t.local.put(
+        new,
+        "turn_ended",
+        json!({"turn_id": "tb", "reason": "completed"}),
+    );
+    caught_up(&t, &t.alex, new, 6).await;
+    // Long enough for the watcher's settling time and its look.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        t.local.callbacks().iter().all(|(s, _)| *s != new),
+        "the copy resumed the fork: {:?}",
+        t.local.callbacks()
+    );
+    let refused = t.store.audit_lines("callback.refused").unwrap();
+    assert!(refused.is_empty(), "a refusal was recorded: {refused:?}");
+    assert!(
+        t.store
+            .kv_get(&format!("callback-attention:{new}"))
+            .unwrap()
+            .is_none(),
+        "the chat was marked as not resumed"
+    );
+    // The divider, late: still nothing.
+    t.local.put(
+        new,
+        "session_forked",
+        json!({"parent": parent, "through_seq": 6, "turn_id": "tb"}),
+    );
+    caught_up(&t, &t.alex, new, 7).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(t.local.callbacks().iter().all(|(s, _)| *s != new));
+}
