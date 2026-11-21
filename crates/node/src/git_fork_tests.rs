@@ -407,6 +407,46 @@ async fn a_hostile_repository_runs_nothing_and_is_copied_correctly() {
     );
 }
 
+/// `origin` is the parent's path (to fetch from), but a push there would run
+/// `receive-pack` in the parent, with the hooks and config an agent may have
+/// planted, as the person. So `origin` cannot push, and git says why.
+#[tokio::test]
+async fn the_forks_origin_cannot_push_into_the_parent() {
+    let r = rig(true).await;
+    let res = run(&r, Some(&r.head)).await;
+    res.as_ref().unwrap_or_else(|e| panic!("refused: {e}"));
+    let d = &r.dest;
+    assert_eq!(
+        out(d, &["config", "remote.origin.pushurl"]),
+        fork_copy::NO_PUSH
+    );
+    // The parent's path is still where `git fetch origin` reads.
+    assert_eq!(
+        out(d, &["remote", "get-url", "origin"]),
+        r.h.repo.display().to_string()
+    );
+    let o = std::process::Command::new("git")
+        .arg("-C")
+        .arg(d)
+        .args(["push", "origin", "fork/ab12cd34"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("bring-work-back-with-git-fetch-from-the-parent"),
+        "{err}"
+    );
+    assert_eq!(
+        r.h.marked(),
+        Vec::<String>::new(),
+        "a push ran something in the parent"
+    );
+    assert_eq!(digest(&r.h.repo), r.before, "a push wrote the parent");
+}
+
 #[tokio::test]
 async fn without_a_checkpoint_the_branchs_commit_is_written_as_it_is() {
     let r = rig(false).await;

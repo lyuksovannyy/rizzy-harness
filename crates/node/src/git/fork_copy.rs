@@ -251,6 +251,14 @@ pub(crate) fn upstream_url(u: &str) -> Option<String> {
     }
 }
 
+/// The URL `origin` is given to push to: a path that cannot exist, which
+/// git prints back in its own error ("'/nonexistent/no-push--...' does not
+/// appear to be a git repository"). Pushing into the parent would run
+/// `receive-pack` there, with the hooks and config an agent may have written
+/// as the person; work comes back by `git fetch` in the parent instead.
+pub(crate) const NO_PUSH: &str =
+    "/nonexistent/no-push--bring-work-back-with-git-fetch-from-the-parent";
+
 pub(crate) use super::fork_sanitise::ENTRY_MAX;
 
 /// The most stdout and stderr a git call of the copy keeps in memory.
@@ -518,7 +526,10 @@ pub(crate) async fn fill(p: &Plan<'_>) -> Result<Filled, String> {
     drop(work);
     check_dest(p.dest)?;
     let src = p.source.to_string_lossy().into_owned();
-    let mut sets = vec![("remote.origin.url", src)];
+    let mut sets = vec![
+        ("remote.origin.url", src),
+        ("remote.origin.pushurl", NO_PUSH.to_string()),
+    ];
     if let Some(u) = &upstream {
         sets.push(("remote.upstream.url", u.clone()));
         sets.push((

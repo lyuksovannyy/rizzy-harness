@@ -342,9 +342,12 @@ reason, and the fork can then go **in the same folder**, where both chats work
 in the same files (the page says so under the title): what one changes is in the
 other's files, and Undo in one chat refuses over the other's work as it does
 between any two chats. To bring work back from an own copy, run
-`git fetch <the fork's folder> fork/<id>` in the original (or `git push` from
-the fork: its `origin` is the original, its `upstream` the original's own
-`origin`). **Deleting a fork's chat keeps its folder on disk** (the files are
+`git fetch <the fork's folder> fork/<id>` in the original. Do not push from the
+fork: its `origin` is the original, kept to fetch from, and its push address is
+set to a path that does not exist, so `git push` stops with a message that says
+so (a push would run, as you, the hooks an agent may have written in the
+original's `.git`). Its `upstream` is the original's own `origin`, without any
+user name or password. **Deleting a fork's chat keeps its folder on disk** (the files are
 yours; the delete dialog says where); remove it yourself. The node keeps only
 the latest checkpoints of a chat, so a fork of a turn whose checkpoint is gone
 can only share the folder. The API is `POST /api/sessions/{id}/fork` with
