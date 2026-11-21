@@ -57,7 +57,7 @@ The model has no tool for this and nothing a model writes can trigger it.
 
 ## Not changed, on purpose
 
-Search and recall still hold the rewound text (`chat_fts` has no `seq` column); usage is not reduced; memory facts saved, board changes, published artifacts, commands run, network calls, files outside the folder and sub-agent chats started by rewound turns are not undone; `others.rs` (T57) still reads rewound turns to say who changed a file; the browser still receives every event of its owner's chat.
+Search, recall and the "earlier chats" context do not read the rewound text: `Store::append` rebuilds that one chat's `chat_fts` rows from its visible log (`rewind::rewound`) in the transaction that appends a `conversation_rewound` or `conversation_rewind_undone`, and `earlier_chats` skips rewound events (note, summary, reply) by the same rule; the undo brings the text back. Usage is not reduced; memory facts saved, board changes, published artifacts, commands run, network calls, files outside the folder and sub-agent chats started by rewound turns are not undone; `others.rs` (T57) still reads rewound turns to say who changed a file; the browser still receives every event of its owner's chat.
 The web dialog (conversation, files or both), the prompt back in the composer, the collapsed "N turns rewound" block with Undo, forking and editing a message in place come in later changes; until then the chat shows rewound items muted under one line saying so.
 
 ## Comparison

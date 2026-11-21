@@ -63,7 +63,8 @@ pub(crate) fn handoff_log_in(conn: &rusqlite::Connection, sid: SessionId) -> Res
         let mut stmt = conn.prepare_cached(
             "SELECT seq, ts_ms, kind, payload FROM events WHERE session_id = ?1
                AND (kind IN ('turn_started', 'turn_ended', 'checkpoint', 'todo_updated',
-                             'handoff_written')
+                             'handoff_written', 'conversation_rewound',
+                             'conversation_rewind_undone')
                     OR seq = (SELECT MIN(seq) FROM events
                               WHERE session_id = ?1 AND kind = 'user_message'))
              ORDER BY seq",

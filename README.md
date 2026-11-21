@@ -292,9 +292,10 @@ summary already replaced (compacted chats cannot be taken back past the
 summary), and to a message you sent while an answer was running (take the
 chat back to the message that started that answer). **It does not undo:** what
 commands did outside the folder, web requests, memory the agent saved,
-tasks it moved, files it published, other chats it started or the cost; the
-removed text still turns up in search and in what the agent can recall from
-earlier chats; and putting a rewind back never changes files. Only you can do
+tasks it moved, files it published, other chats it started or the cost; and
+putting a rewind back never changes files. The removed text leaves search and
+what the agent can recall from earlier chats (and comes back with the undo).
+Only you can do
 it, never the agent. The buttons (per message "Rewind to here", the choice of
 conversation, files or both, the prompt back in the box) come with the next
 change; this version has the server side (`POST /api/sessions/{id}/rewind` with
