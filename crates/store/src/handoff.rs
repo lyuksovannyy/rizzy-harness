@@ -51,7 +51,8 @@ impl Store {
 
     /// The events of `sid` a note reads (`harness_core::handoff::KINDS`),
     /// ascending: only the first `user_message` (the person's first words;
-    /// later ones, attachments and all, are never read).
+    /// later ones, attachments and all, are never read) and the ones a
+    /// rewind went back to (the rule that counts a rewind needs them).
     pub fn handoff_log(&self, sid: SessionId) -> Result<Vec<RawEvent>> {
         handoff_log_in(&self.lock(), sid)
     }
@@ -66,7 +67,12 @@ pub(crate) fn handoff_log_in(conn: &rusqlite::Connection, sid: SessionId) -> Res
                              'handoff_written', 'conversation_rewound',
                              'conversation_rewind_undone')
                     OR seq = (SELECT MIN(seq) FROM events
-                              WHERE session_id = ?1 AND kind = 'user_message'))
+                              WHERE session_id = ?1 AND kind = 'user_message')
+                    -- The message a rewind went back to: `rewind::rewound`
+                    -- counts a rewind only when it finds that message.
+                    OR (kind = 'user_message' AND seq IN (
+                          SELECT json_extract(payload, '$.message_seq') FROM events
+                          WHERE session_id = ?1 AND kind = 'conversation_rewound')))
              ORDER BY seq",
         )?;
         let rows = stmt.query_map(params![sid.to_string()], |r| {

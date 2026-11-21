@@ -60,13 +60,26 @@ struct Target1 {
 pub struct Ranges {
     active: Vec<Active>,
     targets: Vec<Target1>,
+    /// The person's messages that opened a turn (not queued ones) seen so
+    /// far, by seq, with their turn: a rewind counts only when it names
+    /// one of them.
+    messages: HashMap<u64, String>,
 }
 
 impl Ranges {
-    /// Read one event of a log, in order: a rewind joins, an undo removes
-    /// its rewind (one that is not here, or already gone, changes nothing).
+    /// Read one event of a log, in order: a rewind joins (if it counts,
+    /// [`Self::add`]), an undo removes its rewind (one that is not here, or
+    /// already gone, changes nothing). The person's messages are read too
+    /// ([`KINDS`] holds them), so a reader that cuts a log must keep them.
     pub fn apply(&mut self, e: &RawEvent) {
         match e.kind.as_str() {
+            "user_message" => {
+                if e.payload.get("queued").and_then(|q| q.as_bool()) != Some(true)
+                    && let Some(t) = e.payload.get("turn_id").and_then(|t| t.as_str())
+                {
+                    self.message(e.seq, t);
+                }
+            }
             "conversation_rewound" => {
                 if let Ok(EventKind::ConversationRewound(r)) = e.typed() {
                     self.add(e.seq, r.message_seq, &r.turn_id);
@@ -81,9 +94,24 @@ impl Ranges {
         }
     }
 
+    /// The person's message at `seq` opened turn `turn_id` (not a queued
+    /// message: it opens nothing).
+    pub fn message(&mut self, seq: u64, turn_id: &str) {
+        self.messages.insert(seq, turn_id.to_string());
+    }
+
     /// A rewind written at `rewind_seq` that went back to `message_seq`.
-    pub fn add(&mut self, rewind_seq: u64, message_seq: u64, turn_id: &str) {
+    /// It counts only when its range is not empty and `message_seq` is the
+    /// seq of a message of `turn_id` read before ([`Self::message`]); one
+    /// that does not (a corrupt or hostile event) counts for nothing: it
+    /// hides nothing, not even its turn's `turn_started`. Whether it did.
+    pub fn add(&mut self, rewind_seq: u64, message_seq: u64, turn_id: &str) -> bool {
         self.remove(rewind_seq);
+        if message_seq >= rewind_seq
+            || self.messages.get(&message_seq).map(String::as_str) != Some(turn_id)
+        {
+            return false;
+        }
         self.active.push(Active {
             rewind_seq,
             message_seq,
@@ -92,6 +120,7 @@ impl Ranges {
             rewind_seq,
             turn_id: turn_id.to_string(),
         });
+        true
     }
 
     /// The rewind at `rewind_seq` is undone.
@@ -162,7 +191,10 @@ pub fn visible(log: &[RawEvent]) -> Cow<'_, [RawEvent]> {
     Cow::Owned(
         log.iter()
             .filter(|e| {
-                if e.kind == "checkpoint" {
+                // State, not conversation. An undo stays wherever it stands
+                // (it can be in a range in a corrupt log): the pass over the
+                // result must find the rewind it undid undone again.
+                if e.kind == "checkpoint" || e.kind == "conversation_rewind_undone" {
                     return true;
                 }
                 if ranges.holds(e.seq) {

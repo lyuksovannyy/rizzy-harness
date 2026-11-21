@@ -667,6 +667,9 @@ impl SessionView {
             }
             EventKind::UserMessage(m) => {
                 self.no_more_undo();
+                if !m.queued {
+                    self.ranges.message(seq, &m.turn_id);
+                }
                 self.items.push(Item::User {
                     turn_id: m.turn_id,
                     text: m.text,
@@ -1035,18 +1038,21 @@ impl SessionView {
                     .map(|(_, t)| t)
                     .collect::<std::collections::BTreeSet<_>>()
                     .len() as u32;
-                self.ranges.add(seq, r.message_seq, &r.turn_id);
-                self.rewinds.push(RewindInfo {
-                    seq,
-                    message_seq: r.message_seq,
-                    turn_id: r.turn_id,
-                    turns,
-                    files: r.files,
-                    undone: false,
-                    can_undo: true,
-                });
-                self.items.remark(&self.ranges);
-                self.retodo();
+                // One that names no message of its turn counts for nothing
+                // and is not listed.
+                if self.ranges.add(seq, r.message_seq, &r.turn_id) {
+                    self.rewinds.push(RewindInfo {
+                        seq,
+                        message_seq: r.message_seq,
+                        turn_id: r.turn_id,
+                        turns,
+                        files: r.files,
+                        undone: false,
+                        can_undo: true,
+                    });
+                    self.items.remark(&self.ranges);
+                    self.retodo();
+                }
             }
             EventKind::ConversationRewindUndone(u) => {
                 if let Some(r) = self.rewinds.iter_mut().find(|r| r.seq == u.rewind_seq) {

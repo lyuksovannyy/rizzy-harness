@@ -21,6 +21,8 @@ No SQLite schema changed: two event kinds only, so existing data directories kee
 `crates/core/src/rewind.rs` is the one place that computes it: `rewound(log)` is the union of the ranges of the rewinds not undone, `Ranges::holds(seq)` asks whether an event is in it, `check` and `check_undo` are the rules below.
 The Rust fold, the model's rebuild, the seen table, the retry rule, the hand-off note and the node's checks all read it.
 `web/src/fold.ts` is a second implementation of the fold, pinned by the shared fold fixture (`crates/core/tests/fold_fixture.rs`, `web/src/__fixtures__/session.json`).
+**A rewind counts only when its range is not empty and its `message_seq` is the seq of a message of the person's (not a queued one) of its own `turn_id`**, read earlier in the same log: a corrupt or hostile `conversation_rewound` (seq 0, the future, a turn start, another turn's message) counts for nothing, hides nothing (not its turn's `turn_started` either) and is not listed in the view.
+So a reader that cuts a log for this rule must keep the person's messages (`rewind::KINDS`; the hand-off log keeps the messages rewinds went back to), and `visible` keeps every `conversation_rewind_undone` wherever it stands, so a second pass over its result is the same list (`crates/core/tests/rewind_fuzz.rs`, with `web/src/__fixtures__/rewind_fuzz.json` pinning the web fold on the same logs).
 
 ## What "rewound" means, reader by reader
 

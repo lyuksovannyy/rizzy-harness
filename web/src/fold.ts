@@ -422,11 +422,13 @@ interface Rewinding {
   starts: [seq: number, turn: string][];
   /** Every `todo_updated`: a rewind takes the list its turns set back. */
   todos: [seq: number, items: TodoItem[]][];
+  /** The person's messages that opened a turn (not queued ones), by seq: a rewind counts only when it names one of its turn. */
+  messages: Map<number, string>;
 }
 const rewinding = new WeakMap<SessionView, Rewinding>();
 const rw = (v: SessionView): Rewinding => {
   let r = rewinding.get(v);
-  if (!r) rewinding.set(v, (r = { born: [], ranges: [], starts: [], todos: [] }));
+  if (!r) rewinding.set(v, (r = { born: [], ranges: [], starts: [], todos: [], messages: new Map() }));
   return r;
 };
 
@@ -570,8 +572,10 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
     // folds as it did. The target's own start stands before its message.
     case "conversation_rewound": {
       const r = rw(v);
-      const turns = new Set(r.starts.filter(([s, t]) => p.message_seq < s && s < e.seq && t !== p.turn_id).map(([, t]) => t)).size + 1;
+      // One that names no message of its turn counts for nothing and is not listed.
       r.ranges = r.ranges.filter((a) => a.rewind !== e.seq);
+      if (!(p.message_seq < e.seq && r.messages.get(p.message_seq) === p.turn_id)) break;
+      const turns = new Set(r.starts.filter(([s, t]) => p.message_seq < s && s < e.seq && t !== p.turn_id).map(([, t]) => t)).size + 1;
       r.ranges.push({ rewind: e.seq, message: p.message_seq });
       (v.rewinds ??= []).push({
         seq: e.seq,
@@ -620,6 +624,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (p.reply != null) item.reply = p.reply;
       if (p.images?.length) item.images = p.images;
       if (p.queued) item.queued = { seq: e.seq, read: false };
+      else rw(v).messages.set(e.seq, p.turn_id);
       if (p.triggers?.length) item.triggers = p.triggers;
       if (p.tags?.length) item.tags = p.tags;
       pushItem(v, e.seq, item);
