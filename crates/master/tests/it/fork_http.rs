@@ -76,6 +76,19 @@ impl Node {
             .collect()
     }
 
+    /// Where the forks the node was sent put their files.
+    fn checkouts(&self) -> Vec<harness_protocol::ForkCheckout> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                MasterToNode::Fork { checkout, .. } => Some(*checkout),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn callbacks(&self) -> Vec<(SessionId, Vec<String>)> {
         self.seen
             .lock()
@@ -243,13 +256,24 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Node) {
                                 events,
                             });
                         }
-                        MasterToNode::Fork { session_id, parent, turn_id, title, .. } => {
+                        MasterToNode::Fork { session_id, parent, turn_id, title, checkout, .. } => {
                             let log = f.logs.get(parent).cloned().unwrap_or_default();
+                            let own = *checkout == harness_protocol::ForkCheckout::Own;
                             match harness_core::fork::check(&log, turn_id) {
                                 Err(e) => nack = Some(e),
+                                // A node whose chat is in no repository.
+                                Ok(_) if own && f.node == "norepo" => {
+                                    nack = Some(format!(
+                                        "{}: this chat's folder is not a git repository, so \
+                                         there is nothing to copy; the fork can share this \
+                                         chat's folder instead",
+                                        harness_protocol::FORK_REFUSED
+                                    ));
+                                }
                                 Ok(cut) => {
+                                    let cwd = if own { "/projects/w-fork" } else { "/w" };
                                     let built = harness_core::fork::build(
-                                        &log, &cut, *session_id, title, "/w", harness_core::now_ms(),
+                                        &log, &cut, *session_id, title, cwd, harness_core::now_ms(),
                                     )
                                     .unwrap();
                                     for e in built {
@@ -289,6 +313,8 @@ struct T {
     alex: String,
     local: Node,
     old: Node,
+    mid: Node,
+    norepo: Node,
     memory: Arc<SqliteMemory>,
     master: harness_master::Master,
     /// The master's mirror, to read what it kept.
@@ -329,6 +355,7 @@ async fn start_with(file: bool) -> T {
         "local",
         &[
             harness_protocol::CAP_FORK,
+            harness_protocol::CAP_FORK_OWN,
             harness_protocol::CAP_REMEMBER,
             harness_protocol::CAP_BACKGROUND,
             harness_protocol::CAP_CALLBACK,
@@ -337,6 +364,16 @@ async fn start_with(file: bool) -> T {
     );
     master.add_link(l, true).await.unwrap();
     let (l, old) = fake("old", &[]);
+    master.add_link(l, false).await.unwrap();
+    // A node that forks but cannot give a fork a folder of its own (an
+    // older one, or one with no projects folder).
+    let (l, mid) = fake("mid", &[harness_protocol::CAP_FORK]);
+    master.add_link(l, false).await.unwrap();
+    // One that can, where the chat's folder is no repository.
+    let (l, norepo) = fake(
+        "norepo",
+        &[harness_protocol::CAP_FORK, harness_protocol::CAP_FORK_OWN],
+    );
     master.add_link(l, false).await.unwrap();
     harness_master::routines::start_with(
         &master,
@@ -363,6 +400,8 @@ async fn start_with(file: bool) -> T {
         alex,
         local,
         old,
+        mid,
+        norepo,
         memory,
         store,
         db,
@@ -864,15 +903,20 @@ async fn the_nodes_list_says_which_nodes_fork() {
     let (st, v) = req(&t, Method::GET, "/api/nodes", None, &t.alex).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let nodes = v["nodes"].as_array().or(v.as_array()).unwrap();
-    let fork_of = |id: &str| {
+    let field = |id: &str, f: &str| {
         nodes
             .iter()
             .find(|n| n["node_id"] == id)
-            .unwrap_or_else(|| panic!("{v}"))["fork"]
+            .unwrap_or_else(|| panic!("{v}"))[f]
             .clone()
     };
+    let fork_of = |id: &str| field(id, "fork");
     assert_eq!(fork_of("local"), json!(true));
     assert_eq!(fork_of("old"), json!(false));
+    // Which of them can give a fork a folder of its own.
+    assert_eq!(field("local", "fork_own"), json!(true));
+    assert_eq!(field("mid", "fork_own"), json!(false));
+    assert_eq!(field("old", "fork_own"), json!(false));
 }
 
 /// The first event of a fork the node writes by hand (`forked` naming a
@@ -1103,4 +1147,124 @@ async fn a_fork_whose_ack_is_late_still_gets_its_project_and_the_auto_model() {
         "in the parent's project"
     );
     assert!(auto(new).is_some(), "following the defaults, as the parent");
+}
+
+/// Where the fork's files live is the body's `checkout`: `own` and `shared`
+/// reach the node as said, a body without it is `shared` (as before the
+/// choice), anything else is refused here and the node is told nothing.
+#[tokio::test]
+async fn the_checkout_choice_reaches_the_node_and_defaults_to_shared() {
+    use harness_protocol::ForkCheckout::{Own, Shared};
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "local").await;
+    let first = send(&t, &t.alex, sid, "first").await;
+    let ask = |body: Value| {
+        let t = &t;
+        async move { req(t, Method::POST, &path(sid), Some(body), &t.alex).await }
+    };
+    let (st, v) = ask(json!({"turn_id": first, "checkout": "own"})).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let own: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    let (st, v) = ask(json!({"turn_id": first, "checkout": "shared"})).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = ask(json!({"turn_id": first})).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(t.local.checkouts(), vec![Own, Shared, Shared]);
+    // The new chat works in the folder the node chose.
+    let evs = caught_up(&t, &t.alex, own, 5).await;
+    assert_eq!(evs[0]["payload"]["cwd"], "/projects/w-fork");
+    for bad in [
+        json!("copy"),
+        json!(""),
+        json!(1),
+        json!(null),
+        json!("OWN"),
+    ] {
+        let (st, v) = ask(json!({"turn_id": first, "checkout": bad})).await;
+        assert!(st.is_client_error(), "{bad}: {st} {v}");
+    }
+    assert_eq!(t.local.checkouts().len(), 3, "the bad ones reached no node");
+}
+
+/// A node that did not announce `fork_own` is not asked for one (it would
+/// share the folder without saying so): refused with what to do, nothing
+/// sent; "the same folder" works there.
+#[tokio::test]
+async fn an_own_folder_needs_a_node_that_announced_it() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "mid").await;
+    let turn = send(&t, &t.alex, sid, "hello").await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &path(sid),
+        Some(json!({"turn_id": turn, "checkout": "own"})),
+        &t.alex,
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "{v}");
+    let e = v["error"].as_str().unwrap();
+    assert!(e.contains("update") && e.contains("same folder"), "{v}");
+    assert!(t.mid.forks().is_empty());
+    let (st, v) = fork(&t, &t.alex, sid, &turn).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        t.mid.checkouts(),
+        vec![harness_protocol::ForkCheckout::Shared]
+    );
+}
+
+/// The node's refusal of an own folder reaches the person with its sentence
+/// and leaves nothing: no chat, no owner mark kept, the parent still
+/// forkable into the same folder. Everything of part 1 holds with `own`:
+/// not the owner is the 404, a running turn is refused, a sub-agent's chat
+/// is refused.
+#[tokio::test]
+async fn a_nodes_refusal_of_an_own_folder_leaves_no_chat_and_part_one_still_holds() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "norepo").await;
+    let turn = send(&t, &t.alex, sid, "hello").await;
+    let own = |who: String, sid: SessionId, turn: String| {
+        let t = &t;
+        async move {
+            req(
+                t,
+                Method::POST,
+                &path(sid),
+                Some(json!({"turn_id": turn, "checkout": "own"})),
+                &who,
+            )
+            .await
+        }
+    };
+    let (st, v) = own(t.alex.clone(), sid, turn.clone()).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    let e = v["error"].as_str().unwrap();
+    assert!(
+        e.contains("not a git repository") && e.contains("share"),
+        "{v}"
+    );
+    let (st, list) = req(&t, Method::GET, "/api/sessions", None, &t.alex).await;
+    assert_eq!(st, StatusCode::OK);
+    let rows = list["sessions"]
+        .as_array()
+        .or(list.as_array())
+        .unwrap()
+        .clone();
+    assert_eq!(rows.len(), 1, "no chat was made: {rows:?}");
+    // The owner is still the only one who may.
+    let bob = account(&t, "bob", "member").await;
+    let (st, v) = own(bob, sid, turn.clone()).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    assert_eq!(
+        t.norepo.checkouts().len(),
+        1,
+        "only the owner's reached the node"
+    );
+    // A turn that is not there is refused, own or not.
+    let (st, v) = own(t.alex.clone(), sid, "no-such-turn".into()).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    // The same chat forks into the same folder.
+    let (st, v) = fork(&t, &t.alex, sid, &turn).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
 }
