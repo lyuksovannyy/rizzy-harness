@@ -155,7 +155,7 @@ describe("the header is one line", () => {
 
   test("an agentic chat without a project, a host chat, and a plain chat", async () => {
     await draw(sessionRow({ project_id: null }));
-    expect(parts()).toEqual(["Project", "n1", "sandbox"]);
+    expect(parts()).toEqual(["No project", "n1", "sandbox"]);
     await draw(sessionRow({ project_id: null }), "agentic", "host");
     expect(head().querySelector(".exec-mode")!.textContent).toBe("host shell");
     await draw(sessionRow({ profile: "chat", project_id: "p1" }), "chat");
