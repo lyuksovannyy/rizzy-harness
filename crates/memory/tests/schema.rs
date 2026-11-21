@@ -84,7 +84,16 @@ fn a_memory_db_and_a_node_db_do_not_open_as_each_other() {
             SqliteMemory::open(path).err().map(|e| e.to_string())
         };
         let err = err.unwrap_or_else(|| panic!("{} opened as the other kind", path.display()));
-        assert!(err.contains("does not match schema version 1"), "{err}");
+        // The two kinds count their versions apart. A file of the other
+        // kind is refused either because its schema is not this kind's,
+        // or, when its version is above what this kind knows, as a file a
+        // newer build wrote: unchanged in both cases.
+        assert!(
+            err.contains("does not match schema version")
+                || err.contains("was written by a newer rizzy-harness"),
+            "{err}"
+        );
+        assert!(err.contains("not changed"), "{err}");
         assert_eq!(&std::fs::read(path).unwrap(), &before);
     }
 }

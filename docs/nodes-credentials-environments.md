@@ -1091,8 +1091,9 @@ after checking the ids and the base as §4.11.4 does.
 | Deletion classes (§4.8) | Class `c` included "not a git repository". | Class `c` means only "a repository with no forge remote it may push to": it still cannot be saved to a forge. |
 | `node link` | Any folder. | A repository with a commit, or `--init` by the owner (§4.11.3). |
 
-Plain-folder agentic sessions that exist before this is built are not carried over: before the
-first tagged release dev data directories are wiped (`CLAUDE.md`).
+Plain-folder agentic sessions that exist before this is built: to be decided when it is built.
+Data directories are no longer wiped (`CLAUDE.md`, the owner's decision of 2026-11-21), so
+they must either keep working as they are or be carried over by a migration.
 
 ### 4.12 No conversation at rest on the node
 

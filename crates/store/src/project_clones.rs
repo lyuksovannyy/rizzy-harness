@@ -1,12 +1,43 @@
 //! Projects whose folder a node is cloning (ADOPTION_PLAN X.27 step 3,
-//! PLAN.md T86 and T77): the `project_clones` table (its schema is in
-//! `projects.rs`, beside the projects it becomes). A row is not a project:
-//! no lookup of a project by id reads it.
+//! PLAN.md T86 and T77): the `project_clones` table. A row is not a
+//! project: no lookup of a project by id reads it.
 
 use rusqlite::{OptionalExtension, params};
 
 use crate::projects::insert_project;
 use crate::{NewProject, ProjectRow, Result, Store, StoreError};
+
+/// Schema version 2 (the first migration after the schema was frozen,
+/// PLAN.md §0): a database of version 1 gets this table on its next open.
+pub const SCHEMA: &str = r#"
+-- A project whose folder a node is cloning now, or whose clone failed
+-- (ADOPTION_PLAN X.27 step 3, PLAN.md T86 and T77). Not a project: no
+-- route that takes a project id reads this table, so nothing can start a
+-- chat in it, link it, give it a folder or write its memory or board. When
+-- the clone ends well the row is deleted and the project written, with the
+-- same id, in one transaction; when it fails the row stays `failed` with
+-- the reason for its starter to read and dismiss. At the master's start
+-- every `cloning` row becomes `failed` (no clone outlives the master's
+-- wait for it).
+CREATE TABLE IF NOT EXISTS project_clones (
+    project_id   TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    node_id      TEXT NOT NULL,
+    host         TEXT NOT NULL,
+    full_name    TEXT NOT NULL,
+    created_by   TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    started_ms   INTEGER NOT NULL,
+    state        TEXT NOT NULL CHECK (state IN ('cloning', 'failed')),
+    reason       TEXT,
+    ended_ms     INTEGER,
+    CHECK ((state = 'failed') = (reason IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS project_clones_ws ON project_clones(workspace_id);
+-- One clone of a repository per person and node at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS project_clones_one
+    ON project_clones(created_by, node_id, host, lower(full_name)) WHERE state = 'cloning';
+"#;
 
 /// Failed clones kept per person; older ones go when a new one fails.
 pub const FAILED_KEPT: usize = 10;
