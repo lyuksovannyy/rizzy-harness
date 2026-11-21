@@ -5760,3 +5760,9 @@ button.pp-row:hover:not(:disabled),
 .delegate-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 4px; }
 .form label.delegate-option { display: flex; flex-direction: row; gap: 8px; align-items: baseline; font-weight: normal; }
 .tag-only-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+/* Narrow: the note, then the strip across the full width as in a chat that has a composer. */
+@media (max-width: 600px) {
+  .tag-only-row { flex-wrap: wrap; }
+  .tag-only-row > .tag-only { flex: 1 1 100%; margin: 0; }
+  .tag-only-row > .composer-strip.alone { flex: 1 1 100%; justify-content: space-between; }
+}
