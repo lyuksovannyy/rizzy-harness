@@ -311,13 +311,42 @@ struct Block {
     text: String,
     /// What reads the rest of a long one.
     key: Key,
+    /// A `history` call or its result: about the chat, not in it.
+    own: bool,
 }
 
 #[derive(Debug, Clone)]
 enum Key {
     Message,
-    Call(String),
+    /// A call's result: the id as the provider gave it (not unique even
+    /// within a turn), and what reads it here: that id when it is the only
+    /// one in the turn, else `#` and the block's number.
+    Call {
+        id: String,
+        sel: String,
+    },
     Attachment(usize),
+}
+
+/// The tool each call id names as a turn's messages are walked in order.
+/// Providers number calls per message, so an id may come back later in a
+/// turn: a result belongs to the call before it, not to the last of the
+/// turn.
+#[derive(Default)]
+struct Walk(HashMap<String, String>);
+
+impl Walk {
+    fn see(&mut self, m: &ChatMsg) {
+        if let ChatMsg::Assistant { tool_calls, .. } = m {
+            for c in tool_calls {
+                self.0.insert(c.call_id.clone(), c.tool.clone());
+            }
+        }
+    }
+
+    fn is_history(&self, call_id: &str) -> bool {
+        self.0.get(call_id).is_some_and(|tool| tool == NAME)
+    }
 }
 
 /// An image of a turn: the person's, then the ones tool results returned.
@@ -489,22 +518,9 @@ impl Chat {
             .sum()
     }
 
-    /// The calls of a turn by id: (tool, input).
-    fn call_table(&self, t: &Turn) -> HashMap<String, (String, Value)> {
-        let mut out = HashMap::new();
-        for m in &self.msgs[t.start..t.end] {
-            if let ChatMsg::Assistant { tool_calls, .. } = m {
-                for c in tool_calls {
-                    out.insert(c.call_id.clone(), (c.tool.clone(), c.input.clone()));
-                }
-            }
-        }
-        out
-    }
-
     /// The images of a turn, as `image: I` counts them (from 1).
     fn pics(&self, t: &Turn) -> Vec<Pic> {
-        let calls = self.call_table(t);
+        let mut walk = Walk::default();
         let mut out: Vec<Pic> = t
             .user_images
             .iter()
@@ -522,6 +538,7 @@ impl Chat {
             })
             .collect();
         for m in &self.msgs[t.start..t.end] {
+            walk.see(m);
             if let ChatMsg::ToolImage {
                 call_id,
                 image,
@@ -531,7 +548,7 @@ impl Chat {
             {
                 // An image an earlier `history` call showed is a copy of one
                 // of the chat's own.
-                if calls.get(call_id).is_some_and(|(tool, _)| tool == NAME) {
+                if walk.is_history(call_id) {
                     continue;
                 }
                 out.push(Pic {
@@ -549,12 +566,13 @@ impl Chat {
 
     /// A turn's view as blocks, in order.
     fn blocks(&self, t: &Turn) -> Vec<Block> {
-        let calls = self.call_table(t);
+        let mut walk = Walk::default();
         let mut out: Vec<Block> = Vec::new();
         let (mut users, mut att, mut men) = (0usize, 0usize, 0usize);
         let agent = t.agent.clone().unwrap_or_else(|| "assistant".into());
         let mut pics = 0usize;
         for m in &self.msgs[t.start..t.end] {
+            walk.see(m);
             match m {
                 ChatMsg::User(text) | ChatMsg::UserImages { text, .. } => {
                     let queued = text.contains(harness_core::event::QUEUED_LEAD);
@@ -566,6 +584,7 @@ impl Chat {
                         },
                         text: person_text(text).to_string(),
                         key: Key::Message,
+                        own: false,
                     });
                     // What this message brought, listed under it: a queued
                     // message's under the turn that read it, with the
@@ -587,6 +606,7 @@ impl Chat {
                             ),
                             text: a.text.clone(),
                             key: Key::Attachment(att),
+                            own: false,
                         });
                     }
                     for (path, state) in &t.mentions[men..men + brought.mentions] {
@@ -595,6 +615,7 @@ impl Chat {
                             label: format!("mentioned file \"{}\" ({state:?})", shown_name(path)),
                             text: String::new(),
                             key: Key::Message,
+                            own: false,
                         });
                     }
                 }
@@ -606,6 +627,7 @@ impl Chat {
                             label: format!("assistant ({agent})"),
                             text: text.clone(),
                             key: Key::Message,
+                            own: false,
                         });
                     }
                     for c in tool_calls {
@@ -619,11 +641,12 @@ impl Chat {
                             // a few words; the rest is their model's.
                             text: c.input.to_string(),
                             key: Key::Message,
+                            own: c.tool == NAME,
                         });
                     }
                 }
                 ChatMsg::Tool { call_id, content } => {
-                    let earlier = calls.get(call_id).is_some_and(|(tool, _)| tool == NAME);
+                    let earlier = walk.is_history(call_id);
                     out.push(Block {
                         label: format!("result of call {}", shown_id(call_id)),
                         text: if earlier {
@@ -631,7 +654,11 @@ impl Chat {
                         } else {
                             content.clone()
                         },
-                        key: Key::Call(call_id.clone()),
+                        key: Key::Call {
+                            id: call_id.clone(),
+                            sel: String::new(),
+                        },
+                        own: earlier,
                     });
                 }
                 ChatMsg::ToolImage {
@@ -640,7 +667,7 @@ impl Chat {
                     bytes,
                     state,
                 } => {
-                    if calls.get(call_id).is_some_and(|(tool, _)| tool == NAME) {
+                    if walk.is_history(call_id) {
                         continue;
                     }
                     pics += 1;
@@ -659,6 +686,7 @@ impl Chat {
                         ),
                         text: String::new(),
                         key: Key::Message,
+                        own: false,
                     });
                 }
                 ChatMsg::Note(text)
@@ -669,8 +697,26 @@ impl Chat {
                     label: "harness line".into(),
                     text: text.clone(),
                     key: Key::Message,
+                    own: false,
                 }),
                 ChatMsg::System(_) => {}
+            }
+        }
+        // Each result is read by the id when that is the only one of the
+        // turn, else by its number.
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for b in &out {
+            if let Key::Call { id, .. } = &b.key {
+                *seen.entry(id.clone()).or_default() += 1;
+            }
+        }
+        for (k, b) in out.iter_mut().enumerate() {
+            if let Key::Call { id, sel } = &mut b.key {
+                *sel = if seen[id.as_str()] == 1 {
+                    shown_id(id)
+                } else {
+                    format!("#{}", k + 1)
+                };
             }
         }
         out
@@ -850,7 +896,7 @@ impl Chat {
     /// quoted and cut at [`CUT`] characters, with how to read all of it.
     fn render(&self, n: usize, k: usize, b: &Block) -> String {
         let mut out = format!("[{k}] {}", b.label);
-        if b.text.is_empty() && !matches!(b.key, Key::Call(_)) {
+        if b.text.is_empty() && !matches!(b.key, Key::Call { .. }) {
             return out;
         }
         out.push('\n');
@@ -858,7 +904,7 @@ impl Chat {
         out.push_str(&quote(head(&b.text, CUT)));
         if all > CUT {
             let how = match &b.key {
-                Key::Call(id) => format!("\"call\": {}", Value::String(shown_id(id))),
+                Key::Call { sel, .. } => format!("\"call\": {}", Value::String(sel.clone())),
                 Key::Attachment(i) => format!("\"attachment\": {i}"),
                 Key::Message => format!("\"message\": {k}"),
             };
@@ -876,11 +922,7 @@ impl Chat {
         let t = self.turn(n)?;
         let blocks = self.blocks(t);
         let (k, b) = match &sel {
-            Sel::Call(id) => blocks
-                .iter()
-                .enumerate()
-                .find(|(_, b)| matches!(&b.key, Key::Call(c) if c == id || shown_id(c) == *id))
-                .ok_or_else(|| format!("turn {n} has no call with the id `{id}`"))?,
+            Sel::Call(id) => Self::find_call(&blocks, n, id)?,
             Sel::Attachment(i) => blocks
                 .iter()
                 .enumerate()
@@ -908,7 +950,10 @@ impl Chat {
         }
         let r = ranges[part - 1].clone();
         let name = match &sel {
-            Sel::Call(id) => format!("\"call\": {}", Value::String(shown_id(id))),
+            Sel::Call(_) => match &b.key {
+                Key::Call { sel, .. } => format!("\"call\": {}", Value::String(sel.clone())),
+                _ => unreachable!("a call selects a result"),
+            },
             Sel::Attachment(i) => format!("\"attachment\": {i}"),
             Sel::Message(k) => format!("\"message\": {k}"),
         };
@@ -934,6 +979,61 @@ impl Chat {
             out.push_str("That is the end of it.");
         }
         Ok(out)
+    }
+
+    /// The result block `id` names in turn `n`: a call id the turn has
+    /// once, `#K` or `K` for the block `[K]` (when `K` is no call id of the
+    /// turn). An id repeated in the turn is refused with the numbers.
+    fn find_call<'b>(
+        blocks: &'b [Block],
+        n: usize,
+        id: &str,
+    ) -> Result<(usize, &'b Block), String> {
+        let results = || {
+            blocks
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| matches!(b.key, Key::Call { .. }))
+        };
+        let numbered = |k: usize| -> Result<(usize, &'b Block), String> {
+            match blocks.get(k.wrapping_sub(1)) {
+                Some(b) if matches!(b.key, Key::Call { .. }) => Ok((k - 1, b)),
+                Some(_) => Err(format!("[{k}] of turn {n} is not a result of a call")),
+                None => Err(format!(
+                    "turn {n} has {}",
+                    plural(blocks.len(), "message", "messages")
+                )),
+            }
+        };
+        let number = |s: &str| s.parse::<usize>().ok().filter(|k| *k >= 1);
+        if let Some(k) = id.strip_prefix('#').and_then(number) {
+            return numbered(k);
+        }
+        let hits: Vec<(usize, &Block)> = results()
+            .filter(
+                |(_, b)| matches!(&b.key, Key::Call { id: c, .. } if c == id || shown_id(c) == id),
+            )
+            .collect();
+        match hits.as_slice() {
+            [one] => Ok(*one),
+            [] => match number(id) {
+                Some(k) => numbered(k),
+                None => Err(format!(
+                    "turn {n} has no call with the id `{}`",
+                    shown_id(id)
+                )),
+            },
+            many => Err(format!(
+                "more than one call of turn {n} has the id `{}`: their results are {}; ask for \
+                 one with its number, as \"call\": \"#{}\"",
+                shown_id(id),
+                many.iter()
+                    .map(|(i, _)| format!("[{}]", i + 1))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                many[0].0 + 1
+            )),
+        }
     }
 
     fn image(&self, n: usize, i: usize) -> Result<Reply, String> {
@@ -973,13 +1073,10 @@ impl Chat {
         let mut hits: Vec<String> = Vec::new();
         let mut more = 0usize;
         for (i, t) in self.turns.iter().enumerate().rev() {
-            let calls = self.call_table(t);
             let found = self.blocks(t).into_iter().find_map(|b| {
                 // A `history` call's input and result are about the chat,
                 // not in it.
-                if b.label.starts_with("call history ")
-                    || matches!(&b.key, Key::Call(c) if calls.get(c).is_some_and(|(tool, _)| tool == NAME))
-                {
+                if b.own {
                     return None;
                 }
                 let hay = format!("{} {}", b.label, b.text);
@@ -1069,7 +1166,7 @@ impl harness_tools::Tool for History {
             "type": "object",
             "properties": {
                 "turn": { "type": "integer", "minimum": 1, "description": "A turn's number in the index" },
-                "call": { "type": "string", "description": "With turn: one tool call's id, to read its whole result" },
+                "call": { "type": "string", "description": "With turn: one tool call's id, to read its whole result; an id that comes twice in the turn is read by the number of its result, as \"#5\"" },
                 "attachment": { "type": "integer", "minimum": 1, "description": "With turn: an attachment's number, to read its whole text" },
                 "message": { "type": "integer", "minimum": 1, "description": "With turn: a message's number in brackets, to read all of a long one" },
                 "image": { "type": "integer", "minimum": 1, "description": "With turn: an image's number, to see it" },

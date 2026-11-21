@@ -1033,3 +1033,109 @@ fn a_queued_message_whose_delivery_a_rewind_hid_is_not_shown() {
     assert!(call(&log, json!({"turn": 1, "image": 1})).is_err());
     assert!(ask(&log, json!({"search": "QUEUED ATTACHMENT"})).contains("0 turns"));
 }
+
+// ---- a call id repeated inside one turn ----
+
+/// A turn of two steps, a `history` call then a `read`, whose calls carry
+/// the same id (providers number calls per message).
+fn two_calls_one_id() -> Log {
+    let mut log = Log::new();
+    log.turn(
+        None,
+        "q",
+        &[
+            ("history", json!({}), "HISTORY RESULT BODY"),
+            ("read", json!({"path": "f"}), "READ RESULT BODY"),
+        ],
+        "ok",
+    );
+    for e in log.events.iter_mut() {
+        if e.kind == "assistant_message" || e.kind == "tool_call_finished" {
+            let s = e.payload.to_string().replace("t1c1", "t1c0");
+            e.payload = serde_json::from_str(&s).unwrap();
+        }
+    }
+    log
+}
+
+/// The numbers `[k]` of the lines of a view that start with `[k] <what>`.
+fn numbers_of(view: &str, what: &str) -> Vec<usize> {
+    view.lines()
+        .filter_map(|l| l.strip_prefix('['))
+        .filter_map(|l| {
+            let (k, rest) = l.split_once("] ")?;
+            rest.starts_with(what).then(|| k.parse().unwrap())
+        })
+        .collect()
+}
+
+#[test]
+fn a_call_id_repeated_in_a_turn_keeps_each_result_reachable_by_its_number() {
+    let log = two_calls_one_id();
+    let view = ask(&log, json!({"turn": 1}));
+    // The earlier history read is told apart from the read, by position.
+    let results = numbers_of(&view, "result of call t1c0");
+    assert_eq!(results.len(), 2, "{view}");
+    assert!(view.contains("an earlier history read"), "{view}");
+    assert!(view.contains("READ RESULT BODY"), "{view}");
+    // The id alone is ambiguous: a plain sentence names the numbers.
+    let e = call(&log, json!({"turn": 1, "call": "t1c0"})).unwrap_err();
+    assert!(
+        e.contains("more than one")
+            && e.contains(&format!("[{}]", results[0]))
+            && e.contains(&format!("[{}]", results[1])),
+        "{e}"
+    );
+    // Each is read by its number: the second is the read's, whole.
+    let second = ask(&log, json!({"turn": 1, "call": format!("#{}", results[1])}));
+    assert!(second.contains("READ RESULT BODY"), "{second}");
+    let first = ask(&log, json!({"turn": 1, "call": results[0].to_string()}));
+    assert!(first.contains("an earlier history read"), "{first}");
+    // A number that is not a result is refused.
+    let e = call(&log, json!({"turn": 1, "call": "#1"})).unwrap_err();
+    assert!(e.contains("[1]") && e.contains("not a result"), "{e}");
+    // The search is told the same: the read's result is found, the
+    // history call's is not.
+    assert!(ask(&log, json!({"search": "READ RESULT"})).contains("turn 1"));
+    assert!(ask(&log, json!({"search": "HISTORY RESULT"})).contains("0 turns"));
+}
+
+#[test]
+fn a_unique_call_id_is_still_accepted() {
+    let mut log = Log::new();
+    log.turn(
+        None,
+        "q",
+        &[("read", json!({}), "ONE"), ("read", json!({}), "TWO")],
+        "ok",
+    );
+    assert!(ask(&log, json!({"turn": 1, "call": "t1c1"})).contains("TWO"));
+    let e = call(&log, json!({"turn": 1, "call": "nope"})).unwrap_err();
+    assert!(e.contains("nope"), "{e}");
+}
+
+/// A long result of a repeated id is cut with a line that reads that one.
+#[test]
+fn the_cut_line_of_a_repeated_id_names_the_number_not_the_id() {
+    let mut log = Log::new();
+    let long = "x".repeat(6_000);
+    log.turn(
+        None,
+        "q",
+        &[("read", json!({}), &long), ("read", json!({}), &long)],
+        "ok",
+    );
+    for e in log.events.iter_mut() {
+        if e.kind == "assistant_message" || e.kind == "tool_call_finished" {
+            let s = e.payload.to_string().replace("t1c1", "t1c0");
+            e.payload = serde_json::from_str(&s).unwrap();
+        }
+    }
+    let view = ask(&log, json!({"turn": 1}));
+    let n = numbers_of(&view, "result of call t1c0")[1];
+    assert!(
+        view.contains(&format!("\"call\": \"#{n}\", \"part\": 1")),
+        "{view}"
+    );
+    assert!(ask(&log, json!({"turn": 1, "call": format!("#{n}"), "part": 1})).contains("xxxx"));
+}
