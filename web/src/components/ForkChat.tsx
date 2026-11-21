@@ -90,15 +90,16 @@ export function ForkDivider(props: { parent: string }) {
   );
 }
 
-/** Under the header of a fork that works in a folder: the parent's, so each
- * chat's changes are in the other's files; or its own copy of the
- * repository (`own`), which has what the parent had at the fork and
- * nothing git ignores. */
+/** The first line of a fork's conversation, in the normal flow (a banner
+ * over the timeline hid the first message), for a fork that works in a
+ * folder: the parent's, so each chat's changes are in the other's files; or
+ * its own copy of the repository (`own`), which has what the parent had at
+ * the fork and nothing git ignores. */
 export function ForkNote(props: { parent: string; own?: boolean; cwd?: string }) {
   const p = useParent(props.parent);
   if (props.own) {
     return (
-      <div className="incognito-banner fork-note" role="note" data-testid="fork-note">
+      <div className="fork-note small muted" role="note" data-testid="fork-note">
         <span>
           This chat works in its own copy of the repository{props.cwd ? <>, <span className="mono">{props.cwd}</span></> : null}, on a branch of its own. Files git ignores (build output, <span className="mono">.env</span>) were not copied. Deleting the chat keeps the folder.
         </span>
@@ -106,7 +107,7 @@ export function ForkNote(props: { parent: string; own?: boolean; cwd?: string })
     );
   }
   return (
-    <div className="incognito-banner fork-note" role="note" data-testid="fork-note">
+    <div className="fork-note small muted" role="note" data-testid="fork-note">
       <span>
         This chat shares its folder with{" "}
         {p && p !== "gone" ? (

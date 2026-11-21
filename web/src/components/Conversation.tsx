@@ -679,7 +679,8 @@ export default function Conversation(props: {
             {agentic && <NodeBadge node={node} nodeId={nodeId} />}
             {agentic && <ExecBadge mode={meta?.exec_mode} node={node} />}
             {agentic && <span className="mono muted ellipsis">{shownName(meta?.cwd ?? "")}</span>}
-            {view && figures && figures.usage.input_tokens + figures.usage.output_tokens > 0 && (
+            {/* A fresh fork has spent nothing but will send the copied context: show both. */}
+            {view && figures && (figures.usage.input_tokens + figures.usage.output_tokens > 0 || view.context_tokens > 0) && (
               <span
                 className="muted meter"
                 title={`${figures.usage.input_tokens.toLocaleString()} in · ${figures.usage.output_tokens.toLocaleString()} out${
@@ -738,7 +739,6 @@ export default function Conversation(props: {
           <SaveAsArtifact autoFocus />
         </div>
       )}
-      {agentic && meta?.forked && <ForkNote parent={meta.forked.parent} own={meta.forked.own_folder} cwd={meta.cwd} />}
       {routine?.untrusted && (
         <div className="incognito-banner untrusted-banner" role="note">
           <span>Contains data from an external event, so memory and web tools stay off in this chat.</span>
@@ -779,6 +779,7 @@ export default function Conversation(props: {
         <Held.Provider value={holding[0]?.approval?.approval_id ?? null}>
         <BlockCtx slots={slots} inputs={inputs}>
           <div className="column">
+            {agentic && meta?.forked && <ForkNote parent={meta.forked.parent} own={meta.forked.own_folder} cwd={meta.cwd} />}
             {!view || view.head_seq === 0 ? (
               <div className="muted pad">Loading…</div>
             ) : (
@@ -795,6 +796,9 @@ export default function Conversation(props: {
                       blocked={!!blocked}
                       cwd={meta?.cwd}
                       tools={web.members.map((m) => view.items[m] as Extract<typeof it, { type: "tool" }>)}
+                      inherited={web.members.map(
+                        (m) => meta?.forked != null && (seqAt(view, m) ?? Infinity) <= meta.forked.through_seq,
+                      )}
                     />
                   );
                 }
@@ -917,7 +921,15 @@ export default function Conversation(props: {
                     return notes.attached.has(i) ? null : <FallbackNote key={i} note={it} />;
                   case "tool":
                     return (
-                      <ToolCard key={i} sessionId={sessionId} item={it} blocked={!!blocked} projectId={props.row?.project_id} cwd={meta?.cwd} />
+                      <ToolCard
+                        key={i}
+                        sessionId={sessionId}
+                        item={it}
+                        blocked={!!blocked}
+                        projectId={props.row?.project_id}
+                        cwd={meta?.cwd}
+                        inherited={meta?.forked != null && (seqAt(view, i) ?? Infinity) <= meta.forked.through_seq}
+                      />
                     );
                   case "artifact":
                     return <SavedItem key={i} staged={it.staged} />;

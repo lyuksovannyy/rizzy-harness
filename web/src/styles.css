@@ -3618,6 +3618,11 @@ button.swatch:hover:not(:disabled) {
   font-size: var(--text-sm);
   color: var(--fg-2);
 }
+.fork-note {
+  margin: 0;
+  padding: 12px 0 4px;
+  color: var(--fg-2);
+}
 .meter {
   font-variant-numeric: tabular-nums;
 }
