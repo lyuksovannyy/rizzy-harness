@@ -420,7 +420,7 @@ async fn the_forks_origin_cannot_push_into_the_parent() {
         out(d, &["config", "remote.origin.pushurl"]),
         fork_copy::NO_PUSH
     );
-    // The parent's path is still where `git fetch origin` reads.
+    // The parent's path is where the fork came from.
     assert_eq!(
         out(d, &["remote", "get-url", "origin"]),
         r.h.repo.display().to_string()
@@ -436,7 +436,7 @@ async fn the_forks_origin_cannot_push_into_the_parent() {
     assert!(!o.status.success());
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(
-        err.contains("bring-work-back-with-git-fetch-from-the-parent"),
+        err.contains("no-push--this-fork-does-not-push-into-its-parent"),
         "{err}"
     );
     assert_eq!(
@@ -1142,7 +1142,6 @@ mod leaks {
             ("objects/ab/cdef", "fifo"),
             ("objects/pack/pack-x.pack", "fifo"),
             ("objects/info/alternates", "fifo"),
-            ("objects/info/packs", "fifo"),
         ];
         for (path, kind) in cases {
             let r = rig(true).await;
@@ -1823,5 +1822,103 @@ mod round3 {
             .unwrap()
             .write_all(text.as_bytes())
             .unwrap();
+    }
+
+    /// A parent with every optional pack and graph file git writes (bitmap,
+    /// reverse index, multi-pack-index, commit-graph, `objects/info`): the
+    /// fork is correct and none of them is in what git is handed in stage 2.
+    #[tokio::test]
+    async fn the_optional_git_files_are_not_handed_to_the_clone() {
+        let h = Hostile::new();
+        let repo = h.repo.clone();
+        let top = repo.parent().unwrap().canonicalize().unwrap();
+        for i in 0..5 {
+            std::fs::write(repo.join(format!("f{i}.txt")), format!("{i}\n")).unwrap();
+            sh(&repo, &["add", "."]);
+            sh(&repo, &["commit", "-qm", &format!("c{i}")]);
+        }
+        sh(&repo, &["repack", "-adq", "-b"]);
+        sh(&repo, &["multi-pack-index", "write"]);
+        sh(&repo, &["commit-graph", "write", "--reachable"]);
+        sh(&repo, &["update-server-info"]);
+        let head = out(&repo, &["rev-parse", "HEAD"]);
+        let listed = out(
+            &repo,
+            &["ls-files", "--others", "--cached", "--exclude-standard"],
+        );
+        drop(listed);
+        let git_files: Vec<String> = walkdir::WalkDir::new(repo.join(".git/objects"))
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        for want in ["multi-pack-index", "commit-graph", "packs"] {
+            assert!(
+                git_files.iter().any(|f| f == want),
+                "the fixture has no {want}: {git_files:?}"
+            );
+        }
+        assert!(
+            git_files.iter().any(|f| f.ends_with(".bitmap")),
+            "{git_files:?}"
+        );
+        let shadow = repo_for(&repo, Some(&h.base)).await.unwrap();
+        let (dest, outside) = (top.join("dest"), top.join("outside"));
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let real = String::from_utf8(
+            std::process::Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let listing = top.join("staged-files");
+        let script = top.join("fake-git/git");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        crate::test_script::script(
+            &script,
+            &format!(
+                "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in */repo.git) (cd \"$a\" && find . -type f | sort) > '{}';; esac; done\n\
+                 exec {} \"$@\"\n",
+                listing.display(),
+                real.trim()
+            ),
+        );
+        crate::git::use_test_git(Some(script));
+        let res = fill(&Plan {
+            source: &repo,
+            dest: &dest,
+            outside: &outside,
+            branch: "fork/ab12cd34",
+            head: Some(&head),
+            shadow: &shadow,
+            snapshot: None,
+            timeout: Duration::from_secs(60),
+            max_bytes: 1 << 30,
+            max_entries: fork_copy::ENTRY_MAX,
+        })
+        .await;
+        crate::git::use_test_git(None);
+        let staged = std::fs::read_to_string(&listing).expect("the stand-in git saw no copy");
+        for bad in [
+            "multi-pack-index",
+            "commit-graph",
+            ".bitmap",
+            ".rev",
+            "objects/info",
+            "/packs",
+        ] {
+            assert!(!staged.contains(bad), "{bad} was handed to git:\n{staged}");
+        }
+        assert!(
+            staged.contains(".pack") && staged.contains(".idx"),
+            "{staged}"
+        );
+        res.unwrap_or_else(|e| panic!("refused: {e}"));
+        assert_eq!(out(&dest, &["rev-parse", "HEAD"]), head);
+        assert_eq!(out(&dest, &["fsck", "--no-dangling"]), "");
     }
 }

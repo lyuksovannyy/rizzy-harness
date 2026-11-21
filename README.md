@@ -338,18 +338,25 @@ outside the original repository, by the node, which copies only the original's
 history files itself and never lets git open its `.git`; a repository the node
 cannot copy that way (not a git repository, a `.git` that is a file, a link or
 special file anywhere in its history files, borrowed objects, sha256 objects,
-reftable refs, a checkpoint the node no
+reftable refs, a partial clone, a ref file or a line of `packed-refs` that is
+not what git writes, a checkpoint the node no
 longer keeps, no room on the disk, a git older than 2.45.1) is refused with the
 reason, and the fork can then go **in the same folder**, where both chats work
 in the same files (the page says so under the title): what one changes is in the
 other's files, and Undo in one chat refuses over the other's work as it does
-between any two chats. To bring work back from an own copy, run
-`git fetch <the fork's folder> fork/<id>` in the original. Do not push from the
-fork: its `origin` is the original, kept to fetch from, and its push address is
-set to a path that does not exist, so `git push` stops with a message that says
-so (a push would run, as you, the hooks an agent may have written in the
-original's `.git`). Its `upstream` is the original's own `origin`, without any
-user name or password. **Deleting a fork's chat keeps its folder on disk** (the files are
+between any two chats. **Bringing a fork's work back into the original is not
+built yet.** Anything you do with git by hand in either folder runs git on a
+repository an agent could write to (git's own manual says it is not safe to run
+git commands in a `.git` directory from an untrusted source); in particular
+`git fetch <the fork's folder>` makes git read the fork's `.git` as you, and an
+agent that worked in the fork could have linked other files into it, so another
+repository's history could land in the original. The fork's `origin` is the
+original (where it came from), and its push address is set to a path that does
+not exist, so `git push` stops with a message that says so; that guards your
+habit only, because an agent that works in the fork can edit its own config.
+Its `upstream` is the original's own `origin`, without any user name or password
+(and none at all when that address has a query or a fragment, or is plain
+`http://`). **Deleting a fork's chat keeps its folder on disk** (the files are
 yours; the delete dialog says where); remove it yourself. The node keeps only
 the latest checkpoints of a chat, so a fork of a turn whose checkpoint is gone
 can only share the folder. The API is `POST /api/sessions/{id}/fork` with

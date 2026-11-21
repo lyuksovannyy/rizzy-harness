@@ -17,14 +17,23 @@
 //! - no path-based `stat`, `open` or `read_link` is made on anything in the
 //!   parent below its `.git` (that one is opened from the repository's
 //!   folder with `O_NOFOLLOW` too);
-//! - what is copied is `HEAD`, `refs/`, `packed-refs`, `shallow` and
-//!   `objects/`, as new files made with `O_EXCL` in our staging folder
-//!   (bytes copied, never linked, so nothing is shared with the parent),
-//!   and nothing else: no `config`, hooks, `info/`, `worktrees/`,
-//!   `modules/`, `index`, `logs/` or `grafts`;
+//! - what is copied is `HEAD`, the loose refs, `packed-refs`, `shallow` and
+//!   of `objects/` only the loose objects and the `.pack` and `.idx` of each
+//!   pack, as new files made with `O_EXCL` in our staging folder (never
+//!   linked, so nothing is shared with the parent), and nothing else: no
+//!   `config`, hooks, `info/`, `worktrees/`, `modules/`, `index`, `logs/` or
+//!   `grafts`, and none of the optional files git rebuilds or ignores
+//!   (`objects/info/*`, `commit-graph`, `multi-pack-index`, `.bitmap`,
+//!   `.rev`, `.keep`): fewer hostile parsers run in stage 2. `HEAD`, the
+//!   refs, `packed-refs` and `shallow` are parsed and written again from
+//!   what parses, never copied as bytes (a ref name must pass
+//!   `git check-ref-format`, checked here in code); a `.promisor` file (a
+//!   partial clone) refuses the copy;
 //! - anything that is not a regular file or a folder under what is copied,
 //!   a link above all, ends the whole copy in a refusal that names its
-//!   path: skipping it would give a fork with a ref or a pack missing;
+//!   path (and so is a loose ref or a line of `packed-refs` or `shallow`
+//!   that does not parse, by name or by line number, never by content):
+//!   skipping it would give a fork with a ref or a pack missing;
 //! - the parent's `config` and `info/exclude` are read as data (a regular
 //!   file, capped, bytes) and returned, never copied as they are;
 //! - bytes, entries, depth and time are bounded, and the walk stops at the
@@ -599,7 +608,6 @@ impl Walk<'_> {
         dst: Option<OwnedFd>,
         rel: &str,
         depth: usize,
-        skip: &[&str],
         kind: Tree,
     ) -> Result<(), String> {
         if depth > DEPTH_MAX {
@@ -632,9 +640,6 @@ impl Walk<'_> {
         for name in names {
             let child = format!("{rel}/{}", name.to_string_lossy());
             self.entry()?;
-            if skip.contains(&child.as_str()) {
-                continue;
-            }
             let Some((_p, st, k)) = probe(src.as_fd(), &name)? else {
                 // Gone since the listing (a loose object packed away).
                 continue;
@@ -649,6 +654,12 @@ impl Walk<'_> {
                     shown(&child)
                 ));
             }
+            if kind == Tree::Objects
+                && matches!(k, Kind::Dir | Kind::File)
+                && !wanted_object(rel, name.as_bytes(), k, &child)?
+            {
+                continue;
+            }
             match k {
                 Kind::Dir => {
                     let d = match &dst {
@@ -657,7 +668,7 @@ impl Walk<'_> {
                     };
                     let s = openat(src.as_fd(), name.as_os_str(), dir_flags(), Mode::empty())
                         .map_err(|_| refuse(&child, Kind::Link))?;
-                    self.copy_tree(s, d, &child, depth + 1, skip, kind)?;
+                    self.copy_tree(s, d, &child, depth + 1, kind)?;
                 }
                 Kind::File if kind == Tree::Refs => {
                     self.copy_ref(src.as_fd(), dst.as_ref().map(|d| d.as_fd()), &name, &child)?;
@@ -675,6 +686,40 @@ impl Walk<'_> {
         }
         Ok(())
     }
+}
+
+/// Whether the entry `name` (a folder or a plain file) of the folder `parent`
+/// under `objects/` is part of what stage 2's clone needs: loose objects (a
+/// folder of two hex digits holding files of 38), and `pack-<hex>.pack` and
+/// `.idx`. Everything else (`objects/info`, commit-graph, multi-pack-index,
+/// bitmaps, reverse indexes, keep files, temporary files) is git's optional
+/// or rebuildable input and is left out. A `.promisor` file says the
+/// repository is a partial clone whose missing objects live elsewhere: the
+/// copy is refused.
+fn wanted_object(parent: &str, name: &[u8], k: Kind, rel: &str) -> Result<bool, String> {
+    let is_hex = |b: &[u8]| b.iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'));
+    Ok(match (parent, k) {
+        ("objects", Kind::Dir) => name == b"pack" || (name.len() == 2 && is_hex(name)),
+        ("objects", _) => false,
+        ("objects/pack", Kind::File) => {
+            if name.ends_with(b".promisor") {
+                return Err(format!(
+                    "the repository is not copied: it is a partial clone (.git/{} is a \
+                     .promisor file), whose missing objects are not here",
+                    shown(rel)
+                ));
+            }
+            name.strip_prefix(b"pack-").is_some_and(|rest| {
+                [&b".pack"[..], b".idx"].iter().any(|ext| {
+                    rest.strip_suffix(*ext)
+                        .is_some_and(|stem| (stem.len() == 40 || stem.len() == 64) && is_hex(stem))
+                })
+            })
+        }
+        ("objects/pack", _) => false,
+        (_, Kind::File) => name.len() == 38 && is_hex(name),
+        _ => false,
+    })
 }
 
 /// The files that make git read another object store; the copy is refused
@@ -772,7 +817,7 @@ fn walk(root: &Path, into: Option<&Path>, lim: &Limits) -> Result<(Data, u64), S
         Some(d) => Some(w.make_dir(d, OsStr::new("refs"), "refs")?),
         None => None,
     };
-    w.copy_tree(refs_src, refs_dst, "refs", 1, &[], Tree::Refs)?;
+    w.copy_tree(refs_src, refs_dst, "refs", 1, Tree::Refs)?;
     w.copy_list(git.as_fd(), dst_fd, "packed-refs")?;
     w.copy_list(git.as_fd(), dst_fd, "shallow")?;
     // The objects, after every ref that names them.
@@ -801,13 +846,17 @@ fn walk(root: &Path, into: Option<&Path>, lim: &Limits) -> Result<(Data, u64), S
         Some(d) => Some(w.make_dir(d, OsStr::new("objects"), "objects")?),
         None => None,
     };
-    w.copy_tree(obj_src, obj_dst, "objects", 1, &ALTERNATES, Tree::Objects)?;
+    w.copy_tree(obj_src, obj_dst, "objects", 1, Tree::Objects)?;
     Ok((Data { config, exclude }, w.bytes))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Loose object names are 38 hex digits after the two of their folder.
+    const LOOSE: &str = "cccccccccccccccccccccccccccccccccccccc";
+    const BIG: &str = "dddddddddddddddddddddddddddddddddddddd";
 
     fn limits(max_bytes: u64, max_entries: u64) -> Limits {
         Limits {
@@ -824,7 +873,7 @@ mod tests {
         std::fs::create_dir_all(git.join("objects/ab")).unwrap();
         std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
         std::fs::write(git.join("refs/heads/main"), "a".repeat(40) + "\n").unwrap();
-        std::fs::write(git.join("objects/ab/cdef"), "object bytes").unwrap();
+        std::fs::write(git.join("objects/ab").join(LOOSE), "object bytes").unwrap();
         top.join("src")
     }
 
@@ -868,7 +917,7 @@ mod tests {
             seen,
             [
                 "HEAD",
-                "objects/ab/cdef",
+                &format!("objects/ab/{LOOSE}"),
                 "packed-refs",
                 "refs/heads/main",
                 "shallow"
@@ -882,7 +931,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let top = d.path().canonicalize().unwrap();
         let root = repo(&top);
-        std::fs::write(root.join(".git/objects/ab/big"), vec![7u8; 4096]).unwrap();
+        std::fs::write(root.join(".git/objects/ab").join(BIG), vec![7u8; 4096]).unwrap();
         std::fs::write(root.join(".git/config"), "x".repeat(1000)).unwrap();
         let into = top.join("into");
         std::fs::create_dir(&into).unwrap();
@@ -932,7 +981,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let top = d.path().canonicalize().unwrap();
         let root = repo(&top);
-        std::fs::write(root.join(".git/objects/ab/big"), vec![7u8; 4096]).unwrap();
+        std::fs::write(root.join(".git/objects/ab").join(BIG), vec![7u8; 4096]).unwrap();
         let into = top.join("into");
         std::fs::create_dir(&into).unwrap();
         let e = copy(&root, &into, &limits(1000, 1000)).unwrap_err();
@@ -1174,12 +1223,12 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let top = d.path().canonicalize().unwrap();
         let root = repo(&top);
-        let target = root.join(".git/objects/ab/cdef");
-        let real = root.join(".git/objects/ab/cdef.real");
+        let target = root.join(".git/objects/ab").join(LOOSE);
+        let real = root.join(".git/objects/ab").join(format!("{LOOSE}.real"));
         let (t, r) = (target.clone(), real.clone());
         BETWEEN.with(|b| {
             *b.borrow_mut() = Some(Box::new(move |rel| {
-                if rel == "objects/ab/cdef" {
+                if rel == format!("objects/ab/{LOOSE}") {
                     std::fs::rename(&t, &r).unwrap();
                     std::os::unix::fs::symlink(&r, &t).unwrap();
                 }
@@ -1193,7 +1242,7 @@ mod tests {
         let e = res
             .err()
             .unwrap_or_else(|| panic!("a followed link was copied"));
-        assert!(e.contains("objects/ab/cdef"), "{e}");
+        assert!(e.contains(&format!("objects/ab/{LOOSE}")), "{e}");
     }
 
     /// The name is swapped for ANOTHER plain file (the victim's, with a
@@ -1205,11 +1254,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let top = d.path().canonicalize().unwrap();
         let root = repo(&top);
-        let target = root.join(".git/objects/ab/cdef");
+        let target = root.join(".git/objects/ab").join(LOOSE);
         let t = target.clone();
         BETWEEN.with(|b| {
             *b.borrow_mut() = Some(Box::new(move |rel| {
-                if rel == "objects/ab/cdef" {
+                if rel == format!("objects/ab/{LOOSE}") {
                     std::fs::remove_file(&t).unwrap();
                     std::fs::write(&t, MARK).unwrap();
                 }
@@ -1227,6 +1276,145 @@ mod tests {
         let e = res
             .err()
             .unwrap_or_else(|| panic!("a swapped file was copied"));
-        assert!(e.contains("objects/ab/cdef"), "{e}");
+        assert!(e.contains(&format!("objects/ab/{LOOSE}")), "{e}");
+    }
+
+    const PACK: &str = "pack-0123456789abcdef0123456789abcdef01234567";
+
+    /// Of `objects/` only what stage 2's clone needs is copied: loose
+    /// objects, and `.pack` and `.idx` files. The optional files git rebuilds
+    /// or ignores (commit-graph, multi-pack-index, bitmaps, reverse indexes,
+    /// `objects/info`, keep files, junk) are left out, so fewer hostile
+    /// parsers run in the clone.
+    #[test]
+    fn of_the_objects_only_what_the_clone_needs_is_copied() {
+        let mut files: Vec<(String, Vec<u8>)> = vec![
+            (format!("objects/pack/{PACK}.pack"), b"pack".to_vec()),
+            (format!("objects/pack/{PACK}.idx"), b"idx".to_vec()),
+        ];
+        for left_out in [
+            format!("objects/pack/{PACK}.rev"),
+            format!("objects/pack/{PACK}.bitmap"),
+            format!("objects/pack/{PACK}.keep"),
+            format!("objects/pack/{PACK}.mtimes"),
+            "objects/pack/multi-pack-index".to_string(),
+            "objects/pack/tmp_pack_abc".to_string(),
+            "objects/info/commit-graph".to_string(),
+            "objects/info/commit-graphs/commit-graph-chain".to_string(),
+            "objects/info/packs".to_string(),
+            "objects/info/refs".to_string(),
+            "objects/info/alternates".to_string(),
+            "objects/ab/tmp_obj_X".to_string(),
+            "objects/zz/anything".to_string(),
+            "objects/stray-file".to_string(),
+        ] {
+            // An empty alternates file says nothing and is not copied either.
+            let bytes = if left_out.ends_with("alternates") {
+                &b""[..]
+            } else {
+                &b"x"[..]
+            };
+            files.push((left_out, bytes.to_vec()));
+        }
+        let refs: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice()))
+            .collect();
+        let (r, into, _d) = copy_with(&refs);
+        r.unwrap();
+        let mut seen: Vec<String> = walkdir::WalkDir::new(into.join("objects"))
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().strip_prefix(&into).unwrap().display().to_string())
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                format!("objects/ab/{LOOSE}"),
+                format!("objects/pack/{PACK}.idx"),
+                format!("objects/pack/{PACK}.pack"),
+            ]
+        );
+    }
+
+    /// The first pass counts only what the copy writes.
+    #[test]
+    fn measure_ignores_what_is_left_out() {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let root = repo(&top);
+        std::fs::create_dir_all(root.join(".git/objects/pack")).unwrap();
+        std::fs::write(
+            root.join(".git/objects/pack/multi-pack-index"),
+            vec![1u8; 100_000],
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".git/objects/pack")
+                .join(format!("{PACK}.bitmap")),
+            vec![1u8; 100_000],
+        )
+        .unwrap();
+        assert!(measure(&root, &limits(1 << 20, 1000)).unwrap() < 1000);
+    }
+
+    /// A partial clone's pack (`.promisor`) lacks objects the clone would need
+    /// from its remote: refused, with a sentence.
+    #[test]
+    fn a_partial_clone_is_refused() {
+        let (r, _, _d) = copy_with(&[
+            (&format!("objects/pack/{PACK}.pack"), b"pack"),
+            (&format!("objects/pack/{PACK}.idx"), b"idx"),
+            (&format!("objects/pack/{PACK}.promisor"), b""),
+        ]);
+        let e = r.unwrap_err();
+        assert!(
+            e.contains("partial clone") && e.contains(".promisor"),
+            "{e}"
+        );
+    }
+
+    /// A link is still refused wherever the walk looks, even for a name
+    /// that is not copied (a link in `objects/pack`, in a loose folder).
+    #[test]
+    fn a_link_among_what_is_left_out_is_still_refused_where_the_walk_looks() {
+        for at in [
+            format!("objects/pack/{PACK}.bitmap"),
+            "objects/pack/multi-pack-index".to_string(),
+            "objects/ab/junk".to_string(),
+            "objects/zz".to_string(),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            let top = d.path().canonicalize().unwrap();
+            let root = repo(&top);
+            std::fs::create_dir_all(root.join(".git/objects/pack")).unwrap();
+            std::os::unix::fs::symlink(top.join("elsewhere"), root.join(".git").join(&at)).unwrap();
+            let into = top.join("into");
+            std::fs::create_dir(&into).unwrap();
+            let e = copy(&root, &into, &limits(1 << 20, 1000)).unwrap_err();
+            assert!(e.contains(&at) && e.contains("a link"), "{at}: {e}");
+        }
+    }
+
+    /// What is not copied is not looked at: a FIFO in `objects/info` (which
+    /// is left out) is never opened, so nothing waits.
+    #[test]
+    fn a_special_file_in_objects_info_is_not_opened() {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let root = repo(&top);
+        std::fs::create_dir_all(root.join(".git/objects/info")).unwrap();
+        nix::unistd::mkfifo(
+            &root.join(".git/objects/info/packs"),
+            nix::sys::stat::Mode::S_IRWXU,
+        )
+        .unwrap();
+        let into = top.join("into");
+        std::fs::create_dir(&into).unwrap();
+        let t0 = Instant::now();
+        copy(&root, &into, &limits(1 << 20, 1000)).unwrap();
+        assert!(t0.elapsed() < std::time::Duration::from_secs(2));
     }
 }

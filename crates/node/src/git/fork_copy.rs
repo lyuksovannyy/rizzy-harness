@@ -14,8 +14,10 @@
 //!
 //! 1. **A sanitised copy by our own code** ([`fork_sanitise`]): a walk with
 //!    file descriptors (`openat` with `O_NOFOLLOW`, `fstat` on the opened
-//!    descriptor), copying only `HEAD`, `refs/`, `packed-refs`, `shallow`
-//!    and `objects/` as new files; a link or a special file anywhere in
+//!    descriptor), copying `HEAD`, the loose refs, `packed-refs` and
+//!    `shallow` (each parsed and written again from the lines that parse)
+//!    and, of `objects/`, only the loose objects and the `.pack` and `.idx`
+//!    of each pack, as new files; a link or a special file anywhere in
 //!    those ends the copy in a refusal naming the path; the parent's
 //!    `config` and `info/exclude` are read as data. The harness writes the
 //!    copy's own `config`.
@@ -38,8 +40,8 @@
 //!    sanitised copy is deleted afterwards.
 //!
 //! Everything after the clone is the harness's own: the new repository's
-//! config is written by the harness (`origin` is the parent's path with
-//! pushing disabled, and the parent's `origin` URL, read AS DATA from the
+//! config is written by the harness (`origin` is the parent's path, where
+//! the fork came from, with pushing disabled, and the parent's `origin` URL, read AS DATA from the
 //! copy of its config with `git config --file`, validated and stripped of
 //! credentials, becomes `upstream`), the branch is made with `update-ref`,
 //! the working files are written from the checkpoint shadow with the
@@ -321,9 +323,9 @@ pub(crate) fn upstream_url(u: &str) -> Option<String> {
 /// git prints back in its own error ("'/nonexistent/no-push--...' does not
 /// appear to be a git repository"). Pushing into the parent would run
 /// `receive-pack` there, with the hooks and config an agent may have written
-/// as the person; work comes back by `git fetch` in the parent instead.
-pub(crate) const NO_PUSH: &str =
-    "/nonexistent/no-push--bring-work-back-with-git-fetch-from-the-parent";
+/// as the person. This guards the person's habit only: an agent that works in
+/// the fork can edit the fork's own config.
+pub(crate) const NO_PUSH: &str = "/nonexistent/no-push--this-fork-does-not-push-into-its-parent";
 
 pub(crate) use super::fork_sanitise::ENTRY_MAX;
 
@@ -544,6 +546,19 @@ fn parent_config(list: &[u8]) -> Result<ParentConfig, String> {
                 );
             }
             ("remote.origin.url", Some(v)) => out.origin_url = Some(v),
+            (k, v)
+                if k == "extensions.partialclone"
+                    || (k.starts_with("remote.")
+                        && k.ends_with(".promisor")
+                        && v.as_deref()
+                            .is_none_or(|v| !v.eq_ignore_ascii_case("false"))) =>
+            {
+                return Err(
+                    "the repository is not copied: it is a partial clone, whose missing objects \
+                     are not here"
+                        .into(),
+                );
+            }
             _ => {}
         }
     }
@@ -1135,6 +1150,9 @@ mod tests {
         for (text, want) in [
             ("extensions.objectformat\nSHA256|", "sha256"),
             ("extensions.refstorage\nreftable|", "reftable"),
+            ("extensions.partialclone\norigin|", "partial clone"),
+            ("remote.origin.promisor\ntrue|", "partial clone"),
+            ("remote.origin.promisor|", "partial clone"),
             ("core.repositoryformatversion\n2|", "format version"),
             ("core.repositoryformatversion\nx|", "format version"),
         ] {
@@ -1142,5 +1160,6 @@ mod tests {
             assert!(e.contains(want), "{text}: {e}");
         }
         assert!(parent_config(&list("extensions.objectformat\nsha1|")).is_ok());
+        assert!(parent_config(&list("remote.origin.promisor\nfalse|")).is_ok());
     }
 }

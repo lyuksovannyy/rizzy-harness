@@ -83,16 +83,25 @@ The fork's folder is the same sub-folder of the copy that the parent worked in.
 A `git clone --no-local` of the parent was the first design; its `upload-pack` runs in the parent's `.git` as the node's user and follows every link an agent planted in `refs/` and `objects/` (and in `config`), so a link to another repository on the disk put that repository's history into the fork.
 An agent in a sandboxed chat can write all of that, and the node is not sandboxed.
 So git never opens the parent.
-Stage 1 is the harness's own walk (`git/fork_sanitise.rs`), with file descriptors and `O_NOFOLLOW`, into the node's staging folder: it copies only `HEAD`, `refs/`, `packed-refs`, `shallow` and `objects/` as new files (never a link, never a hard link), and reads `config` and `info/exclude` as capped data.
-Anything that is not a plain file or folder in what it copies (a link, a FIFO, a socket) refuses the whole copy with a sentence naming the path; so do alternates, sha256 objects and reftable refs.
-It copies no config, hooks, `info/`, worktrees, modules, index, logs or grafts.
+Stage 1 is the harness's own walk (`git/fork_sanitise.rs`), with file descriptors and `O_NOFOLLOW`, into the node's staging folder.
+It copies `HEAD`, the loose refs, `packed-refs` and `shallow`, each parsed and written again from the lines that parse (a commit id, `ref: <name>`, git's `# pack-refs` header, `<id> <refname>` and `^<id>` lines; a ref name must pass `git check-ref-format`, checked in code); a loose ref or a line that does not parse refuses the copy, by name or by line number and never by content.
+Of `objects/` it copies only what stage 2's clone needs: the loose objects, and the `.pack` and `.idx` of each pack, as new files (never a link, never a hard link).
+It leaves out `objects/info/*` (the alternates files are only checked, and refuse the copy when they hold anything), `commit-graph`, `multi-pack-index`, bitmaps, reverse indexes, keep files and temporary files: git rebuilds or ignores them, and fewer hostile parsers run in stage 2.
+A `.promisor` pack (a partial clone) refuses the copy.
+It reads `config` and `info/exclude` as capped data.
+Anything that is not a plain file or folder in what it walks (a link, a FIFO, a socket) refuses the whole copy with a sentence naming the path; so do alternates, sha256 objects and reftable refs.
+It copies no config, hooks, worktrees, modules, index, logs or grafts.
 Stage 2 is `git clone --no-local --no-checkout --template= -- <sanitised copy> <dest>` by the hardened runner, in the node's sandbox jail when it has one (only this copy's folders visible read-write; without a jail it runs hardened and unjailed), and the sanitised copy is deleted.
-Bounds: `clone_max_mb` bytes, 1,000,000 files and folders, 32 levels, 1 MiB each for the config and `info/exclude`, `clone_timeout_s` per stage.
+Bounds: `clone_max_mb` bytes, 1,000,000 files and folders, 32 levels, 1 MiB each for the config and `info/exclude`, 512 bytes for a ref, 16 MiB each for `packed-refs` and `shallow`, `clone_timeout_s` per stage.
+The room check before the copy is a first pass of the same walk (descriptors, `O_NOFOLLOW`, the same bounds, cancellable), not a path walk.
 The reasoning, the quoted documentation, the minimum git version and the proof are in `docs/threats/T92.md`.
 
 **What the copy is.**
-The clone's own config: remote `origin` is the parent's path, to fetch from, and its `pushurl` is a path that does not exist (`/nonexistent/no-push--bring-work-back-with-git-fetch-from-the-parent`), so `git push` from the fork fails with git's own message naming it.
-Work comes back by running `git fetch <fork folder> fork/<short id>` in the parent, never by pushing into it: a push runs `receive-pack` in the parent, with the hooks and config an agent may have written there, as the person.
+The clone's own config: remote `origin` is the parent's path (where the fork came from), and its `pushurl` is a path that does not exist (`/nonexistent/no-push--this-fork-does-not-push-into-its-parent`), so `git push` from the fork fails with git's own message naming it.
+Bringing a fork's work back into the parent is not built yet.
+Anything the person does with git by hand in either folder runs git on a repository an agent could write to; the git(1) SECURITY section says "it is not safe to run Git commands in a .git directory (or the working tree that surrounds it) when that .git directory itself comes from an untrusted source".
+In particular `git fetch <fork folder>` makes git read the fork's `.git` as the person, and an agent that worked in the fork could have linked other files into it, so another repository's history could land in the parent.
+The push block (`pushurl`) guards the person's habit only: the fork's agent can edit its own config.
 Plus remote `upstream` when the parent had a usable `origin` URL (read as data, validated; the user name and password of an https URL and the password of any other URL are dropped, and a URL with a query or a fragment, or an `http://` one, gives no `upstream`).
 The branch is at the commit the parent's HEAD was on at the cut: the log's `head_moved` of the last turn at or before the cut, else the HEAD the first later turn that moved it found, else the parent's HEAD now (and the chat says so).
 The working files are the cut's: the `after` checkpoint of the last turn at or before the cut that has one, written from the shadow by the checkpoint writers; with none, the branch's commit as it is.
