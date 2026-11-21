@@ -1269,3 +1269,59 @@ async fn a_nodes_refusal_of_an_own_folder_leaves_no_chat_and_part_one_still_hold
     let (st, v) = fork(&t, &t.alex, sid, &turn).await;
     assert_eq!(st, StatusCode::OK, "{v}");
 }
+
+/// Titles: two forks of one chat are "X (fork)" and "X (fork 2)", a fork of
+/// a fork is the next number of the same original, never "X (fork) (fork)".
+#[tokio::test]
+async fn forks_of_one_chat_are_numbered_and_a_fork_of_a_fork_does_not_stack() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "local").await;
+    let first = send(&t, &t.alex, sid, "first").await;
+    let title_of = |t: &T, id: SessionId| {
+        let (t, id) = (t.store.clone(), id);
+        async move {
+            for _ in 0..500 {
+                if let Ok(Some(row)) = t.session(id) {
+                    return row.title;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("no row");
+        }
+    };
+    let mut forks = Vec::new();
+    for _ in 0..2 {
+        let (st, v) = fork(&t, &t.alex, sid, &first).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        forks.push(
+            v["session_id"]
+                .as_str()
+                .unwrap()
+                .parse::<SessionId>()
+                .unwrap(),
+        );
+    }
+    assert_eq!(title_of(&t, forks[0]).await, "Parent (fork)");
+    assert_eq!(title_of(&t, forks[1]).await, "Parent (fork 2)");
+    // A fork of the first fork: the third of the same original.
+    let sent = t.local.forks().len();
+    let (st, v) = fork(&t, &t.alex, forks[0], &first).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let third: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(t.local.forks().len(), sent + 1);
+    assert_eq!(title_of(&t, third).await, "Parent (fork 3)");
+    // A renamed parent: the number follows the family, the base the name.
+    let (st, v) = req(
+        &t,
+        Method::PUT,
+        &format!("/api/sessions/{sid}/title"),
+        Some(json!({"title": "Renamed"})),
+        &t.alex,
+    )
+    .await;
+    assert!(st.is_success(), "{st} {v}");
+    let (st, v) = fork(&t, &t.alex, sid, &first).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let fourth: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(title_of(&t, fourth).await, "Renamed (fork 4)");
+}

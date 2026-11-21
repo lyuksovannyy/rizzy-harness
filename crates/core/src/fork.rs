@@ -107,9 +107,43 @@ pub fn through_of(log: &[RawEvent]) -> u64 {
     }
 }
 
-/// The fork's title from its parent's.
+/// The fork's title from its parent's, for the first fork of a chat.
 pub fn title(parent: &str) -> String {
-    format!("{parent}{TITLE_SUFFIX}")
+    title_nth(parent, 1)
+}
+
+/// The title of the `n`th fork (1 for the first) of the original chat the
+/// parent descends from: `X (fork)`, `X (fork 2)`, ... A suffix of this
+/// kind already on the parent's title (the parent is itself a fork) is
+/// stripped first, so a fork of a fork is the next number of the same
+/// original, never `X (fork) (fork)`.
+pub fn title_nth(parent: &str, n: u64) -> String {
+    let base = strip_suffix(parent);
+    if n <= 1 {
+        format!("{base}{TITLE_SUFFIX}")
+    } else {
+        format!("{base} (fork {n})")
+    }
+}
+
+/// `title` without one trailing ` (fork)` or ` (fork N)` (N from 2 up, no
+/// leading zero). Nothing is stripped when the whole title would go.
+fn strip_suffix(title: &str) -> &str {
+    let Some(head) = title.strip_suffix(')') else {
+        return title;
+    };
+    let Some(at) = head.rfind(" (fork") else {
+        return title;
+    };
+    let rest = &head[at + " (fork".len()..];
+    let numbered = rest
+        .strip_prefix(' ')
+        .is_some_and(|n| n.parse::<u64>().is_ok_and(|n| n >= 2) && !n.starts_with('0'));
+    if (rest.is_empty() || numbered) && at > 0 {
+        &title[..at]
+    } else {
+        title
+    }
 }
 
 /// Whether the chat in `log` (the whole log, or [`KINDS`] of it) may be
@@ -271,6 +305,28 @@ pub fn build(
 mod tests {
     use super::*;
     use crate::event::*;
+
+    /// "X (fork)", "X (fork 2)", ...: counted per original chat, an existing
+    /// suffix of the parent's title stripped first (never "X (fork) (fork)").
+    #[test]
+    fn titles_are_numbered_per_original_and_never_stack_suffixes() {
+        assert_eq!(title_nth("X", 1), "X (fork)");
+        assert_eq!(title_nth("X", 2), "X (fork 2)");
+        assert_eq!(title_nth("X (fork)", 3), "X (fork 3)");
+        assert_eq!(title_nth("X (fork 2)", 4), "X (fork 4)");
+        assert_eq!(title_nth("X (fork 12)", 13), "X (fork 13)");
+        assert_eq!(title(&"X (fork)".to_string()), "X (fork)");
+        // Only one trailing suffix is the harness's; the rest is the title.
+        assert_eq!(title_nth("X (fork) (fork)", 2), "X (fork) (fork 2)");
+        // Not a suffix of ours: kept.
+        assert_eq!(title_nth("X (forked)", 1), "X (forked) (fork)");
+        assert_eq!(title_nth("X (fork 2x)", 1), "X (fork 2x) (fork)");
+        assert_eq!(title_nth("X (fork 0)", 1), "X (fork 0) (fork)");
+        assert_eq!(title_nth("X(fork)", 1), "X(fork) (fork)");
+        // A title that is only the suffix keeps it as its name.
+        assert_eq!(title_nth(" (fork)", 2), " (fork) (fork 2)");
+        assert_eq!(title_nth("", 1), " (fork)");
+    }
     use crate::policy::ApprovalMode;
     use crate::view::Item;
 
