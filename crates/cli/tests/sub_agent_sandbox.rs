@@ -834,7 +834,7 @@ async fn a_shared_sub_agent_writes_the_chats_folder_and_reaches_nothing_else() {
     assert_eq!(made, 0, "a folder was made for a shared sub-agent");
     let line = &parent.last().expect("the delegate call").1;
     assert!(
-        line.contains("worked in this chat's folder") && line.contains("`a.txt`"),
+        line.contains("worked in this chat's folder") && line.lines().any(|l| l == "| a.txt"),
         "{line}"
     );
 }

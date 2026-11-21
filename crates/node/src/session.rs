@@ -4715,6 +4715,7 @@ impl Session {
         // (from its turn's checkpoints; none when its record failed: then
         // nothing un-writes what it changed, and the turn's Undo is the way
         // back).
+        let mut unapplied = unapplied;
         let merge_note = merge_note.or_else(|| {
             shared.then(|| {
                 let files = log.iter().find_map(|e| match e.typed() {
@@ -4725,6 +4726,8 @@ impl Session {
                     }
                     _ => None,
                 });
+                // The names follow the note, quoted line by line.
+                unapplied = harness_core::subagent::shared_files(files.as_deref(), log_failed);
                 harness_core::subagent::shared_note(files.as_deref(), log_failed)
             })
         });

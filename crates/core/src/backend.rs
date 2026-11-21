@@ -360,8 +360,11 @@ pub struct DelegateOutcome {
     /// The harness's own note after the report: what became of the child's
     /// changes, or why it stopped.
     pub note: Option<String>,
-    /// The child's changes against its base when they were not applied to
-    /// the folder (plain lines; quoted when rendered for the parent).
+    /// Plain lines the parent's result quotes behind the note: the child's
+    /// changes against its base when they were not applied to the folder,
+    /// or, for a sub-agent that worked in the chat's folder, the names of
+    /// the files that changed there (`subagent::shared_files`). Quoted
+    /// when rendered for the parent.
     pub unapplied: Option<String>,
     /// Its changes are in the folder (always, for a child that could not
     /// change files). `false`: the `delegate` result is not ok and ends
