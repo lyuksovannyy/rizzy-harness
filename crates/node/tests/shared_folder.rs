@@ -218,3 +218,219 @@ async fn a_reader_ignores_folder() {
     }
     assert_eq!(session_folders(&r), 0);
 }
+
+// ---- Two writers in one folder, and the cases that go wrong -----------------
+
+/// `(ok, output)` of each finished call of `tool` in `sid`, in order.
+fn finished(r: &Rig, sid: SessionId, tool: &str) -> Vec<(bool, String)> {
+    let calls: Vec<String> = r
+        .seen
+        .iter()
+        .filter(|e| e.session_id == sid)
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ToolCallStarted(c)) if c.tool == tool => Some(c.call_id),
+            _ => None,
+        })
+        .collect();
+    r.seen
+        .iter()
+        .filter(|e| e.session_id == sid)
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ToolCallFinished(f)) if calls.contains(&f.call_id) => {
+                Some((f.ok, f.output))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Nobody overwrites blindly: the lead reads `a.txt`, a shared child
+/// changes it, and the lead's edit is refused as stale until it reads the
+/// file again; then it lands. (`bash` is not covered by the guard.)
+#[tokio::test]
+async fn the_lead_cannot_edit_a_file_a_shared_child_changed_until_it_reads_it_again() {
+    let mut r = Rig::new().await;
+    r.write("a.txt", "one\n");
+    r.lead_tools = Some(vec!["bash", "write", "read", "edit"]);
+    let script = serde_json::json!([
+        {"tool": "read", "input": {"path": "a.txt"}},
+        {"tool": "delegate", "input": {"agent": "dev", "task": "run: echo changed > a.txt"}},
+        {"tool": "edit", "input": {"path": "a.txt", "old_string": "one", "new_string": "ONE"}},
+        {"tool": "read", "input": {"path": "a.txt"}},
+        {"tool": "edit", "input": {"path": "a.txt", "old_string": "changed", "new_string": "CHANGED"}},
+    ]);
+    let (_, outs) = r.lead_turn(&format!("script: {script}")).await;
+    assert!(outs[0].contains("`a.txt`"), "the lead is told: {outs:#?}");
+    let edits = finished(&r, r.session_id(), "edit");
+    assert_eq!(edits.len(), 2, "{edits:#?}");
+    assert!(
+        !edits[0].0
+            && edits[0]
+                .1
+                .contains("has changed on disk since you last read it"),
+        "{edits:#?}"
+    );
+    assert!(edits[1].0, "{edits:#?}");
+    assert_eq!(r.read("a.txt").as_deref(), Some("CHANGED\n"));
+}
+
+/// The same between two shared children running at once: the one that read
+/// the file is refused when the other changed it meanwhile, and edits
+/// after a fresh read.
+#[tokio::test]
+async fn a_shared_child_cannot_edit_what_another_shared_child_changed_meanwhile() {
+    let mut r = Rig::new().await;
+    r.write("a.txt", "one\n");
+    r.delegates = vec![Rig::spec("ed", &["read", "edit", "bash"], vec![])];
+    let script = serde_json::json!([
+        {"tool": "read", "input": {"path": "a.txt"}},
+        {"tool": "bash", "input": {"command": "sleep 2"}},
+        {"tool": "edit", "input": {"path": "a.txt", "old_string": "one", "new_string": "ONE"}},
+        {"tool": "read", "input": {"path": "a.txt"}},
+        {"tool": "edit", "input": {"path": "a.txt", "old_string": "changed", "new_string": "CHANGED"}},
+    ]);
+    let (_, outs) = r
+        .lead_turn(&format!(
+            "delegate: ed=script: {script} | dev=run: sleep 1; echo changed > a.txt"
+        ))
+        .await;
+    assert_eq!(outs.len(), 2, "{outs:#?}");
+    let child = children(&r)
+        .into_iter()
+        .map(|(id, _)| id)
+        .find(|id| !finished(&r, *id, "edit").is_empty())
+        .expect("the editing child");
+    let edits = finished(&r, child, "edit");
+    assert_eq!(edits.len(), 2, "{edits:#?}");
+    assert!(
+        !edits[0].0
+            && edits[0]
+                .1
+                .contains("has changed on disk since you last read it"),
+        "{edits:#?}"
+    );
+    assert!(edits[1].0, "{edits:#?}");
+    assert_eq!(r.read("a.txt").as_deref(), Some("CHANGED\n"));
+}
+
+/// Finding A8's case: the sub-agent's session log fails after it changed
+/// files. Nothing un-writes them; the result says its record is incomplete,
+/// that its changes are in the folder, and that the turn's Undo restores
+/// them; and the Undo does.
+#[tokio::test]
+async fn a_shared_child_whose_record_failed_leaves_its_changes_and_the_result_says_so() {
+    let mut r = repo_rig().await;
+    let before = r.files();
+    let db = rusqlite::Connection::open(r.dir.path().join("node.db")).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    db.execute_batch(&format!(
+        "CREATE TRIGGER break_log BEFORE INSERT ON events
+         WHEN NEW.kind = 'tool_call_finished' AND NEW.session_id <> '{}'
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+        r.session_id()
+    ))
+    .unwrap();
+    let (turn, outs) = r
+        .lead_turn("delegate: dev=run: echo v2 > keep.txt; echo new > made.txt")
+        .await;
+    let out = &outs[0];
+    assert_eq!(r.read("keep.txt").as_deref(), Some("v2\n"), "{out}");
+    assert_eq!(r.read("made.txt").as_deref(), Some("new\n"), "{out}");
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("[the sub-agent stopped because its session log"))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(
+        line.contains("its record is incomplete")
+            && line.contains("is in the folder now")
+            && line.contains("this turn's Undo restores them"),
+        "{line}"
+    );
+    db.execute_batch("DROP TRIGGER break_log").unwrap();
+    let undo = r.restore(&turn.id.expect("a turn checkpoint"), false).await;
+    assert_eq!(undo.result, Ok(()));
+    assert_eq!(r.files(), before);
+}
+
+/// A writing sub-agent of a sub-agent stays refused (one level of
+/// writers), shared or not: no session for it, the folder untouched.
+#[tokio::test]
+async fn a_shared_childs_own_writing_sub_agent_is_refused() {
+    let mut r = Rig::with_policy(|p| p.limits.max_delegation_depth = 2).await;
+    r.git(&["init", "-q"]);
+    r.write("keep.txt", "v1\n");
+    r.git(&["add", "."]);
+    r.git(&["commit", "-qm", "init"]);
+    r.delegates = vec![Rig::spec(
+        "mid",
+        &["bash", "write"],
+        vec![Rig::spec("coder", &["bash", "write"], vec![])],
+    )];
+    let before = r.files();
+    let (_, outs) = r
+        .lead_turn("delegate: mid=delegate: coder=run: echo nested > nested.txt")
+        .await;
+    let out = &outs[0];
+    assert!(
+        out.contains("@coder was not started") && out.contains("may only read"),
+        "{out}"
+    );
+    assert_eq!(r.files(), before);
+    assert_eq!(children(&r).len(), 1, "a session was made for the coder");
+}
+
+/// In plan mode nothing writes: the writer is refused before a child
+/// exists, whatever `folder` says.
+#[tokio::test]
+async fn in_plan_mode_a_writing_sub_agent_is_not_started_shared_or_own() {
+    let mut r = repo_rig().await;
+    let before = r.files();
+    r.n += 1;
+    r.send(harness_protocol::MasterToNode::SetApprovalMode {
+        lowering: true,
+        req_id: format!("m{}", r.n),
+        session_id: r.session_id(),
+        mode: harness_core::policy::ApprovalMode::Plan,
+    });
+    for ask in ["dev", "dev#shared", "dev#own"] {
+        let (_, outs) = r
+            .lead_turn(&format!("delegate: {ask}=run: echo v2 > keep.txt"))
+            .await;
+        assert!(outs[0].contains("plan mode"), "{ask}: {outs:#?}");
+    }
+    assert_eq!(r.files(), before);
+    assert_eq!(children(&r).len(), 0);
+}
+
+/// A follow-up of a sub-agent that works in the chat's folder works where
+/// it is now, on a node that shares the folder, and writes there; the
+/// call may not name a folder.
+#[tokio::test]
+async fn shared_follow_ups_work_in_the_folder_and_name_no_folder() {
+    let mut r = repo_rig().await;
+    let (_, outs) = r.lead_turn("delegate: dev=run: echo one > b.txt").await;
+    let child = outs[0]
+        .strip_prefix("session: ")
+        .and_then(|r| r.lines().next())
+        .unwrap()
+        .to_string();
+    let (_, outs) = r
+        .lead_turn(&format!("delegate: dev@{child}=run: echo two >> b.txt"))
+        .await;
+    assert!(
+        outs[0].contains("worked in this chat's folder"),
+        "{outs:#?}"
+    );
+    assert_eq!(r.read("b.txt").as_deref(), Some("one\ntwo\n"));
+    assert_eq!(children(&r).len(), 1, "no second child");
+    // A `folder` with a follow-up is refused by the tool.
+    let (_, outs) = r
+        .lead_turn(&format!(
+            "script: {}",
+            serde_json::json!([{"tool": "delegate", "input": {
+                "agent": "dev", "session": child, "task": "run: echo x", "folder": "own"
+            }}])
+        ))
+        .await;
+    assert!(outs[0].contains("leave `folder` out"), "{outs:#?}");
+}
