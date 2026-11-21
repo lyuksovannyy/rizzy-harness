@@ -396,10 +396,11 @@ fn shape(v: &Value) -> Option<usize> {
 
 /// The classes known, per kind, path and shape of the node (see [`shape`]),
 /// for the life of the process.
-type Cache = HashMap<String, HashMap<String, [Option<Class>; 4]>>;
-/// The slot of a number's class ([`Classifier::number_is_free`]): learned
-/// only from a number that holds a secret, so no other number is probed.
-const NUMBER: usize = 3;
+type Cache = HashMap<String, HashMap<String, [Option<Class>; 3]>>;
+/// How many numbers one pass over an event asks the types about
+/// ([`Classifier::number_is_free`]); past it a number that holds a secret
+/// is taken as free JSON and the check of the result decides.
+const NUMBER_PROBES: usize = 256;
 static CLASSES: LazyLock<Mutex<Cache>> = LazyLock::new(Mutex::default);
 
 /// The payload is not as the typed event writes it: no probe can be read.
@@ -410,6 +411,8 @@ struct Classifier<'a, 'b> {
     base: &'a Value,
     cache: &'a mut Cache,
     sk: Option<Value>,
+    /// Numbers asked about in this pass ([`NUMBER_PROBES`]).
+    number_probes: usize,
 }
 
 impl Classifier<'_, '_> {
@@ -458,26 +461,29 @@ impl Classifier<'_, '_> {
 
     /// Whether the number at `path` stands in free JSON, where a string
     /// may take its place: probed with a string there (a typed number, an
-    /// exit code or a count, does not take one), once per path.
-    fn number_is_free(&mut self, path: &[Seg], g: &str) -> Result<bool, NotWritten> {
-        if let Some(c) = self
-            .cache
-            .get(self.s.kind)
-            .and_then(|m| m.get(g))
-            .and_then(|l| l[NUMBER])
-        {
-            return Ok(c == Class::Free);
+    /// exit code or a count, does not take one). Asked of each such number
+    /// on its own and never remembered: a general path can name a typed
+    /// number in one element of a list and free JSON in the next, and an
+    /// answer kept for the path would leave the free one unscrubbed for
+    /// the life of the process. Only a number that holds a secret is
+    /// asked about, so this is rare; past [`NUMBER_PROBES`] in one pass
+    /// the answer is "free" (when in doubt, scrub) and the check of the
+    /// result decides.
+    fn number_is_free(&mut self, path: &[Seg]) -> Result<bool, NotWritten> {
+        if self.number_probes >= NUMBER_PROBES {
+            return Ok(true);
         }
+        self.number_probes += 1;
         let s = self.s;
         let mut c = self.skeleton()?.clone();
         if let Some(x) = at_mut(&mut c, path) {
             *x = Value::String("\u{1}probe".into());
         }
-        let free = (s.holds)(c).0;
-        self.learn(g, NUMBER, if free { Class::Free } else { Class::Fixed });
-        Ok(free)
+        Ok((s.holds)(c).0)
     }
+}
 
+impl Classifier<'_, '_> {
     /// The class of the position at `path` and its general path; `Free`
     /// as soon as an ancestor is free JSON.
     fn resolve(&mut self, path: &[Seg]) -> Result<(Class, String), NotWritten> {
@@ -615,7 +621,7 @@ impl Walk<'_, '_, '_> {
             // (free JSON): its scrubbed text. A typed number stays: it
             // cannot hold the marker.
             if let Some(to) = number_hit(self.set, self.nums, v)
-                && self.cls.number_is_free(path, g)?
+                && self.cls.number_is_free(path)?
                 && self.may(g)
             {
                 *v = Value::String(to);
@@ -741,6 +747,7 @@ fn run(
                 base: payload,
                 cache,
                 sk: None,
+                number_probes: 0,
             },
             allow,
             touched: vec![],
@@ -918,6 +925,7 @@ pub fn positions(kind: &str, payload: &Value) -> Vec<(String, Class)> {
             base: payload,
             cache: &mut cache,
             sk: None,
+            number_probes: 0,
         };
         let Ok((class, g)) = c.resolve(&p) else {
             return vec![];
@@ -1053,7 +1061,7 @@ mod tests {
             cache
                 .entry("t".into())
                 .or_default()
-                .insert("packed".into(), [Some(wrong), None, None, None]);
+                .insert("packed".into(), [Some(wrong), None, None]);
             let mut v = serde_json::json!({ "name": "x", "packed": "a longsecret", "tags": [] });
             run_t(&set, &mut v, &mut cache);
             assert_eq!(v["packed"], "a [REDACTED]", "{wrong:?}");
@@ -1114,6 +1122,70 @@ mod tests {
                 obj,
                 serde_json::json!({ "w": { "longfield": "a [REDACTED]" } })
             );
+        }
+    }
+
+    /// One general path, `xs[].n`, that is free JSON in one element and a
+    /// typed number in the next (the event schema has none). Each number
+    /// is asked about on its own: the free one is scrubbed and the typed
+    /// one stays, whichever the process met first. An answer remembered
+    /// for the path left the free one unscrubbed for good, with no
+    /// fallback to log it, when the typed one came first.
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct N {
+        xs: Vec<Z>,
+    }
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    #[serde(tag = "t", rename_all = "snake_case")]
+    enum Z {
+        A { n: Value },
+        B { n: i64 },
+    }
+
+    fn holds_n(v: Value) -> (bool, Value) {
+        let ok =
+            N::deserialize(&v).is_ok_and(|x| serde_json::to_value(&x).is_ok_and(|back| back == v));
+        (ok, v)
+    }
+
+    #[test]
+    fn a_number_is_asked_about_on_its_own_not_by_its_path() {
+        let set = SecretSet::new(vec![Secret::new("12345678901".into())]);
+        let keep = |_: &str, _: &str| Keep::No;
+        let s = Schema {
+            kind: "n",
+            holds: &holds_n,
+            keep: &keep,
+        };
+        let a = serde_json::json!({ "t": "a", "n": 12345678901u64 });
+        let b = serde_json::json!({ "t": "b", "n": 12345678901u64 });
+        let a_done = serde_json::json!({ "t": "a", "n": "[REDACTED]" });
+        for order in [[&a, &b], [&b, &a]] {
+            let mut cache = Cache::new();
+            // Twice: what the first event taught must not change the second.
+            for _ in 0..2 {
+                let mut v = serde_json::json!({ "xs": order });
+                let out = run(&set, &s, &mut v, &mut cache).ok();
+                assert_eq!(out, Some(Outcome::Scrubbed), "{v}");
+                let want: Vec<&Value> = order
+                    .iter()
+                    .map(|x| if *x == &a { &a_done } else { &b })
+                    .collect();
+                assert_eq!(v, serde_json::json!({ "xs": want }));
+            }
+            // The typed one alone, then the free one alone.
+            let mut cache = Cache::new();
+            let mut only_b = serde_json::json!({ "xs": [b] });
+            assert_eq!(
+                run(&set, &s, &mut only_b, &mut cache).ok(),
+                Some(Outcome::Clean)
+            );
+            let mut only_a = serde_json::json!({ "xs": [a] });
+            assert_eq!(
+                run(&set, &s, &mut only_a, &mut cache).ok(),
+                Some(Outcome::Scrubbed)
+            );
+            assert_eq!(only_a, serde_json::json!({ "xs": [a_done] }));
         }
     }
 

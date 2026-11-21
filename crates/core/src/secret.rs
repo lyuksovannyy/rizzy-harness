@@ -281,6 +281,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_a_value_of_digits_and_number_signs_could_be_a_number() {
+        let numeric = |v: &str| SecretSet::new(vec![Secret::new(v.into())]).any_numeric();
+        assert!(numeric("12345678"));
+        assert!(numeric("-1234.5e+10"));
+        assert!(!numeric("12345678-abc"));
+        assert!(!numeric("sk-12345678"));
+        // Too short to be redacted at all.
+        assert!(!numeric("1234567"));
+        let mixed = SecretSet::new(vec![
+            Secret::new("not-a-number".into()),
+            Secret::new("0000000000".into()),
+        ]);
+        assert!(mixed.any_numeric());
+        assert!(!SecretSet::new(vec![]).any_numeric());
+    }
+
+    #[test]
     fn debug_is_redacted() {
         let s = Secret::new("sk-very-secret".to_string());
         assert_eq!(format!("{s:?}"), "Secret(<redacted>)");

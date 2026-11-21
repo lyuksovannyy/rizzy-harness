@@ -122,8 +122,7 @@ fn a_typed_number_with_the_same_digits_stays() {
     assert_eq!(p, before);
 }
 
-/// A set with no value that could be a number leaves every number alone
-/// (and does not look at them).
+/// A set with no value that could be a number leaves every number alone.
 #[test]
 fn a_secret_that_is_not_a_number_leaves_numbers_alone() {
     let set = SecretSet::new(vec![Secret::new("12345678-abc".into())]);
@@ -142,4 +141,23 @@ fn an_unknown_kinds_number_is_left() {
         Outcome::Unknown
     );
     assert_eq!(p, json!({ "pin": 12345678901u64, "s": "[REDACTED]" }));
+}
+
+/// More numbers than one pass asks the types about: past that count a
+/// number that holds a secret is taken as free JSON, and here it is.
+#[test]
+fn a_form_of_many_number_fields_is_redacted_whole() {
+    let values: serde_json::Map<String, Value> = (0..400)
+        .map(|i| (format!("f{i}"), json!(12345678901u64)))
+        .collect();
+    let mut p = json!({
+        "turn_id": "t",
+        "text": "sent",
+        "reply": { "message_id": "m", "block_id": "b", "values": values },
+    });
+    assert_eq!(set().scrub_event("user_message", &mut p), Outcome::Scrubbed);
+    let got = p["reply"]["values"].as_object().unwrap();
+    assert_eq!(got.len(), 400);
+    assert!(got.values().all(|v| v == "[REDACTED]"), "{p}");
+    assert!(EventKind::from_parts("user_message", p.clone()).is_ok());
 }
