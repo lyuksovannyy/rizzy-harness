@@ -349,6 +349,7 @@ mod tests {
             parent_session: parent,
             no_callbacks,
             exec_mode: None,
+            sub_folder: None,
         })
     }
 

@@ -2157,6 +2157,7 @@ impl NodeRuntime {
                 owned: None,
                 no_callbacks,
                 exec_mode,
+                sub_folder: None,
             },
         )
         .await

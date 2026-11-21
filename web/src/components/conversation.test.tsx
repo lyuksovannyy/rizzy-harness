@@ -133,6 +133,24 @@ async function show(
   await act(() => new Promise((r) => setTimeout(r, 0)));
 }
 
+describe("a sub-agent's chat", () => {
+  const withFolder = async (sub_folder?: "shared" | "own") => {
+    const base = view([], "agentic");
+    current = { ...base, meta: { ...base.meta, sub_folder } as SessionView["meta"] };
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow({ parent_id: "p1" })} nodes={[]} agents={[]} models={[]} />));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    return host.querySelector(".incognito-banner")!.textContent!;
+  };
+
+  test("the banner says where it worked, when it could change files", async () => {
+    expect(await withFolder("shared")).toContain("for another session, worked in this chat's folder.");
+    expect(await withFolder("own")).toContain("for another session, worked in a copy of the folder of its own.");
+    const reader = await withFolder(undefined);
+    expect(reader).toContain("for another session.");
+    expect(reader).not.toContain("worked");
+  });
+});
+
 describe("routine chats", () => {
   test("a chat with webhook data says so and links its routine", async () => {
     await show([], sessionRow({ routine: mark({ untrusted: true }) }));

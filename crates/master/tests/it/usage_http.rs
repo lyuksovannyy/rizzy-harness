@@ -154,6 +154,7 @@ fn chat(t: &T, owner: &str, parent: Option<SessionId>, ts: i64, u: Value) -> Ses
         backend: "native".into(),
         node_id: "node-xyz-secret".into(),
         approval_mode: Default::default(),
+        sub_folder: None,
     })
     .into_parts();
     push(ts, &kind, payload);

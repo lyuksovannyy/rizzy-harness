@@ -477,6 +477,7 @@ async fn an_agentic_session_without_a_recorded_mode_runs_nothing() {
             backend: "native".into(),
             node_id: "n".into(),
             approval_mode: harness_core::policy::ApprovalMode::Auto,
+            sub_folder: None,
         })
         .into_parts();
         store

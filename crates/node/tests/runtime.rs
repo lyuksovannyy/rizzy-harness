@@ -691,6 +691,7 @@ async fn recovers_interrupted_turn_on_start() {
                 backend: "native".into(),
                 node_id: "local".into(),
                 approval_mode: Default::default(),
+                sub_folder: None,
             }),
             EventKind::TurnStarted(TurnStarted {
                 cause: None,
@@ -794,6 +795,7 @@ async fn sub_task_sessions_ask_no_questions() {
         backend: "native".into(),
         node_id: "local".into(),
         approval_mode: Default::default(),
+        sub_folder: None,
     })
     .into_parts();
     let created = RawEvent {
@@ -1892,6 +1894,7 @@ async fn ack_time_on_a_long_session() {
                 backend: "native".into(),
                 node_id: "local".into(),
                 approval_mode: Default::default(),
+                sub_folder: None,
             });
             for seq in 1..=n {
                 let kind = if seq == 1 {

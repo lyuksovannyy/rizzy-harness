@@ -61,6 +61,7 @@ impl Chat {
             backend: "native".into(),
             node_id: "n1".into(),
             approval_mode: Default::default(),
+            sub_folder: None,
         })
         .into_parts();
         c.push(ts, &kind, payload);

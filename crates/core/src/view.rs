@@ -1366,6 +1366,7 @@ mod tests {
             parent_session: None,
             no_callbacks: false,
             exec_mode: None,
+            sub_folder: None,
         };
         let change = |mode, requested| {
             EventKind::ApprovalModeChanged(ApprovalModeChanged { mode, requested })

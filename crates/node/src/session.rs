@@ -522,6 +522,8 @@ pub(crate) struct NewSession {
     pub no_callbacks: bool,
     /// Chosen by the runtime (or the parent's, for a sub-agent).
     pub exec_mode: Option<harness_core::policy::ExecMode>,
+    /// Where a sub-agent that can change files works (recorded).
+    pub sub_folder: Option<harness_core::subagent::SubFolder>,
 }
 
 impl Session {
@@ -542,6 +544,7 @@ impl Session {
             owned,
             no_callbacks,
             exec_mode,
+            sub_folder,
         } = new;
         let (bg, ends) = background_table(&node, profile, parent_session, 1);
         let s = Arc::new(Self {
@@ -614,6 +617,7 @@ impl Session {
             node_id: node.cfg.node_id.clone(),
             approval_mode: mode,
             exec_mode,
+            sub_folder,
         }))
         .await?;
         Ok(s)
@@ -4414,6 +4418,11 @@ impl Session {
                     .as_ref()
                     .map(|i| i.child.owned())
                     .or_else(|| self.owned()),
+                sub_folder: if iso.is_some() {
+                    Some(harness_core::subagent::SubFolder::Own)
+                } else {
+                    shared.then_some(harness_core::subagent::SubFolder::Shared)
+                },
             },
         )
         .await

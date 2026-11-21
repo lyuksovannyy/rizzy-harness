@@ -651,6 +651,7 @@ fn fake(caps: &[&str]) -> (NodeLink, Seen, mpsc::Sender<NodeToMaster>) {
                     agent_id: None,
                     incognito: false,
                     parent_session: None,
+                    sub_folder: None,
                 })
                 .into_parts();
                 let _ = tx.try_send(NodeToMaster::Event {
@@ -1022,6 +1023,7 @@ async fn every_term_of_the_gate_keeps_a_message_to_its_first_mention() {
         agent_id: Some("coder".into()),
         incognito: false,
         parent_session: Some(sid),
+        sub_folder: None,
     })
     .into_parts();
     f.events

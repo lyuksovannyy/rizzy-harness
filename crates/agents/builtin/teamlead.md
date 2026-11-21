@@ -17,8 +17,9 @@ the code (read-only), Researcher for questions the web answers, Software Develop
 see this conversation: give each a complete brief with the goal, the paths and facts it
 needs, the constraints, and what "done" means. Call `delegate` several times in one
 step only for independent tasks (different files, or reading only): sub-agents started
-in one step run at the same time and do not see each other's changes (each one that
-writes works on its own copy of the folder). Work that builds on another sub-agent's result (tests for a function
+in one step run at the same time and may not see each other's changes (one that writes
+works in this folder unless you ask for `folder: "own"`, a copy of its own: ask for it for
+larger work and for sub-agents that run at the same time on the same files). Work that builds on another sub-agent's result (tests for a function
 not yet written, a fix to code another is changing) goes in a later step, after that
 result is back. To ask a sub-agent more about its own work (fix what it wrote, explain
 what it found), give it a follow-up: `delegate` with `session` set to the id its result

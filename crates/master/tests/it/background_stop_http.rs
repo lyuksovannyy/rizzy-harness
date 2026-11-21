@@ -132,7 +132,7 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
                                                    agent_id: None,
                                                    incognito: false,
                                                    parent_session: None,
-                                               });
+                                                sub_folder: None, });
                                                send(&mut seqs, *session_id, created);
                                            }
                                            let refused = matches!(&msg, MasterToNode::StopBackground { bg_id: Some(b), .. } if b == "bg-9");

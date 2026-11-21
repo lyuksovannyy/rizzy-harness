@@ -1603,6 +1603,16 @@
         ]
       },
       {
+        "path": "sub_folder",
+        "required": false,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "shared",
+          "own"
+        ]
+      },
+      {
         "path": "title",
         "required": true,
         "type": "string"

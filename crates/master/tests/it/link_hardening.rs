@@ -126,6 +126,7 @@ fn event(sid: SessionId, seq: u64, text: &str) -> RawEvent {
             backend: "native".into(),
             node_id: "n1".into(),
             approval_mode: Default::default(),
+            sub_folder: None,
         })
     } else {
         EventKind::AssistantDelta(AssistantDelta {
@@ -833,6 +834,7 @@ fn created_by(sid: SessionId, seq: u64, parent: Option<SessionId>) -> RawEvent {
         backend: "native".into(),
         node_id: "n1".into(),
         approval_mode: Default::default(),
+        sub_folder: None,
     })
     .into_parts();
     RawEvent {
