@@ -252,6 +252,31 @@ describe("Workspace settings → Agents", () => {
     );
   }
 
+  test("an agent named by the route (a reload) opens its page; opening one from the list is the route's to record", async () => {
+    api.agents.mockResolvedValue({ agents: [agent("coder")], default: "general" });
+    const features = { memory: true, project_memory: true, personalisation: true, history: true, recall: false, board: false, web: true, read_files: false, edit_files: false, commands: false, read_only_commands: false, mcp: false, skills: true, delegate: false, background_subagents: false, as_agent: true, as_subagent: true };
+    pageApi.agent.mockResolvedValue({ ...agent("coder"), features, prompt: "p", summary: "", instructions: "", description_default: "" });
+    const opened = vi.fn();
+    await act(async () =>
+      root.render(
+        <WorkspaceAgents me={me} workspace={ws} agents={[]} models={[]} defaultAgent="general" onChanged={() => {}} onLeft={() => {}} open="coder" onOpen={opened} />,
+      ),
+    );
+    expect(pageApi.agent).toHaveBeenCalledWith("coder", { workspace: "w1" });
+    expect(host.querySelector(".agent-back")).not.toBeNull();
+    await act(async () => host.querySelector<HTMLButtonElement>(".agent-back")!.click());
+    expect(opened).toHaveBeenCalledWith(null);
+    // Without an open agent the list shows, and a row asks the route to open it.
+    await act(async () =>
+      root.render(
+        <WorkspaceAgents me={me} workspace={ws} agents={[]} models={[]} defaultAgent="general" onChanged={() => {}} onLeft={() => {}} open={null} onOpen={opened} />,
+      ),
+    );
+    await act(async () => host.querySelector<HTMLButtonElement>(".agent-open")!.click());
+    expect(opened).toHaveBeenLastCalledWith("coder");
+    expect(host.querySelector(".agent-back")).toBeNull();
+  });
+
   test("lists the workspace's agents as the Agents page does, read in its scope", async () => {
     api.agents.mockResolvedValue({ agents: [agent("coder"), agent("<i>x</i>", { origin: "custom", builtin: false })], default: "general" });
     await show(me);
