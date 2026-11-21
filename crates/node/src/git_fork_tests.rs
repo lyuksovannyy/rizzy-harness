@@ -447,6 +447,58 @@ async fn the_forks_origin_cannot_push_into_the_parent() {
     assert_eq!(digest(&r.h.repo), r.before, "a push wrote the parent");
 }
 
+/// The size of the cut's files is counted from the snapshot's listing; a
+/// listing that cannot be read is an error, never "0 bytes" (the room check
+/// would pass on a size nobody knew).
+#[tokio::test]
+async fn the_size_of_the_cuts_files_is_counted_and_a_failed_count_is_an_error() {
+    let r = rig(true).await;
+    let n = fork_copy::tree_bytes(&r.shadow, &r.snap).await.unwrap();
+    assert!(n >= 4 + 4 + 4, "{n}");
+    let e = fork_copy::tree_bytes(&r.shadow, &"1".repeat(40))
+        .await
+        .unwrap_err();
+    assert!(e.contains("file list could not be read"), "{e}");
+    let e = fork_copy::tree_bytes(&r.shadow, "not an id")
+        .await
+        .unwrap_err();
+    assert!(e.contains("not a checkpoint id"), "{e}");
+}
+
+/// The working files are written after the clone, so the folder is measured
+/// again after them: a cut whose files are bigger than the bound is refused
+/// although the repository's own `.git` was small.
+#[tokio::test]
+async fn the_folder_is_measured_again_after_its_files_are_written() {
+    let h = Hostile::new();
+    let repo = h.repo.clone();
+    let top = repo.parent().unwrap().canonicalize().unwrap();
+    std::fs::write(repo.join("big.bin"), vec![7u8; 3 << 20]).unwrap();
+    let shadow = repo_for(&repo, Some(&h.base)).await.unwrap();
+    let snap = snapshot(&shadow, "refs/harness/s/t/after", "after")
+        .await
+        .unwrap();
+    let head = out(&repo, &["rev-parse", "HEAD"]);
+    let (dest, outside) = (top.join("dest"), top.join("outside"));
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let res = fill(&Plan {
+        source: &repo,
+        dest: &dest,
+        outside: &outside,
+        branch: "fork/ab12cd34",
+        head: Some(&head),
+        shadow: &shadow,
+        snapshot: Some(&snap),
+        timeout: Duration::from_secs(60),
+        max_bytes: 1 << 20,
+        max_entries: fork_copy::ENTRY_MAX,
+    })
+    .await;
+    let e = res.unwrap_err();
+    assert!(e.contains("clone_max_mb"), "{e}");
+}
+
 #[tokio::test]
 async fn without_a_checkpoint_the_branchs_commit_is_written_as_it_is() {
     let r = rig(false).await;

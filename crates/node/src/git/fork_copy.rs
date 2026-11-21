@@ -997,6 +997,18 @@ pub(crate) async fn git_dir_bytes(source: &Path, cap: u64) -> u64 {
 mod tests {
     use super::*;
 
+    /// A git call keeps a bounded amount of what it prints, however much it
+    /// says (a hostile repository's messages cannot fill the node's memory).
+    #[tokio::test]
+    async fn a_git_call_keeps_a_bounded_amount_of_output() {
+        let mut c = Command::new("sh");
+        c.arg("-c")
+            .arg("head -c 5000000 /dev/zero; head -c 300000 /dev/zero >&2");
+        let out = exec_capped(c, Duration::from_secs(20)).await.unwrap();
+        assert!(out.status.success());
+        assert_eq!((out.stdout.len(), out.stderr.len()), (OUT_CAP, ERR_CAP));
+    }
+
     #[test]
     fn credentials_of_an_https_url_are_dropped_and_a_url_without_a_host_is_none() {
         for (url, want) in [

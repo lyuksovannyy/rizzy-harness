@@ -561,6 +561,21 @@ mod tests {
         assert_eq!(r.projects(), Vec::<String>::new());
     }
 
+    /// A cut whose snapshot cannot be listed has no known size: refused
+    /// before anything is made, not copied on "0 bytes".
+    #[tokio::test]
+    async fn a_snapshot_that_cannot_be_listed_refuses_the_copy_before_anything_is_made() {
+        let r = rig(true).await;
+        let mut req = r.request();
+        req.cut.snapshot = Some("1".repeat(40));
+        let e = make(&r.policy, &r.made, req, &|| "zzzz".into())
+            .await
+            .unwrap_err();
+        assert!(e.contains("file list could not be read"), "{e}");
+        assert_eq!(r.staging(), Vec::<String>::new());
+        assert_eq!(r.projects(), Vec::<String>::new());
+    }
+
     /// A name that is taken (a folder, or a link) is never replaced or
     /// followed: the copy takes another.
     #[tokio::test]
