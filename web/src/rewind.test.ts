@@ -68,3 +68,35 @@ describe("rewind", () => {
     expect(v.items.every((i) => i.rewound === undefined)).toBe(true);
   });
 });
+
+describe("rewind and the task list", () => {
+  const list = (seq: number, content: string): RawEvent => ev(seq, "todo_updated", { turn_id: "t", call_id: "c", items: [{ content, status: "pending" }] });
+  it("a rewound list does not count, an undo brings it back, a later one is the list", () => {
+    const log = [
+      ev(1, "turn_started", { turn_id: "t1" }),
+      ev(2, "user_message", { turn_id: "t1", text: "one" }),
+      list(3, "before"),
+      ev(4, "turn_started", { turn_id: "t2" }),
+      ev(5, "user_message", { turn_id: "t2", text: "two" }),
+      list(6, "rewound"),
+    ];
+    const v = fold([...log, ev(7, "conversation_rewound", { message_seq: 5, turn_id: "t2", files: false })]);
+    expect(v.todo?.map((t) => t.content)).toEqual(["before"]);
+    apply(v, ev(8, "conversation_rewind_undone", { rewind_seq: 7 }));
+    expect(v.todo?.map((t) => t.content)).toEqual(["rewound"]);
+    apply(v, ev(9, "conversation_rewound", { message_seq: 5, turn_id: "t2", files: false }));
+    expect(v.todo?.map((t) => t.content)).toEqual(["before"]);
+    apply(v, list(10, "after"));
+    expect(v.todo?.map((t) => t.content)).toEqual(["after"]);
+  });
+
+  it("a rewind to before any list leaves none", () => {
+    const v = fold([
+      ev(1, "turn_started", { turn_id: "t1" }),
+      ev(2, "user_message", { turn_id: "t1", text: "one" }),
+      list(3, "only"),
+      ev(4, "conversation_rewound", { message_seq: 2, turn_id: "t1", files: false }),
+    ]);
+    expect(v.todo).toBeUndefined();
+  });
+});

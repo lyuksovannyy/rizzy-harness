@@ -32,7 +32,8 @@ The Rust fold, the model's rebuild, the seen table, the retry rule, the hand-off
    It is built from the log (`rewind::opening_lines`, `next_opening_line`), so a rebuild writes the bytes the turn was sent with.
 3. **What the agent has seen** (the read-first table behind `edit` and `write`): rebuilt from the visible history at every turn's start, so a file read in a rewound turn is not read any more and an edit by tag or by old text needs a fresh read.
 4. **The view**: items made from a rewound range carry `rewound` (the seq of the earliest rewind that hides them); `rewinds` lists each rewind with `seq, message_seq, turn_id, turns, files, undone, can_undo`.
-   Usage, checkpoints, background commands, chat grants, the approval mode, the step limit, the agent and the task list fold as before: what was spent is spent.
+   Usage, checkpoints, background commands, chat grants and the person's own settings (the approval mode, the step limit, the agent) fold as before: what was spent is spent, and a rewind does not change a setting the person made.
+   The task list is the model's own work, so it goes back with the conversation: a rewound `todo_updated` does not count (the view and the web fold show the latest list none of the rewinds holds, as the model is shown it), and an undo brings it back.
 5. **The retry rule and the hand-off note**: rewound turns are absent; a chat rewound since a turn began has nothing of it to retry; the files a rewound turn changed and nobody put back are still in the note.
 
 ## The rule

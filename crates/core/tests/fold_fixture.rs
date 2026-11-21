@@ -1245,6 +1245,16 @@ fn events() -> Vec<RawEvent> {
     kinds.extend(turn_of("t91", "Keep this one", "Kept."));
     let third = kinds.len() as u64 + 2;
     kinds.extend(turn_of("t92", "Then lose this", "Lost."));
+    // A task list the rewound turn set: the rewind takes it back, so the
+    // list stays the one before (the model's side already did).
+    kinds.insert(
+        kinds.len() - 1,
+        EventKind::TodoUpdated(TodoUpdated {
+            turn_id: "t92".into(),
+            call_id: "c-lost".into(),
+            items: vec![todo("Lost with the rewind", TodoStatus::InProgress)],
+        }),
+    );
     kinds.push(EventKind::ConversationRewound(ConversationRewound {
         message_seq: third,
         turn_id: "t92".into(),
@@ -1553,4 +1563,85 @@ fn a_rewind_marks_its_range_and_an_undo_unmarks_it() {
     assert!(SessionView::default().rewinds.is_empty());
     let empty = serde_json::to_value(SessionView::default()).unwrap();
     assert!(empty.get("rewinds").is_none());
+}
+
+/// X.46: the task list goes back with the conversation: a rewound
+/// `todo_updated` does not count (the model's side already ignored it) and
+/// the undo brings it back; one set after the rewind is the list again.
+#[test]
+fn a_rewound_task_list_does_not_count_and_an_undo_brings_it_back() {
+    let sid: SessionId = "01a19bf2-0000-7000-8000-00000000f1f1".parse().unwrap();
+    let mut seq = 0;
+    let mut ev = |k: EventKind| {
+        let (kind, payload) = k.into_parts();
+        seq += 1;
+        RawEvent {
+            session_id: sid,
+            seq,
+            ts_ms: 0,
+            kind,
+            payload,
+        }
+    };
+    let list = |c: &str| {
+        EventKind::TodoUpdated(TodoUpdated {
+            turn_id: "t".into(),
+            call_id: "c".into(),
+            items: vec![todo(c, TodoStatus::Pending)],
+        })
+    };
+    let started = |id: &str| {
+        EventKind::TurnStarted(TurnStarted {
+            turn_id: id.into(),
+            agent: None,
+            cause: None,
+            environment: None,
+            continued_by: None,
+            retry: None,
+        })
+    };
+    let said = |id: &str| {
+        serde_json::from_value::<UserMessage>(json!({"turn_id": id, "text": "x"})).unwrap()
+    };
+    let mut log = vec![
+        ev(started("t1")),
+        ev(EventKind::UserMessage(said("t1"))),
+        ev(list("before")),
+        ev(started("t2")),
+    ];
+    let m2 = log.len() as u64 + 1;
+    log.push(ev(EventKind::UserMessage(said("t2"))));
+    log.push(ev(list("rewound")));
+    let rewind = log.len() as u64 + 1;
+    log.push(ev(EventKind::ConversationRewound(ConversationRewound {
+        message_seq: m2,
+        turn_id: "t2".into(),
+        files: false,
+    })));
+    let now = |log: &[RawEvent]| {
+        SessionView::fold(log)
+            .unwrap()
+            .todo
+            .iter()
+            .map(|t| t.content.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(now(&log), ["before"]);
+    log.push(ev(EventKind::ConversationRewindUndone(
+        ConversationRewindUndone { rewind_seq: rewind },
+    )));
+    assert_eq!(now(&log), ["rewound"]);
+    // A rewind again, then a list set after it counts.
+    log.push(ev(EventKind::ConversationRewound(ConversationRewound {
+        message_seq: m2,
+        turn_id: "t2".into(),
+        files: false,
+    })));
+    assert_eq!(now(&log), ["before"]);
+    log.push(ev(list("after")));
+    assert_eq!(now(&log), ["after"]);
+    // The model's side agrees at every step.
+    let vis = harness_core::rewind::visible(&log[..rewind as usize]);
+    let model = harness_core::todo::latest(&vis).unwrap();
+    assert_eq!(model[0].content, "before");
 }

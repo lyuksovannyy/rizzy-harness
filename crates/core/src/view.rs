@@ -489,6 +489,10 @@ pub struct SessionView {
     /// Every turn's start (seq, turn id), for a rewind's turn count.
     #[serde(skip)]
     turn_starts: Vec<(u64, String)>,
+    /// Every `todo_updated` (seq, its list): a rewind takes the list the
+    /// rewound turns set back, and an undo brings it back.
+    #[serde(skip)]
+    todos: Vec<(u64, Vec<crate::todo::TodoItem>)>,
 }
 
 /// One background command as the log shows it.
@@ -1042,6 +1046,7 @@ impl SessionView {
                     can_undo: true,
                 });
                 self.items.remark(&self.ranges);
+                self.retodo();
             }
             EventKind::ConversationRewindUndone(u) => {
                 if let Some(r) = self.rewinds.iter_mut().find(|r| r.seq == u.rewind_seq) {
@@ -1050,8 +1055,12 @@ impl SessionView {
                 }
                 self.ranges.remove(u.rewind_seq);
                 self.items.remark(&self.ranges);
+                self.retodo();
             }
-            EventKind::TodoUpdated(t) => self.todo = t.items,
+            EventKind::TodoUpdated(t) => {
+                self.todos.push((seq, t.items.clone()));
+                self.todo = t.items;
+            }
             // What the model was sent with the turn's message; the chat
             // never showed it (X.1).
             EventKind::ContextSent(_) => {}
@@ -1139,6 +1148,19 @@ impl SessionView {
 
     /// An agent's staged file joins its `publish` card; the user's (or one
     /// whose call is not in the log) stands alone.
+    /// The task list as the rewinds that count leave it: the latest
+    /// `todo_updated` none of them holds (what the model is shown too,
+    /// `todo::as_of` over `rewind::visible`).
+    fn retodo(&mut self) {
+        self.todo = self
+            .todos
+            .iter()
+            .rev()
+            .find(|(seq, _)| !self.ranges.holds(*seq))
+            .map(|(_, items)| items.clone())
+            .unwrap_or_default();
+    }
+
     fn stage(&mut self, a: Box<ArtifactStaged>) {
         let card = match (&a.call_id, a.by) {
             (Some(c), crate::artifacts::StagedBy::Agent) => self.tool_mut(c),

@@ -13,9 +13,10 @@
 //! fixture.
 //!
 //! The rewound range hides conversation, not state: usage, checkpoints,
-//! background commands, grants, the approval mode, the step limit, the
-//! agent and the task list fold as they did. [`visible`] therefore keeps
-//! the `checkpoint` events of a rewound range.
+//! background commands, grants and the person's own settings (the
+//! approval mode, the step limit, the agent) fold as they did; the task
+//! list is the model's work and goes back with the conversation.
+//! [`visible`] therefore keeps the `checkpoint` events of a rewound range.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
