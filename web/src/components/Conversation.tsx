@@ -796,6 +796,9 @@ export default function Conversation(props: {
                       blocked={!!blocked}
                       cwd={meta?.cwd}
                       tools={web.members.map((m) => view.items[m] as Extract<typeof it, { type: "tool" }>)}
+                      inherited={web.members.map(
+                        (m) => meta?.forked != null && (seqAt(view, m) ?? Infinity) <= meta.forked.through_seq,
+                      )}
                     />
                   );
                 }

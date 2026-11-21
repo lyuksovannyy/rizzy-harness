@@ -311,12 +311,15 @@ export function WebGroupCard({
   tools,
   blocked,
   cwd,
+  inherited,
 }: {
   sessionId: string;
   group: WebGroup;
   tools: Tool[];
   blocked?: boolean;
   cwd?: string;
+  /** Per tool, in order: copied from the chat this one was forked from. */
+  inherited?: boolean[];
 }) {
   const [open, setOpen] = useState<boolean | null>(null);
   const statuses = tools.map(statusOf);
@@ -342,8 +345,8 @@ export function WebGroupCard({
       </button>
       {expanded && (
         <div className="tool-group-body">
-          {tools.map((t) => (
-            <ToolCard key={t.call_id} sessionId={sessionId} item={t} blocked={blocked} cwd={cwd} />
+          {tools.map((t, k) => (
+            <ToolCard key={t.call_id} sessionId={sessionId} item={t} blocked={blocked} cwd={cwd} inherited={inherited?.[k]} />
           ))}
         </div>
       )}
