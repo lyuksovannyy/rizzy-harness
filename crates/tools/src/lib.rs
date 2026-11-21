@@ -46,6 +46,7 @@ mod search;
 mod search_tag_tests;
 pub mod seen;
 mod shown;
+pub use shown::RESULT_BUDGET;
 #[cfg(test)]
 mod shown_tests;
 pub mod skills;

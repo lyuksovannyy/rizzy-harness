@@ -13,6 +13,7 @@ pub mod context;
 mod delegate_availability_tests;
 #[cfg(test)]
 mod edit_guard_tests;
+pub mod history;
 #[cfg(test)]
 mod history_tests;
 pub mod images;
