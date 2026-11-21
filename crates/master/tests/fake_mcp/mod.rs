@@ -324,6 +324,13 @@ async fn handle(State(f): State<Fake>, req: Request) -> Response {
             f.in_init.fetch_sub(1, Ordering::SeqCst);
             json_resp(init_result(&id, &body, "fake"))
         }
+        ("lateinit", "initialize") => {
+            // Like `slowinit`, for a test that must tell "did not wait for
+            // the server" from "was only quick": it answers long after any
+            // loaded machine would have returned from a turn that did not wait.
+            tokio::time::sleep(Duration::from_millis(3_000)).await;
+            json_resp(init_result(&id, &body, "fake"))
+        }
         ("tiny", "tools/list") => {
             // About 1 MB of minimal tools (the reviewer's): cheap to send,
             // dear to parse.
