@@ -1281,7 +1281,7 @@ change anything, and the call shows in the chat like any tool.
 paragraph in place of the earlier turns, its old tool results are one-line
 stubs and the earlier images and attached files are no longer in front of it.
 An agent with the **Chat history** switch (on the Agents page; on unless a
-definition says `history: false`; every built-in agent has it) has a `history`
+definition says `history: false`; every built-in agent but Smol, which has no tools, has it) has a `history`
 tool that reads **this chat's own** earlier turns in full, from the log on the
 node, with no model call and nothing sent to the server:
 
@@ -1302,8 +1302,13 @@ node, with no model call and nothing sent to the server:
 
 It shows only what the agent could have been sent: **never a turn you rewound
 (turn numbers are those of the turns left, so they change after a rewind),
-never an image the provider refused, never the agent's thinking, never
-another chat** (a sub-agent's chat is its own). It changes nothing and asks
+never an image the provider refused, never the agent's thinking, never a
+message you sent while a turn ran that the agent never read** (one it read is
+listed with the turn that read it, with its attachments and images), **never
+the environment line or the context block of an old request, never the text of
+a file you mentioned with `@` (only its path), never another chat** (a
+sub-agent's chat is its own). If a provider repeats a call id inside one turn,
+the result is read by its number in brackets (`call` `"#5"`). It changes nothing and asks
 nothing. Everything it returns was written then and is quoted line by line
 (`| `), so an old result that looks like a note from the harness stays text
 of that result; the agent is told it may hold text from files and pages and
