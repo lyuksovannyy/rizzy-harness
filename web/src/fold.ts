@@ -269,6 +269,8 @@ const KINDS: Record<string, string> = {
   images_withheld: "turn_id calls:[s status:n",
   thinking_withheld: "turn_id model status:n",
   peers_skipped: "message_seq:n agents:[s reason:=peersReason",
+  conversation_rewound: "message_seq:n turn_id ?files:b",
+  conversation_rewind_undone: "rewind_seq:n",
 };
 
 /** The guard's tables, for the test that compares them with Rust's schema. */
@@ -407,6 +409,62 @@ function staged(p: any): StagedArtifact {
   return s;
 }
 
+// What a rewind (X.45) needs of the log besides the view's JSON: where each
+// item came from, the ranges that count, and where each turn started. Kept
+// beside the view, never in it (the fixture compares the view as the Rust
+// fold writes it); the view is mutated in place by the live connection, so
+// it is the key.
+interface Rewinding {
+  /** The seq of the event each item was made from, by item index. */
+  born: number[];
+  /** The rewinds that count: their own seq and the message they went back to. */
+  ranges: { rewind: number; message: number }[];
+  starts: [seq: number, turn: string][];
+}
+const rewinding = new WeakMap<SessionView, Rewinding>();
+const rw = (v: SessionView): Rewinding => {
+  let r = rewinding.get(v);
+  if (!r) rewinding.set(v, (r = { born: [], ranges: [], starts: [] }));
+  return r;
+};
+
+function pushItem(v: SessionView, seq: number, item: Item): void {
+  v.items.push(item);
+  rw(v).born[v.items.length - 1] = seq;
+}
+
+function insertItem(v: SessionView, seq: number, at: number, item: Item): void {
+  v.items.splice(at, 0, item);
+  rw(v).born.splice(at, 0, seq);
+}
+
+/** The earliest rewind that counts and hides the event at `seq`: the one the
+ * chat shows it under (`Ranges::by` in crates/core/src/rewind.rs). */
+function hiddenBy(r: Rewinding, seq: number): number | undefined {
+  let by: number | undefined;
+  for (const a of r.ranges) if (a.message <= seq && seq < a.rewind && (by === undefined || a.rewind < by)) by = a.rewind;
+  return by;
+}
+
+/** Mark each item as the ranges say, after a rewind or an undo. An item
+ * whose mark changes is replaced by a copy, so what renders it by identity
+ * sees the change. */
+function remark(v: SessionView): void {
+  const r = rw(v);
+  for (let i = 0; i < v.items.length; i++) {
+    const it = v.items[i]!;
+    const by = hiddenBy(r, r.born[i] ?? 0);
+    if (it.rewound === by) continue;
+    const copy: Item = { ...it };
+    if (by === undefined) delete copy.rewound;
+    else copy.rewound = by;
+    v.items[i] = copy;
+  }
+}
+
+/** A message, a turn or a summary after a rewind: it can no longer be put back. */
+const ENDS_UNDO = new Set(["user_message", "turn_started", "history_summarized"]);
+
 /** Apply one event in place. Throws on gaps, duplicates or wrong session. */
 export function apply(v: SessionView, e: RawEvent): void {
   if (v.session_id !== null && v.session_id !== e.session_id) {
@@ -440,6 +498,7 @@ export function apply(v: SessionView, e: RawEvent): void {
 function fold1(v: SessionView, e: RawEvent, p: any): void {
   // Anything the turn shows next means the wait is over (as the Rust view).
   if (CLEARS_RETRY.has(e.kind)) delete v.retry;
+  if (ENDS_UNDO.has(e.kind)) for (const r of v.rewinds ?? []) r.can_undo = false;
   switch (e.kind) {
     case "session_created": {
       // Match serde: optional fields are omitted when absent.
@@ -461,11 +520,12 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       break;
     }
     case "turn_started":
+      rw(v).starts.push([e.seq, p.turn_id]);
       // A callback turn stands where a person's message would.
-      if (p.cause?.callback) v.items.push({ type: "callback", turn_id: p.turn_id, bg_ids: p.cause.callback });
+      if (p.cause?.callback) pushItem(v, e.seq, { type: "callback", turn_id: p.turn_id, bg_ids: p.cause.callback });
       // So does the turn of an agent a message called after the first (X.37).
       if (p.cause?.mention)
-        v.items.push({ type: "called", turn_id: p.turn_id, agent: p.agent ?? null, message_seq: p.cause.mention.message_seq });
+        pushItem(v, e.seq, { type: "called", turn_id: p.turn_id, agent: p.agent ?? null, message_seq: p.cause.mention.message_seq });
       // A sub-agent's follow-up from the chat that started it (T68).
       if (p.continued_by) (v.follow_ups ??= []).push(p.turn_id);
       // A person's Retry (X.21): the failed attempt stays above it.
@@ -473,7 +533,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
         const r: Extract<Item, { type: "retry" }> = { type: "retry", turn_id: p.turn_id, of: p.retry.turn_id, reason: p.retry.reason };
         if (p.retry.failed_model != null) r.failed_model = p.retry.failed_model;
         if (p.retry.model != null) r.model = p.retry.model;
-        v.items.push(r);
+        pushItem(v, e.seq, r);
       }
       {
         // A turn that never ended keeps what it had used.
@@ -489,10 +549,40 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       v.running_agent = p.agent ?? null;
       break;
     case "callback_refused":
-      v.items.push({ type: "callback_refused", bg_ids: p.bg_ids, reason: p.reason });
+      pushItem(v, e.seq, { type: "callback_refused", bg_ids: p.bg_ids, reason: p.reason });
       break;
+    // A rewind (X.45): the items from the message on are marked, state
+    // folds as it did. The target's own start stands before its message.
+    case "conversation_rewound": {
+      const r = rw(v);
+      const turns = new Set(r.starts.filter(([s, t]) => p.message_seq < s && s < e.seq && t !== p.turn_id).map(([, t]) => t)).size + 1;
+      r.ranges = r.ranges.filter((a) => a.rewind !== e.seq);
+      r.ranges.push({ rewind: e.seq, message: p.message_seq });
+      (v.rewinds ??= []).push({
+        seq: e.seq,
+        message_seq: p.message_seq,
+        turn_id: p.turn_id,
+        turns,
+        files: !!p.files,
+        undone: false,
+        can_undo: true,
+      });
+      remark(v);
+      break;
+    }
+    case "conversation_rewind_undone": {
+      const r = rw(v);
+      const one = v.rewinds?.find((x) => x.seq === p.rewind_seq);
+      if (one) {
+        one.undone = true;
+        one.can_undo = false;
+      }
+      r.ranges = r.ranges.filter((a) => a.rewind !== p.rewind_seq);
+      remark(v);
+      break;
+    }
     case "peers_skipped":
-      v.items.push({ type: "peers_skipped", agents: p.agents, reason: p.reason });
+      pushItem(v, e.seq, { type: "peers_skipped", agents: p.agents, reason: p.reason });
       break;
     case "handoff_written": {
       // Its cost is the chat's, like a turn's (the sums only).
@@ -501,7 +591,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (p.text != null) it.text = p.text;
       if (p.model != null) it.model = p.model;
       if (p.failed != null && p.failed.length > 0) it.failed = p.failed;
-      v.items.push(it);
+      pushItem(v, e.seq, it);
       break;
     }
     case "user_message": {
@@ -515,7 +605,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (p.queued) item.queued = { seq: e.seq, read: false };
       if (p.triggers?.length) item.triggers = p.triggers;
       if (p.tags?.length) item.tags = p.tags;
-      v.items.push(item);
+      pushItem(v, e.seq, item);
       break;
     }
     case "queued_delivered": {
@@ -527,7 +617,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       const a = lastAssistant(v, p.message_id);
       if (a) a.text += p.text;
       else
-        v.items.push({
+        pushItem(v, e.seq, {
           type: "assistant",
           message_id: p.message_id,
           text: p.text,
@@ -541,7 +631,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       const a = lastAssistant(v, p.message_id);
       // Its thinking, a row before what the step said (X.25), as the Rust view.
       // Each block's kind and text (`for_browser` sent no more; the guard keeps no more).
-      if (p.thinking) v.items.splice(a ? v.items.indexOf(a) : v.items.length, 0, { type: "thinking", message_id: p.message_id, blocks: p.thinking.blocks });
+      if (p.thinking) insertItem(v, e.seq, a ? v.items.indexOf(a) : v.items.length, { type: "thinking", message_id: p.message_id, blocks: p.thinking.blocks });
       if (a) {
         a.text = p.text;
         a.done = true;
@@ -559,12 +649,12 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
           variant: p.variant ?? null,
         };
         if (p.blocks?.length) item.blocks = p.blocks;
-        v.items.push(item);
+        pushItem(v, e.seq, item);
       }
       break;
     }
     case "tool_call_started":
-      v.items.push({
+      pushItem(v, e.seq, {
         type: "tool",
         call_id: p.call_id,
         author: p.author ?? null,
@@ -691,7 +781,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       else delete v.turn_usage;
       v.running_turn = null;
       v.running_agent = null;
-      v.items.push({ type: "turn_end", turn_id: p.turn_id, reason: p.reason });
+      pushItem(v, e.seq, { type: "turn_end", turn_id: p.turn_id, reason: p.reason });
       break;
     }
     case "turn_usage": {
@@ -718,26 +808,26 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       break;
     }
     case "error":
-      v.items.push(p.notice ? { type: "error", message: p.message, notice: true } : { type: "error", message: p.message });
+      pushItem(v, e.seq, p.notice ? { type: "error", message: p.message, notice: true } : { type: "error", message: p.message });
       break;
     case "agent_changed": {
       const it: Extract<Item, { type: "agent_changed" }> = { type: "agent_changed", agent: p.agent };
       if (p.model != null) it.model = p.model;
-      v.items.push(it);
+      pushItem(v, e.seq, it);
       break;
     }
     case "approval_mode_changed": {
       if (v.meta) v.meta.approval_mode = p.mode;
       const it: Extract<Item, { type: "approval_mode_changed" }> = { type: "approval_mode_changed", mode: p.mode };
       if (p.requested != null) it.requested = p.requested;
-      v.items.push(it);
+      pushItem(v, e.seq, it);
       break;
     }
     case "step_limit_changed": {
       v.max_steps = p.max_steps;
       const it: Extract<Item, { type: "step_limit_changed" }> = { type: "step_limit_changed", max_steps: p.max_steps };
       if (p.requested != null) it.requested = p.requested;
-      v.items.push(it);
+      pushItem(v, e.seq, it);
       break;
     }
     case "variant_selected":
@@ -751,12 +841,12 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       const it: Extract<Item, { type: "summary" }> = { type: "summary", through_seq: p.through_seq, text: p.text };
       if (p.manual === true) it.manual = true;
       if (p.focus != null) it.focus = p.focus;
-      v.items.push(it);
+      pushItem(v, e.seq, it);
       break;
     }
     case "compact_failed":
       if (p.usage) settle(v, p.usage);
-      v.items.push({ type: "error", message: p.reason });
+      pushItem(v, e.seq, { type: "error", message: p.reason });
       break;
     case "context_shortened": {
       const it: Extract<Item, { type: "shortened" }> = {
@@ -771,20 +861,20 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
         it.text = p.folded.text;
       }
       if (p.thinking != null) it.thinking = true;
-      v.items.push(it);
+      pushItem(v, e.seq, it);
       break;
     }
     case "model_retry":
       v.retry = { turn_id: p.turn_id, model: p.model, attempt: p.attempt, of: p.of, at_ms: p.at_ms, wait_ms: p.wait_ms, reason: p.reason };
       break;
     case "model_fallback":
-      v.items.push({ type: "fallback", turn_id: p.turn_id, model: p.model, from: p.from, reason: p.reason ?? null });
+      pushItem(v, e.seq, { type: "fallback", turn_id: p.turn_id, model: p.model, from: p.from, reason: p.reason ?? null });
       break;
     case "artifact_staged": {
       // An agent's file joins its `publish` card; the user's stands alone.
       const card = p.by === "agent" && p.call_id != null ? lastTool(v, p.call_id) : undefined;
       if (card) card.staged = staged(p);
-      else v.items.push({ type: "artifact", staged: staged(p) });
+      else pushItem(v, e.seq, { type: "artifact", staged: staged(p) });
       break;
     }
     case "background_started": {
@@ -810,7 +900,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       };
       if (c) it.agent = c.agent_id;
       if (p.confirmed === "still_alive" || p.confirmed === "unconfirmed") it.open = true;
-      v.items.push(it);
+      pushItem(v, e.seq, it);
       break;
     }
     case "chat_allow_added":
@@ -830,7 +920,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       break;
     }
     case "artifact_stage_failed":
-      v.items.push({ type: "artifact_failed", path: p.path, name: p.name ?? null, error: p.error });
+      pushItem(v, e.seq, { type: "artifact_failed", path: p.path, name: p.name ?? null, error: p.error });
       break;
     // What the model was sent with the turn's message (X.1): never shown.
     case "context_sent":
