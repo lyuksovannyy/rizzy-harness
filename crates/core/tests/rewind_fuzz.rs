@@ -44,7 +44,7 @@ impl Log {
 
 fn gen_log(seed: u64) -> Vec<RawEvent> {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    let hostile = seed % 3 != 0;
+    let hostile = !seed.is_multiple_of(3);
     let mut l = Log(vec![]);
     let mut msgs: Vec<(u64, String)> = vec![];
     let mut rewinds: Vec<u64> = vec![];

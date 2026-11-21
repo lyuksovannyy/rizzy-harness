@@ -422,10 +422,10 @@ pub fn next_opening_line(log: &[RawEvent]) -> Option<String> {
 /// One pass over `log`: fills `out` (see [`opening_lines`]) and returns the
 /// rewinds still waiting for a turn, (rewind seq, message seq), and a
 /// person's turn that has begun and has no opening yet, with its line.
-fn scan(
-    log: &[RawEvent],
-    out: &mut HashMap<u64, String>,
-) -> (Vec<(u64, u64)>, Option<(String, String)>) {
+/// Rewinds waiting for a turn: (rewind seq, message seq).
+type Waiting = Vec<(u64, u64)>;
+
+fn scan(log: &[RawEvent], out: &mut HashMap<u64, String>) -> (Waiting, Option<(String, String)>) {
     // Turns that have a person's message of their own.
     let with_message: HashSet<&str> = log
         .iter()

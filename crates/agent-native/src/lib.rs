@@ -3162,10 +3162,10 @@ impl NativeBackend {
         // The first turn after a rewind that kept the files, a callback, an
         // agent a message called or a retry too: the line stands among the
         // notes the opening takes into itself (the rebuild puts it there).
-        if callback.is_some() || retry.is_some() || called.is_some() {
-            if let Some(line) = &rewind_line {
-                messages.push(ChatMsg::Note(line.clone()));
-            }
+        if (callback.is_some() || retry.is_some() || called.is_some())
+            && let Some(line) = &rewind_line
+        {
+            messages.push(ChatMsg::Note(line.clone()));
         }
         // The opening as the loop sends it and the log rebuilds it.
         let callback_base = callback.as_ref().map(|ids| {
