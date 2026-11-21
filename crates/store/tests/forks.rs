@@ -695,3 +695,93 @@ fn an_incognito_fork_is_not_indexed_nor_listed() {
     let q = asker(&s, &w);
     assert!(s.earlier_chats("p", "u1", q, 10).unwrap().is_empty());
 }
+
+/// The columns the fork's row keeps its state in, read off the file.
+fn row_state(path: &std::path::Path, sid: SessionId) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
+    let c = rusqlite::Connection::open(path).unwrap();
+    c.query_row(
+        "SELECT running, pending_approvals, finished_seq, asks_user, attention_seq, last_asks,
+                updated_ms, head_seq FROM sessions WHERE session_id = ?1",
+        [sid.to_string()],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        },
+    )
+    .unwrap()
+}
+
+/// While a long copy is still arriving, the fork's row is idle and calls for
+/// nobody's attention: the copied events keep the parent's flags out of it
+/// (an approval nobody answered, a question the parent ended on, "finished,
+/// unread"), and only the replication columns follow them. The divider sets
+/// the row once, idle, with the time the fork was made.
+#[test]
+fn a_forks_row_stays_idle_after_every_copied_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mirror.db");
+    let s = Store::open(&path, harness_store::Durability::Full).unwrap();
+    s.create_user(&NewUser {
+        user_id: "u1".into(),
+        username: "alex".into(),
+        password_hash: "x".into(),
+        role: Role::Member,
+        exec_ceiling: harness_core::policy::ExecLevel::None,
+        must_change_password: false,
+    })
+    .unwrap();
+    let mut p = parent_log();
+    p.raw("turn_started", json!({"turn_id": "t2"}));
+    p.raw("user_message", json!({"turn_id": "t2", "text": "go"}));
+    p.raw(
+        "approval_requested",
+        json!({"approval_id": "a1", "call_id": "c", "tool": "bash", "input": {}, "reason": "r"}),
+    );
+    p.raw(
+        "assistant_message",
+        json!({"turn_id": "t2", "message_id": "m2", "text": "Shall I?"}),
+    );
+    p.raw(
+        "turn_ended",
+        json!({"turn_id": "t2", "reason": "completed"}),
+    );
+    for e in &p.events {
+        s.append(NODE, e).unwrap();
+    }
+    s.claim_session(p.sid, Some("u1"), None).unwrap();
+    let cut = fork::check(&p.events, "t2").unwrap();
+    let id = SessionId::new();
+    let built = fork::build(&p.events, &cut, id, "x (fork)", "/w", 9_000).unwrap();
+    for e in &built {
+        assert_eq!(s.append(NODE, e).unwrap(), AppendOutcome::Applied);
+        let (running, pending, finished, asks, attention, last_asks, updated, head) =
+            row_state(&path, id);
+        let at = format!("after event {} ({})", e.seq, e.kind);
+        assert_eq!(
+            (running, pending, finished, asks, attention, last_asks),
+            (0, 0, 0, 0, 0, 0),
+            "{at}"
+        );
+        assert_eq!(updated, 9_000, "{at}: the fork is as old as its creation");
+        assert_eq!(head, e.seq as i64, "{at}");
+    }
+    s.claim_session(id, Some("u1"), None).unwrap();
+    assert!(
+        s.attention(Some("u1"), "u1")
+            .unwrap()
+            .iter()
+            .all(|a| a.session_id != id)
+    );
+    // The parent's row is the parent's.
+    let (running, pending, _, asks, attention, ..) = row_state(&path, p.sid);
+    assert_eq!((running, pending, asks), (0, 1, 1));
+    assert!(attention > 0);
+}

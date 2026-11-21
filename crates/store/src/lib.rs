@@ -933,16 +933,30 @@ impl Store {
                 params![sid, owner, e.ts_ms],
             )?;
         }
-        // A hand-off note (X.16) is bookkeeping written once the chat has
-        // been idle: it does not make the chat "last active" (the list's
-        // order, the earlier chats' dates), so the chat does not jump to
-        // the top of the list ten minutes after the person left it.
-        tx.execute(
-            "UPDATE sessions SET head_seq = ?2,
-                 updated_ms = CASE WHEN ?4 = 'handoff_written' THEN updated_ms ELSE ?3 END
-             WHERE session_id = ?1",
-            params![sid, e.seq as i64, e.ts_ms, e.kind],
-        )?;
+        // A copy of a fork's parent's event (C.2) is replicated and nothing
+        // more: the row's state (running, asks, attention, "finished", the
+        // time it was last active) is the parent's story, not the new
+        // chat's, and the divider sets it once, idle. The first event is
+        // never a copy.
+        let copy =
+            e.seq >= 2 && harness_core::fork::inherited(session_forks::through(tx, &sid)?, e.seq);
+        if copy {
+            tx.execute(
+                "UPDATE sessions SET head_seq = ?2 WHERE session_id = ?1",
+                params![sid, e.seq as i64],
+            )?;
+        } else {
+            // A hand-off note (X.16) is bookkeeping written once the chat has
+            // been idle: it does not make the chat "last active" (the list's
+            // order, the earlier chats' dates), so the chat does not jump to
+            // the top of the list ten minutes after the person left it.
+            tx.execute(
+                "UPDATE sessions SET head_seq = ?2,
+                     updated_ms = CASE WHEN ?4 = 'handoff_written' THEN updated_ms ELSE ?3 END
+                 WHERE session_id = ?1",
+                params![sid, e.seq as i64, e.ts_ms, e.kind],
+            )?;
+        }
         match e.kind.as_str() {
             "session_created" => {
                 let s = |k: &str| {
@@ -1014,7 +1028,7 @@ impl Store {
                     params![sid, agent],
                 )?;
             }
-            "turn_started" => {
+            "turn_started" if !copy => {
                 // Only a callback turn is "nobody's": the turn of an agent a
                 // person's message called (`cause.mention`, X.37) finishes
                 // for the person like any other.
@@ -1028,7 +1042,7 @@ impl Store {
                     params![sid, callback],
                 )?;
             }
-            "turn_ended" => {
+            "turn_ended" if !copy => {
                 let reason = e.payload.get("reason").and_then(|v| v.as_str());
                 // A turn that used its step budget ends with its account,
                 // which may ask the person (`limit`, as `completed`).
@@ -1047,7 +1061,7 @@ impl Store {
                     params![sid, completed, e.seq as i64, tells],
                 )?;
             }
-            "assistant_message" => {
+            "assistant_message" if !copy => {
                 let text = e
                     .payload
                     .get("text")
@@ -1061,27 +1075,28 @@ impl Store {
                     )?;
                 }
             }
-            "approval_requested" => {
+            "approval_requested" if !copy => {
                 tx.execute(
                     "UPDATE sessions SET pending_approvals = pending_approvals + 1, attention_seq = ?2 WHERE session_id = ?1",
                     params![sid, e.seq as i64],
                 )?;
             }
-            "approval_resolved" => {
+            "approval_resolved" if !copy => {
                 tx.execute(
                     "UPDATE sessions SET pending_approvals = MAX(0, pending_approvals - 1) WHERE session_id = ?1",
                     params![sid],
                 )?;
             }
-            // A fork starts idle (C.2): the copied events ran the columns
-            // above as the parent's did, and what they left (an approval
-            // nobody answered, a question the parent asked, "finished,
-            // unread") is the parent's to show, not the new chat's.
+            // A fork starts idle (C.2): the copied events left the state
+            // columns alone (an approval nobody answered, a question the
+            // parent asked, "finished, unread" are the parent's to show),
+            // and the row is set here, once, as of the moment it was made.
             "session_forked" => {
                 tx.execute(
                     "UPDATE sessions SET running = 0, pending_approvals = 0, asks_user = 0,
-                         finished_seq = 0, turn_callback = 0 WHERE session_id = ?1",
-                    params![sid],
+                         finished_seq = 0, turn_callback = 0, attention_seq = 0, last_asks = 0,
+                         updated_ms = ?2 WHERE session_id = ?1",
+                    params![sid, e.ts_ms],
                 )?;
             }
             _ => {}
@@ -1101,9 +1116,7 @@ impl Store {
                 |r| r.get::<_, i64>(0).map(|v| v != 0),
             )?;
             // What a fork copied is in the index already, under the parent.
-            if !incognito
-                && !harness_core::fork::inherited(session_forks::through(tx, &sid)?, e.seq)
-            {
+            if !incognito && !copy {
                 Self::index_row(tx, &sid, col, &text)?;
             }
         }
