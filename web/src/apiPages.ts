@@ -74,6 +74,11 @@ export const pageApi = {
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/variants`, { group, message_id }),
   restoreTurn: (id: string, turn: string, force = false, rewind = false) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/turns/${turn}/restore`, { force, rewind }),
+  /** Take the chat back to the person's message at `message_seq` (X.46); with `files` the folder goes back too. */
+  rewind: (id: string, message_seq: number, files = false, force = false) =>
+    call<{ ok: boolean }>("POST", `/api/sessions/${id}/rewind`, { message_seq, files, force }),
+  /** Put a rewind back, while no message has been sent after it. */
+  undoRewind: (id: string, rewind_seq: number) => call<{ ok: boolean }>("POST", `/api/sessions/${id}/rewind/${rewind_seq}/undo`),
   /** Paths of a chat's folder for the composer's `@` completion (T63). */
   files: (id: string, q: string) => call<{ paths: string[] }>("GET", `/api/sessions/${id}/files?q=${encodeURIComponent(q)}`),
   /** What a turn changed (with `rewind`, it and every later turn), from its node. */

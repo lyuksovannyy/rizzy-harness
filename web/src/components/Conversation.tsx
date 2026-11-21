@@ -1,6 +1,7 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
 import { own } from "../emptyView";
+import { seqAt } from "../fold";
 import "../lib/i18nPages";
 import { errText } from "../lib/errorText";
 import { AtSign, Download, FileText, Image as ImageIcon, Package, Square, Trash2 } from "lucide-react";
@@ -11,6 +12,7 @@ import { pageApi } from "../apiPages";
 import { endWords, turnStart } from "../lib/callback";
 import { useCompact } from "../lib/compact";
 import { canRetry } from "../lib/retry";
+import { changesFiles, forceable, noRewind, resend, runs, type Resend } from "../lib/rewind";
 import { dropDraft, readDraft, writeDraft } from "../lib/drafts";
 import { useFeatures } from "../lib/features";
 import { t } from "../lib/i18n";
@@ -33,9 +35,10 @@ import { CopyMessage } from "../md/CopyMessage";
 import { rt } from "../md/strings";
 import { showHidden, shownName } from "../md/hidden";
 import type { History } from "../bg/topics";
-import type { Agent, ApprovalMode, HeadMoved, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow, SessionView } from "../types";
+import type { Agent, ApprovalMode, HeadMoved, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow, SessionView, UploadedAttachment } from "../types";
 import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
 import { Composer, type ComposerHandle, type Submission } from "./Composer";
+import type { Picture } from "../lib/downscale";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import { ChatArtifactsCtx, SaveAsArtifact, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
 import { BubbleImages } from "./ChatImages";
@@ -53,6 +56,8 @@ import { ExecBadge } from "./ExecBadge";
 import { compactTokens, ContextMeter } from "./ContextMeter";
 import { CostMeter } from "./CostMeter";
 import { RetryNote } from "./RetryNote";
+import { RewindMessage } from "./RewindMessage";
+import { RewoundBlock } from "./RewoundBlock";
 import { TurnStatus, turnState } from "./TurnStatus";
 import { type Outgoing, outbox } from "../lib/outbox";
 import { useHeaderFigures } from "../lib/childcost";
@@ -122,6 +127,9 @@ function Undo(props: {
   /** After an undo: the checkpoint it saved first. Restoring it puts back
    * what the undo replaced (an undo of the undo: the node's same checks). */
   saved?: string;
+  /** In a rewound turn (X.46): only the way back for files a rewind put
+   * back, since nothing else in a turn out of the conversation is acted on. */
+  only?: boolean;
 }) {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -144,6 +152,35 @@ function Undo(props: {
     }
   };
   const mine = { turn: props.turnId, rewind: false };
+  const putBack = props.restored && props.saved && !gone && !props.blocked && (
+    <button
+      type="button"
+      className="link"
+      disabled={busy || props.running}
+      title="Restore the folder as it was just before the undo: the files it replaced come back, with the same checks as any undo"
+      onClick={() => void run(false, { turn: props.saved!, rewind: false })}
+    >
+      Put back what this undo replaced
+    </button>
+  );
+  const failed = err && (
+    <div className="error-text">
+      {err}{" "}
+      {/* Every refusal a forced undo goes past says so. */}
+      {forceable(err) && (
+        <button type="button" className="link" onClick={() => void run(true)}>
+          Undo anyway
+        </button>
+      )}
+    </div>
+  );
+  if (props.only)
+    return (
+      <div className="undo small">
+        {putBack}
+        {failed}
+      </div>
+    );
   return (
     <div className="undo small">
       <details>
@@ -171,17 +208,7 @@ function Undo(props: {
           Undo file changes
         </button>
       )}
-      {props.restored && props.saved && !gone && !props.blocked && (
-        <button
-          type="button"
-          className="link"
-          disabled={busy || props.running}
-          title="Restore the folder as it was just before the undo: the files it replaced come back, with the same checks as any undo"
-          onClick={() => void run(false, { turn: props.saved!, rewind: false })}
-        >
-          Put back what this undo replaced
-        </button>
-      )}
+      {putBack}
       {props.laterChanges && !props.blocked && (
         <button
           type="button"
@@ -193,17 +220,7 @@ function Undo(props: {
           Rewind files to before this turn
         </button>
       )}
-      {err && (
-        <div className="error-text">
-          {err}{" "}
-          {/* Every refusal a forced undo goes past says so. */}
-          {(err.includes("changed after the turn") || err.includes('"Undo anyway"')) && (
-            <button type="button" className="link" onClick={() => void run(true)}>
-              Undo anyway
-            </button>
-          )}
-        </div>
-      )}
+      {failed}
     </div>
   );
 }
@@ -325,6 +342,7 @@ export default function Conversation(props: {
   const view = live.view(sessionId);
   // The header's figures: the log's, plus the running foreground sub-agents'.
   const figures = useHeaderFigures(live, sessionId, view, props.models);
+  const heldRun: ReactNode[] = [];
   /** One item, in its own boundary: a row that throws costs that row, not the chat (RowBoundary). */
   const row = (it: Item, i: number, draw: () => ReactNode) => {
     let el: ReactNode;
@@ -334,23 +352,50 @@ export default function Conversation(props: {
       console.error(e);
       el = <RowFailed item={it} sessionId={sessionId} canAnswer={!blocked} />;
     }
+    // Taken out of the conversation by a rewind (X.46): the items of a run
+    // are held, nothing in them is acted on (`inert`), and the run's last
+    // one draws them as one closed block.
+    if (it.rewound !== undefined) return rewoundRow(it, i, el);
     if (el == null || el === false) return null;
     const key = isValidElement(el) && el.key != null ? el.key : i;
-    // Taken out of the conversation by a rewind (X.46): still readable, muted,
-    // with one line saying so above the first of a run.
-    if (it.rewound !== undefined) {
-      const first = view?.items[i - 1]?.rewound !== it.rewound;
-      el = (
-        <div className="rewound">
-          {first && <div className="rewound-mark muted small">{t("conv.rewound")}</div>}
-          {el}
-        </div>
-      );
-    }
     return (
       <RowBoundary key={key} item={it} sessionId={sessionId} canAnswer={!blocked}>
         {el}
       </RowBoundary>
+    );
+  };
+  const rewoundRow = (it: Item, i: number, el: ReactNode): ReactNode => {
+    if (el != null && el !== false) {
+      const key = isValidElement(el) && el.key != null ? el.key : i;
+      // A turn's end line holds the one way back for files a rewind put back.
+      heldRun.push(
+        <div key={key} inert={it.type !== "turn_end"}>
+          <RowBoundary item={it} sessionId={sessionId} canAnswer={false}>
+            {el}
+          </RowBoundary>
+        </div>,
+      );
+    }
+    const run = view && rewoundEnds.get(i);
+    if (!view || !run) return null;
+    const info = view.rewinds?.find((r) => r.seq === run.rewind);
+    const first = view.items[run.start];
+    const seq = seqAt(view, run.start);
+    // The message the rewind went back to leads its run; what it can be sent again with.
+    const said = info?.can_undo && first?.type === "user" && seq === info.message_seq ? resend(first) : null;
+    return (
+      <RewoundBlock
+        key={`rw${run.rewind}-${run.start}`}
+        sessionId={sessionId}
+        rewind={run.rewind}
+        turns={run.turns}
+        canUndo={!!info?.can_undo && !blocked && !running && !!props.row && view.items.findLastIndex((x) => x.rewound === run.rewind) === i}
+        filesToo={!!info?.files}
+        lost={said?.lost ?? []}
+        putBack={said && info && !refilled.includes(info.message_seq) ? () => putRewound(info.message_seq, said) : undefined}
+      >
+        {heldRun.splice(0)}
+      </RewoundBlock>
     );
   };
   const scroller = useRef<HTMLDivElement>(null);
@@ -365,6 +410,8 @@ export default function Conversation(props: {
   const running = !!view?.running_turn;
   const summarise = useCompact(sessionId, view);
   const items = view?.items ?? [];
+  // Where each run of rewound items ends: one pass per render (the items are mutated in place).
+  const rewoundEnds = new Map(runs(items).map((r) => [r.end, r]));
   // The view is mutated in place, so memoise on what the result depends on.
   const provSig = provenanceSignature(items);
   const firstSeen = useMemo(() => provenanceIndex(items), [view, provSig]);
@@ -445,13 +492,25 @@ export default function Conversation(props: {
   useEffect(() => {
     for (const o of held) if (!putBack.current.has(o.id)) putBack.current.add(o.id), put(o, false);
   }, [held.map((o) => o.id).join()]);
-  const put = (o: Outgoing, take: boolean) => {
+  const fill = (text: string, files: UploadedAttachment[], pics: Picture[], take: boolean) => {
     const b = box.current;
-    const files = o.s?.uploads ?? [];
-    const pics = o.s?.pictures ?? [];
-    b?.setText((c) => (take ? c.replace(o.text, "").trim() : c.includes(o.text) ? c : c ? `${o.text}\n${c}` : o.text));
+    b?.setText((c) => (take ? c.replace(text, "").trim() : c.includes(text) ? c : c ? `${text}\n${c}` : text));
     b?.setFiles((f) => [...(take ? [] : files), ...f.filter((x) => !files.some((y) => y.attachment_id === x.attachment_id))]);
     b?.setPictures((p) => [...(take ? [] : pics), ...p.filter((x) => !pics.some((y) => y.key === x.key))]);
+  };
+  const put = (o: Outgoing, take: boolean) => fill(o.text, o.s?.uploads ?? [], o.s?.pictures ?? [], take);
+  // A rewind's message goes back into the box (X.46): by itself only into an
+  // empty one (never over what is typed); on request, merged as a refused
+  // message is. The messages (by seq) whose box already has them.
+  const [refilled, setRefilled] = useState<number[]>([]);
+  const putRewound = (seq: number, m: Resend) => {
+    fill(m.text, [], m.pictures, false);
+    setRefilled((r) => [...r, seq]);
+    box.current?.focus();
+  };
+  const afterRewind = (seq: number, m: Resend | null) => {
+    if (m && box.current?.empty()) putRewound(seq, m);
+    else box.current?.focus();
   };
   // One send: shown at once; the log's message replaces it (lib/outbox).
   // `again`: a Retry, whose refusal is shown on its bubble, not in the box.
@@ -490,6 +549,14 @@ export default function Conversation(props: {
   const choiceBox = useRef<HTMLDivElement>(null);
   const routine = props.row?.routine;
   useRunSeen(routine);
+  // "Rewind to here" on the person's message (X.46): the fold's data decides, the server decides again.
+  const rewindable = (v: SessionView, i: number) =>
+    noRewind(v, i, {
+      mine: !!props.row && !blocked,
+      subagent: !!props.row?.parent_id || !!meta?.parent_session,
+      routine: !!routine,
+      compacting: summarise.compacting,
+    }) === null;
   // What the server offers here: "Save as artifact" in agentic chats, images in any.
   const workspaceId = props.row?.workspace_id ?? null;
   const features = useFeatures(workspaceId, !!props.row && !blocked && !incognito);
@@ -761,6 +828,14 @@ export default function Conversation(props: {
                         )}
                         {!!it.images?.length && <BubbleImages images={it.images} />}
                         {view.follow_ups?.includes(it.turn_id) && <div className="queued-mark muted">{t("conv.followUp")}</div>}
+                        {rewindable(view, i) && (
+                          <RewindMessage
+                            sessionId={sessionId}
+                            seq={seqAt(view, i)!}
+                            files={changesFiles(view, i)}
+                            onDone={() => afterRewind(seqAt(view, i)!, resend(it))}
+                          />
+                        )}
                         {it.queued && !it.queued.read && (
                           <div className="queued-mark muted" title={t("conv.queuedHint")}>
                             {running ? t("conv.queued") : t("conv.queuedLater")}
@@ -791,7 +866,7 @@ export default function Conversation(props: {
                           />
                         </MessageCtx.Provider>
                         {notes.byReply.has(i) && <FallbackNote note={notes.byReply.get(i)!} />}
-                        {final && <CopyMessage text={it.text} />}
+                        {final && it.rewound === undefined && <CopyMessage text={it.text} />}
                       </div>
                     );
                   }
@@ -949,7 +1024,25 @@ export default function Conversation(props: {
                       const c = own(view.checkpoints, x.turn_id);
                       return !!c && c.files.length > 0 && !c.restored;
                     });
-                    const undo =
+                    // In a rewound turn only the way back for files a rewind put back.
+                    const gone = it.rewound !== undefined;
+                    const undo = gone ? (
+                      cp?.restored && cp.saved ? (
+                        <Undo
+                          key={`u${i}`}
+                          only
+                          sessionId={sessionId}
+                          turnId={it.turn_id}
+                          files={cp.files}
+                          restored
+                          running={running}
+                          laterChanges={false}
+                          blocked={!!blocked}
+                          saved={cp.saved}
+                          onShow={() => {}}
+                        />
+                      ) : null
+                    ) :
                       // Only a rewind would show for a turn that changed nothing.
                       cp && cp.after && (cp.files.length > 0 || (laterChanges && !blocked)) ? (
                         <Undo
@@ -974,6 +1067,7 @@ export default function Conversation(props: {
                     // cannot drive the chat, a sub-agent's chat or a routine's
                     // own run (its first turn).
                     const retry =
+                      !gone &&
                       !running &&
                       !blocked &&
                       !summarise.compacting &&
@@ -1135,7 +1229,7 @@ export default function Conversation(props: {
               item={holding[0]}
               blocked={!!blocked}
               cwd={meta?.cwd}
-              place={{ n: 1, of: holding.length }}
+              place
               boxRef={choiceBox}
             />
           )}

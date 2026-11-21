@@ -72,7 +72,15 @@ Pinned by `crates/agent-native/tests/rewind_live.rs`.
 ## Not changed, on purpose
 
 Search, recall and the "earlier chats" context do not read the rewound text: `Store::append` rebuilds that one chat's `chat_fts` rows from its visible log (`rewind::rewound`) in the transaction that appends a `conversation_rewound` or `conversation_rewind_undone`, and `earlier_chats` skips rewound events (note, summary, reply) by the same rule; the undo brings the text back. Usage is not reduced; memory facts saved, board changes, published artifacts, commands run, network calls, files outside the folder and sub-agent chats started by rewound turns are not undone; `others.rs` (T57) still reads rewound turns to say who changed a file; the browser still receives every event of its owner's chat.
-The web dialog (conversation, files or both), the prompt back in the composer, the collapsed "N turns rewound" block with Undo, forking and editing a message in place come in later changes; until then the chat shows rewound items muted under one line saying so.
+Forking and editing a message in place come in later changes.
+
+## The web UI
+
+`web/src/lib/rewind.ts` mirrors the rule from what the fold holds (`noRewind`: the viewer drives the chat, not a sub-agent's chat or a routine's own first message, a message that opened a turn, not rewound, after the latest summary, nothing running); the server's refusal is shown inline where the guess was wrong.
+`RewindMessage.tsx` is the action under the person's message and its inline panel (conversation, or conversation and files only when a turn from there on changed files; "Rewind anyway" repeats a refused files part with `force`).
+`RewoundBlock.tsx` folds each run of rewound items into "N turns rewound", closed, nothing inside acted on (`inert`), with "Undo rewind" while the fold says it can be undone.
+The message goes back into the box through the composer's handle, only into an empty box (or on request from the block): its text and its images, which are Media references a chat may send again (`room_in_chat`).
+Its attachments cannot: the master deletes an upload when the message is sent (`attachments_take_owned`), so the block names them to be attached again.
 
 ## Comparison
 

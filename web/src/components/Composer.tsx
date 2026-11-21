@@ -72,6 +72,9 @@ export interface ComposerHandle {
   setText: Dispatch<SetStateAction<string>>;
   setFiles: Dispatch<SetStateAction<UploadedAttachment[]>>;
   setPictures: Dispatch<SetStateAction<Picture[]>>;
+  /** Nothing typed, attached or picked (as of the last render). */
+  empty: () => boolean;
+  focus: () => void;
 }
 
 const MAX_ATTACHMENTS = 5;
@@ -227,7 +230,7 @@ export function Composer(props: {
   const [uploading, setUploading] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const [pictures, setPictures] = useState<Picture[]>([]);
-  if (props.handle) props.handle.current = { setText, setFiles, setPictures };
+  if (props.handle) props.handle.current = { setText, setFiles, setPictures, empty: () => !text.trim() && !files.length && !pictures.length, focus: () => ta.current?.focus() };
   const [rec, setRec] = useState<"idle" | "recording" | "transcribing">("idle");
   const recorder = useRef<MediaRecorder | null>(null);
 

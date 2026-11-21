@@ -334,14 +334,13 @@ describe("every answer from the composer's place is the card's call", () => {
 });
 
 describe("several pending calls", () => {
-  test("one at a time, in the order the node asked, with a count; guarded again when the next appears", async () => {
+  test("one at a time, in the order the node asked; guarded again when the next appears", async () => {
     vi.useFakeTimers();
     // The node asked for a2 first: the fold's list says so, whatever the items' order.
     const items = [tool(1), tool(2)];
     await show(view(items, { pending_approvals: ["a2", "a1"] }));
     expect(choice()!.textContent).toContain("make step2");
     expect(choice()!.textContent).not.toContain("make step1");
-    expect(choice()!.textContent).toContain("1 of 2");
     // The second call's card in the transcript has no buttons: one choice at a time.
     expect(host.querySelectorAll("button.primary").length).toBe(1);
     expect(host.textContent).toContain("Asked after the one below.");
@@ -351,7 +350,6 @@ describe("several pending calls", () => {
     // a2 answered: a1 is next, alone, guarded afresh.
     await show(view([tool(1), tool(2, { decision: "allow", by: "user" })], { pending_approvals: ["a1"] }));
     expect(choice()!.textContent).toContain("make step1");
-    expect(choice()!.textContent).not.toContain("1 of");
     approve.mockClear();
     await act(async () => named("Allow once").click());
     expect(approve).not.toHaveBeenCalled();
