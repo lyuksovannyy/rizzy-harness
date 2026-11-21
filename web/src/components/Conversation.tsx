@@ -53,8 +53,8 @@ import { Mentioned } from "./Mentioned";
 import { peersLeft } from "../lib/peers";
 import { NodeBadge } from "./NodeBadge";
 import { ExecBadge } from "./ExecBadge";
-import { compactTokens, ContextMeter } from "./ContextMeter";
-import { CostMeter } from "./CostMeter";
+import { compactTokens } from "./ContextMeter";
+import { SessionFigures } from "./SessionFigures";
 import { RetryNote } from "./RetryNote";
 import { ForkChat, ForkDivider, ForkNote, InheritedChanges } from "./ForkChat";
 import { canFork } from "../lib/fork";
@@ -308,10 +308,6 @@ function useRunSeen(mark: RoutineMark | null | undefined) {
 const CHAT_IMAGES = 50;
 /** An approval mode in the chat's own words (T50). */
 const MODE_NAMES: Record<ApprovalMode, string> = { plan: "plan", ask_all: "ask every call", ask: "ask", accept_edits: "accept edits", auto: "auto" };
-
-function compact(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
-}
 
 export default function Conversation(props: {
   live: Live;
@@ -659,6 +655,22 @@ export default function Conversation(props: {
     diffOpener.current?.focus();
   };
 
+  // The chat's figures, at the right of the composer's strip (they were the
+  // header's): drawn per render from the view, which is mutated in place.
+  const stripFigures =
+    view && figures ? (
+      <SessionFigures
+        usage={figures.usage}
+        costUsage={figures.costUsage}
+        costTurn={figures.costTurn}
+        contextTokens={view.context_tokens}
+        window={view.context_window}
+        summaryAt={view.summary_at}
+        model={view.context_model ?? meta?.model ?? ""}
+        models={props.models}
+      />
+    ) : undefined;
+
   const page = (
     <section className={props.gutter ? "conversation with-gutter" : "conversation"}>
       {props.gutter && (
@@ -679,21 +691,6 @@ export default function Conversation(props: {
             {agentic && <NodeBadge node={node} nodeId={nodeId} />}
             {agentic && <ExecBadge mode={meta?.exec_mode} node={node} />}
             {agentic && <span className="mono muted ellipsis">{shownName(meta?.cwd ?? "")}</span>}
-            {/* A fresh fork has spent nothing but will send the copied context: show both. */}
-            {view && figures && (figures.usage.input_tokens + figures.usage.output_tokens > 0 || view.context_tokens > 0) && (
-              <span
-                className="muted meter"
-                title={`${figures.usage.input_tokens.toLocaleString()} in · ${figures.usage.output_tokens.toLocaleString()} out${
-                  figures.usage.cache_read_tokens
-                    ? ` · ${figures.usage.cache_read_tokens.toLocaleString()} of the input read from the provider's cache`
-                    : ""
-                }`}
-              >
-                {compact(figures.usage.input_tokens + figures.usage.output_tokens)} {t("conv.tokens")} ·{" "}
-                <CostMeter usage={figures.costUsage} turn={figures.costTurn} models={props.models} />
-                <ContextMeter used={view.context_tokens} window={view.context_window} summaryAt={view.summary_at} model={view.context_model ?? meta?.model ?? ""} />
-              </span>
-            )}
           </div>
         </div>
         {props.row && canJoinProject(props.row) && <ProjectChip row={props.row} projects={props.projects ?? []} />}
@@ -1299,6 +1296,7 @@ export default function Conversation(props: {
               <p className="muted small tag-only" role="note">
                 {agentName(activeAgent)} only takes tasks from other agents, so there is nobody to answer here.
               </p>
+              {stripFigures && <div className="composer-strip alone"><div className="strip-figures">{stripFigures}</div></div>}
               {/* The composer's Stop, for a sub-agent that goes on after its parent's turn ended. */}
               {running && (
                 <button type="button" className="send stop" onClick={() => void pageApi.cancel(sessionId)} aria-label={t("composer.stop")}>
@@ -1366,6 +1364,7 @@ export default function Conversation(props: {
             // While a /compact runs, Stop cancels it (the same route).
             compacting={summarise.compacting && !running}
             link={live.state}
+            figures={stripFigures}
             draft={keepsDraft ? sessionId : undefined}
             voice={props.voice}
             onStop={() => void pageApi.cancel(sessionId)}

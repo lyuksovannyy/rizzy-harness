@@ -1533,7 +1533,6 @@ select.pill {
 .conv-meta > .meta-model,
 .conv-meta > .exec-gaps,
 .conv-meta > .conv-agent,
-.conv-meta > .meter,
 .conv-meta > .badge {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1553,10 +1552,6 @@ select.pill {
 .conv-meta > .conv-agent {
   flex: 0 10000 auto;
   min-width: 7ch;
-}
-.conv-meta > .meter {
-  flex: 0 100 auto;
-  min-width: 10ch;
 }
 .conv-meta > .badge {
   flex: 0 20 auto;
@@ -1594,7 +1589,6 @@ select.pill {
   .conv-meta > .meta-model,
   .conv-meta > .exec-gaps,
   .conv-meta > .conv-agent,
-  .conv-meta > .meter,
   .conv-meta > .badge {
     flex: 0 1 auto;
     min-width: 0;
@@ -3626,6 +3620,95 @@ button.swatch:hover:not(:disabled) {
 .meter {
   font-variant-numeric: tabular-nums;
 }
+/* The strip under the composer's box (Composer.tsx): the controls the box
+   used to carry at the left, the chat's figures at the right; small and
+   muted. One line while it fits, then the figures wrap under the controls.
+   The figures' line height is fixed, so figures arriving move nothing. */
+.composer-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px var(--space-3);
+  margin-top: 4px;
+  padding: 0 6px;
+  font-size: var(--text-xs);
+  line-height: 20px;
+  color: var(--fg-2);
+}
+.composer-strip.alone { flex: 1; justify-content: flex-end; margin: 0; }
+.strip-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--space-1);
+  min-width: 0;
+}
+.strip-controls:empty { display: none; }
+.strip-figures { margin-left: auto; min-width: 0; }
+/* The pickers read as part of the strip: the strip's size and colour. */
+.composer-strip .pill,
+.composer-strip select.pill,
+.composer-strip .select.compact .select-button {
+  font-size: var(--text-xs);
+  line-height: 18px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  color: var(--fg-2);
+}
+.composer-strip .pill:hover:not(:disabled),
+.composer-strip .select.compact .select-button:hover:not(:disabled) { color: var(--fg); }
+.composer-strip .pill.override { color: var(--accent-fg); }
+.composer-strip .pill.incognito.on { color: var(--fg); }
+.composer-strip .mode-switch { font-size: var(--text-xs); }
+/* The new chat's place (node, project, shell, approval) is a second line. */
+.composer-strip .agentic-row {
+  order: 3;
+  flex: 1 1 100%;
+  border-top: none;
+  margin-top: 0;
+  padding-top: 0;
+  font-size: var(--text-xs);
+}
+.session-figures {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0 var(--space-3);
+  white-space: nowrap;
+}
+.session-figures .figure,
+.session-figures .context-meter,
+.session-figures .cost-meter { display: inline-flex; align-items: center; gap: 5px; }
+.session-figures .ring { flex: none; }
+.session-figures .ring-track { fill: none; stroke: var(--fill); stroke-width: 2; }
+.session-figures .ring-fill { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.session-figures .ring.high .ring-fill { stroke: var(--warn); }
+/* The quota is not known yet: a dashed ring, so it reads as a placeholder. */
+.session-figures .ring-empty .ring-track { stroke: currentColor; stroke-dasharray: 2 2.4; opacity: 0.7; }
+.figure-quota { position: relative; cursor: help; border-radius: var(--r-sm); }
+.figure-quota:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.figure-tip {
+  display: none;
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  width: max-content;
+  max-width: min(260px, calc(100vw - 32px));
+  padding: 6px 9px;
+  white-space: normal;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-1);
+  color: var(--fg);
+  font-weight: var(--w-regular);
+  line-height: 1.4;
+}
+.figure-quota:hover:not([data-dismissed]) .figure-tip,
+.figure-quota:focus-visible:not([data-dismissed]) .figure-tip { display: block; }
 /* The window is not known: the summary point is a fixed guess (hover says how to set it). */
 .meter .window-unknown {
   color: var(--warn);

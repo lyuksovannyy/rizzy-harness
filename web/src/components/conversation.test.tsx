@@ -707,8 +707,8 @@ describe("rows given what the fold keeps as sent", () => {
   // A `ui:` block's spec of the wrong shape: see src/ui/uishapes.test.tsx.
 });
 
-// X.39: the header's tokens and cost estimate follow a turn while it runs.
-describe("usage in the header during a turn", () => {
+// X.39: the tokens and cost estimate (the composer strip's figures; the header's until the strip) follow a turn while it runs.
+describe("usage in the strip during a turn", () => {
   const PRICED = [
     {
       id: "p::m", raw: "m", provider: "P", provider_id: "p", name: null, context: null, max_output: null,
@@ -718,7 +718,7 @@ describe("usage in the header during a turn", () => {
   ] as unknown as import("../types").ModelInfo[];
   const ev = (seq: number, kind: string, payload: object) => ({ session_id: SID, seq, ts_ms: 0, kind, payload }) as import("../types").RawEvent;
   const use = (input: number, output: number) => ({ input_tokens: input, output_tokens: output, context_tokens: input, model: "p::m", by_model: { "p::m": { input_tokens: input, output_tokens: output } } });
-  const header = () => host.querySelector(".conv-meta .meter")?.textContent ?? "";
+  const header = () => host.querySelector(".composer-strip .session-figures")?.textContent ?? "";
 
   test("moves with each turn_usage, and keeps the figure when the turn ends", async () => {
     current = emptyView();
@@ -729,16 +729,19 @@ describe("usage in the header during a turn", () => {
       await act(() => new Promise((r) => setTimeout(r, 0)));
     };
     await draw();
-    expect(header()).toContain("1.2k tokens");
+    expect(header()).toContain("1.0k in · 200 out");
     expect(header()).toContain("≈ $1.20");
+    // Shown once: the header keeps the title and the badges, not the figures.
+    expect(host.querySelector(".conv-head .meter, .conv-head .context-meter, .conv-head .cost-meter, .conv-head .session-figures")).toBeNull();
+    expect(host.querySelector(".conv-meta")!.textContent).not.toContain("tokens");
     apply(current, ev(3, "turn_usage", { turn_id: "t", usage: use(3000, 400) }));
     await draw();
-    expect(header()).toContain("3.4k tokens");
+    expect(header()).toContain("3.0k in · 400 out");
     expect(header()).toContain("≈ $3.40");
     // An interrupted turn ends without usage: what it spent stays.
     apply(current, ev(4, "turn_ended", { turn_id: "t", reason: "interrupted" }));
     await draw();
-    expect(header()).toContain("3.4k tokens");
+    expect(header()).toContain("3.0k in · 400 out");
     expect(header()).toContain("≈ $3.40");
   });
   test("follows a running sub-agent's turn_usage while the parent's log is silent, and never dips when it ends", async () => {
@@ -761,26 +764,26 @@ describe("usage in the header during a turn", () => {
     };
     await draw();
     // The parent's own 1.2k plus the child's running 0.6k.
-    expect(header()).toContain("1.8k tokens");
+    expect(header()).toContain("1.5k in · 300 out");
     expect(header()).toContain("≈ $1.80");
     expect(watched).toHaveBeenCalledWith(CHILD);
     // The child goes on; the parent's log says nothing.
     push(kid, CHILD, "turn_usage", { turn_id: "ct", usage: use(2000, 300) });
     await draw();
-    expect(header()).toContain("3.5k tokens");
+    expect(header()).toContain("3.0k in · 500 out");
     expect(header()).toContain("≈ $3.50");
     // The child's end shows before the parent's result: no dip.
     push(kid, CHILD, "turn_ended", { turn_id: "ct", reason: "completed", usage: use(2000, 300) });
     await draw();
-    expect(header()).toContain("3.5k tokens");
+    expect(header()).toContain("3.0k in · 500 out");
     // The parent catches up with the child's cost in its own figure.
     push(parent, SID, "tool_call_finished", { call_id: "d1", ok: true, output: `session: ${CHILD}\nSub-agent @coder finished: done.` });
     push(parent, SID, "turn_usage", { turn_id: "t", usage: use(3200, 500) });
     await draw();
-    expect(header()).toContain("3.7k tokens");
+    expect(header()).toContain("3.2k in · 500 out");
     push(parent, SID, "turn_ended", { turn_id: "t", reason: "completed" });
     await draw();
-    expect(header()).toContain("3.7k tokens");
+    expect(header()).toContain("3.2k in · 500 out");
   });
 });
 
@@ -813,6 +816,17 @@ describe("a sub-agent's chat (X.41)", () => {
     expect(stop()!.getAttribute("aria-label")).toBe("Stop");
     await act(async () => stop()!.click());
     expect(api.cancel).toHaveBeenCalledWith(SID);
+  });
+
+  test("an agent that works only as a sub-agent still shows the chat's figures beside its line", async () => {
+    await render(sessionRow({ agent_id: "advisor", parent_id: "parent-1" }), [agent("advisor", false)]);
+    expect(host.querySelector(".tag-only-row .session-figures .figure-quota")).not.toBeNull();
+    expect(host.querySelector(".tag-only-row .figure-tokens")).toBeNull();
+    // Events arrive: the same view, grown in place.
+    current.usage = { input_tokens: 1500, output_tokens: 20 } as SessionView["usage"];
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow({ agent_id: "advisor", parent_id: "parent-1" })} nodes={[]} agents={[]} models={[]} />));
+    expect(host.querySelector(".tag-only-row .figure-tokens")?.textContent).toBe("1.5k in · 20 out");
+    expect(host.querySelector(".conv-head .session-figures")).toBeNull();
   });
 
   test("a sub-agent chat whose agent can also answer a person keeps its reply box", async () => {

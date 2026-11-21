@@ -1,4 +1,4 @@
-// The chat header's cost: the chat's and the last turn's estimate at the
+// The cost in the composer strip's figures: the chat's and the last turn's estimate at the
 // prices the server's admin set, next to the token counts. Shows nothing
 // when the server prices no model (the tokens alone, as before).
 import { costText, estimate, formatCost, pricesSet } from "../lib/cost";
@@ -26,11 +26,8 @@ export function CostMeter(props: { usage: Usage; turn?: Usage; models: ModelInfo
   const m = costMeter(props.usage, props.turn, props.models);
   if (!m) return null;
   return (
-    <>
-      <span className="cost-meter" title={m.hint}>
-        {m.text}
-      </span>
-      {" · "}
-    </>
+    <span className="cost-meter" title={m.hint}>
+      {m.text}
+    </span>
   );
 }

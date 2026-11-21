@@ -50,8 +50,34 @@ export function meter(used: number, window: number | undefined, at: number | und
   };
 }
 
-export function ContextMeter(props: { used: number; window?: number; summaryAt?: number; model: string }) {
+/** A small ring filled to `part` of `whole` (0 to 1): the stroke is the
+ * text colour, the track the muted fill. Decoration: the percentage beside
+ * it says the same in words. */
+function Ring(props: { part: number }) {
+  const r = 5.5;
+  const c = 2 * Math.PI * r;
+  const part = Math.min(1, Math.max(0, props.part));
+  return (
+    <svg className={`ring${part >= 0.85 ? " high" : ""}`} width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+      <circle className="ring-track" cx="7" cy="7" r={r} />
+      <circle className="ring-fill" cx="7" cy="7" r={r} strokeDasharray={`${part * c} ${c}`} transform="rotate(-90 7 7)" />
+    </svg>
+  );
+}
+
+/** `ring`: the composer strip's form, a ring and the percentage, with how it
+ * was worked out on hover; the window unknown stays in words. */
+export function ContextMeter(props: { used: number; window?: number; summaryAt?: number; model: string; ring?: boolean }) {
   const m = meter(props.used, props.window, props.summaryAt, props.model);
+  if (props.ring && props.window && props.window > 0) {
+    const part = props.used / props.window;
+    return (
+      <span className="context-meter" title={[m.text, m.hint].filter(Boolean).join(". ")}>
+        <Ring part={part} />
+        {pct(props.used, props.window)}%
+      </span>
+    );
+  }
   return (
     <span className="context-meter" title={m.hint ?? undefined}>
       {m.text}

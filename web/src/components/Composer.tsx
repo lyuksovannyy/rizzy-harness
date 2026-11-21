@@ -164,6 +164,10 @@ export function Composer(props: {
   compacting?: boolean;
   /** The page's live connection, in a chat. */
   link?: ConnState;
+  /** Session: the chat's figures (tokens, context, cost, quota), shown at
+   * the right of the strip under the box. The chat draws them; the home
+   * screen has no session and passes none. */
+  figures?: React.ReactNode;
 }) {
   const home = props.where === "home";
   const [text, setText] = useState(() => (props.draft ? readDraft(props.draft) : ""));
@@ -839,6 +843,46 @@ export function Composer(props: {
               />
             </>
           )}
+          <span className="spacer" />
+          {props.voice && mode !== "search" && (
+            <button
+              type="button"
+              className={`icon mic ${rec}`}
+              aria-label={rec === "recording" ? "stop dictation" : "dictate"}
+              title={rec === "recording" ? "Stop and transcribe" : "Dictate (audio goes to this server's transcription service)"}
+              disabled={rec === "transcribing"}
+              onClick={() => void toggleMic()}
+            >
+              {rec === "recording" ? (
+                <Square size={16} />
+              ) : rec === "transcribing" ? (
+                <Loader2 size={18} className="spin" />
+              ) : (
+                <Mic size={18} />
+              )}
+            </button>
+          )}
+          {(props.running || props.compacting) && props.onStop && (
+            <button type="button" className="send stop" onClick={props.onStop} aria-label={t("composer.stop")}>
+              <Square size={16} fill="currentColor" />
+            </button>
+          )}
+          {/* While a turn runs, Send joins Stop once there is something to send. */}
+          {(!((props.running || props.compacting) && props.onStop) || !!text.trim()) && (
+            <button
+              type="button"
+              className="send"
+              onClick={() => void submit()}
+              disabled={!!busy || uploading > 0 || sendingImages || !text.trim() || !!props.readOnly}
+              aria-label={t("composer.send")}
+            >
+              <ArrowUp size={18} />
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="composer-strip" role="group" aria-label={t("composer.strip")}>
+        <div className="strip-controls">
           {mode !== "search" && props.agents.length > 0 && (
             <span
               className={`agent-pick${pickedAlert ? " bad" : ""}`}
@@ -942,25 +986,6 @@ export function Composer(props: {
               ))}
             </select>
           )}
-          <span className="spacer" />
-          {props.voice && mode !== "search" && (
-            <button
-              type="button"
-              className={`icon mic ${rec}`}
-              aria-label={rec === "recording" ? "stop dictation" : "dictate"}
-              title={rec === "recording" ? "Stop and transcribe" : "Dictate (audio goes to this server's transcription service)"}
-              disabled={rec === "transcribing"}
-              onClick={() => void toggleMic()}
-            >
-              {rec === "recording" ? (
-                <Square size={16} />
-              ) : rec === "transcribing" ? (
-                <Loader2 size={18} className="spin" />
-              ) : (
-                <Mic size={18} />
-              )}
-            </button>
-          )}
           {searching && (
             <>
               <div className="seg" role="radiogroup" aria-label="search kind" onKeyDown={radioKeys}>
@@ -1048,24 +1073,8 @@ export function Composer(props: {
               })}
             </div>
           )}
-          {(props.running || props.compacting) && props.onStop && (
-            <button type="button" className="send stop" onClick={props.onStop} aria-label={t("composer.stop")}>
-              <Square size={16} fill="currentColor" />
-            </button>
-          )}
-          {/* While a turn runs, Send joins Stop once there is something to send. */}
-          {(!((props.running || props.compacting) && props.onStop) || !!text.trim()) && (
-            <button
-              type="button"
-              className="send"
-              onClick={() => void submit()}
-              disabled={!!busy || uploading > 0 || sendingImages || !text.trim() || !!props.readOnly}
-              aria-label={t("composer.send")}
-            >
-              <ArrowUp size={18} />
-            </button>
-          )}
         </div>
+        {props.figures && <div className="strip-figures">{props.figures}</div>}
         {home && mode === "agentic" && (
           <div className="composer-row agentic-row">
             <label>
