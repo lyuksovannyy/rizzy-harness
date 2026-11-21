@@ -234,7 +234,7 @@ pub enum Item {
 }
 
 /// The chat's items, each with the seq of the event that made it and, once
-/// a rewind hides it (`conversation_rewound`, X.45), the seq of that rewind:
+/// a rewind hides it (`conversation_rewound`, X.46), the seq of that rewind:
 /// written to the browser as the item's `rewound` field. A slice to every
 /// reader; only the fold adds to it.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -480,7 +480,7 @@ pub struct SessionView {
     /// first run is not one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub follow_ups: Vec<String>,
-    /// The chat's rewinds, in the order they were made (X.45).
+    /// The chat's rewinds, in the order they were made (X.46).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rewinds: Vec<RewindInfo>,
     /// The rewinds that count (not part of the view's wire shape).

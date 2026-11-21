@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { apply, fold } from "./fold";
 import type { RawEvent } from "./types";
 
-// X.45: the fold marks the items a rewind took out of the conversation with
+// X.46: the fold marks the items a rewind took out of the conversation with
 // the rewind's own seq (the Rust fold does the same, pinned by the shared
 // fixture); state folds as it did.
 const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;

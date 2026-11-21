@@ -64,7 +64,7 @@ pub const CAP_COMPACT: &str = "compact";
 pub const CAP_RETRY: &str = "retry";
 
 /// The node capability that announces `session.rewind` and
-/// `session.rewind_undo` (X.45): a person's rewind of the conversation to
+/// `session.rewind_undo` (X.46): a person's rewind of the conversation to
 /// an earlier message, and putting it back. The master offers them only for
 /// chats on nodes whose hello listed it.
 pub const CAP_REWIND: &str = "rewind";
@@ -751,7 +751,7 @@ pub const COMPACTING: &str = "This chat is being summarised: send your message w
 pub const RETRY_REFUSED: &str = "This turn can't be retried";
 
 /// How a node's refusal of a `session.rewind` or `session.rewind_undo`
-/// begins (X.45): the master answers 409 with it.
+/// begins (X.46): the master answers 409 with it.
 pub const REWIND_REFUSED: &str = "This chat can't be rewound there";
 
 /// The most background ids one `session.callback` may name.
@@ -1247,7 +1247,7 @@ pub enum MasterToNode {
     #[serde(rename = "session.retry")]
     Retry(RetryMsg),
     /// Take the chat back to an earlier message of the person's (a rewind,
-    /// X.45, docs/rewind.md; only to nodes with [`CAP_REWIND`]). Sent only
+    /// X.46, docs/rewind.md; only to nodes with [`CAP_REWIND`]). Sent only
     /// for the chat's owner, on their click: nothing a model, a tool or a
     /// routine does sends one. A request only: the node writes
     /// `conversation_rewound` only if `message_seq` is a message

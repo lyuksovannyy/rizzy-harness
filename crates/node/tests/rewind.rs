@@ -1,5 +1,5 @@
 //! A person's rewind of the conversation on a real node (ADOPTION_PLAN
-//! X.45, docs/rewind.md, README "Rewind"; plan row B.6's restart test): one
+//! X.46, docs/rewind.md, README "Rewind"; plan row B.6's restart test): one
 //! `conversation_rewound` event in the same log, nothing deleted; the model
 //! is sent the chat without the rewound turns; the files are put back only
 //! when asked (and a refusal of that writes nothing); what the agent read

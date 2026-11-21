@@ -864,7 +864,7 @@ pub enum PeersSkipReason {
 }
 
 /// The person took the conversation back to an earlier message of theirs
-/// (`conversation_rewound`, ADOPTION_PLAN X.45, docs/rewind.md): every
+/// (`conversation_rewound`, ADOPTION_PLAN X.46, docs/rewind.md): every
 /// event of the log with `message_seq <= seq <` this event's own seq is
 /// rewound, which the folds honour ([`crate::rewind`] is the one rule).
 /// Nothing is deleted and the seqs stay contiguous. Written by the node

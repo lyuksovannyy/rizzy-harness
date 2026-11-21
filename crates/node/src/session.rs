@@ -689,7 +689,7 @@ impl Session {
             queue: tokio::sync::Mutex::new(()),
             // Sent while a turn ran that a restart cut: the next turn reads
             // them (X.5).
-            pending: Mutex::new(unread(&events)),
+            pending: Mutex::new(rewind_op::unread_visible(&events)),
             queued_context: Mutex::new(None),
             turn_env: Mutex::new(None),
             note: Mutex::new(None),
@@ -2713,7 +2713,7 @@ impl Session {
             .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
             .await
             .map_err(|e| e.to_string())?;
-        let queued = unread(&history);
+        let queued = rewind_op::unread_visible(&history);
         if msg.is_none() && queued.is_empty() {
             // The log is the authority: nothing waits.
             self.pending
@@ -6094,7 +6094,7 @@ mod peers;
 #[path = "session_retry.rs"]
 mod retry;
 
-/// A person's rewind of the conversation to an earlier message (X.45); its
+/// A person's rewind of the conversation to an earlier message (X.46); its
 /// own file.
 #[path = "session_rewind.rs"]
 mod rewind_op;

@@ -1,5 +1,5 @@
 //! Rewinding a conversation to an earlier message of the person's
-//! (ADOPTION_PLAN X.45, docs/rewind.md): the one rule every reader of a
+//! (ADOPTION_PLAN X.46, docs/rewind.md): the one rule every reader of a
 //! chat's log shares.
 //!
 //! A rewind is an event of the same log, `conversation_rewound`: every

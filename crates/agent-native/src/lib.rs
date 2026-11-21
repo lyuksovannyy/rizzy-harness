@@ -1899,7 +1899,7 @@ pub fn rebuild_spans(
     history: &[RawEvent],
     how: &Rebuild<'_>,
 ) -> (Vec<ChatMsg>, Vec<shorten::Span>) {
-    // Rewound turns are not there (X.45): the model is sent the chat as it
+    // Rewound turns are not there (X.46): the model is sent the chat as it
     // stands after the person's rewind, whatever slice of the log a caller
     // holds. A log nothing rewound is read as it is.
     let history = &*harness_core::rewind::visible(history);
@@ -2626,7 +2626,7 @@ impl NativeBackend {
     /// One turn. Every append that fails ends it (see [`Logged`]).
     async fn turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome {
         let mut ctx = ctx;
-        // A rewound range is not part of the chat (X.45): not what the
+        // A rewound range is not part of the chat (X.46): not what the
         // model is sent, not what it has read (the file tools' guard is
         // rebuilt from this), not the summary's or the task list's. The
         // line a turn after a rewind that kept the files opens with is

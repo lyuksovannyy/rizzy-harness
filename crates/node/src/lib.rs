@@ -844,7 +844,7 @@ impl NodeRuntime {
             // either profile.
             capabilities.push(harness_protocol::CAP_RETRY.into());
             // A person's rewind of the conversation to an earlier message
-            // and its undo (X.45), in chats of either profile.
+            // and its undo (X.46), in chats of either profile.
             capabilities.push(harness_protocol::CAP_REWIND.into());
             // The agents a message called after the first, asked one after
             // another (X.37).

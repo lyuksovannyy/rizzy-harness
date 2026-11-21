@@ -874,7 +874,7 @@ async fn a_host_chat_starts_lists_and_hears_a_background_sub_agent() {
             .is_some_and(|b| b.child.is_some() && !b.ended)
     );
     // A rewind of the conversation is refused while the sub-agent runs
-    // (X.45): `restore` looks at commands only, this looks at sub-agents
+    // (X.46): `restore` looks at commands only, this looks at sub-agents
     // too, which write into the folder as well.
     let first = raw.iter().find(|e| e.kind == "user_message").unwrap().seq;
     n.n += 1;

@@ -5544,7 +5544,7 @@ button.pp-row:hover:not(:disabled),
 .form label.delegate-option { display: flex; flex-direction: row; gap: 8px; align-items: baseline; font-weight: normal; }
 .tag-only-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 
-/* A turn a rewind took out of the conversation (X.45): readable, muted. */
+/* A turn a rewind took out of the conversation (X.46): readable, muted. */
 .rewound {
   opacity: 0.55;
 }

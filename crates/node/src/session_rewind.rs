@@ -1,5 +1,5 @@
 //! A person's rewind of the conversation to an earlier message of theirs,
-//! and putting it back (ADOPTION_PLAN X.45, docs/rewind.md, README
+//! and putting it back (ADOPTION_PLAN X.46, docs/rewind.md, README
 //! "Rewind"). The node decides, against its own log, under the turn slot:
 //! the rule is `harness_core::rewind::check` (shared with the master, which
 //! answers the click from its mirror first). Nothing is deleted: the rewind
@@ -223,8 +223,7 @@ impl Session {
         let Ok(history) = self.read_log().await else {
             return;
         };
-        let visible = rewind::visible(&history);
-        *self.pending.lock().unwrap_or_else(|p| p.into_inner()) = super::unread(&visible);
+        *self.pending.lock().unwrap_or_else(|p| p.into_inner()) = unread_visible(&history);
         *self
             .queued_context
             .lock()
@@ -250,4 +249,87 @@ fn files_turn(history: &[RawEvent], view: &SessionView, target: &rewind::Target)
             .get(t)
             .is_some_and(|c| c.before.is_some() && !c.restored)
     })
+}
+
+/// The messages sent during a turn that nothing has read, as the chat
+/// stands after its rewinds: one sent inside a rewound range is gone with it
+/// and is never read by a later turn.
+pub(crate) fn unread_visible(history: &[RawEvent]) -> Vec<(u64, harness_core::event::UserMessage)> {
+    super::unread(&rewind::visible(history))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use harness_core::SessionId;
+
+    fn log(kinds: Vec<EventKind>) -> Vec<RawEvent> {
+        let sid = SessionId::new();
+        kinds
+            .into_iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let (kind, payload) = k.into_parts();
+                RawEvent {
+                    session_id: sid,
+                    seq: i as u64 + 1,
+                    ts_ms: 0,
+                    kind,
+                    payload,
+                }
+            })
+            .collect()
+    }
+
+    fn said(turn: &str, text: &str, queued: bool) -> EventKind {
+        let mut m: harness_core::event::UserMessage =
+            serde_json::from_value(serde_json::json!({"turn_id": turn, "text": text})).unwrap();
+        m.queued = queued;
+        EventKind::UserMessage(m)
+    }
+
+    fn started(turn: &str) -> EventKind {
+        EventKind::TurnStarted(harness_core::event::TurnStarted {
+            turn_id: turn.into(),
+            agent: None,
+            cause: None,
+            environment: None,
+            retry: None,
+            continued_by: None,
+        })
+    }
+
+    /// A message the person sent while a turn ran, which the turn never
+    /// read, is rewound with the turn: the next turn must not read it, after
+    /// a rewind, and after the node restarted (`Session::load`).
+    #[test]
+    fn an_unread_queued_message_of_a_rewound_turn_is_not_read_later() {
+        let mut kinds = vec![
+            started("t1"),
+            said("t1", "one", false),
+            started("t2"),
+            said("t2", "two", false),
+            said("t2", "sent meanwhile", true),
+        ];
+        let l = log(kinds.clone());
+        assert_eq!(super::super::unread(&l).len(), 1);
+        assert_eq!(unread_visible(&l).len(), 1, "no rewind yet");
+        kinds.push(EventKind::ConversationRewound(ConversationRewound {
+            message_seq: 4,
+            turn_id: "t2".into(),
+            files: false,
+        }));
+        let l = log(kinds.clone());
+        assert_eq!(
+            super::super::unread(&l).len(),
+            1,
+            "the raw log still has it"
+        );
+        assert!(unread_visible(&l).is_empty());
+        // Put back: it waits again.
+        kinds.push(EventKind::ConversationRewindUndone(
+            ConversationRewindUndone { rewind_seq: 6 },
+        ));
+        assert_eq!(unread_visible(&log(kinds)).len(), 1);
+    }
 }

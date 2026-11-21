@@ -1,4 +1,4 @@
-//! Wire snapshots of `session.rewind` and `session.rewind_undo` (X.45):
+//! Wire snapshots of `session.rewind` and `session.rewind_undo` (X.46):
 //! every field is named by every sender (there is no default), and the
 //! bytes are what a node of this version reads.
 

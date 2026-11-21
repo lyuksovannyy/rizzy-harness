@@ -65,7 +65,7 @@ pub struct Facts {
 
 impl Facts {
     pub fn from_log(log: &[RawEvent]) -> Facts {
-        // Rewound turns are absent (X.45); what they did to the files is
+        // Rewound turns are absent (X.46); what they did to the files is
         // not (their checkpoints stay, `rewind::visible`).
         let log = &*crate::rewind::visible(log);
         let mut f = Facts::default();
@@ -503,7 +503,7 @@ mod tests {
         assert_eq!(cut_note("  short \n"), "short");
     }
 
-    /// X.45: a rewound turn is absent from the note (what was asked, the
+    /// X.46: a rewound turn is absent from the note (what was asked, the
     /// turn count, how it ended), but the files it changed and nobody put
     /// back are still changed.
     #[test]

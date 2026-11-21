@@ -1189,7 +1189,7 @@ fn events() -> Vec<RawEvent> {
             }),
         ],
     );
-    // X.45: a turn rewound and put back (its items stay unmarked), then a
+    // X.46: a turn rewound and put back (its items stay unmarked), then a
     // turn rewound for good over its own and the turn before (marked with
     // the later rewind; the earlier one's items were never hidden).
     let turn_of = |id: &str, text: &str, answer: &str| {
@@ -1512,7 +1512,7 @@ fn the_fold_keeps_an_approvals_preview() {
     assert!(previews[0].contains("<script>x</script>"));
 }
 
-/// X.45: a rewind marks the items of its range with its own seq; one that
+/// X.46: a rewind marks the items of its range with its own seq; one that
 /// was undone marks nothing; the view lists the rewinds, the later one
 /// still open to an undo. The shared fixture carries the same.
 #[test]

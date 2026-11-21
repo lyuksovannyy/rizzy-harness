@@ -1,4 +1,4 @@
-//! A rewind of the conversation (ADOPTION_PLAN X.45, docs/rewind.md): the
+//! A rewind of the conversation (ADOPTION_PLAN X.46, docs/rewind.md): the
 //! model is sent the chat as it stands after it. The log is rebuilt with
 //! `rebuild`, as every request does; what a rewound range held is not in
 //! it, what came before the cut is byte for byte what it was, and the
@@ -365,4 +365,22 @@ fn a_signed_thinking_block_before_the_cut_keeps_its_prefix() {
         } => assert_eq!(t.prefix, "abc123"),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn a_manual_summary_counts_only_what_the_chat_still_holds() {
+    // The big first turn is what makes `/compact` worth it; once it is
+    // rewound the chat is too short to summarise, and its text is not in
+    // the part a summary would replace.
+    let big = "word ".repeat(2_000);
+    let mut l = Log::new();
+    let m1 = l.turn("t1", &big);
+    l.turn("t2", "short");
+    l.turn("t3", "short");
+    assert!(harness_agent_native::manual_compact::check(&l.events).is_ok());
+    l.rewind(m1, "t1", true);
+    l.turn("t4", "short");
+    l.turn("t5", "short");
+    let e = harness_agent_native::manual_compact::check(&l.events).unwrap_err();
+    assert!(e.contains("too short"), "{e}");
 }

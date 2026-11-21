@@ -163,7 +163,7 @@ const item: Check = (x, at) => {
   OBJ(x, at);
   const c = ITEM[(x as { type: string }).type];
   if (!c) fail(`${at}.type`, x);
-  // A rewound item (X.45) carries the seq of the rewind, whatever it is.
+  // A rewound item (X.46) carries the seq of the rewind, whatever it is.
   const { rewound, ...rest } = x as { rewound?: unknown };
   if (rewound !== undefined) N(rewound, `${at}.rewound`);
   c!(rest, at);

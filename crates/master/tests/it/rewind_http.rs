@@ -1,4 +1,4 @@
-//! A person's rewind of the conversation over HTTP (ADOPTION_PLAN X.45,
+//! A person's rewind of the conversation over HTTP (ADOPTION_PLAN X.46,
 //! README "Rewind"): `POST /api/sessions/{id}/rewind` and
 //! `POST /api/sessions/{id}/rewind/{seq}/undo`. The chat's owner only:
 //! every other account gets the 404 of a chat that does not exist (admins
@@ -399,10 +399,7 @@ async fn send(t: &T, who: &str, sid: SessionId, text: &str) -> u64 {
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let evs = caught_up(t, who, sid, before + 3).await;
-    evs.iter()
-        .filter(|e| e["kind"] == "user_message")
-        .next_back()
-        .unwrap()["seq"]
+    evs.iter().rfind(|e| e["kind"] == "user_message").unwrap()["seq"]
         .as_u64()
         .unwrap()
 }

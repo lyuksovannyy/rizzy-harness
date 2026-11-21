@@ -1187,7 +1187,7 @@ async fn a_dev_server_answers_in_the_next_step_and_a_later_turn() {
     });
     let acks = n.until_ack().await;
     assert!(acks.contains("bg-1") && acks.contains("running"), "{acks}");
-    // So is a rewind of the conversation (X.45): the command would end
+    // So is a rewind of the conversation (X.46): the command would end
     // after it, for something a rewound turn started.
     let first_message = n
         .seen

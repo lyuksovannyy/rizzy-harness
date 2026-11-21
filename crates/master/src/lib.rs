@@ -3043,7 +3043,7 @@ impl Master {
     }
 
     /// Take a chat back to the person's message at `message_seq` on its
-    /// owning node (X.45); the node decides again.
+    /// owning node (X.46); the node decides again.
     pub async fn rewind(
         &self,
         sid: SessionId,
@@ -3062,7 +3062,7 @@ impl Master {
         .await
     }
 
-    /// Put back what the rewind at `rewind_seq` took out (X.45).
+    /// Put back what the rewind at `rewind_seq` took out (X.46).
     pub async fn rewind_undo(&self, sid: SessionId, rewind_seq: u64) -> Result<(), CommandError> {
         let node = self.owner(sid).await?;
         self.send_command(&node, |req_id| MasterToNode::RewindUndo {

@@ -1,5 +1,5 @@
 //! A person's rewind of a chat's conversation to an earlier message of
-//! theirs, and putting it back (ADOPTION_PLAN X.45, docs/rewind.md, README
+//! theirs, and putting it back (ADOPTION_PLAN X.46, docs/rewind.md, README
 //! "Rewind"):
 //!
 //! * `POST /api/sessions/{id}/rewind` with `{message_seq, files, force}`;

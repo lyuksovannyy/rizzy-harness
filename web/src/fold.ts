@@ -409,7 +409,7 @@ function staged(p: any): StagedArtifact {
   return s;
 }
 
-// What a rewind (X.45) needs of the log besides the view's JSON: where each
+// What a rewind (X.46) needs of the log besides the view's JSON: where each
 // item came from, the ranges that count, and where each turn started. Kept
 // beside the view, never in it (the fixture compares the view as the Rust
 // fold writes it); the view is mutated in place by the live connection, so
@@ -551,7 +551,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
     case "callback_refused":
       pushItem(v, e.seq, { type: "callback_refused", bg_ids: p.bg_ids, reason: p.reason });
       break;
-    // A rewind (X.45): the items from the message on are marked, state
+    // A rewind (X.46): the items from the message on are marked, state
     // folds as it did. The target's own start stands before its message.
     case "conversation_rewound": {
       const r = rw(v);

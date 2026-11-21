@@ -12,7 +12,7 @@ use crate::event::{
 /// and what its retry records: Ok with the failed turn's end, or why not,
 /// in the person's words.
 pub fn check(history: &[RawEvent], failed: &str) -> Result<RetryOf, String> {
-    // Rewound turns are absent (X.45): the last turn is the last one that
+    // Rewound turns are absent (X.46): the last turn is the last one that
     // is not; and a chat rewound since it began has nothing to retry.
     let ranges = crate::rewind::rewound(history);
     let last = history
@@ -472,7 +472,7 @@ mod tests {
         assert_eq!(message(&l.events, "nope"), None);
     }
 
-    /// X.45: after a rewind the chat's last turn is the last one not
+    /// X.46: after a rewind the chat's last turn is the last one not
     /// rewound, and a chat rewound since a turn began has nothing of it to
     /// retry; put back by an undo, the turn is the last again.
     #[test]

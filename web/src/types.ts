@@ -228,7 +228,7 @@ export interface StagedArtifact {
   meta: ArtifactMeta;
 }
 
-/** One block of the chat. A rewound one (X.45) carries the seq of the rewind
+/** One block of the chat. A rewound one (X.46) carries the seq of the rewind
  * that hides it (`conversation_rewound`): shown muted, never sent to the model. */
 export type Item = ItemKind & { rewound?: number };
 
@@ -375,7 +375,7 @@ export interface SessionView {
   /** A sub-agent's turns that were follow-ups from its parent chat
    * (`turn_started.continued_by`, T68); absent when none. */
   follow_ups?: string[];
-  /** The chat's rewinds (X.45), in the order they were made; absent when none. */
+  /** The chat's rewinds (X.46), in the order they were made; absent when none. */
   rewinds?: RewindInfo[];
 }
 
