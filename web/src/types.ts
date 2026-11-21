@@ -282,8 +282,8 @@ export type ItemKind =
     }
   /** `notice`: information for the person, not a failure (T.9's file-count notes). */
   | { type: "error"; message: string; notice?: true }
-  /** `at`: when it ended (the event's time, ms). `usage`: what the turn used, its foreground sub-agents included (the final figure, or the last running one of a turn that ended without). */
-  | { type: "turn_end"; turn_id: string; reason: TurnEndReason; at: number; usage?: Usage }
+  /** `at`: when it ended (the event's time, ms; the fold always writes it, a hand-built item may not). `usage`: what the turn used, its foreground sub-agents included (the final figure, or the last running one of a turn that ended without). */
+  | { type: "turn_end"; turn_id: string; reason: TurnEndReason; at?: number; usage?: Usage }
   /** The chat ran another agent or model from the message after it. */
   | { type: "agent_changed"; agent: AgentRef; model?: string }
   /** The owner changed the approval mode; `requested` when the node gave less. */

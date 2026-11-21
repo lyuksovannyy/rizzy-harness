@@ -11,7 +11,7 @@ import { routeHash } from "../lib/routes";
 /** "Fork from here" on a turn's end line: a new chat that begins with this
  * conversation up to here and goes its own way; the parent is not changed.
  * The new chat opens at once. The route refuses what this misses. */
-export function ForkChat(props: { sessionId: string; turnId: string }) {
+export function ForkChat(props: { sessionId: string; turnId: string; /** In the row under an answer: the link alone, in the row's own flow. */ inline?: boolean }) {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const run = async () => {
@@ -26,17 +26,32 @@ export function ForkChat(props: { sessionId: string; turnId: string }) {
       setBusy(false);
     }
   };
+  const button = (
+    <button
+      type="button"
+      className={props.inline ? "link small" : "link"}
+      disabled={busy}
+      title="Start a new chat with this conversation up to here. This chat stays as it is."
+      onClick={() => void run()}
+    >
+      Fork from here
+    </button>
+  );
+  if (props.inline) {
+    return (
+      <>
+        {button}
+        {err && (
+          <div className="error-text small msg-actions-err" role="alert">
+            {err}
+          </div>
+        )}
+      </>
+    );
+  }
   return (
     <div className={`fork-line small${err || busy ? " shown" : ""}`}>
-      <button
-        type="button"
-        className="link"
-        disabled={busy}
-        title="Start a new chat with this conversation up to here. This chat stays as it is."
-        onClick={() => void run()}
-      >
-        Fork from here
-      </button>
+      {button}
       {err && <div className="error-text">{err}</div>}
     </div>
   );
