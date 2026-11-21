@@ -1764,4 +1764,64 @@ mod round3 {
             assert_eq!(upstream_url(url).as_deref(), want, "{url:?}");
         }
     }
+
+    /// What git is handed in stage 2 has a `config` that is the harness's own
+    /// fixed text, byte for byte, whatever the parent's config holds
+    /// (`include.path`, `uploadpack.packObjectsHook`, `core.fsmonitor`, a
+    /// secret-looking value). A stand-in `git` copies the staged config aside
+    /// when it is asked to clone.
+    #[tokio::test]
+    async fn the_staged_config_is_the_harness_own_text_whatever_the_parents_holds() {
+        let r = rig(true).await;
+        let secret = "Bearer SECRET-TOKEN-4711";
+        let cfg = r.h.repo.join(".git/config");
+        append_text(
+            &cfg,
+            &format!(
+                "[http]\n\textraHeader = Authorization: {secret}\n[include]\n\tpath = /etc/passwd\n\
+                 [uploadpack]\n\tpackObjectsHook = /bin/false\n[core]\n\tfsmonitor = /bin/true\n"
+            ),
+        );
+        let real = String::from_utf8(
+            std::process::Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let captured = r.top.join("staged-config");
+        let script = r.top.join("fake-git/git");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        crate::test_script::script(
+            &script,
+            &format!(
+                "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in */repo.git) cp \"$a/config\" '{}';; esac; done\n\
+                 exec {} \"$@\"\n",
+                captured.display(),
+                real.trim()
+            ),
+        );
+        crate::git::use_test_git(Some(script));
+        let res = run(&r, Some(&r.head)).await;
+        crate::git::use_test_git(None);
+        let got = std::fs::read(&captured).expect("the stand-in git saw no staged config");
+        assert_eq!(
+            got,
+            b"[core]\n\trepositoryformatversion = 0\n\tbare = true\n",
+            "{}",
+            String::from_utf8_lossy(&got)
+        );
+        res.unwrap_or_else(|e| panic!("refused: {e}"));
+    }
+
+    fn append_text(p: &Path, text: &str) {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(p)
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+    }
 }

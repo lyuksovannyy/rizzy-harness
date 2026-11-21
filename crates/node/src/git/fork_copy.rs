@@ -550,6 +550,10 @@ fn parent_config(list: &[u8]) -> Result<ParentConfig, String> {
     Ok(out)
 }
 
+/// The config of the sanitised copy: the harness's own text, never a byte of
+/// the parent's.
+pub(crate) const STAGED_CONFIG: &str = "[core]\n\trepositoryformatversion = 0\n\tbare = true\n";
+
 /// Copy the parent's repository into `dest` and fill it (see the module
 /// comment). `dest` is left as it is on failure: the caller removes it.
 pub(crate) async fn fill(p: &Plan<'_>) -> Result<Filled, String> {
@@ -580,11 +584,8 @@ pub(crate) async fn fill(p: &Plan<'_>) -> Result<Filled, String> {
         );
     }
     let upstream = read_parent_config(p, &work, data.config.as_deref()).await?;
-    std::fs::write(
-        work.repo.join("config"),
-        "[core]\n\trepositoryformatversion = 0\n\tbare = true\n",
-    )
-    .map_err(|e| format!("cannot write the copy's config: {e}"))?;
+    std::fs::write(work.repo.join("config"), STAGED_CONFIG)
+        .map_err(|e| format!("cannot write the copy's config: {e}"))?;
     // Stage 2: the clone, from the copy. The parent is not mounted.
     clone(p, &work).await?;
     drop(work);

@@ -60,6 +60,26 @@ pub(crate) const ENTRY_MAX: u64 = 1_000_000;
 /// The deepest folder nesting the walk follows (refs are a few levels).
 const DEPTH_MAX: usize = 32;
 
+#[cfg(test)]
+type Between = Box<dyn Fn(&str)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: called with the relative path of a file after it was probed
+    /// (`O_PATH`, `fstat`) and before it is opened for reading, so a test can
+    /// swap the name at exactly that moment.
+    static BETWEEN: std::cell::RefCell<Option<Between>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn between_probe_and_open(rel: &str) {
+    BETWEEN.with(|b| {
+        if let Some(f) = b.borrow().as_ref() {
+            f(rel);
+        }
+    });
+}
+
 /// What the walk is bounded by.
 pub(crate) struct Limits {
     pub max_bytes: u64,
@@ -334,6 +354,8 @@ impl Walk<'_> {
         if k != Kind::File {
             return Err(refuse(rel, k));
         }
+        #[cfg(test)]
+        between_probe_and_open(rel);
         let fd = openat(
             dir,
             name,
@@ -1142,5 +1164,69 @@ mod tests {
             assert!(e.contains("shallow") && e.contains("line "), "{e}");
             assert!(!e.contains(SECRET), "{e}");
         }
+    }
+
+    /// The name is swapped for a link to THE SAME file between the `O_PATH`
+    /// probe and the read open: the device and inode check cannot see it, only
+    /// `O_NOFOLLOW` on the read open does. Without it the link is followed.
+    #[test]
+    fn a_name_swapped_for_a_link_to_the_same_file_after_the_probe_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let root = repo(&top);
+        let target = root.join(".git/objects/ab/cdef");
+        let real = root.join(".git/objects/ab/cdef.real");
+        let (t, r) = (target.clone(), real.clone());
+        BETWEEN.with(|b| {
+            *b.borrow_mut() = Some(Box::new(move |rel| {
+                if rel == "objects/ab/cdef" {
+                    std::fs::rename(&t, &r).unwrap();
+                    std::os::unix::fs::symlink(&r, &t).unwrap();
+                }
+            }));
+        });
+        let into = top.join("into");
+        std::fs::create_dir(&into).unwrap();
+        let res = copy(&root, &into, &limits(1 << 20, 1000));
+        BETWEEN.with(|b| *b.borrow_mut() = None);
+        assert!(real.is_file(), "the hook did not run");
+        let e = res
+            .err()
+            .unwrap_or_else(|| panic!("a followed link was copied"));
+        assert!(e.contains("objects/ab/cdef"), "{e}");
+    }
+
+    /// The name is swapped for ANOTHER plain file (the victim's, with a
+    /// marker) between the probe and the read open: `O_NOFOLLOW` cannot see
+    /// it, only the device and inode check against the probed file does.
+    #[test]
+    fn a_name_swapped_for_another_file_after_the_probe_is_refused() {
+        const MARK: &str = "VICTIM-FILE-MARK";
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let root = repo(&top);
+        let target = root.join(".git/objects/ab/cdef");
+        let t = target.clone();
+        BETWEEN.with(|b| {
+            *b.borrow_mut() = Some(Box::new(move |rel| {
+                if rel == "objects/ab/cdef" {
+                    std::fs::remove_file(&t).unwrap();
+                    std::fs::write(&t, MARK).unwrap();
+                }
+            }));
+        });
+        let into = top.join("into");
+        std::fs::create_dir(&into).unwrap();
+        let res = copy(&root, &into, &limits(1 << 20, 1000));
+        BETWEEN.with(|b| *b.borrow_mut() = None);
+        let leaked = walkdir::WalkDir::new(&into).into_iter().flatten().any(|e| {
+            e.file_type().is_file()
+                && std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains(MARK))
+        });
+        assert!(!leaked, "the swapped-in file was copied");
+        let e = res
+            .err()
+            .unwrap_or_else(|| panic!("a swapped file was copied"));
+        assert!(e.contains("objects/ab/cdef"), "{e}");
     }
 }
