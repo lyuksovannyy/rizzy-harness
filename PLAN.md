@@ -53,27 +53,32 @@ rewritten after the layout mockup (foundations, UI shell and bar first, onboardi
   inside it), workspace admin (members, defaults) and server. Agentic sessions (a shell on a
   worker node) need a per-user grant, and the workspace role must allow them too. Localhost by
   default; remote only with an explicit flag. Shared chats and shared memory are not built.
-* **No compatibility code before the first release.** Nothing has shipped, so the schema is
-  created complete, with no aliases or renames; a dev data dir is simply wiped when the schema
-  changes. **Schema versions** (fix plan 4.3, `crates/store/src/migrate.rs`): every database
-  (`master.db`, `chat.db`, `node.db` through `Store`, `memory.db` through `SqliteMemory`)
-  carries `PRAGMA user_version` and is opened through numbered migrations; migration 1 is the
-  whole schema. Until the first tag migration 1 is edited in place and its recorded schema
-  (`crates/store/schema/1.sql`, `crates/memory/schema/1.sql`) emptied and recorded again with
-  `HARNESS_WRITE_SCHEMA=1`, which only fills files that are missing or empty (not deleted:
-  `include_str!` needs the file to build); the recorded text is
+* **A data directory in use is never wiped; no other compatibility code before the first
+  release.** The owner's decision of 2026-11-21 (it replaces "the schema is changed in place
+  and dev data directories are wiped"): the harness is in daily use before its first tag, and
+  every schema edit made that data directory unusable. **Schema versions** (fix plan 4.3,
+  `crates/store/src/migrate.rs`): every database (`master.db`, `chat.db`, `node.db` through
+  `Store`, `memory.db` through `SqliteMemory`) carries `PRAGMA user_version` and is opened
+  through numbered migrations. Version 1 is the whole schema as it was frozen: for `Store`
+  the schema of commit `3f0859a3` (2026-11-19), which the data directory in use had, compared
+  object by object; the `project_clones` table added after it is migration 2. A recorded
+  version (`crates/store/schema/<n>.sql`, `crates/memory/schema/<n>.sql`) is never edited and
+  never recorded again: every change is a new migration with its own recorded file
+  (`HARNESS_WRITE_SCHEMA=1` only fills a file that is missing or empty), the tests fail
+  otherwise, and a test holds version 1's text fixed. The recorded text is
   what the migrations make (SQLite's own `sqlite_*` objects and FTS5's shadow tables are left
   out, so a SQLite update does not change it). **The version is trusted only with the schema:**
-  a file at a known version must have exactly that version's recorded schema, and a migrated
-  one must end with it before its version is bumped, or it is refused unchanged. So from this
-  change on **every** pre-tag schema edit, an added table or index included, needs a wiped dev
-  data directory (the build names the file and refuses to start), and no pre-tag file is ever
-  taken for a released version 1. **Open, for the owner before the first tag** (review R43-8):
+  a file at the latest version must have exactly its recorded schema, and a migrated
+  one must end with it before its version is bumped, or it is refused unchanged. A database
+  from a development build older than version 1 is refused, named and left as it is; it
+  cannot be migrated. **Events:** a kind or a payload field is added, never renamed, removed
+  or given another meaning, so a log written before a change still decodes and folds; the
+  wire between master and node and the configuration files carry no aliases yet (a master
+  and its nodes are updated together). **Open** (review R43-8):
   `master.db`, `chat.db` and `node.db` share one migration list, so a master-only change bumps
   every node's `node.db` (and a node rolled back afterwards is refused over a table it never
-  reads), and node and chat files carry the account tables unused. One list per role is cheap
-  to split before the tag and a migration per role after it. From the tag on a released migration never changes, every change
-  is a new migration with its own recorded file, and the tests fail otherwise. A value that is
+  reads), and node and chat files carry the account tables unused. Splitting the list per role
+  is now a migration per role. A value that is
   queried or joined is a column; the `kv` table holds opaque documents only.
 
 ### Omnibox (the new-tab bar)
@@ -353,7 +358,7 @@ Kinds (v1):
 | `assistant_message` | `turn_id, message_id, text, tool_calls[{call_id, tool, input}], thinking?{model, blocks[{type: signed{text, signature} / redacted{data} / text{text}}], prefix?, unsent?}` — authoritative full text; `thinking` is the step's thinking as the provider sent it, in its order (X.25, T73): `model` the prefixed model that wrote it, `prefix` (signed blocks) the SHA-256 of the request that made them, `unsent` its signed blocks never sent back (a signed block scrubbed, over 256 KiB, out of order, or the model's thinking was refused earlier in the chat), nor any later signed block of that model; browsers get the thinking without `signature`, `data` and `prefix` (`event::for_browser`) |
 | `thinking_withheld` | `turn_id, model, status, reason?` — the provider refused a request that sent back thinking and the same request without any was answered (X.25, T73): `model`'s thinking before it is never sent again and its later steps record `unsent`; `reason` as `images_withheld`'s; recorded only by the node's loop, before the answer; both folds show nothing for it |
 | `peers_skipped` | `message_seq, agents, reason` — agents a message called (`user_message.triggers`) that were not asked, in the order they would have run: `reason` `stopped` (the person's Stop ended the turn that ran and the rest), `restarted` (the node restarted with agents still to ask: their specs were in memory only; written once at the node's start, from the log alone) or `unavailable` (the node could not start the next turn: its log, a restore, a stopping node). One quiet line in the chat; never shown to the model (X.37, T87) |
-| `conversation_rewound` | `message_seq, turn_id, files` — the person took the chat back to their `user_message` at `message_seq` (the turn it opened is `turn_id`); every event with `message_seq <= seq <` this event's own seq is **rewound** (ADOPTION_PLAN X.46, T90, `docs/rewind.md`). Nothing is deleted. The model is not sent a rewound range (nor the `turn_started` of `turn_id`), the file tools' seen table does not count what it read, the view marks its items `rewound`, retry and the hand-off note treat its turns as absent; usage, checkpoints, background commands, grants, mode, step limit, agent and task list fold as before. `files`: the folder was put back first (the restore with `rewind`), recorded false when no rewound turn had a checkpoint. Written by the node's session actor only, for the chat's owner (`session.rewind`), after `harness_core::rewind::check` and with no turn, `/compact` or background work of the chat running. The first message after one with `files` false opens with a harness line naming the files kept (built from the log). |
+| `conversation_rewound` | `message_seq, turn_id, files` — the person took the chat back to their `user_message` at `message_seq` (the turn it opened is `turn_id`); every event with `message_seq <= seq <` this event's own seq is **rewound** (ADOPTION_PLAN X.46, T90, `docs/rewind.md`). Nothing is deleted. The model is not sent a rewound range (nor the `turn_started` of `turn_id`), the file tools' seen table does not count what it read, the view marks its items `rewound`, retry and the hand-off note treat its turns as absent; usage, checkpoints, background commands, grants, mode, step limit and agent (the person's own settings) fold as before; the task list goes back with the conversation (a rewound `todo_updated` does not count; the undo brings it back). `files`: the folder was put back first (the restore with `rewind`), recorded false when no rewound turn had a checkpoint. Written by the node's session actor only, for the chat's owner (`session.rewind`), after `harness_core::rewind::check` and with no turn, `/compact` or background work of the chat running. The first message after one with `files` false opens with a harness line naming the files kept (built from the log). |
 | `conversation_rewind_undone` | `rewind_seq` — the range of the `conversation_rewound` at `rewind_seq` counts again; only before a message, a turn or a summary came after it (`rewind::check_undo`); files are never touched |
 | `tool_call_started` | `turn_id, call_id, tool, input` — the calls of a parallel batch: all starts first, then the results in call order ("Event order of a parallel step" below) |
 | `tool_output_delta` | `call_id, stream (stdout/stderr), text` |

@@ -1,10 +1,13 @@
 // The approval takes the composer's place (row W.6) against the real binary:
-// an Agentic chat in Ask. Two parallel calls wait while a draft is being
+// an Agentic chat in Ask. A turn with two bash calls (not parallel-safe, so
+// the loop asks them one at a time) waits while a draft is being
 // typed (continuously, across the moment the choice appears): the text field is replaced by the choice (the card above its
 // buttons), no button has focus, Enter and Space typed at once answer
-// nothing, Stop stays, and the buttons work after the guard; the calls come
-// one at a time ("1 of 2"), the second guarded again; once answered the field
-// is back with the draft and the caret where they were.
+// nothing, Stop stays, and the buttons work after the guard; the second call
+// is asked only after the first is answered, guarded again, with no count (the
+// "n of m" count needs several pending approvals in one chat, which the
+// loop never produces: only calls that run unasked go in a parallel batch);
+// once answered the field is back with the draft and the caret where they were.
 // Usage: node web/e2e/approval-in-composer.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -89,7 +92,7 @@ async function turnsEnded(p, sid, n) {
     await p.waitForSelector(PICK);
     await choose(p, 'Ask');
 
-    // 1. Two parallel calls; a draft is typed while the turn runs.
+    // 1. Two calls, asked one at a time; a draft is typed while the turn runs.
     await p.fill('.composer textarea', script([['bash', { command: 'touch first.txt' }], ['bash', { command: 'touch second.txt' }]]));
     await p.keyboard.press('Enter');
     await p.waitForSelector('.conversation');
@@ -117,7 +120,7 @@ async function turnsEnded(p, sid, n) {
     const draft = await p.inputValue('.composer textarea');
     check(/^a+$/.test(draft) && draft.length <= typed && draft.length >= typed - 1, 'the draft is what was typed before the choice, nothing after: ' + draft.length + ' of ' + typed);
     const shown = await p.innerText('.approval-choice');
-    check(shown.includes('1 of 2'), 'the count is shown');
+    check(!/\d of \d/.test(shown), 'one request at a time: no count');
     check(shown.includes('first.txt'), 'the first call the node asked is shown, with what it runs');
     const now = await events(p, sid);
     check(now.every((e) => e.kind !== 'approval_resolved'), 'the burst answered an approval');
@@ -129,10 +132,10 @@ async function turnsEnded(p, sid, n) {
     check(await p.evaluate(() => document.activeElement?.classList.contains('primary')), 'the first Tab reaches Allow once');
     await p.focus('.approval-choice');
 
-    // 3. Answer the first; the second comes alone, guarded again.
+    // 3. Answer the first; only then is the second asked, guarded again.
     await p.click('.approval-choice button.primary');
     await p.waitForFunction(() => document.querySelector('.approval-choice')?.textContent.includes('second.txt'));
-    check(!(await p.innerText('.approval-choice')).includes(' of '), 'one call left: no count');
+    check(!(await p.innerText('.approval-choice')).includes('first.txt'), 'the second request replaced the first');
     await p.keyboard.press('Enter');
     await sleep(150);
     check((await events(p, sid)).filter((e) => e.kind === 'approval_resolved').length === 1, 'the second is guarded as it appears');
@@ -143,6 +146,7 @@ async function turnsEnded(p, sid, n) {
     // 4. The field is back with the draft and the caret.
     await p.waitForSelector('.composer textarea', { state: 'visible' });
     check(!(await p.$('.approval-choice')), 'the choice is gone');
+    await p.waitForFunction(() => document.activeElement === document.querySelector('.composer textarea'), null, { timeout: 5000 }).catch(() => {});
     const back = await p.evaluate(() => {
       const t = document.querySelector('.composer textarea');
       return { v: t.value, c: t.selectionStart, f: document.activeElement === t };

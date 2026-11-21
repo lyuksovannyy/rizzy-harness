@@ -489,6 +489,15 @@ pub struct SessionView {
     /// Every turn's start (seq, turn id), for a rewind's turn count.
     #[serde(skip)]
     turn_starts: Vec<(u64, String)>,
+    /// The person's messages that opened a turn (not queued ones), by seq:
+    /// a rewind counts only when it names one of its turn
+    /// (`rewind::counts`; the fold sees the whole log).
+    #[serde(skip)]
+    messages: std::collections::HashMap<u64, String>,
+    /// Every `todo_updated` (seq, its list): a rewind takes the list the
+    /// rewound turns set back, and an undo brings it back.
+    #[serde(skip)]
+    todos: Vec<(u64, Vec<crate::todo::TodoItem>)>,
 }
 
 /// One background command as the log shows it.
@@ -663,6 +672,9 @@ impl SessionView {
             }
             EventKind::UserMessage(m) => {
                 self.no_more_undo();
+                if !m.queued {
+                    self.messages.insert(seq, m.turn_id.clone());
+                }
                 self.items.push(Item::User {
                     turn_id: m.turn_id,
                     text: m.text,
@@ -1031,17 +1043,23 @@ impl SessionView {
                     .map(|(_, t)| t)
                     .collect::<std::collections::BTreeSet<_>>()
                     .len() as u32;
-                self.ranges.add(seq, r.message_seq, &r.turn_id);
-                self.rewinds.push(RewindInfo {
-                    seq,
-                    message_seq: r.message_seq,
-                    turn_id: r.turn_id,
-                    turns,
-                    files: r.files,
-                    undone: false,
-                    can_undo: true,
-                });
-                self.items.remark(&self.ranges);
+                // One that names no message of its turn counts for nothing
+                // and is not listed.
+                if self.messages.get(&r.message_seq) == Some(&r.turn_id)
+                    && self.ranges.add(seq, r.message_seq, &r.turn_id)
+                {
+                    self.rewinds.push(RewindInfo {
+                        seq,
+                        message_seq: r.message_seq,
+                        turn_id: r.turn_id,
+                        turns,
+                        files: r.files,
+                        undone: false,
+                        can_undo: true,
+                    });
+                    self.items.remark(&self.ranges);
+                    self.retodo();
+                }
             }
             EventKind::ConversationRewindUndone(u) => {
                 if let Some(r) = self.rewinds.iter_mut().find(|r| r.seq == u.rewind_seq) {
@@ -1050,8 +1068,12 @@ impl SessionView {
                 }
                 self.ranges.remove(u.rewind_seq);
                 self.items.remark(&self.ranges);
+                self.retodo();
             }
-            EventKind::TodoUpdated(t) => self.todo = t.items,
+            EventKind::TodoUpdated(t) => {
+                self.todos.push((seq, t.items.clone()));
+                self.todo = t.items;
+            }
             // What the model was sent with the turn's message; the chat
             // never showed it (X.1).
             EventKind::ContextSent(_) => {}
@@ -1139,6 +1161,19 @@ impl SessionView {
 
     /// An agent's staged file joins its `publish` card; the user's (or one
     /// whose call is not in the log) stands alone.
+    /// The task list as the rewinds that count leave it: the latest
+    /// `todo_updated` none of them holds (what the model is shown too,
+    /// `todo::as_of` over `rewind::visible`).
+    fn retodo(&mut self) {
+        self.todo = self
+            .todos
+            .iter()
+            .rev()
+            .find(|(seq, _)| !self.ranges.holds(*seq))
+            .map(|(_, items)| items.clone())
+            .unwrap_or_default();
+    }
+
     fn stage(&mut self, a: Box<ArtifactStaged>) {
         let card = match (&a.call_id, a.by) {
             (Some(c), crate::artifacts::StagedBy::Agent) => self.tool_mut(c),

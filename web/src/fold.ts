@@ -420,11 +420,15 @@ interface Rewinding {
   /** The rewinds that count: their own seq and the message they went back to. */
   ranges: { rewind: number; message: number }[];
   starts: [seq: number, turn: string][];
+  /** Every `todo_updated`: a rewind takes the list its turns set back. */
+  todos: [seq: number, items: TodoItem[]][];
+  /** The person's messages that opened a turn (not queued ones), by seq: a rewind counts only when it names one of its turn. */
+  messages: Map<number, string>;
 }
 const rewinding = new WeakMap<SessionView, Rewinding>();
 const rw = (v: SessionView): Rewinding => {
   let r = rewinding.get(v);
-  if (!r) rewinding.set(v, (r = { born: [], ranges: [], starts: [] }));
+  if (!r) rewinding.set(v, (r = { born: [], ranges: [], starts: [], todos: [], messages: new Map() }));
   return r;
 };
 
@@ -460,6 +464,19 @@ function remark(v: SessionView): void {
     else copy.rewound = by;
     v.items[i] = copy;
   }
+}
+
+/** The task list the rewinds that count leave: the latest list none of them holds. */
+function retodo(v: SessionView): void {
+  const r = rw(v);
+  for (let i = r.todos.length - 1; i >= 0; i--) {
+    const [seq, items] = r.todos[i]!;
+    if (hiddenBy(r, seq) !== undefined) continue;
+    if (items.length) v.todo = items;
+    else delete v.todo;
+    return;
+  }
+  delete v.todo;
 }
 
 /** A message, a turn or a summary after a rewind: it can no longer be put back. */
@@ -555,8 +572,10 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
     // folds as it did. The target's own start stands before its message.
     case "conversation_rewound": {
       const r = rw(v);
-      const turns = new Set(r.starts.filter(([s, t]) => p.message_seq < s && s < e.seq && t !== p.turn_id).map(([, t]) => t)).size + 1;
+      // One that names no message of its turn counts for nothing and is not listed.
       r.ranges = r.ranges.filter((a) => a.rewind !== e.seq);
+      if (!(p.message_seq < e.seq && r.messages.get(p.message_seq) === p.turn_id)) break;
+      const turns = new Set(r.starts.filter(([s, t]) => p.message_seq < s && s < e.seq && t !== p.turn_id).map(([, t]) => t)).size + 1;
       r.ranges.push({ rewind: e.seq, message: p.message_seq });
       (v.rewinds ??= []).push({
         seq: e.seq,
@@ -568,6 +587,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
         can_undo: true,
       });
       remark(v);
+      retodo(v);
       break;
     }
     case "conversation_rewind_undone": {
@@ -579,6 +599,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       }
       r.ranges = r.ranges.filter((a) => a.rewind !== p.rewind_seq);
       remark(v);
+      retodo(v);
       break;
     }
     case "peers_skipped":
@@ -603,6 +624,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (p.reply != null) item.reply = p.reply;
       if (p.images?.length) item.images = p.images;
       if (p.queued) item.queued = { seq: e.seq, read: false };
+      else rw(v).messages.set(e.seq, p.turn_id);
       if (p.triggers?.length) item.triggers = p.triggers;
       if (p.tags?.length) item.tags = p.tags;
       pushItem(v, e.seq, item);
@@ -915,6 +937,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
     case "todo_updated": {
       // The whole list each time; an empty one is no list (serde omits it).
       const items: TodoItem[] = p.items ?? [];
+      rw(v).todos.push([e.seq, items]);
       if (items.length) v.todo = items;
       else delete v.todo;
       break;

@@ -5513,6 +5513,28 @@ impl TurnHost for Session {
             return Ok(Vec::new());
         };
         let queued = std::mem::take(&mut *self.bg_queue.lock().unwrap_or_else(|p| p.into_inner()));
+        // The end of a command a rewound turn started is not the model's
+        // to read (X.46): recorded as not delivered, outside the history.
+        let queued = if queued.is_empty() {
+            queued
+        } else {
+            // Only the kinds the rule reads: the whole log holds every
+            // command's output, and reading it here for each turn that has
+            // an end to hand over would cost a second copy of it.
+            let log = match self.read_rewind_kinds().await {
+                Ok(l) => l,
+                Err(e) => {
+                    self.bg_queue
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .extend(queued);
+                    return Err(harness_core::backend::LogError(e));
+                }
+            };
+            let (kept, gone) = rewind_op::split_rewound_ends(&log, queued);
+            self.record_background(gone).await;
+            kept
+        };
         let mut out = Vec::new();
         let mut rest = queued.into_iter();
         while let Some(e) = rest.next() {

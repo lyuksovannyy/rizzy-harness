@@ -13,7 +13,8 @@ The node runs it under the turn slot (`session.rewind`, `session.rewind_undo`, c
 The web fold marks rewound items and the chat draws them muted under one line.
 Tests: `core/src/rewind.rs`, `core/tests/fold_fixture.rs`, `agent-native/tests/rewind.rs`, `node/tests/rewind.rs` (with the restart of B.6), `master/tests/it/rewind_http.rs`, `protocol/tests/rewind_wire.rs`, `cli/tests/background.rs` and `background_agents.rs` (the refusals while background work runs), `web/src/rewind.test.ts`.
 Left for the web pull request: per-message "Rewind to here", the dialog (conversation, files or both, and what is not undone), the prompt back in the composer through `put()`, the collapsed "N turns rewound" block with Undo.
-Left for later: fork; removing rewound text from search and recall (`chat_fts` has no `seq`); editing a message in place.
+Search, recall and the earlier-chats context skip rewound text (the chat's `chat_fts` rows are rebuilt from its visible log when a rewind or an undo is appended); the undo brings it back.
+Left for later: fork; editing a message in place.
 
 ## Invariants
 

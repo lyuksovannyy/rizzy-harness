@@ -1824,14 +1824,30 @@
       "ts_ms": 1700000000118
     },
     {
-      "kind": "turn_ended",
+      "kind": "todo_updated",
       "payload": {
-        "reason": "completed",
+        "call_id": "c-lost",
+        "items": [
+          {
+            "content": "Lost with the rewind",
+            "status": "in_progress"
+          }
+        ],
         "turn_id": "t92"
       },
       "seq": 120,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 1700000000119
+    },
+    {
+      "kind": "turn_ended",
+      "payload": {
+        "reason": "completed",
+        "turn_id": "t92"
+      },
+      "seq": 121,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000120
     },
     {
       "kind": "conversation_rewound",
@@ -1840,9 +1856,9 @@
         "message_seq": 118,
         "turn_id": "t92"
       },
-      "seq": 121,
+      "seq": 122,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000120
+      "ts_ms": 1700000000121
     },
     {
       "kind": "model_retry",
@@ -1855,16 +1871,16 @@
         "turn_id": "t6",
         "wait_ms": 4000
       },
-      "seq": 122,
+      "seq": 123,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000121
+      "ts_ms": 1700000000122
     },
     {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 123,
+      "seq": 124,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -1954,7 +1970,7 @@
     "follow_ups": [
       "t6"
     ],
-    "head_seq": 123,
+    "head_seq": 124,
     "items": [
       {
         "text": "fix the bug",
@@ -2625,7 +2641,7 @@
         "type": "turn_end"
       },
       {
-        "rewound": 121,
+        "rewound": 122,
         "text": "Then lose this",
         "turn_id": "t92",
         "type": "user"
@@ -2634,14 +2650,14 @@
         "author": null,
         "done": true,
         "message_id": "m-t92",
-        "rewound": 121,
+        "rewound": 122,
         "text": "Lost.",
         "type": "assistant",
         "variant": null
       },
       {
         "reason": "completed",
-        "rewound": 121,
+        "rewound": 122,
         "turn_id": "t92",
         "type": "turn_end"
       }
@@ -2684,7 +2700,7 @@
         "can_undo": true,
         "files": true,
         "message_seq": 118,
-        "seq": 121,
+        "seq": 122,
         "turn_id": "t92",
         "turns": 1,
         "undone": false

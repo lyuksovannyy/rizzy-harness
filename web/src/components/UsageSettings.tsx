@@ -25,40 +25,42 @@ function Table(props: { title: string; group: PricedGroup }) {
   return (
     <div className="card stack usage-group">
       <h4>{props.title}</h4>
-      <table className="users usage-table">
-        <thead>
-          <tr>
-            <th>{t("usage.model")}</th>
-            <th>{t("usage.input")}</th>
-            <th>{t("usage.output")}</th>
-            <th>{t("usage.cached")}</th>
-            <th>{t("usage.turns")}</th>
-            <th>{t("usage.cost")}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {g.models.map((m) => (
-            <tr key={m.row.model}>
-              <td>{m.row.model}</td>
-              <td>{n(m.row.input_tokens)}</td>
-              <td>{n(m.row.output_tokens)}</td>
-              <td>{n(m.row.cache_read_tokens)}</td>
-              <td>{n(m.row.turns)}</td>
-              <td>{m.cost ? <span title={m.cost.hint}>{m.cost.text}</span> : "–"}</td>
+      <div className="usage-scroll">
+        <table className="users usage-table">
+          <thead>
+            <tr>
+              <th>{t("usage.model")}</th>
+              <th>{t("usage.input")}</th>
+              <th>{t("usage.output")}</th>
+              <th>{t("usage.cached")}</th>
+              <th>{t("usage.turns")}</th>
+              <th>{t("usage.cost")}</th>
             </tr>
-          ))}
-        </tbody>
-        <tfoot>
-          <tr>
-            <th>{t("usage.total")}</th>
-            <td>{n(g.source.input_tokens)}</td>
-            <td>{n(g.source.output_tokens)}</td>
-            <td>{n(g.source.cache_read_tokens)}</td>
-            <td>{n(g.source.turns)}</td>
-            <td>{g.cost ? <span title={g.cost.hint}>{g.cost.text}</span> : "–"}</td>
-          </tr>
-        </tfoot>
-      </table>
+          </thead>
+          <tbody>
+            {g.models.map((m) => (
+              <tr key={m.row.model}>
+                <td>{m.row.model}</td>
+                <td>{n(m.row.input_tokens)}</td>
+                <td>{n(m.row.output_tokens)}</td>
+                <td>{n(m.row.cache_read_tokens)}</td>
+                <td>{n(m.row.turns)}</td>
+                <td>{m.cost ? <span title={m.cost.hint}>{m.cost.text}</span> : "–"}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr>
+              <th>{t("usage.total")}</th>
+              <td>{n(g.source.input_tokens)}</td>
+              <td>{n(g.source.output_tokens)}</td>
+              <td>{n(g.source.cache_read_tokens)}</td>
+              <td>{n(g.source.turns)}</td>
+              <td>{g.cost ? <span title={g.cost.hint}>{g.cost.text}</span> : "–"}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
     </div>
   );
 }

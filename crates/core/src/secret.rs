@@ -56,6 +56,18 @@ impl SecretSet {
         }
     }
 
+    /// Whether a redacted value could be written as a JSON number, whole
+    /// or as a part of one: it is made of digits and the few signs a
+    /// number is written with. Only then does the event scrubber look at
+    /// numbers.
+    pub(crate) fn any_numeric(&self) -> bool {
+        let set = self.0.read().unwrap_or_else(|p| p.into_inner());
+        live(&set).iter().any(|s| {
+            s.iter()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'+' | b'e' | b'E'))
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.read().unwrap_or_else(|p| p.into_inner()).is_empty()
     }
@@ -267,6 +279,23 @@ pub fn scrub(text: &str, secrets: &[Secret<String>]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_value_of_digits_and_number_signs_could_be_a_number() {
+        let numeric = |v: &str| SecretSet::new(vec![Secret::new(v.into())]).any_numeric();
+        assert!(numeric("12345678"));
+        assert!(numeric("-1234.5e+10"));
+        assert!(!numeric("12345678-abc"));
+        assert!(!numeric("sk-12345678"));
+        // Too short to be redacted at all.
+        assert!(!numeric("1234567"));
+        let mixed = SecretSet::new(vec![
+            Secret::new("not-a-number".into()),
+            Secret::new("0000000000".into()),
+        ]);
+        assert!(mixed.any_numeric());
+        assert!(!SecretSet::new(vec![]).any_numeric());
+    }
 
     #[test]
     fn debug_is_redacted() {

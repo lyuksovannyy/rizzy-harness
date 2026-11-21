@@ -3,11 +3,12 @@
 //! and `node.db` (`Store`, one schema) and `memory.db` (`SqliteMemory`).
 //!
 //! Migration `k` (1-based) takes a database from version `k - 1` to `k`.
-//! Migration 1 is the whole schema; a fresh file is version 0 and gets all of
-//! them. Before the first tag migration 1 is still edited in place and dev
-//! data directories are wiped (PLAN.md §0); from the tag on a released
-//! migration never changes, which `check_recorded` enforces against the
-//! schema recorded per version in the crate's `schema/` folder.
+//! Migration 1 is the whole schema as it was frozen on 2026-11-21 (PLAN.md
+//! §0: the owner's decision that a data directory in use is never wiped
+//! again); a fresh file is version 0 and gets all of them. A recorded
+//! migration never changes: every schema change is a new migration, which
+//! `check_recorded` enforces against the schema recorded per version in
+//! the crate's `schema/` folder.
 //!
 //! Rules this keeps:
 //! - A database from a newer build (a version this build does not know) is
@@ -90,13 +91,13 @@ pub enum MigrateError {
         parent: String,
     },
     /// The version is one this build knows, the schema is not that
-    /// version's: a file from before the first release, another kind of
-    /// database (a memory.db in place of a node.db), or one edited by hand.
+    /// version's: a file from a development build older than the frozen
+    /// version 1 (before 2026-11-19), another kind of database (a
+    /// memory.db in place of a node.db), or one edited by hand.
     #[error(
-        "{db} does not match schema version {version} (a database from before the first release, \
-         another kind of file, or one changed by hand). It was not changed. Before the first \
-         release a schema change is not migrated: remove this data directory (or move it aside) \
-         and start again"
+        "{db} does not match schema version {version} (a database from a development build older \
+         than schema version 1, another kind of file, or one changed by hand). It was not \
+         changed, and it cannot be migrated: move this data directory aside and start again"
     )]
     Mismatch { db: String, version: i64 },
     /// The file was locked past the busy timeout: for the version read

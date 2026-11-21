@@ -183,6 +183,23 @@ describe("the choice in the composer's place", () => {
     expect(box().selectionStart).toBe(3);
   });
 
+  test("two calls asked one after the other: the field still comes back after the second answer", async () => {
+    await show(view([]));
+    typeInto(box(), "a line being typed");
+    act(() => box().focus());
+    await show(view([tool(1)]));
+    // The first is answered; the field is back for a moment, then the browser
+    // drops focus from it as the second choice hides it again.
+    await show(view([tool(1, { decision: "allow", by: "user" })]));
+    act(() => (document.activeElement as HTMLElement | null)?.blur());
+    await show(view([tool(1, { decision: "allow", by: "user" }), tool(2)]));
+    // A button of the choice is clicked and unmounted: focus is on the page.
+    act(() => (document.activeElement as HTMLElement | null)?.blur());
+    await show(view([tool(1, { decision: "allow", by: "user" }), tool(2, { decision: "deny", by: "user" })]));
+    expect(choice()).toBeNull();
+    expect(document.activeElement).toBe(box());
+  });
+
   test("a person who was not typing in the box does not have focus pulled to it", async () => {
     await show(view([tool(1)]));
     const other = document.createElement("button");

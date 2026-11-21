@@ -2079,6 +2079,9 @@ pub fn rebuild_spans(
                 }
                 if let Some(m) = last {
                     close_open(&mut out, &mut open);
+                    if let Some(line) = rewind_lines.get(&e.seq) {
+                        out.push(ChatMsg::Note(line.clone()));
+                    }
                     mark(&mut spans, out.len(), &d.turn_id);
                     let b = block(&d.turn_id);
                     let text = context::opening(
@@ -2208,6 +2211,11 @@ pub fn rebuild_spans(
             }) => {
                 close_open(&mut out, &mut open);
                 opening = None;
+                // After a rewind that kept the files: the opening takes it
+                // with the notes before it (the loop puts it there too).
+                if let Some(line) = rewind_lines.get(&e.seq) {
+                    out.push(ChatMsg::Note(line.clone()));
+                }
                 provider::open_callback(&mut out, &ids);
                 // The opening took the notes before it into itself: the
                 // turn begins where it stands.
@@ -2235,6 +2243,9 @@ pub fn rebuild_spans(
             }) => {
                 close_open(&mut out, &mut open);
                 opening = None;
+                if let Some(line) = rewind_lines.get(&e.seq) {
+                    out.push(ChatMsg::Note(line.clone()));
+                }
                 let notes = provider::take_notes(&mut out);
                 let at = out.len();
                 while spans.last().is_some_and(|s| s.start >= at) {
@@ -2263,6 +2274,9 @@ pub fn rebuild_spans(
             }) => {
                 close_open(&mut out, &mut open);
                 opening = None;
+                if let Some(line) = rewind_lines.get(&e.seq) {
+                    out.push(ChatMsg::Note(line.clone()));
+                }
                 let notes = provider::take_notes(&mut out);
                 let at = out.len();
                 while spans.last().is_some_and(|s| s.start >= at) {
@@ -3199,6 +3213,14 @@ impl NativeBackend {
                 (m, spans)
             };
         let (mut messages, mut spans) = history_msgs(summary.as_deref(), recent, plan.as_ref());
+        // The first turn after a rewind that kept the files, a callback, an
+        // agent a message called or a retry too: the line stands among the
+        // notes the opening takes into itself (the rebuild puts it there).
+        if (callback.is_some() || retry.is_some() || called.is_some())
+            && let Some(line) = &rewind_line
+        {
+            messages.push(ChatMsg::Note(line.clone()));
+        }
         // The opening as the loop sends it and the log rebuilds it.
         let callback_base = callback.as_ref().map(|ids| {
             provider::open_callback(&mut messages, ids);

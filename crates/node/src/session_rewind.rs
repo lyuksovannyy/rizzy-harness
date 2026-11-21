@@ -205,12 +205,29 @@ impl Session {
         ))
     }
 
-    async fn read_log(&self) -> Result<Vec<RawEvent>, String> {
+    pub(super) async fn read_log(&self) -> Result<Vec<RawEvent>, String> {
         let id = self.id;
         self.node
             .cfg
             .store
             .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// The log cut to what [`split_rewound_ends`] reads: the kinds of the
+    /// rewind rule ([`rewind::KINDS`]) and `background_started`, filtered
+    /// in SQL, so no tool output and no delta is read or parsed.
+    pub(super) async fn read_rewind_kinds(&self) -> Result<Vec<RawEvent>, String> {
+        let id = self.id;
+        self.node
+            .cfg
+            .store
+            .call(move |s| {
+                let mut kinds: Vec<&str> = rewind::KINDS.to_vec();
+                kinds.push("background_started");
+                s.events_since_turn_at(id, i64::MIN, &kinds)
+            })
             .await
             .map_err(|e| e.to_string())
     }
@@ -224,6 +241,17 @@ impl Session {
             return;
         };
         *self.pending.lock().unwrap_or_else(|p| p.into_inner()) = unread_visible(&history);
+        // An end that was in the channel for a command a rewound turn
+        // started is recorded now, not delivered: the model is not handed
+        // its output, whichever turn comes next.
+        let _gate = self.bg_gate.lock().await;
+        let queued = std::mem::take(&mut *self.bg_queue.lock().unwrap_or_else(|p| p.into_inner()));
+        let (kept, gone) = split_rewound_ends(&history, queued);
+        self.bg_queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .extend(kept);
+        self.record_background(gone).await;
         *self
             .queued_context
             .lock()
@@ -249,6 +277,31 @@ fn files_turn(history: &[RawEvent], view: &SessionView, target: &rewind::Target)
             .get(t)
             .is_some_and(|c| c.before.is_some() && !c.restored)
     })
+}
+
+/// `ends`, the ends of background commands that came and are not recorded
+/// yet, as (kept, rewound): the rewound ones are of a command whose
+/// `background_started` a rewind of `history` holds. Their output belongs
+/// to a turn the model no longer has, so the next turn must not hand it
+/// over (the end is still recorded, as not delivered).
+pub(crate) fn split_rewound_ends(
+    history: &[RawEvent],
+    ends: Vec<harness_tools::background::Ended>,
+) -> (
+    Vec<harness_tools::background::Ended>,
+    Vec<harness_tools::background::Ended>,
+) {
+    let ranges = rewind::rewound(history);
+    if ranges.is_empty() {
+        return (ends, Vec::new());
+    }
+    let gone: std::collections::HashSet<&str> = history
+        .iter()
+        .filter(|e| e.kind == "background_started" && ranges.holds(e.seq))
+        .filter_map(|e| e.payload.get("bg_id")?.as_str())
+        .collect();
+    ends.into_iter()
+        .partition(|e| !gone.contains(e.bg_id.as_str()))
 }
 
 /// The messages sent during a turn that nothing has read, as the chat
@@ -297,6 +350,73 @@ mod tests {
             retry: None,
             continued_by: None,
         })
+    }
+
+    fn ended(bg_id: &str) -> harness_tools::background::Ended {
+        harness_tools::background::Ended {
+            bg_id: bg_id.into(),
+            reason: harness_core::event::BackgroundReason::Exited,
+            exit_code: Some(0),
+            signal: None,
+            confirmed: harness_core::event::BackgroundConfirmed::Ended,
+            ran_ms: 5,
+            output_bytes: 9,
+            tail: "SECRET-OF-A-REWOUND-TURN".into(),
+            tail_cut: false,
+        }
+    }
+
+    fn bg_started(turn: &str, bg: &str) -> EventKind {
+        EventKind::BackgroundStarted(harness_core::event::BackgroundStarted {
+            bg_id: bg.into(),
+            call_id: "c".into(),
+            turn_id: turn.into(),
+            timeout_s: 60,
+            ends_by_ms: 0,
+            child: None,
+        })
+    }
+
+    /// A command a rewound turn started exited before the rewind and its
+    /// end was still in the channel: the next turn must not be handed its
+    /// output. The end of a command the visible turns started goes on being
+    /// handed over, and with no rewind nothing is split. (A unit test on
+    /// the selection: the window between the exit and the node's reading
+    /// of the channel cannot be timed from outside.)
+    #[test]
+    fn the_end_of_a_rewound_turns_command_is_not_handed_to_the_model() {
+        let mut kinds = vec![
+            started("t1"),
+            said("t1", "one", false),
+            bg_started("t1", "bg-1"),
+            started("t2"),
+            said("t2", "two", false),
+            bg_started("t2", "bg-2"),
+        ];
+        let plain = log(kinds.clone());
+        let (kept, gone) = split_rewound_ends(&plain, vec![ended("bg-1"), ended("bg-2")]);
+        assert_eq!((kept.len(), gone.len()), (2, 0), "no rewind");
+        kinds.push(EventKind::ConversationRewound(ConversationRewound {
+            message_seq: 5,
+            turn_id: "t2".into(),
+            files: false,
+        }));
+        let l = log(kinds.clone());
+        let (kept, gone) = split_rewound_ends(&l, vec![ended("bg-1"), ended("bg-2")]);
+        assert_eq!(
+            kept.iter().map(|e| e.bg_id.as_str()).collect::<Vec<_>>(),
+            ["bg-1"]
+        );
+        assert_eq!(
+            gone.iter().map(|e| e.bg_id.as_str()).collect::<Vec<_>>(),
+            ["bg-2"]
+        );
+        // Put back: both are the model's again.
+        kinds.push(EventKind::ConversationRewindUndone(
+            ConversationRewindUndone { rewind_seq: 7 },
+        ));
+        let (kept, gone) = split_rewound_ends(&log(kinds), vec![ended("bg-1"), ended("bg-2")]);
+        assert_eq!((kept.len(), gone.len()), (2, 0));
     }
 
     /// A message the person sent while a turn ran, which the turn never

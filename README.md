@@ -4,17 +4,17 @@
 [![image](https://img.shields.io/badge/ghcr.io-rizzy--harness-blue?logo=docker)](https://github.com/lyuksovannyy/rizzy-harness/pkgs/container/rizzy-harness)
 [![release](https://img.shields.io/github/v/release/lyuksovannyy/rizzy-harness?include_prereleases&sort=semver)](https://github.com/lyuksovannyy/rizzy-harness/releases)
 
-> **Pre-release.** There is no tagged release and no upgrade path yet: until
-> the first tag the data directory's format still changes in place, so an
-> update can require wiping it. Each database records its schema version, and
-> a build refuses to start on one it would misread, naming the file and
-> leaving it unchanged. A database a newer build wrote (a downgrade, a rolled
-> back update) means: run that build or a newer one; the data is intact. A
-> database whose tables are not those of its version, including one from
-> before schema versions whose tables are not exactly version 1's (a data
-> directory from an earlier pre-release commit), means, until the first tag:
-> remove the data directory (or move it aside) and start again. Do not keep
-> anything in it you cannot lose. A security
+> **Pre-release.** There is no tagged release yet. A data directory is kept
+> across updates all the same: each database records its schema version, and
+> a newer build migrates it when it starts (one transaction per file; a
+> failure leaves the file as it was). A build refuses to start on a database
+> it would misread, naming the file and leaving it unchanged. A database a
+> newer build wrote (a downgrade, a rolled back update) means: run that
+> build or a newer one; the data is intact. A database whose tables are not
+> those of its version (a data directory from a development build before
+> 19 November 2026, or a file changed by hand) cannot be migrated: move the
+> data directory aside and start again. Keep a copy of anything in it you
+> cannot lose: migrations are tested, and this is still a pre-release. A security
 > review ([`AUDIT.md`](AUDIT.md)) is being worked through in
 > [`FIX_PLAN.md`](FIX_PLAN.md); until its Phase 2 is done, run it on
 > `127.0.0.1` for yourself only.
@@ -284,17 +284,19 @@ rewound, and **you can put them back until you send the next message**. You
 choose whether the files go back too, as **Rewind files to before this turn**
 does today (refused, with the reason, and nothing rewound, if you edited a file
 since or another chat worked in the folder; **Undo anyway** is the same
-`force`); if you leave the files, the agent's next message tells it which
-files the removed turns changed and that they are as they were left. A rewind
+`force`); if you leave the files, the agent's next turn (whatever starts it)
+is told the conversation was taken back and, when the removed turns still
+changed files, which ones and that they are as they were left. A rewind
 is refused while an answer, a `/compact` or a background command or
 sub-agent of the chat is running, in a sub-agent's chat, to a message that a
 summary already replaced (compacted chats cannot be taken back past the
 summary), and to a message you sent while an answer was running (take the
 chat back to the message that started that answer). **It does not undo:** what
 commands did outside the folder, web requests, memory the agent saved,
-tasks it moved, files it published, other chats it started or the cost; the
-removed text still turns up in search and in what the agent can recall from
-earlier chats; and putting a rewind back never changes files. Only you can do
+tasks it moved, files it published, other chats it started or the cost; and
+putting a rewind back never changes files. The removed text leaves search and
+what the agent can recall from earlier chats (and comes back with the undo).
+Only you can do
 it, never the agent. The buttons (per message "Rewind to here", the choice of
 conversation, files or both, the prompt back in the box) come with the next
 change; this version has the server side (`POST /api/sessions/{id}/rewind` with

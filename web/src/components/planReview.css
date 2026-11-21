@@ -18,7 +18,8 @@
   min-height: 0;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
-  background: var(--bg-2);
+  /* Opaque: the chat must not show through the pane. */
+  background: var(--surface);
   color: var(--fg);
   font-size: var(--text-sm);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
