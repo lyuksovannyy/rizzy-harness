@@ -679,7 +679,8 @@ export default function Conversation(props: {
             {agentic && <NodeBadge node={node} nodeId={nodeId} />}
             {agentic && <ExecBadge mode={meta?.exec_mode} node={node} />}
             {agentic && <span className="mono muted ellipsis">{shownName(meta?.cwd ?? "")}</span>}
-            {view && figures && figures.usage.input_tokens + figures.usage.output_tokens > 0 && (
+            {/* A fresh fork has spent nothing but will send the copied context: show both. */}
+            {view && figures && (figures.usage.input_tokens + figures.usage.output_tokens > 0 || view.context_tokens > 0) && (
               <span
                 className="muted meter"
                 title={`${figures.usage.input_tokens.toLocaleString()} in · ${figures.usage.output_tokens.toLocaleString()} out${
