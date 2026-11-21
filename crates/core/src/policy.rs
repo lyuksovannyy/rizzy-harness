@@ -300,6 +300,11 @@ pub enum Decision {
 /// refuses a longer one and the node cuts one to it.
 pub const MAX_DENY_NOTE: usize = 2000;
 
+/// Files one turn may change before the chat says so (ADOPTION_PLAN T.9,
+/// `docs/undo-and-stash.md` 2.6): a soft limit. Above it the end of the turn
+/// and its undo each add a note; nothing is blocked or delayed.
+pub const RECOMMENDED_MAX_FILES_PER_TURN: usize = 100;
+
 impl Decision {
     pub fn allows(self) -> bool {
         !matches!(self, Decision::Deny)

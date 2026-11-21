@@ -490,6 +490,18 @@ impl Rig {
             .collect()
     }
 
+    /// The `error` events seen since `mark` that are notices (information
+    /// for the person, not a failure), by message.
+    pub fn notices_since(&self, mark: usize) -> Vec<String> {
+        self.seen[mark..]
+            .iter()
+            .filter_map(|e| match e.typed() {
+                Ok(EventKind::Error(m)) if m.notice => Some(m.message),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every file in the folder but `.git`, with its bytes.
     pub fn files(&self) -> BTreeMap<String, Vec<u8>> {
         walkdir::WalkDir::new(&self.ws)

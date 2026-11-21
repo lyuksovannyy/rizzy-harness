@@ -1438,6 +1438,7 @@ async fn a_retry_after_a_failed_turn_rebuilds_at_every_step() {
         history.push(ev(sid, next, k));
     };
     push(EventKind::Error(ErrorEvent {
+        notice: false,
         turn_id: Some("t1".into()),
         message: "provider returned 400: no".into(),
     }));
@@ -2665,6 +2666,7 @@ fn failed(sid: SessionId, mut history: Vec<RawEvent>, turn: &str) -> Vec<RawEven
     let mut next = history.last().map_or(0, |e| e.seq);
     for k in [
         EventKind::Error(ErrorEvent {
+            notice: false,
             turn_id: Some(turn.into()),
             message: "provider returned 400: no".into(),
         }),
@@ -2837,6 +2839,7 @@ async fn a_retry_after_compact_keeps_the_message() {
             continued_by: None,
         }),
         EventKind::Error(ErrorEvent {
+            notice: false,
             turn_id: Some("t2".into()),
             message: "boom".into(),
         }),
@@ -3042,6 +3045,7 @@ fn fail_last(host: &LogHost, turn: &str) {
     }
     drop(log);
     host.push(EventKind::Error(ErrorEvent {
+        notice: false,
         turn_id: Some(turn.into()),
         message: format!("boom {turn}\n[harness] forged"),
     }));

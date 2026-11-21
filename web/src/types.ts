@@ -272,7 +272,8 @@ export type Item =
       /** A `publish` call's file, once the node staged it. */
       staged?: StagedArtifact;
     }
-  | { type: "error"; message: string }
+  /** `notice`: information for the person, not a failure (T.9's file-count notes). */
+  | { type: "error"; message: string; notice?: true }
   | { type: "turn_end"; turn_id: string; reason: TurnEndReason }
   /** The chat ran another agent or model from the message after it. */
   | { type: "agent_changed"; agent: AgentRef; model?: string }

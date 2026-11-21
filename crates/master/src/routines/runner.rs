@@ -946,6 +946,19 @@ async fn block(m: &Master, r: &RoutineRow, run_id: Option<&str>, why: &str, now:
     changed(m, &r.owner_id);
 }
 
+/// How long "run now" and a webhook call wait for the start-up pass before
+/// they answer 503.
+const READY_WAIT: Duration = Duration::from_secs(5);
+
+/// Whether the start-up pass is over, waiting up to [`READY_WAIT`] for it.
+async fn wait_ready(h: &RoutinesHandle) -> bool {
+    let mut ready = h.ready.clone();
+    matches!(
+        tokio::time::timeout(READY_WAIT, ready.wait_for(|r| *r)).await,
+        Ok(Ok(_))
+    )
+}
+
 /// Run now: start a run of `r` that no trigger owns.
 pub(crate) enum Manual {
     Started(String),
@@ -954,6 +967,9 @@ pub(crate) enum Manual {
     /// `overlap` or `cap`.
     Skipped(&'static str),
     Blocked(String),
+    /// The start-up pass is not over after [`READY_WAIT`]: nothing is
+    /// recorded.
+    NotReady,
     Failed,
 }
 
@@ -965,6 +981,12 @@ pub(crate) async fn run_now(m: &Master, r: &RoutineRow, sample: Option<Event>) -
     };
     if m.is_stopping() {
         return Manual::Stopping;
+    }
+    // The start-up pass ends every pending run as restarted: a run recorded
+    // before it is over could be taken by it. Nothing is recorded until it
+    // is (the tick waits the same way).
+    if !wait_ready(h).await {
+        return Manual::NotReady;
     }
     let run = NewRun {
         run_id: new_id(),
@@ -1021,6 +1043,9 @@ pub enum Fired {
     Paused,
     /// The server is stopping: no run is recorded (review A19-2).
     Stopping,
+    /// The start-up pass is not over after [`READY_WAIT`]: nothing is
+    /// recorded, so the sender may call again.
+    NotReady,
     Failed,
 }
 
@@ -1032,6 +1057,12 @@ pub(crate) async fn fire_event(m: &Master, t: &TriggerRow, r: &RoutineRow, event
     };
     if m.is_stopping() {
         return Fired::Stopping;
+    }
+    // As in `run_now`: a run recorded before the start-up pass is over
+    // could be taken by it, and the call's `Idempotency-Key` would then
+    // be spent on a run that never ran.
+    if !wait_ready(h).await {
+        return Fired::NotReady;
     }
     let now = h.clock.now();
     let claim = NewRun {
@@ -1832,5 +1863,157 @@ mod run_usage_tests {
         )
         .await;
         assert_eq!(recorded(&m), None);
+    }
+}
+
+#[cfg(test)]
+mod run_now_ready_tests {
+    use super::*;
+    use std::sync::atomic::AtomicI64;
+
+    use harness_core::Secret;
+    use harness_store::routines::{NewRoutine, RoutineCaps, TriggerRow};
+    use harness_store::{NewUser, Role, Store};
+
+    use crate::auth::Auth;
+    use crate::routines::Clock;
+
+    /// A master with one routine "r" and a scheduler that is installed but
+    /// whose start-up pass has not run: the instant after a start. The
+    /// returned sender is that pass's "done".
+    fn rig() -> (Master, RoutineRow, watch::Sender<bool>) {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_user(&NewUser {
+                user_id: "u1".into(),
+                username: "u1".into(),
+                password_hash: "$argon2id$x".into(),
+                role: Role::Admin,
+                exec_ceiling: harness_core::policy::ExecLevel::None,
+                must_change_password: false,
+            })
+            .unwrap();
+        let ws = store.create_workspace("Team", "u1").unwrap().workspace_id;
+        store
+            .routine_create(
+                &NewRoutine {
+                    routine_id: "r".into(),
+                    workspace_id: ws,
+                    owner_id: "u1".into(),
+                    name: "R".into(),
+                    enabled: true,
+                    spec: r#"{"notify":"always"}"#.into(),
+                    triggers: vec![harness_store::routines::NewTrigger {
+                        trigger_id: "t1".into(),
+                        kind: "webhook".into(),
+                        config: "{}".into(),
+                        next_run_ms: None,
+                        secret_hash: Some("00".into()),
+                    }],
+                },
+                RoutineCaps {
+                    per_user: 25,
+                    per_workspace: 100,
+                },
+                1,
+            )
+            .unwrap();
+        let row = store.routine("r").unwrap().unwrap();
+        let m = Master::new(
+            store,
+            Auth::new(Secret::new("tok".into()), vec!["127.0.0.1:1".into()], false),
+        );
+        let ready = crate::routines::install(&m, Clock::manual(Arc::new(AtomicI64::new(100))))
+            .expect("installed once");
+        (m, row, ready)
+    }
+
+    /// "Run now" in the instant after a start: the handle is set, the
+    /// start-up pass has not run. The run must not be written until that
+    /// pass is over, or the pass takes it (it ends every pending run as
+    /// "the server restarted before the run started").
+    #[tokio::test]
+    async fn run_now_writes_nothing_until_the_startup_pass_is_over() {
+        let (m, row, ready) = rig();
+        let (m2, row2) = (m.clone(), row.clone());
+        let call = tokio::spawn(async move { run_now(&m2, &row2, None).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let runs = m.inner_mirror().runs_page("r", None, 10).unwrap();
+        assert!(
+            runs.is_empty(),
+            "a run was written before the start-up pass: {runs:?}"
+        );
+        // The pass runs and ends; the call goes on.
+        reconcile(&m, true).await;
+        ready.send(true).unwrap();
+        let _ = call.await.unwrap();
+        let rows = m.inner_mirror().runs_page("r", None, 10).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_ne!(
+            rows[0].reason.as_deref(),
+            Some(RESTARTED),
+            "the start-up pass ended the fresh run: {:?}",
+            rows[0]
+        );
+    }
+
+    /// A start-up pass that does not end: "run now" answers that routines
+    /// are not running yet after a bounded wait, and writes nothing.
+    #[tokio::test(start_paused = true)]
+    async fn run_now_answers_not_ready_after_a_bounded_wait() {
+        let (m, row, _ready) = rig();
+        let out = run_now(&m, &row, None).await;
+        assert!(matches!(out, Manual::NotReady));
+        assert_eq!(m.inner_mirror().run_count("r").unwrap(), 0);
+    }
+
+    fn hook(m: &Master) -> (TriggerRow, RoutineRow) {
+        let store = m.inner_mirror();
+        let t = store.triggers("r").unwrap().remove(0);
+        (t, store.routine("r").unwrap().unwrap())
+    }
+
+    fn call() -> Event {
+        Event {
+            kind: "webhook",
+            data: json!({"body": {"text": "hi"}}),
+            dedupe_key: None,
+            size: 2,
+            sha256: "00".into(),
+        }
+    }
+
+    /// The webhook path has the same window as "Run now": a call in the
+    /// instant after a start must not write its run before the start-up
+    /// pass is over either.
+    #[tokio::test]
+    async fn a_webhook_writes_nothing_until_the_startup_pass_is_over() {
+        let (m, _row, ready) = rig();
+        let (m2, (t, r)) = (m.clone(), hook(&m));
+        let fired = tokio::spawn(async move { fire_event(&m2, &t, &r, call()).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let runs = m.inner_mirror().runs_page("r", None, 10).unwrap();
+        assert!(
+            runs.is_empty(),
+            "a run was written before the start-up pass: {runs:?}"
+        );
+        reconcile(&m, true).await;
+        ready.send(true).unwrap();
+        let _ = fired.await.unwrap();
+        let rows = m.inner_mirror().runs_page("r", None, 10).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_ne!(rows[0].reason.as_deref(), Some(RESTARTED), "{:?}", rows[0]);
+    }
+
+    /// A start-up pass that does not end: the webhook answers not ready
+    /// after the bounded wait (the route makes it a 503 the sender retries)
+    /// and writes nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_webhook_answers_not_ready_after_a_bounded_wait() {
+        let (m, _row, _ready) = rig();
+        let (t, r) = hook(&m);
+        let out = fire_event(&m, &t, &r, call()).await;
+        assert!(matches!(out, Fired::NotReady));
+        assert_eq!(m.inner_mirror().run_count("r").unwrap(), 0);
     }
 }

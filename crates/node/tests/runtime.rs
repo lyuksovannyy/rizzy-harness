@@ -1895,6 +1895,7 @@ async fn ack_time_on_a_long_session() {
                     created.clone()
                 } else {
                     EventKind::Error(ErrorEvent {
+                        notice: false,
                         turn_id: None,
                         message: "x".repeat(200),
                     })

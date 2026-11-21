@@ -577,7 +577,10 @@ status, duration, tokens and the first sentence of its answer.
   when you save (Rotate makes a new one). The server binds loopback
   (`127.0.0.1` and `[::1]`) by default, so a webhook reaches it only from this machine, over
   [WireGuard](#using-it-from-other-devices-wireguard), or through a TLS proxy
-  whose Host is allowed (`--allowed-host`).
+  whose Host is allowed (`--allowed-host`). In the first seconds after the
+  server starts, a call waits for the routines' start-up pass and, if it is not
+  over after five seconds, gets `503` ("routines are not running yet, try
+  again") with nothing recorded: send it again.
 - **What a webhook sends is untrusted.** Its data only fills the prompt; that
   chat, and every later turn in it, gets no memory (no recall, no
   `remember`), no `web_fetch` or `web_search`, and a banner saying so.
@@ -1347,6 +1350,10 @@ the turn changed beside the chat: each file with its added and removed lines
 (three lines of context, line numbers, `+` and `−`), renames as renames,
 binary files and files over 512 KiB named with their sizes, hidden characters
 shown as `<U+…>` codes. "Include later turns" shows what "Rewind" would undo.
+A turn that changed more than 100 files adds a note at its end ("This turn changed
+143 files, more than the recommended 100. Undoing it will put back 143 files."), and
+its undo adds one too, drawn as a quiet note, not a red error; nothing is blocked (nested repositories and ignored files are not
+counted).
 When your repository's `HEAD` moved while a turn ran (a `git checkout`, a
 commit, a reset), the turn's row and the changes panel say so in one sentence:
 for example "While this turn ran, the checked-out branch changed from `main`

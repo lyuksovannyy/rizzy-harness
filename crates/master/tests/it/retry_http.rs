@@ -118,6 +118,7 @@ impl Fake {
             self.emit(
                 sid,
                 EventKind::Error(ErrorEvent {
+                    notice: false,
                     turn_id: Some(t.clone()),
                     message: "the model is not available".into(),
                 }),

@@ -2104,6 +2104,17 @@ pre.diff .del {
   border-left: 2px solid var(--bad);
   padding-left: 10px;
 }
+/* A notice (T.9's file-count notes) is information, not a failure: muted,
+   and not the home page's red `.notice` box that shares the class name. */
+.msg.notice {
+  display: block;
+  padding: 0 0 0 10px;
+  background: none;
+  border-left: 2px solid var(--line);
+  border-radius: 0;
+  color: var(--fg-2);
+  font-size: var(--text-sm);
+}
 .divider {
   text-align: center;
   font-size: var(--text-xs);

@@ -34,7 +34,7 @@ export function sessionFace(view: SessionView | undefined | null): Exclude<Avata
   }
   for (let i = items.length - 1; i >= 0; i--) {
     const it = items[i]!;
-    if (it.type === "error" || (it.type === "turn_end" && it.reason === "error")) return "error";
+    if ((it.type === "error" && !it.notice) || (it.type === "turn_end" && it.reason === "error")) return "error";
     if (it.type === "turn_end" || turnStart(items, i) || it.type === "assistant" || it.type === "tool") break;
   }
   return asking(items) ? "unsure" : "idle";

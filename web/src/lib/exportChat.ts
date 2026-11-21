@@ -122,7 +122,7 @@ export function chatMarkdown(view: SessionView, title: string, opts: ExportOptio
       case "thinking":
         break;
       case "error":
-        out.push(`> Error: ${oneLine(it.message, 500)}`, "");
+        out.push(it.notice ? `> ${oneLine(it.message, 500)}` : `> Error: ${oneLine(it.message, 500)}`, "");
         break;
       case "turn_end":
         if (it.reason !== "completed") out.push(`_Turn ${it.reason}._`, "");

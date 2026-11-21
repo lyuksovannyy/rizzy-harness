@@ -169,6 +169,18 @@ pub fn start(m: &Master) {
 /// and the timeout sweep), which tests leave off to call `tick` and
 /// `sweep_timeouts` themselves.
 pub fn start_with(m: &Master, clock: Clock, spawn_loops: bool) {
+    let Some(ready_tx) = install(m, clock) else {
+        return;
+    };
+    runner::start_watcher(m, ready_tx);
+    if spawn_loops {
+        runner::start_loops(m);
+    }
+}
+
+/// Set the scheduler's handle, not ready; the sender says when the start-up
+/// pass is over. `None` when one was installed already.
+fn install(m: &Master, clock: Clock) -> Option<watch::Sender<bool>> {
     let (ready_tx, ready) = watch::channel(false);
     let slots = Arc::new(Semaphore::new(config(m).max_concurrent_runs.max(1) as usize));
     let handle = RoutinesHandle {
@@ -183,12 +195,9 @@ pub fn start_with(m: &Master, clock: Clock, spawn_loops: bool) {
     };
     if m.inner.routines.set(handle).is_err() {
         tracing::warn!("routines were started twice; keeping the first scheduler");
-        return;
+        return None;
     }
-    runner::start_watcher(m, ready_tx);
-    if spawn_loops {
-        runner::start_loops(m);
-    }
+    Some(ready_tx)
 }
 
 /// The scheduler, once `start` ran.
@@ -200,6 +209,10 @@ pub fn handle(m: &Master) -> Option<&RoutinesHandle> {
 /// What "run now" and a webhook call get while the server stops (503): no
 /// run is recorded, so nothing is left to end at the next start.
 pub const STOPPING: &str = "the server is stopping: try again once it is back";
+
+/// What "run now" gets (503) when the scheduler's start-up pass has not
+/// ended after a few seconds.
+pub const NOT_READY: &str = "routines are not running yet, try again";
 
 pub(crate) const TOKEN_CANNOT_OWN: &str = "The API token can read routines but cannot own one";
 

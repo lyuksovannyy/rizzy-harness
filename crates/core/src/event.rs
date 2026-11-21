@@ -2320,6 +2320,13 @@ pub struct ErrorEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     pub message: String,
+    /// A notice is information for the person, not a failure: the chat
+    /// draws it muted, and nothing that looks for a turn's error (the
+    /// retry, a sub-agent's report, the avatar's face) reads it as one.
+    /// Absent, which is every event written before this field, means a
+    /// failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notice: bool,
 }
 
 #[cfg(test)]
@@ -3311,5 +3318,30 @@ mod browser_tests {
         let mut other = serde_json::json!({"thinking": {"blocks": [{"signature": "S"}]}});
         for_browser("tool_call_finished", &mut other);
         assert_eq!(other["thinking"]["blocks"][0]["signature"], "S");
+    }
+
+    /// A notice is information for the person, not a failure: the flag is
+    /// written only when set, and an event written before it existed reads
+    /// as a failure.
+    #[test]
+    fn an_error_event_is_a_failure_unless_it_says_it_is_a_notice() {
+        let old: ErrorEvent = serde_json::from_value(serde_json::json!({"message": "x"})).unwrap();
+        assert!(!old.notice);
+        let failure = ErrorEvent {
+            turn_id: None,
+            message: "x".into(),
+            notice: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&failure).unwrap(),
+            serde_json::json!({"message": "x"})
+        );
+        let notice = ErrorEvent {
+            notice: true,
+            ..failure
+        };
+        let v = serde_json::to_value(&notice).unwrap();
+        assert_eq!(v, serde_json::json!({"message": "x", "notice": true}));
+        assert_eq!(serde_json::from_value::<ErrorEvent>(v).unwrap(), notice);
     }
 }

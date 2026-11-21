@@ -2797,6 +2797,7 @@ impl NativeBackend {
                     for n in &loaded.notes {
                         if host
                             .emit(EventKind::Error(harness_core::event::ErrorEvent {
+                                notice: false,
                                 turn_id: Some(ctx.turn_id.clone()),
                                 message: n.clone(),
                             }))
@@ -2836,6 +2837,7 @@ impl NativeBackend {
                 let n = self.config.secrets.scrub(&n);
                 if host
                     .emit(EventKind::Error(harness_core::event::ErrorEvent {
+                        notice: false,
                         turn_id: Some(ctx.turn_id.clone()),
                         message: n.clone(),
                     }))

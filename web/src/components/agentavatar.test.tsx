@@ -294,6 +294,12 @@ describe("the face follows the session", () => {
     expect(sessionFace(view([user, tool(false)], { running_turn: "t", pending_approvals: ["a"] }))).toBe("unsure");
   });
 
+  test("a notice after a completed turn is not an error face", () => {
+    const done: Item[] = [user, reply({ done: true }), { type: "turn_end", turn_id: "t", reason: "completed" }];
+    expect(sessionFace(view([...done, { type: "error", message: "This undo put back 150 files.", notice: true }]))).toBe("idle");
+    expect(sessionFace(view([...done, { type: "error", message: "x" }]))).toBe("error");
+  });
+
   test("settled: an error, a question waiting, or idle", () => {
     expect(sessionFace(undefined)).toBe("idle");
     expect(sessionFace(view([user, reply({ done: true }), { type: "turn_end", turn_id: "t", reason: "completed" }]))).toBe("idle");
