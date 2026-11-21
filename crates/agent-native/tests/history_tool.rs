@@ -604,3 +604,60 @@ async fn missing_bytes_and_a_wrong_number_are_said() {
         "{range}"
     );
 }
+
+fn system_of(req: &ChatRequest) -> String {
+    match &req.messages[0] {
+        ChatMsg::System(s) => s.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The summary's line tells the model that what it replaces can be read in
+/// full with `history`, only while the tool is offered; the same bytes on
+/// the next turn (the cache prefix does not move) and no sentence without.
+#[tokio::test]
+async fn the_summary_says_where_the_rest_is_only_when_the_tool_is_on() {
+    let ws = tempfile::tempdir().unwrap();
+    let mut systems = Vec::new();
+    for on in [true, true, false] {
+        let host = Host::new();
+        host.old_turn(1, "first", "a result", vec![]);
+        host.summarize("The first turn read a file.");
+        let p = Model::new("history", vec![]);
+        turn(
+            &backend(p.clone()),
+            &host,
+            ws.path(),
+            agent(false, on),
+            "t2",
+            "go on",
+        )
+        .await;
+        systems.push(system_of(&p.requests()[0]));
+    }
+    let line = "Summary of the earlier conversation (the messages it replaces can be read \
+                in full with the `history` tool):\nThe first turn read a file.";
+    assert!(systems[0].contains(line), "{}", systems[0]);
+    assert_eq!(systems[0], systems[1]);
+    assert!(!systems[2].contains("history"), "{}", systems[2]);
+    assert!(
+        systems[2].contains("Summary of the earlier conversation:\nThe first turn read a file.")
+    );
+}
+
+/// A tool the node does not have, or denies, is not promised.
+#[tokio::test]
+async fn the_summary_does_not_promise_a_tool_the_node_lacks() {
+    let ws = tempfile::tempdir().unwrap();
+    let host = Host::new();
+    host.old_turn(1, "first", "a result", vec![]);
+    host.summarize("The first turn read a file.");
+    let p = Model::new("history", vec![]);
+    let b = NativeBackend::new(
+        p.clone(),
+        vec![Arc::new(harness_tools::Read)],
+        NativeConfig::default(),
+    );
+    turn(&b, &host, ws.path(), agent(false, true), "t2", "go on").await;
+    assert!(!system_of(&p.requests()[0]).contains("history"));
+}

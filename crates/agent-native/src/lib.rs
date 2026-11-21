@@ -2913,6 +2913,15 @@ impl NativeBackend {
                 .tools
                 .iter()
                 .any(|t| t.name() == TODO_TOOL && t.enabled(sv));
+        // Likewise `history` (T91): the summary's line sends the model there
+        // only while this turn can call it (the tool is registered here,
+        // the agent has it and the node does not deny it).
+        let offers_history = agent.is_none_or(|a| a.allows_tool(history::NAME))
+            && !host.tool_denied(history::NAME)
+            && self
+                .tools
+                .iter()
+                .any(|t| t.name() == history::NAME && t.enabled(sv));
         // A callback turn (T.8d step 3) opens with the harness's frame and
         // the ended commands' notes, from the log alone: no person's text,
         // no master's context, no images; its block (instruction files and
@@ -3136,8 +3145,14 @@ impl NativeBackend {
             |summary: Option<&str>, recent: &[RawEvent], plan: Option<&context::Plan>| {
                 let system = match summary {
                     Some(t) => {
-                        let mut s =
-                            format!("{base_system}\n\nSummary of the earlier conversation:\n{t}");
+                        let mut s = format!(
+                            "{base_system}\n\nSummary of the earlier conversation{}:\n{t}",
+                            if offers_history {
+                                history::SUMMARY_NOTE
+                            } else {
+                                ""
+                            }
+                        );
                         let through = recent.first().map_or(u64::MAX, |e| e.seq.saturating_sub(1));
                         if let Some(items) =
                             harness_core::todo::as_of(full, through).filter(|_| offers_todo)

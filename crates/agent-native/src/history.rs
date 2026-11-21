@@ -46,6 +46,10 @@ const LEAD_CHARS: usize = 120;
 const SNIPPET_CHARS: usize = 160;
 /// Characters of an agent's name in a line.
 const WHO_CHARS: usize = 30;
+/// What the summary's line says when the turn can call `history`: the
+/// harness's own words, in the line over the model-written summary.
+pub const SUMMARY_NOTE: &str =
+    " (the messages it replaces can be read in full with the `history` tool)";
 /// What a `history` call's own earlier result is shown as: no copies of
 /// copies.
 pub const EARLIER_READ: &str = "an earlier history read";
