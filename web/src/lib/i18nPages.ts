@@ -11,6 +11,7 @@ export const pages = {
   "time.yesterday": "yesterday {time}",
   "msg.pin": "Pin",
   "msg.unpin": "Unpin",
+  "msg.pinned": "Pinned",
   "msg.pinHint": "Bookmark this message: it is marked in the chat and listed under Pinned. The model is not told.",
   "msg.unpinHint": "Take the bookmark off this message",
   "msg.tokens": "{in} in \u00b7 {out} out",

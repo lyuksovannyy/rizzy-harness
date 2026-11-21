@@ -33,6 +33,7 @@ import type { Live } from "../live";
 import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
 import { AnswerActions } from "./MessageActions";
+import { PinMark, PinnedList } from "./PinnedList";
 import { answerEnds, turnFigures } from "../lib/turnTokens";
 import { rt } from "../md/strings";
 import { showHidden, shownName } from "../md/hidden";
@@ -747,6 +748,7 @@ export default function Conversation(props: {
             <Package size={18} />
           </button>
         )}
+        {view?.pins && <PinnedList sessionId={sessionId} pins={view.pins} canUnpin={!!props.row && !blocked} />}
         <button
           type="button"
           className="icon"
@@ -931,7 +933,8 @@ export default function Conversation(props: {
                   case "assistant": {
                     const final = it.done || i < liveFrom;
                     return (
-                      <div key={i} className={`msg assistant ${!it.done && running ? "streaming" : ""}`} data-msg-seq={it.seq}>
+                      <div key={i} className={`msg assistant ${!it.done && running ? "streaming" : ""}${it.seq !== undefined && pinnedSeqs.has(it.seq) ? " pinned" : ""}`} data-msg-seq={it.seq}>
+                        {it.seq !== undefined && pinnedSeqs.has(it.seq) && <PinMark />}
                         {it.author && it.author !== activeAgent && (
                           <div className="author">
                             {props.agents.some((a) => a.id === it.author) && (
