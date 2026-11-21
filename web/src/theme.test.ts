@@ -359,6 +359,18 @@ describe("theme", () => {
     expect(contrast(theme["--fg-2"]!, inkColour), `--fg-2 over ink ${inkColour}`).toBeGreaterThanOrEqual(4.5);
   });
 
+  // The wall's suggestion phrases (bg/wall.css) are muted text, not texture:
+  // the first sharp tier (alpha 0.68 of --wall-max) must be readable, the nearest
+  // (1.0) must still sit well below body text.
+  test.each(THEMES)("%s: the wall's phrases are readable and still muted", (_, theme, block) => {
+    const wall = Number(declarations(block)["--wall-max"] ?? declarations(darkBlock)["--wall-max"]);
+    expect(wall).toBeGreaterThan(0);
+    const at = (a: number) => contrast(mix(theme["--fg"]!, theme["--bg"]!, wall * a), theme["--bg"]!);
+    expect(at(0.68), "first sharp tier").toBeGreaterThanOrEqual(1.7);
+    expect(at(0.42), "far tier").toBeGreaterThanOrEqual(1.25);
+    expect(at(1), "nearest tier").toBeLessThanOrEqual(4.5);
+  });
+
   // Blur only on the sidebar, menus, dialogs and the palette: never on the
   // transcript, its messages, tool cards, code blocks or tables.
   test("backdrop-filter is used only where the design system puts it", () => {

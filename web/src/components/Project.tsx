@@ -23,6 +23,7 @@ import { PROJECT_ICONS } from "../lib/projectIconSet";
 import { normalizeAccent } from "../lib/appearance";
 import { accentColor, ProjectIcon } from "../lib/projectIcons";
 import { radioKeys, radioTab } from "../lib/radios";
+import { useRevealTab } from "../lib/revealTab";
 import type { Agent, MemoryFact, ModelInfo, NodeInfo, Prefs, SessionRow } from "../types";
 import { Composer, type Submission } from "./Composer";
 import type { HostRight } from "../lib/execModes";
@@ -89,6 +90,7 @@ export default function Project(props: {
   // "no longer exists", and looks again whenever projects change.
   const pending = useSyncExternalStore(pendingProjects.sub, pendingProjects.get).find((p) => p.project_id === props.id);
   const [tab, setTab] = useState<Tab>(props.tab ?? "chats");
+  const tabRow = useRevealTab(tab);
   useEffect(() => {
     if (props.tab) setTab(props.tab);
   }, [props.tab]);
@@ -165,7 +167,7 @@ export default function Project(props: {
           project={{ nodeId: project.settings.node_id, cwd: project.settings.cwd }}
           images={features?.media.vision_images ? { workspace: props.workspaceId } : null}
         />
-        <div className="tabs" role="tablist">
+        <div className="tabs" role="tablist" ref={tabRow}>
           {TABS.filter(([x]) => x !== "artifacts" || artifactsShown).map(([x, label]) => (
             <button key={x} role="tab" aria-selected={tab === x} className={tab === x ? "on" : ""} onClick={() => setTab(x)}>
               {label}

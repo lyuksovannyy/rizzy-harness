@@ -101,6 +101,8 @@
     bottom: 0;
     z-index: 3;
     width: min(320px, 90%);
+    /* Opaque: the chat must not show through the drawer. */
+    background: var(--surface);
     box-shadow: var(--shadow-1);
   }
 }

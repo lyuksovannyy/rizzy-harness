@@ -839,3 +839,21 @@ describe("a sub-agent's chat (X.41)", () => {
     expect(agentsOf).toHaveBeenCalledWith({ workspace: "w2" });
   });
 });
+
+// The shell re-renders the chat on each batch of events, but the folded view
+// is mutated in place: nothing the chat memoises may key on `view.items`.
+describe("a plan arriving after the chat is on screen", () => {
+  test("the plan bar offers the review once the plan's turn has ended, with no remount", async () => {
+    const node = { node_id: "n1", hostname: "box", connected: true, embedded: false, max_approval: "auto" } as unknown as import("../types").NodeInfo;
+    const items: Item[] = [{ type: "user", text: "plan it" } as Item];
+    current = { ...view(items), meta: { ...view(items).meta!, approval_mode: "plan" } } as SessionView;
+    const draw = () => act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow()} nodes={[node]} agents={[]} models={[]} />));
+    await draw();
+    await until(() => host.querySelector(".plan-bar-choice"));
+    expect(host.querySelector(".plan-bar-review")).toBeNull();
+    // Events arrive: the same array and view object, grown in place.
+    current.items.push({ type: "assistant", message_id: "m1", text: "1. Do it", done: true } as Item, { type: "turn_end" } as Item);
+    await draw();
+    expect(host.querySelector(".plan-bar-review")?.textContent).toBe("Review the plan");
+  });
+});

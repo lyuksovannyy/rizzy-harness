@@ -125,10 +125,15 @@ let PAGE = null;
     await p.click('.side-panel button[aria-label="Stop bg-1"]');
     log('after Stop:', (await p.innerText('.side-panel').catch(() => '(panel gone)')).replace(/\s+/g, ' '));
     await waitFor(() => sleeps(BG).length === 0, 'the command is still running after its stop', 5000);
-    const ended = await p.evaluate(async (id) => {
-      const r = await fetch(`/api/sessions/${id}/events?after=0`);
-      return (await r.json()).events.filter((e) => e.kind === 'background_ended').map((e) => e.payload.reason);
-    }, sid);
+    // The process is gone before the node reports it: `background_ended`
+    // follows by up to a second, so poll for it.
+    let ended = [];
+    for (const until = Date.now() + 15000; Date.now() < until && ended.length === 0; await sleep(250)) {
+      ended = await p.evaluate(async (id) => {
+        const r = await fetch(`/api/sessions/${id}/events?after=0`);
+        return (await r.json()).events.filter((e) => e.kind === 'background_ended').map((e) => e.payload.reason);
+      }, sid);
+    }
     check(JSON.stringify(ended) === '["stopped_by_user"]', `the end is the person's (${ended})`);
     // The timeline keeps the end; it started in an earlier turn, so the
     // panel lets it go once ended.
