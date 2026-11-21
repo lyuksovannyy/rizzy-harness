@@ -972,6 +972,63 @@ mod tests {
         }
     }
 
+    /// A path that is a bare string in one variant and an object in
+    /// another (the event schema has none). The class is kept per shape:
+    /// the string's class is not the object's, so the object is taken as
+    /// the struct it is, its field name left alone and its text scrubbed.
+    /// Under one class per path the object would be scrubbed as free
+    /// JSON, the field name with it, and the result would not decode.
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct U {
+        w: W,
+    }
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    #[serde(untagged)]
+    enum W {
+        Bare(String),
+        Obj { longfield: String },
+    }
+
+    fn holds_u(v: Value) -> (bool, Value) {
+        let ok =
+            U::deserialize(&v).is_ok_and(|x| serde_json::to_value(&x).is_ok_and(|back| back == v));
+        (ok, v)
+    }
+
+    #[test]
+    fn a_string_and_an_object_at_one_path_each_have_their_own_class() {
+        let set = SecretSet::new(vec![Secret::new("longfield".into())]);
+        let keep = |_: &str, _: &str| Keep::No;
+        let s = Schema {
+            kind: "u",
+            holds: &holds_u,
+            keep: &keep,
+        };
+        for bare_first in [true, false] {
+            let mut cache = Cache::new();
+            let mut bare = serde_json::json!({ "w": "a longfield" });
+            let mut obj = serde_json::json!({ "w": { "longfield": "a longfield" } });
+            let order: [&mut Value; 2] = if bare_first {
+                [&mut bare, &mut obj]
+            } else {
+                [&mut obj, &mut bare]
+            };
+            for v in order {
+                let out = run(&set, &s, v, &mut cache).ok();
+                assert_eq!(
+                    out,
+                    Some(Outcome::Scrubbed),
+                    "bare first: {bare_first}: {v}"
+                );
+            }
+            assert_eq!(bare, serde_json::json!({ "w": "a [REDACTED]" }));
+            assert_eq!(
+                obj,
+                serde_json::json!({ "w": { "longfield": "a [REDACTED]" } })
+            );
+        }
+    }
+
     #[test]
     fn colliding_keys_are_numbered_not_lost() {
         let set = SecretSet::new(vec![

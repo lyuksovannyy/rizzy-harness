@@ -16,6 +16,7 @@ use std::process::Command;
 use std::sync::{Arc, Barrier};
 
 use harness_core::event::EventKind;
+use harness_core::secret::schema::KEPT;
 use serde_json::{Value, json};
 
 mod common;
@@ -182,8 +183,53 @@ fn the_order_instances_are_met_in_changes_nothing() {
             "{label} no longer decodes: {p}"
         );
         scrubbed += usize::from(p != i.payload);
+        // The secret is gone: what is left of it is at a kept position.
+        let outcome = r["outcome"].as_str().unwrap_or_default();
+        assert!(
+            outcome == "Scrubbed" || outcome == "Clean",
+            "{label}: {outcome}"
+        );
+        let kept = KEPT
+            .iter()
+            .find(|(k, _)| *k == i.kind)
+            .map_or(&[][..], |(_, paths)| *paths);
+        let mut left = vec![];
+        survivors(&p, &mut vec![], &mut left);
+        left.retain(|at| !kept.contains(&at.as_str()));
+        assert!(
+            left.is_empty(),
+            "{label}: the secret is still at {left:?}: {p}"
+        );
     }
     assert!(scrubbed > reference.len() / 2, "most of them had text");
+}
+
+/// The positions of `v`, written as [`KEPT`] writes them, where a string
+/// or a key still holds the secret.
+fn survivors(v: &Value, path: &mut Vec<String>, out: &mut Vec<String>) {
+    let at = |path: &[String]| path.join(".").replace(".[]", "[]");
+    match v {
+        Value::String(s) if s.contains(SECRET) => out.push(at(path)),
+        Value::Array(a) => {
+            for x in a {
+                path.push("[]".into());
+                survivors(x, path, out);
+                path.pop();
+            }
+        }
+        Value::Object(m) => {
+            for (k, x) in m {
+                let held = k.contains(SECRET);
+                path.push(if held { "{}".into() } else { k.clone() });
+                if held {
+                    out.push(at(path));
+                }
+                survivors(x, path, out);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The strictest table: each instance in turn is the very first of its
