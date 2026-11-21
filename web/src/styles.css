@@ -2212,6 +2212,10 @@ pre.diff .del {
   flex-direction: column;
   gap: var(--space-2);
 }
+/* A call whose answer is asked in the composer: the card only says so. */
+.approval-held {
+  padding: 0 14px 10px;
+}
 .approval-note {
   padding: 0 14px 8px;
   font-size: var(--text-xs);

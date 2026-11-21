@@ -20,3 +20,8 @@ test("the plan-review pane has an opaque surface", () => {
 test("the side panel's drawer on a narrow screen has an opaque surface", () => {
   expect(rule(sidePanel, ".side-panel", "@media (max-width: 900px)")).toMatch(/background:\s*var\(--surface\)/);
 });
+
+// A class the markup uses has a rule: the held card's sentence sat on the border.
+test("the tool card's held-approval sentence is padded like the card's other lines", () => {
+  expect(rule(read("../styles.css"), ".approval-held")).toMatch(/padding:\s*0 14px 10px/);
+});
