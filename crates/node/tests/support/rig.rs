@@ -32,6 +32,8 @@ pub struct Rig {
     /// lead's own `deny_skills`.
     pub lead_stored: Vec<harness_core::skills::StoredSkillEntry>,
     pub lead_deny_skills: Vec<String>,
+    /// The lead's own tools in [`Rig::lead_turn`] (`None`: `bash`, `write`).
+    pub lead_tools: Option<Vec<&'static str>>,
     pub dir: tempfile::TempDir,
     pub ws: PathBuf,
     _node: NodeRuntime,
@@ -181,6 +183,7 @@ impl Rig {
             lead_context: None,
             lead_stored: vec![],
             lead_deny_skills: vec![],
+            lead_tools: None,
             dir,
             ws,
             _node: node,
@@ -329,7 +332,7 @@ impl Rig {
     pub fn lead(&self) -> harness_core::agent::AgentSpec {
         let mut lead = Self::spec(
             "lead",
-            &["bash", "write"],
+            self.lead_tools.as_deref().unwrap_or(&["bash", "write"]),
             vec![
                 Self::spec("dev", &["bash", "write"], vec![]),
                 Self::spec("look", &["read", "grep"], vec![]),
@@ -420,13 +423,25 @@ impl Rig {
 
     /// Undo `turn`, or with `rewind` it and every later turn.
     pub async fn restore_with(&mut self, turn: &str, force: bool, rewind: bool) -> Restore {
+        self.restore_of(self.sid, turn, force, rewind).await
+    }
+
+    /// [`Rig::restore_with`] in the chat `sid` (another chat of the rig,
+    /// or a sub-agent's).
+    pub async fn restore_of(
+        &mut self,
+        sid: SessionId,
+        turn: &str,
+        force: bool,
+        rewind: bool,
+    ) -> Restore {
         self.n += 1;
         let req = format!("r{}", self.n);
         let mark = self.seen.len();
         let folder_before = self.files();
         self.send(MasterToNode::Restore {
             req_id: req.clone(),
-            session_id: self.sid,
+            session_id: sid,
             turn_id: turn.into(),
             force,
             rewind,
@@ -466,11 +481,21 @@ impl Rig {
         turn: &str,
         rewind: bool,
     ) -> Result<harness_protocol::TurnDiff, String> {
+        self.diff_of(self.sid, turn, rewind).await
+    }
+
+    /// [`Rig::diff`] of a turn of the chat `sid`.
+    pub async fn diff_of(
+        &mut self,
+        sid: SessionId,
+        turn: &str,
+        rewind: bool,
+    ) -> Result<harness_protocol::TurnDiff, String> {
         self.n += 1;
         let req = format!("d{}", self.n);
         self.send(MasterToNode::Diff {
             req_id: req.clone(),
-            session_id: self.sid,
+            session_id: sid,
             turn_id: turn.into(),
             rewind,
         });

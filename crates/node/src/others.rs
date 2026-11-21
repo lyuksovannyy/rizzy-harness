@@ -90,6 +90,10 @@ pub(crate) struct Span {
     /// The undoing chat's own `edit`/`write` calls in the span, in order:
     /// real path, base, result.
     pub own: Vec<(String, Option<String>, String)>,
+    /// The chat that undoes: a background entry of another chat that is
+    /// this chat's own run (a background sub-agent's chat, undoing its own
+    /// turn) is not a command of someone else.
+    pub me: Option<SessionId>,
 }
 
 /// When the undone span of `turn_id` began, from the undoing chat's own
@@ -323,7 +327,7 @@ pub(crate) async fn foreign_work(
         let mut unlisted = false;
         match events {
             Ok(events) => {
-                let w = read_window(&events, since, end);
+                let w = read_window(&events, since, end, span.me);
                 for path in w.recorded {
                     if let Some(rel) = relative(&root, Path::new(&path))
                         && touched.contains(&rel)
@@ -484,7 +488,7 @@ struct Window {
 /// it ran at any time in it (it started by `end` and ended at `since` or
 /// later), so a write that landed before the `after` snapshot scanned the
 /// folder counts even if its result was logged after that checkpoint.
-fn read_window(events: &[RawEvent], since: i64, end: i64) -> Window {
+fn read_window(events: &[RawEvent], since: i64, end: i64, me: Option<SessionId>) -> Window {
     struct Call {
         tool: String,
         turn: String,
@@ -528,6 +532,10 @@ fn read_window(events: &[RawEvent], since: i64, end: i64) -> Window {
             EventKind::TurnEnded(t) => {
                 turn_end.insert(t.turn_id, e.ts_ms);
             }
+            // The run of the undoing chat itself (its parent's entry for
+            // it) is not a command of another chat.
+            EventKind::BackgroundStarted(b)
+                if me.is_some() && b.child.as_ref().is_some_and(|c| Some(c.session) == me) => {}
             EventKind::BackgroundStarted(b) => {
                 bg_started.insert(b.bg_id, e.ts_ms);
             }
@@ -707,6 +715,7 @@ mod tests {
             ],
             50,
             i64::MAX,
+            None,
         );
         assert_eq!(w.recorded, vec!["/f/b".to_string()]);
         assert!(w.turns.is_empty());
@@ -719,19 +728,19 @@ mod tests {
             started(1, 100, "b", "bash"),
             finished(2, 110, "b", true, None),
         ];
-        assert!(read_window(&events, 111, i64::MAX).turns.is_empty());
-        assert_eq!(read_window(&events, 105, i64::MAX).turns.len(), 1);
+        assert!(read_window(&events, 111, i64::MAX, None).turns.is_empty());
+        assert_eq!(read_window(&events, 105, i64::MAX, None).turns.len(), 1);
         // Started after the expected state's checkpoint: the changed-since
         // check's, not this one's (review F4).
-        assert!(read_window(&events, 50, 99).turns.is_empty());
+        assert!(read_window(&events, 50, 99, None).turns.is_empty());
         // Started before it, its result logged after: it counts.
-        assert_eq!(read_window(&events, 50, 105).turns.len(), 1);
+        assert_eq!(read_window(&events, 50, 105, None).turns.len(), 1);
         // An unknown tool is taken to write.
         let mcp = [
             started(1, 100, "m", "mcp__x__y"),
             finished(2, 110, "m", true, None),
         ];
-        assert_eq!(read_window(&mcp, 50, i64::MAX).turns.len(), 1);
+        assert_eq!(read_window(&mcp, 50, i64::MAX, None).turns.len(), 1);
     }
 
     /// Review F2: the window starts at the turn's `turn_started`, written
@@ -773,7 +782,10 @@ mod tests {
             started(1, 1_498, "e", "edit"),
             finished(2, 1_499, "e", true, Some("/f/a")),
         ];
-        assert_eq!(read_window(&other, since, i64::MAX).recorded, vec!["/f/a"]);
+        assert_eq!(
+            read_window(&other, since, i64::MAX, None).recorded,
+            vec!["/f/a"]
+        );
     }
 
     fn bg(seq: u64, ts: i64, started: bool) -> RawEvent {
@@ -810,13 +822,13 @@ mod tests {
     fn a_background_command_counts_while_it_runs_in_the_window() {
         let max = i64::MAX;
         // Still running.
-        assert!(read_window(&[bg(1, 100, true)], 500, max).background);
+        assert!(read_window(&[bg(1, 100, true)], 500, max, None).background);
         // Ended inside the window.
-        assert!(read_window(&[bg(1, 100, true), bg(2, 600, false)], 500, max).background);
+        assert!(read_window(&[bg(1, 100, true), bg(2, 600, false)], 500, max, None).background);
         // Ended before it.
-        assert!(!read_window(&[bg(1, 100, true), bg(2, 400, false)], 500, max).background);
+        assert!(!read_window(&[bg(1, 100, true), bg(2, 400, false)], 500, max, None).background);
         // Started after the window's end (review F4).
-        assert!(!read_window(&[bg(1, 700, true)], 500, 600).background);
+        assert!(!read_window(&[bg(1, 700, true)], 500, 600, None).background);
     }
 
     #[test]

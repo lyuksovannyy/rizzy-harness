@@ -3835,6 +3835,7 @@ impl Session {
                 (None, false) => Some(after.clone()),
             },
             own: crate::others::own_writes(&events, since, end),
+            me: Some(self.id),
         };
         if !rewind && cp.restored {
             return Err("already undone".into());
@@ -4110,11 +4111,18 @@ impl Session {
             .collect();
         let parent: HashMap<SessionId, Option<SessionId>> =
             all.iter().map(|(id, p, _)| (*id, *p)).collect();
-        // This chat's sub-agents (and theirs) work for this turn.
+        // This chat's sub-agents (and theirs) work for this turn, those it
+        // waited for: a sub-agent it started in the background was not
+        // waited for, and its work in the folder is another chat's (a
+        // shared one writes the same folder; PLAN.md T32, T57).
+        let background = self.background_children().await;
         let mine = |mut id: SessionId| {
             for _ in 0..64 {
                 if id == self.id {
                     return true;
+                }
+                if background.contains(&id) {
+                    return false;
                 }
                 match parent.get(&id).copied().flatten() {
                     Some(p) => id = p,
@@ -4167,6 +4175,24 @@ impl Session {
             }
         };
         crate::others::foreign_work(store, repo, others, &tombstones, span, touched).await
+    }
+
+    /// The sub-agents this chat ever started in the background (its log's
+    /// `background_started` entries that name a child).
+    async fn background_children(&self) -> std::collections::HashSet<SessionId> {
+        let me = self.id;
+        self.node
+            .cfg
+            .store
+            .call(move |s| s.events_since_turn_at(me, i64::MIN, &["background_started"]))
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|e| match e.typed() {
+                Ok(EventKind::BackgroundStarted(b)) => b.child.map(|c| c.session),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Register a restore of `root` (the checkpoint's folder: the
