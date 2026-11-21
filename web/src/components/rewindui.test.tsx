@@ -419,6 +419,24 @@ describe("the rewound block", () => {
   });
 });
 
+describe("the Undo block of a turn", () => {
+  test("a turn that changed no files has none, restored or not, even when a later turn changed files", async () => {
+    const log = [
+      created,
+      ...turn(2, "t1", "first"),
+      ev(6, "checkpoint", { turn_id: "t1", phase: "after", git_ref: "r0", files: [] }),
+      ...turn(7, "t2", "second"),
+      ev(11, "checkpoint", { turn_id: "t2", phase: "after", git_ref: "r1", files: ["a.rs"] }),
+    ];
+    await show(log);
+    expect([...host.querySelectorAll(".undo summary")].map((x) => x.textContent)).toEqual(["1 file changed"]);
+    expect(host.textContent).not.toContain("0 files changed");
+    // A files rewind marks the earlier turn restored too: still no block for it.
+    await show([...log, ev(12, "checkpoint", { turn_id: "restore-1", phase: "before_restore", git_ref: "s" }), ev(13, "checkpoint", { turn_id: "t1", phase: "restored", git_ref: "r0" }), ev(14, "checkpoint", { turn_id: "t2", phase: "restored", git_ref: "r0" })]);
+    expect([...host.querySelectorAll(".undo summary")].map((x) => x.textContent)).toEqual(["1 file changed · undone"]);
+  });
+});
+
 describe("a rewind arriving after the chat is on screen", () => {
   test("its events change the screen in place: the block appears, the actions go, the undo brings it back; the header and the task list do not double count", async () => {
     const usage = { input_tokens: 1000, output_tokens: 500, context_tokens: 900 };

@@ -1028,15 +1028,15 @@ export default function Conversation(props: {
                     // In a rewound turn nothing is acted on: the rewound block
                     // holds the way back for the files.
                     const gone = it.rewound !== undefined;
-                    // Only a rewind would show for a turn that changed nothing.
+                    // A turn that changed no files has no Undo block, restored or not.
                     const undo =
-                      !gone && cp && cp.after && (cp.files.length > 0 || (laterChanges && !blocked)) ? (
+                      !gone && cp && cp.after && cp.files.length > 0 ? (
                         <Undo
                           key={`u${i}`}
                           sessionId={sessionId}
                           turnId={it.turn_id}
                           files={cp.files}
-                          restored={cp.restored || cp.files.length === 0}
+                          restored={cp.restored}
                           running={running}
                           laterChanges={laterChanges}
                           blocked={!!blocked}
