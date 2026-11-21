@@ -18,9 +18,9 @@ use std::sync::Arc;
 
 use harness_core::RawEvent;
 use harness_core::SessionId;
-use harness_core::event::Profile;
+use harness_core::event::{ErrorEvent, EventKind, Profile};
 use harness_core::fork;
-use harness_protocol::FORK_REFUSED;
+use harness_protocol::{FORK_REFUSED, ForkCheckout};
 
 use super::Session;
 use crate::Inner;
@@ -30,10 +30,10 @@ use crate::Inner;
 const MAX_TITLE_CHARS: usize = 300;
 
 impl Session {
-    /// The folder the fork works in: the parent's, checked as at any
-    /// create (inside `workspace_roots`, not protected, a directory). The
-    /// one place that decides it; a fork with a checkout of its own would
-    /// decide it here (ADOPTION_PLAN C.2, part 2).
+    /// The folder a fork that shares its parent's works in: the parent's,
+    /// checked as at any create (inside `workspace_roots`, not protected, a
+    /// directory). A fork with a folder of its own gets it from
+    /// [`Self::own_copy`]; `fork` decides between the two.
     fn fork_folder(&self) -> Result<PathBuf, String> {
         match self.profile {
             // A chat session has no folder and runs no tools.
@@ -57,6 +57,7 @@ impl Session {
         new: SessionId,
         turn_id: &str,
         title: &str,
+        checkout: ForkCheckout,
     ) -> Result<(Arc<Session>, Vec<RawEvent>), String> {
         let refused = |why: String| format!("{FORK_REFUSED}: {why}");
         if node.session(new).is_some() {
@@ -71,39 +72,178 @@ impl Session {
             .map_err(|e| e.to_string())?;
         let cut = fork::check(&log, turn_id).map_err(refused)?;
         drop(log);
-        let cwd = self.fork_folder().map_err(refused)?;
+        // Always checked: the parent's folder and mode are what the fork
+        // would share, and what an own copy is made from.
+        let shared = self.fork_folder().map_err(refused)?;
+        // The copy is made before anything of the chat is written, off the
+        // parent's actor (this runs in the new chat's lane, which nothing
+        // else uses yet): a failure leaves no chat and no folder.
+        let copy = match checkout {
+            ForkCheckout::Shared => None,
+            ForkCheckout::Own => Some(
+                self.own_copy(node, new, cut.through_seq)
+                    .await
+                    .map_err(refused)?,
+            ),
+        };
+        let cwd = copy.as_ref().map_or(shared, |c| c.folder.clone());
         let through = cut.through_seq as usize;
         let events = node
             .cfg
             .store
             .call(move |s| s.events_after(parent, 0, through))
-            .await
-            .map_err(|e| e.to_string())?;
+            .await;
+        let events = match events {
+            Ok(e) => e,
+            Err(e) => {
+                discard(copy).await;
+                return Err(e.to_string());
+            }
+        };
         let title: String = title.chars().take(MAX_TITLE_CHARS).collect();
-        let mut built = fork::build(
+        let built = fork::build(
             &events,
             &cut,
             new,
             &title,
             &cwd.display().to_string(),
             harness_core::now_ms(),
-        )
-        .map_err(refused)?;
+        );
+        let mut built = match built {
+            Ok(b) => b,
+            Err(e) => {
+                discard(copy).await;
+                return Err(refused(e));
+            }
+        };
         drop(events);
+        // What the person should know about its folder, said in the chat.
+        if let Some(c) = &copy {
+            for note in &c.notes {
+                let (kind, payload) = EventKind::Error(ErrorEvent {
+                    turn_id: None,
+                    message: note.clone(),
+                    notice: true,
+                })
+                .into_parts();
+                let last = built.last().map_or(0, |e| e.seq);
+                built.push(RawEvent {
+                    session_id: new,
+                    seq: last + 1,
+                    ts_ms: harness_core::now_ms(),
+                    kind,
+                    payload,
+                });
+            }
+        }
         // The title is text from outside the log: scrubbed like any event's
         // free text (T3); the copied events were scrubbed when written.
         let kind = built[0].kind.clone();
         node.cfg.secrets.scrub_event(&kind, &mut built[0].payload);
         let owner = node.cfg.node_id.clone();
         let to_write = built.clone();
-        node.cfg
+        let wrote = node
+            .cfg
             .store
             .call(move |s| s.write_fork(&owner, parent, &to_write))
-            .await
-            .map_err(|e| e.to_string())?;
+            .await;
+        if let Err(e) = wrote {
+            // No chat: no folder either.
+            discard(copy).await;
+            return Err(e.to_string());
+        }
         let s = Session::load(node.clone(), new)
             .await
             .map_err(|e| e.to_string())?;
         Ok((s, built))
+    }
+
+    /// The fork's own folder (`checkout: "own"`): a clone of the parent's
+    /// repository made from outside it, the files written from the cut's
+    /// checkpoint (`fork_checkout`, `git::fork_copy`). Refused, with a
+    /// sentence that says which and that `"shared"` is possible, for a chat
+    /// with no folder, a folder that is no git repository, a node with no
+    /// projects folder or an old git, and a cut whose checkpoint was pruned.
+    async fn own_copy(
+        &self,
+        node: &Arc<Inner>,
+        new: SessionId,
+        through: u64,
+    ) -> Result<crate::fork_checkout::Copy, String> {
+        let shared = |why: String| format!("{why}; the fork can share this chat's folder instead");
+        if self.profile != Profile::Agentic {
+            return Err(shared("this chat has no folder to copy".into()));
+        }
+        let dir = self.checked_folder()?;
+        let Some(repo) = self.checkpoint_repo().await.map_err(shared)? else {
+            return Err(shared(
+                "this node keeps no checkpoint store, which the copy's files are written from"
+                    .into(),
+            ));
+        };
+        let parent = self.id;
+        let checkpoints = node
+            .cfg
+            .store
+            .call(move |s| s.events_since_turn_at(parent, i64::MIN, &["checkpoint"]))
+            .await
+            .map_err(|e| e.to_string())?;
+        let cut = crate::fork_checkout::cut_state(&checkpoints, through);
+        drop(checkpoints);
+        if let Some(snap) = &cut.snapshot
+            && !crate::git::exists(&repo, snap).await
+        {
+            return Err(shared(
+                "this node no longer keeps the checkpoint of that point (it keeps the latest                  ones), so the copy's files cannot be rebuilt"
+                    .into(),
+            ));
+        }
+        // Waits its turn behind other copies; none is refused for another's.
+        let _slot = node
+            .fork_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| e.to_string())?;
+        let short: String = new
+            .to_string()
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(8)
+            .collect();
+        let req = crate::fork_checkout::Request {
+            bounds: self.bounds(&dir),
+            cwd: dir,
+            shadow: repo,
+            cut,
+            short,
+        };
+        let res = crate::fork_checkout::make(
+            &node.cfg.policy,
+            &node.projects_made,
+            req,
+            &crate::projects::suffix,
+        )
+        .await;
+        node.audit_log.record(
+            "session.fork_copy",
+            serde_json::json!({
+                "session": new.to_string(),
+                "ok": res.is_ok(),
+                "folder": res.as_ref().ok().map(|c| c.root.display().to_string()),
+                "branch": res.as_ref().ok().map(|c| c.branch.clone()),
+                "head_exact": res.as_ref().ok().map(|c| c.head_exact),
+                "upstream": res.as_ref().ok().map(|c| c.upstream),
+            })
+            .to_string(),
+        );
+        res.map_err(shared)
+    }
+}
+
+/// Remove a copy whose chat could not be written.
+async fn discard(copy: Option<crate::fork_checkout::Copy>) {
+    if let Some(c) = copy {
+        c.discard().await;
     }
 }

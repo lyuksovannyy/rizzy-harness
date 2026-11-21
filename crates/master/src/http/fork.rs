@@ -15,6 +15,13 @@
 //! chat's node, which decides again against its own log and policy and
 //! writes the new chat. Nothing a model, a tool or a routine sends reaches
 //! this route: a fork is a person's click, never automatic.
+//!
+//! `checkout` says where the fork's files live (C.2 part 2): `own`, a clone
+//! of the chat's repository the node makes from outside it, or `shared`
+//! (the default). `own` is refused for a node that did not announce
+//! `fork_own`; the node refuses what it cannot do (no repository, no
+//! projects folder, a pruned checkpoint, an old git) with its reason, and
+//! then no chat and no folder exist. The answer waits for the copy.
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -41,6 +48,11 @@ fn refused(why: impl std::fmt::Display) -> ApiError {
 struct Body {
     /// The turn whose end the new chat's copy stops at.
     turn_id: String,
+    /// Where the fork's files live: `own` (a clone of the chat's
+    /// repository, made by its node) or `shared` (the chat's own folder).
+    /// Left out: `shared`, as before the choice existed.
+    #[serde(default)]
+    checkout: harness_protocol::ForkCheckout,
 }
 
 async fn fork(
@@ -61,6 +73,17 @@ async fn fork(
         return Err(CommandError::Rejected(
             "this chat's node cannot fork a chat (a node older than this server, or one that is \
              away)"
+                .into(),
+        )
+        .into());
+    }
+    if b.checkout == harness_protocol::ForkCheckout::Own
+        && !m.node_has(&row.node_id, harness_protocol::CAP_FORK_OWN)
+    {
+        return Err(CommandError::Rejected(
+            "this chat's node cannot give a fork a folder of its own: it needs an update, or a \
+             projects folder ([projects] dir in its node.toml); fork into \"the same folder\" \
+             instead"
                 .into(),
         )
         .into());
@@ -95,6 +118,6 @@ async fn fork(
         ));
     }
     tracing::info!(session = %sid, "a person forks a chat at a finished turn");
-    let new = crate::forks::fork_session(&m, &row, &b.turn_id).await?;
+    let new = crate::forks::fork_session(&m, &row, &b.turn_id, b.checkout).await?;
     Ok(Json(json!({ "session_id": new })))
 }

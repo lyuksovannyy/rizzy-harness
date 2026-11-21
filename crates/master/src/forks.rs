@@ -113,6 +113,7 @@ pub(crate) async fn fork_session(
     m: &Master,
     parent: &SessionRow,
     turn_id: &str,
+    checkout: harness_protocol::ForkCheckout,
 ) -> Result<SessionId, CommandError> {
     let sid = SessionId::new();
     let node_id = parent.node_id.clone();
@@ -156,6 +157,7 @@ pub(crate) async fn fork_session(
             parent: pid,
             turn_id: turn_id.to_string(),
             title,
+            checkout,
         })
         .await;
     match &sent {

@@ -297,6 +297,7 @@ impl H {
                 parent,
                 turn_id: turn_id.into(),
                 title,
+                checkout: harness_protocol::ForkCheckout::Shared,
             })
             .unwrap();
         let mut events = Vec::new();

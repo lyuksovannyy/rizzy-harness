@@ -631,6 +631,8 @@ async fn write_snapshot(p: &Plan<'_>, snap: &str) -> Result<(), String> {
     if !object_id(snap) {
         return Err("not a checkpoint id".into());
     }
+    // No prune or collection of the shadow while it is read.
+    let _busy = hold(p.shadow).await;
     let mut into = p.shadow.with_root(p.dest).scratch();
     into.tree_rw = true;
     let idx = fresh_index(&into).await?;
@@ -661,7 +663,47 @@ pub(crate) async fn tree_bytes(shadow: &Repo, snap: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Where `dest`'s `.git` is, for the caller's checks.
-pub(crate) fn git_of(dest: &Path) -> PathBuf {
-    dest.join(".git")
+/// What the parent's folder is, to a fork that wants its own copy.
+pub(crate) enum Source {
+    /// The top of the git repository holding the folder (canonical).
+    Repo(PathBuf),
+    /// No git repository holds it (or none within the bounds).
+    NotRepo,
+}
+
+/// The repository holding `cwd`, found on the file system and read as data
+/// (see [`user_repo`]); `Err` with the reason when the `.git` there is not a
+/// plain repository directory (a gitfile, a link, a `commondir`).
+pub(crate) async fn source_of(cwd: &Path, bounds: &Bounds) -> Result<Source, String> {
+    match find_repo(cwd, bounds).await {
+        user_repo::Found::Repo(r) => Ok(Source::Repo(r.top)),
+        user_repo::Found::Unusual(why) => Err(why),
+        user_repo::Found::None => Ok(Source::NotRepo),
+    }
+}
+
+/// The disk a copy of `source`'s `.git` needs, counted from its files
+/// (no link followed), counting no further than `cap`.
+pub(crate) async fn git_dir_bytes(source: &Path, cap: u64) -> u64 {
+    let git = source.join(".git");
+    tokio::task::spawn_blocking(move || {
+        let mut n = 0u64;
+        for e in walkdir::WalkDir::new(&git)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+        {
+            if let Ok(m) = e.metadata()
+                && !m.is_dir()
+            {
+                n = n.saturating_add(m.len());
+                if n > cap {
+                    break;
+                }
+            }
+        }
+        n
+    })
+    .await
+    .unwrap_or(cap)
 }

@@ -8,6 +8,7 @@ mod connectors;
 mod environment;
 pub mod exec;
 mod forge_clone;
+mod fork_checkout;
 mod git;
 mod history;
 mod images;
@@ -41,6 +42,9 @@ pub use git::SNAPSHOT_TIMEOUT;
 pub use outbox::Backlog;
 pub use policy::{InstructionsPolicy, NodePolicy, SkillsPolicy, WebPolicy};
 use session::Session;
+
+/// Copies of a repository made for forks at the same time on one node.
+const FORK_COPIES_AT_ONCE: usize = 2;
 
 /// Commands that start new work, refused while the node stops: a session,
 /// a turn, a restore, a staged file.
@@ -257,6 +261,10 @@ pub(crate) struct Inner {
     /// Room for the clone being run (`project.clone`, T86): one at a time,
     /// apart from `project.create`'s, which a ten-minute clone must not hold.
     clone_slots: Arc<tokio::sync::Semaphore>,
+    /// Room for the copies being made for forks (C.2 part 2): a few at a
+    /// time, the rest wait their turn (a fork is a person's click; none is
+    /// refused for another's).
+    fork_slots: Arc<tokio::sync::Semaphore>,
     /// A repository's MCP servers (X.36, PLAN.md T82): only where node.toml
     /// says `[mcp] project_servers = "ask"` on an agentic node; `None`
     /// otherwise, and then no `.mcp.json` is ever read.
@@ -662,6 +670,7 @@ impl NodeRuntime {
             projects_made: Default::default(),
             project_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             clone_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            fork_slots: Arc::new(tokio::sync::Semaphore::new(FORK_COPIES_AT_ONCE)),
             project_mcp,
         });
         for row in rows {
@@ -853,6 +862,16 @@ impl NodeRuntime {
             // A person's fork of a chat at a finished turn (C.2), in chats
             // of either profile.
             capabilities.push(harness_protocol::CAP_FORK.into());
+            // ... in a folder of its own (a clone of the parent's
+            // repository), where this node makes folders for it: a
+            // projects folder, and a store for checkpoints (the files come
+            // from the cut's snapshot).
+            if self.inner.cfg.profile == harness_core::event::Profile::Agentic
+                && self.inner.cfg.policy.projects.located.is_some()
+                && self.inner.cfg.checkpoints_dir.is_some()
+            {
+                capabilities.push(harness_protocol::CAP_FORK_OWN.into());
+            }
             // The agents a message called after the first, asked one after
             // another (X.37).
             capabilities.push(harness_protocol::CAP_PEERS.into());
@@ -1703,15 +1722,17 @@ impl NodeRuntime {
                 parent,
                 turn_id,
                 title,
+                checkout,
                 ..
             } => {
                 self.audit_with(
                     "session.fork",
                     session_id,
-                    serde_json::json!({ "parent": parent }),
+                    serde_json::json!({ "parent": parent, "checkout": checkout }),
                 )
                 .await;
-                self.fork(session_id, parent, &turn_id, &title).await
+                self.fork(session_id, parent, &turn_id, &title, checkout)
+                    .await
             }
             MasterToNode::SelectVariant {
                 session_id,
@@ -2179,11 +2200,12 @@ impl NodeRuntime {
         parent: SessionId,
         turn_id: &str,
         title: &str,
+        checkout: harness_protocol::ForkCheckout,
     ) -> Result<(), String> {
         let Some(p) = self.session(parent) else {
             return Err("unknown session".into());
         };
-        let (s, events) = p.fork(&self.inner, sid, turn_id, title).await?;
+        let (s, events) = p.fork(&self.inner, sid, turn_id, title, checkout).await?;
         self.inner
             .sessions
             .lock()

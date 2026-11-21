@@ -272,7 +272,7 @@ fn plant(h: &Hostile) {
     std::fs::create_dir_all(git.join("info")).unwrap();
     std::fs::write(git.join("info/attributes"), "* filter=evil diff=evil\n").unwrap();
     std::fs::write(git.join("info/exclude"), "scratch/\n").unwrap();
-    std::fs::create_dir_all(&root.join("elsewhere")).unwrap();
+    std::fs::create_dir_all(root.join("elsewhere")).unwrap();
 }
 
 async fn run(r: &Rig, head: Option<&str>) -> Result<fork_copy::Filled, String> {

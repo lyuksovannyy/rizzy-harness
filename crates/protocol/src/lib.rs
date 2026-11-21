@@ -74,6 +74,25 @@ pub const CAP_REWIND: &str = "rewind";
 /// The master offers it only for chats on nodes whose hello listed it.
 pub const CAP_FORK: &str = "fork";
 
+/// The node capability that lets `session.fork` carry `checkout: "own"`
+/// (C.2 part 2, docs/fork.md): the fork gets a folder of its own, a clone of
+/// the parent's repository the node makes from outside it. The master sends
+/// `own` only to nodes whose hello listed it; an older node would share the
+/// parent's folder without saying so.
+pub const CAP_FORK_OWN: &str = "fork_own";
+
+/// Where a fork's files live (`session.fork`, C.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkCheckout {
+    /// A folder of its own: a clone of the parent's repository, the files
+    /// written from the cut's checkpoint (the node refuses where it cannot).
+    Own,
+    /// The parent's folder: both chats work in the same files.
+    #[default]
+    Shared,
+}
+
 /// The node capability that announces `session.diff` (X.12, PLAN.md T53).
 /// The master asks for a turn's changes only on nodes whose hello listed it.
 pub const CAP_DIFF: &str = "diff";
@@ -1303,6 +1322,8 @@ pub enum MasterToNode {
         parent: SessionId,
         turn_id: String,
         title: String,
+        /// Where its files live. `own` only for nodes with [`CAP_FORK_OWN`].
+        checkout: ForkCheckout,
     },
     /// Write the chat's hand-off note now if one is due (X.16,
     /// docs/handoff-notes.md; only to nodes with [`CAP_HANDOFF`]). A

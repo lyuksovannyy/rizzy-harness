@@ -77,6 +77,11 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(15);
 /// A fork waits this many times longer for its ack: the node sends the whole
 /// copy of the chat before it.
 const FORK_ACK_FACTOR: u32 = 4;
+/// A fork that gets a folder of its own waits as long as a node may take to
+/// copy a repository (`[limits] clone_timeout_s`, at most
+/// `MAX_CLONE_TIMEOUT_S`) and a minute more: the ack follows the copy.
+const FORK_OWN_ACK_FACTOR: u32 =
+    ((harness_protocol::MAX_CLONE_TIMEOUT_S + 60) / ACK_TIMEOUT.as_secs()) as u32;
 
 /// How many sub-agent chats of one depth a delete asks their node about at
 /// once.
@@ -215,6 +220,10 @@ pub struct NodeInfo {
     /// Whether it forks a chat at a finished turn (`fork`, C.2): what the
     /// UI offers; the master and the node refuse whatever this says.
     pub fork: bool,
+    /// Whether a fork there may get a folder of its own (`fork_own`, C.2
+    /// part 2): what the UI offers; the master and the node refuse
+    /// whatever this says.
+    pub fork_own: bool,
 }
 
 /// The approval modes in a hello's capabilities (T50): its ceiling and its
@@ -1370,6 +1379,7 @@ impl Master {
                     max_steps: None,
                     projects: false,
                     fork: false,
+                    fork_own: false,
                 },
                 tx: None,
                 resuming: HashSet::new(),
@@ -1393,6 +1403,9 @@ impl Master {
                 .iter()
                 .any(|c| c == harness_protocol::CAP_PROJECTS);
             entry.info.fork = capabilities.iter().any(|c| c == harness_protocol::CAP_FORK);
+            entry.info.fork_own = capabilities
+                .iter()
+                .any(|c| c == harness_protocol::CAP_FORK_OWN);
             entry.capabilities = capabilities;
             entry.tx = Some(link.to_node.clone());
             entry.resuming.clear();
@@ -2017,6 +2030,13 @@ impl Master {
             send: note.and_then(|n| self.inner.connectors.calls.note_send(&msg, n)),
         };
         let slow = matches!(msg, MasterToNode::Fork { .. });
+        let own = matches!(
+            msg,
+            MasterToNode::Fork {
+                checkout: harness_protocol::ForkCheckout::Own,
+                ..
+            }
+        );
         let sent = {
             let nodes = lock(&self.inner.nodes);
             // A revoked node gets nothing: no prompt, context or image
@@ -2041,7 +2061,9 @@ impl Master {
         }
         let mut ack_timeout = *lock(&self.inner.ack_timeout);
         // A fork's ack follows every event of the copy on the ordered link.
-        if slow {
+        if own {
+            ack_timeout *= FORK_OWN_ACK_FACTOR;
+        } else if slow {
             ack_timeout *= FORK_ACK_FACTOR;
         }
         let acked = tokio::time::timeout(ack_timeout, rx).await;
