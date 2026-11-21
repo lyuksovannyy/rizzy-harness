@@ -966,31 +966,30 @@ pub(crate) async fn source_of(cwd: &Path, bounds: &Bounds) -> Result<Source, Str
     }
 }
 
-/// The disk a copy of `source`'s `.git` needs, counted from its files
-/// (no link followed, only sizes: nothing is opened), counting no further
-/// than `cap`. An estimate for the room check; stage 1 bounds the real copy.
-pub(crate) async fn git_dir_bytes(source: &Path, cap: u64) -> u64 {
-    let git = source.join(".git");
-    tokio::task::spawn_blocking(move || {
-        let mut n = 0u64;
-        for e in walkdir::WalkDir::new(&git)
-            .follow_links(false)
-            .into_iter()
-            .flatten()
-        {
-            if let Ok(m) = e.metadata()
-                && !m.is_dir()
-            {
-                n = n.saturating_add(m.len());
-                if n > cap {
-                    break;
-                }
-            }
-        }
-        n
-    })
-    .await
-    .unwrap_or(cap)
+/// The disk a copy of `source`'s `.git` needs, from a first pass of stage
+/// 1's own walk ([`fork_sanitise::measure`]): file descriptors and
+/// `O_NOFOLLOW`, no path-based call below the repository's folder, the same
+/// bound on bytes, entries, depth and time, and stopped when this future is
+/// dropped. An estimate for the room check; the copy itself is bounded
+/// again. `Err` is the refusal the copy would give.
+pub(crate) async fn git_dir_bytes(
+    source: &Path,
+    max_bytes: u64,
+    max_entries: u64,
+    timeout: Duration,
+) -> Result<u64, String> {
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _stop = StopOnDrop(cancel.clone());
+    let lim = fork_sanitise::Limits {
+        max_bytes,
+        max_entries,
+        deadline: Instant::now() + timeout,
+        cancel,
+    };
+    let root = source.to_path_buf();
+    tokio::task::spawn_blocking(move || fork_sanitise::measure(&root, &lim))
+        .await
+        .map_err(|e| format!("measuring the repository: {e}"))?
 }
 
 #[cfg(test)]

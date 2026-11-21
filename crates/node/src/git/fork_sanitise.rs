@@ -149,6 +149,10 @@ struct Walk<'a> {
     bytes: u64,
     entries: u64,
     buf: Vec<u8>,
+    /// A measuring pass: the same walk, with the same bounds, that opens
+    /// nothing for reading and writes nothing; it counts the sizes `fstat`
+    /// gives for what a copy would write.
+    dry: bool,
 }
 
 impl Walk<'_> {
@@ -268,10 +272,20 @@ impl Walk<'_> {
     fn copy_file(
         &mut self,
         src: BorrowedFd<'_>,
-        dst: BorrowedFd<'_>,
+        dst: Option<BorrowedFd<'_>>,
         name: &str,
     ) -> Result<bool, String> {
         self.entry()?;
+        let Some(dst) = dst else {
+            let Some((_p, st, k)) = probe(src, OsStr::new(name))? else {
+                return Ok(false);
+            };
+            if k != Kind::File {
+                return Err(refuse(name, k));
+            }
+            self.count(u64::try_from(st.st_size).unwrap_or(0))?;
+            return Ok(true);
+        };
         match self.open_file(src, OsStr::new(name), name)? {
             Some(f) => self
                 .write_new(f, dst, OsStr::new(name), name)
@@ -319,7 +333,7 @@ impl Walk<'_> {
     fn copy_tree(
         &mut self,
         src: OwnedFd,
-        dst: OwnedFd,
+        dst: Option<OwnedFd>,
         rel: &str,
         depth: usize,
         skip: &[&str],
@@ -357,22 +371,28 @@ impl Walk<'_> {
             if skip.contains(&child.as_str()) {
                 continue;
             }
-            let Some((_p, _st, k)) = probe(src.as_fd(), &name)? else {
+            let Some((_p, st, k)) = probe(src.as_fd(), &name)? else {
                 // Gone since the listing (a loose object packed away).
                 continue;
             };
             match k {
                 Kind::Dir => {
-                    let d = self.make_dir(dst.as_fd(), &name, &child)?;
+                    let d = match &dst {
+                        Some(dst) => Some(self.make_dir(dst.as_fd(), &name, &child)?),
+                        None => None,
+                    };
                     let s = openat(src.as_fd(), name.as_os_str(), dir_flags(), Mode::empty())
                         .map_err(|_| refuse(&child, Kind::Link))?;
                     self.copy_tree(s, d, &child, depth + 1, skip)?;
                 }
-                Kind::File => {
-                    if let Some(f) = self.open_file(src.as_fd(), &name, &child)? {
-                        self.write_new(f, dst.as_fd(), &name, &child)?;
+                Kind::File => match &dst {
+                    Some(dst) => {
+                        if let Some(f) = self.open_file(src.as_fd(), &name, &child)? {
+                            self.write_new(f, dst.as_fd(), &name, &child)?;
+                        }
                     }
-                }
+                    None => self.count(u64::try_from(st.st_size).unwrap_or(0))?,
+                },
                 other => return Err(refuse(&child, other)),
             }
         }
@@ -388,17 +408,43 @@ const ALTERNATES: [&str; 2] = ["objects/info/alternates", "objects/info/http-alt
 /// `into` (see the module comment); returns the parent's `config` and
 /// `info/exclude` as data.
 pub(crate) fn copy(root: &Path, into: &Path, lim: &Limits) -> Result<Data, String> {
+    walk(root, Some(into), lim).map(|(data, _)| data)
+}
+
+/// The bytes a [`copy`] of `<root>/.git` would write, from a first pass of
+/// the same walk (the same descriptors, `O_NOFOLLOW`, bounds and
+/// cancellation) that opens no file for reading and writes nothing: the
+/// room check before a copy. A link, a special file or a bound ends it in
+/// the refusal the copy would give.
+pub(crate) fn measure(root: &Path, lim: &Limits) -> Result<u64, String> {
+    walk(root, None, lim).map(|(_, bytes)| bytes)
+}
+
+fn walk(root: &Path, into: Option<&Path>, lim: &Limits) -> Result<(Data, u64), String> {
     let mut w = Walk {
         lim,
         bytes: 0,
         entries: 0,
-        buf: vec![0; 256 * 1024],
+        buf: if into.is_some() {
+            vec![0; 256 * 1024]
+        } else {
+            Vec::new()
+        },
+        dry: into.is_none(),
     };
     let top = nix::fcntl::open(root, dir_flags(), Mode::empty())
         .map_err(|e| format!("cannot open the repository's folder: {e}"))?;
     let git = match openat(top.as_fd(), ".git", dir_flags(), Mode::empty()) {
         Ok(fd) => fd,
         Err(Errno::ELOOP) => return Err("the repository is not copied: .git is a link".into()),
+        Err(Errno::ENOTDIR)
+            if matches!(
+                probe(top.as_fd(), OsStr::new(".git")),
+                Ok(Some((_, _, Kind::Link)))
+            ) =>
+        {
+            return Err("the repository is not copied: .git is a link".into());
+        }
         Err(Errno::ENOTDIR) => {
             return Err(
                 "the repository is not copied: .git is a file (a linked worktree or a submodule), \
@@ -409,8 +455,14 @@ pub(crate) fn copy(root: &Path, into: &Path, lim: &Limits) -> Result<Data, Strin
         Err(Errno::ENOENT) => return Err("the folder is not a git repository".into()),
         Err(e) => return Err(format!("cannot open .git: {e}")),
     };
-    let dst = nix::fcntl::open(into, dir_flags(), Mode::empty())
-        .map_err(|e| format!("cannot open the copy's folder: {e}"))?;
+    let dst = match into {
+        Some(into) => Some(
+            nix::fcntl::open(into, dir_flags(), Mode::empty())
+                .map_err(|e| format!("cannot open the copy's folder: {e}"))?,
+        ),
+        None => None,
+    };
+    let dst_fd = dst.as_ref().map(|d| d.as_fd());
     // Another git directory by name: not a repository of its own.
     for n in ["commondir", "gitdir"] {
         if probe(git.as_fd(), OsStr::new(n))?.is_some() {
@@ -421,24 +473,30 @@ pub(crate) fn copy(root: &Path, into: &Path, lim: &Limits) -> Result<Data, Strin
     }
     // What is read as data first: cheap, and a special file there ends
     // the copy before the heavy work.
-    let config = w.read_data(git.as_fd(), "config", "config", DATA_MAX)?;
-    let exclude = match probe(git.as_fd(), OsStr::new("info"))? {
-        Some((_, _, Kind::Dir)) => {
-            let info = w.open_dir(git.as_fd(), OsStr::new("info"), "info")?;
-            w.read_data(info.as_fd(), "exclude", "info/exclude", DATA_MAX)?
-        }
-        // Not copied and not read: whatever `info` is, nothing of it is used.
-        _ => None,
-    };
-    if !w.copy_file(git.as_fd(), dst.as_fd(), "HEAD")? {
+    let (mut config, mut exclude) = (None, None);
+    if !w.dry {
+        config = w.read_data(git.as_fd(), "config", "config", DATA_MAX)?;
+        exclude = match probe(git.as_fd(), OsStr::new("info"))? {
+            Some((_, _, Kind::Dir)) => {
+                let info = w.open_dir(git.as_fd(), OsStr::new("info"), "info")?;
+                w.read_data(info.as_fd(), "exclude", "info/exclude", DATA_MAX)?
+            }
+            // Not copied and not read: whatever `info` is, nothing of it is used.
+            _ => None,
+        };
+    }
+    if !w.copy_file(git.as_fd(), dst_fd, "HEAD")? {
         return Err("the repository is not copied: it has no HEAD file".into());
     }
     // Refs, loose then packed.
     let refs_src = w.open_dir(git.as_fd(), OsStr::new("refs"), "refs")?;
-    let refs_dst = w.make_dir(dst.as_fd(), OsStr::new("refs"), "refs")?;
+    let refs_dst = match dst_fd {
+        Some(d) => Some(w.make_dir(d, OsStr::new("refs"), "refs")?),
+        None => None,
+    };
     w.copy_tree(refs_src, refs_dst, "refs", 1, &[])?;
-    w.copy_file(git.as_fd(), dst.as_fd(), "packed-refs")?;
-    w.copy_file(git.as_fd(), dst.as_fd(), "shallow")?;
+    w.copy_file(git.as_fd(), dst_fd, "packed-refs")?;
+    w.copy_file(git.as_fd(), dst_fd, "shallow")?;
     // The objects, after every ref that names them.
     let obj_src = w.open_dir(git.as_fd(), OsStr::new("objects"), "objects")?;
     let info = match probe(obj_src.as_fd(), OsStr::new("info"))? {
@@ -461,9 +519,12 @@ pub(crate) fn copy(root: &Path, into: &Path, lim: &Limits) -> Result<Data, Strin
             }
         }
     }
-    let obj_dst = w.make_dir(dst.as_fd(), OsStr::new("objects"), "objects")?;
+    let obj_dst = match dst_fd {
+        Some(d) => Some(w.make_dir(d, OsStr::new("objects"), "objects")?),
+        None => None,
+    };
     w.copy_tree(obj_src, obj_dst, "objects", 1, &ALTERNATES)?;
-    Ok(Data { config, exclude })
+    Ok((Data { config, exclude }, w.bytes))
 }
 
 #[cfg(test)]
@@ -535,6 +596,30 @@ mod tests {
                 "shallow"
             ]
         );
+    }
+
+    /// The first pass counts what the copy writes, and refuses what it refuses.
+    #[test]
+    fn measure_counts_what_copy_writes_and_refuses_what_it_refuses() {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let root = repo(&top);
+        std::fs::write(root.join(".git/objects/ab/big"), vec![7u8; 4096]).unwrap();
+        std::fs::write(root.join(".git/config"), "x".repeat(1000)).unwrap();
+        let into = top.join("into");
+        std::fs::create_dir(&into).unwrap();
+        let n = measure(&root, &limits(1 << 20, 1000)).unwrap();
+        copy(&root, &into, &limits(1 << 20, 1000)).unwrap();
+        let written: u64 = walkdir::WalkDir::new(&into)
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.metadata().unwrap().len())
+            .sum();
+        assert_eq!(n, written);
+        std::os::unix::fs::symlink(top.join("elsewhere"), root.join(".git/refs/heads/x")).unwrap();
+        let e = measure(&root, &limits(1 << 20, 1000)).unwrap_err();
+        assert!(e.contains("refs/heads/x") && e.contains("a link"), "{e}");
     }
 
     #[test]

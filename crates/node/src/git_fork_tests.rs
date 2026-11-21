@@ -1470,3 +1470,76 @@ mod leaks {
         println!("{oks} of 4 copies made while the parent worked");
     }
 }
+
+/// Third fix round: the room estimate and stage 1 follow no link and stay
+/// within their bounds, whatever the parent's `.git` is.
+mod round3 {
+    use super::*;
+
+    /// A plain parent repository in a temp folder, no git run in it.
+    fn bare_parent(top: &Path) -> PathBuf {
+        let root = top.join("src");
+        let git = root.join(".git");
+        std::fs::create_dir_all(git.join("refs/heads")).unwrap();
+        std::fs::create_dir_all(git.join("objects/ab")).unwrap();
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(git.join("refs/heads/main"), "a".repeat(40) + "\n").unwrap();
+        root
+    }
+
+    const T: Duration = Duration::from_secs(30);
+
+    /// The room estimate of a `.git` that is a link to a big folder: the
+    /// link is not followed (no path walk outside the repository's folder),
+    /// and the answer is the copy's own refusal.
+    #[tokio::test]
+    async fn the_room_estimate_does_not_follow_a_git_that_is_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let root = bare_parent(&top);
+        std::fs::remove_dir_all(root.join(".git")).unwrap();
+        let big = top.join("elsewhere");
+        std::fs::create_dir_all(&big).unwrap();
+        for i in 0..50 {
+            std::fs::write(big.join(format!("f{i}")), vec![1u8; 100_000]).unwrap();
+        }
+        std::os::unix::fs::symlink(&big, root.join(".git")).unwrap();
+        let e = fork_copy::git_dir_bytes(&root, u64::MAX, 1000, T)
+            .await
+            .unwrap_err();
+        assert!(e.contains(".git is a link"), "{e}");
+    }
+
+    /// A parent with more entries than the bound is refused by the first
+    /// pass, within the time of a bounded walk (the production bound is
+    /// `ENTRY_MAX` = one million; the test uses a small one so that it
+    /// does not make a million files on a slow disk).
+    #[tokio::test]
+    async fn the_room_estimate_stops_at_the_entry_bound() {
+        assert_eq!(fork_copy::ENTRY_MAX, 1_000_000);
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let root = bare_parent(&top);
+        for i in 0..5000 {
+            std::fs::write(root.join(format!(".git/objects/ab/{i:038x}")), b"").unwrap();
+        }
+        let t0 = std::time::Instant::now();
+        let e = fork_copy::git_dir_bytes(&root, u64::MAX, 1000, T)
+            .await
+            .unwrap_err();
+        assert!(e.contains("more than 1000"), "{e}");
+        assert!(t0.elapsed() < Duration::from_secs(10));
+    }
+
+    /// The estimate is cancellable: a dropped future stops the walk.
+    #[tokio::test]
+    async fn the_room_estimate_stops_at_its_time_bound() {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let root = bare_parent(&top);
+        let e = fork_copy::git_dir_bytes(&root, u64::MAX, 1000, Duration::ZERO)
+            .await
+            .unwrap_err();
+        assert!(e.contains("took longer"), "{e}");
+    }
+}

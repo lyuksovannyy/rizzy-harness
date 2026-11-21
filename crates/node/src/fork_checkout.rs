@@ -193,7 +193,13 @@ pub(crate) async fn make(
     let slot = made.reserve(policy.limits.projects_per_hour)?;
     let max = policy.limits.clone_max_mb.saturating_mul(1024 * 1024);
     // Room, before anything is made.
-    let git_bytes = fork_copy::git_dir_bytes(&source, max.saturating_add(1)).await;
+    let git_bytes = fork_copy::git_dir_bytes(
+        &source,
+        max,
+        crate::git::fork_copy::ENTRY_MAX,
+        Duration::from_secs(policy.limits.clone_timeout_s),
+    )
+    .await?;
     let tree_bytes = match &req.cut.snapshot {
         Some(s) => fork_copy::tree_bytes(&req.shadow, s).await?,
         None => git_bytes,
