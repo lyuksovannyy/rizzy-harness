@@ -1,7 +1,10 @@
 /* The chat header's "Pinned (n)" list and the mark on a pinned message (PinnedList.tsx). */
-.pinned {
+.pinned-wrap {
   position: relative;
   display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  height: 32px;
 }
 .pinned-btn {
   display: inline-flex;
@@ -52,7 +55,7 @@
 .pinned-meta {
   font-size: var(--text-xs);
 }
-.msg.pinned {
+.msg.msg-pinned {
   position: relative;
 }
 .pin-mark {

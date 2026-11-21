@@ -138,6 +138,9 @@ describe("the mark on a pinned message", () => {
     await show([...base, ...pins(4)]);
     const marks = [...host.querySelectorAll(".msg.assistant")].map((m) => !!m.querySelector(".pin-mark"));
     expect(marks).toEqual([true, false]);
+    // The message's own class never collides with the header list's (a shared name once laid the pinned answer out as the list).
+    expect([...host.querySelectorAll(".msg.assistant")].map((m) => m.classList.contains("msg-pinned"))).toEqual([true, false]);
+    expect(host.querySelectorAll(".msg.assistant.pinned-wrap")).toHaveLength(0);
     expect(host.querySelector(".pin-mark")!.getAttribute("aria-label")).toBe("Pinned");
   });
 });

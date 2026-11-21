@@ -933,7 +933,7 @@ export default function Conversation(props: {
                   case "assistant": {
                     const final = it.done || i < liveFrom;
                     return (
-                      <div key={i} className={`msg assistant ${!it.done && running ? "streaming" : ""}${it.seq !== undefined && pinnedSeqs.has(it.seq) ? " pinned" : ""}`} data-msg-seq={it.seq}>
+                      <div key={i} className={`msg assistant ${!it.done && running ? "streaming" : ""}${it.seq !== undefined && pinnedSeqs.has(it.seq) ? " msg-pinned" : ""}`} data-msg-seq={it.seq}>
                         {it.seq !== undefined && pinnedSeqs.has(it.seq) && <PinMark />}
                         {it.author && it.author !== activeAgent && (
                           <div className="author">

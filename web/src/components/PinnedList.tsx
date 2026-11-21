@@ -72,7 +72,7 @@ export function PinnedList(props: { sessionId: string; pins: PinInfo[]; canUnpin
     }
   };
   return (
-    <div ref={root} className="pinned">
+    <div ref={root} className="pinned-wrap">
       <button
         ref={opener}
         type="button"
