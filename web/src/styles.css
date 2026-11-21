@@ -4095,6 +4095,12 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
   border-radius: 8px;
   font-size: var(--text-xs);
 }
+/* Narrow: from the strip's left edge, so it cannot leave the screen. */
+.composer-strip { position: relative; }
+@media (max-width: 600px) {
+  .step-pick { position: static; }
+  .step-pop { left: 6px; right: auto; width: min(240px, calc(100% - 12px)); }
+}
 .step-pop label { display: flex; flex-direction: column; gap: 4px; flex: 1; }
 .step-pop input { width: 100%; }
 .step-err { color: var(--bad); width: 100%; }
