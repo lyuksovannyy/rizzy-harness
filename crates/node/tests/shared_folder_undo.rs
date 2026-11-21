@@ -663,3 +663,86 @@ async fn a_never_started_sub_agents_chat_cannot_be_used_to_write_during_a_lead_t
     assert_eq!(undo.result, Ok(()));
     assert!(r.read("lead.txt").is_none());
 }
+// ---- Regression probes of the second review, and a restart ------------------
+
+/// A background follow-up the lead sent through `delegate`, finished inside
+/// the lead's turn, is the lead's own work: Undo does not ask and the
+/// folder is restored exactly.
+#[tokio::test]
+async fn a_background_follow_up_through_delegate_that_ends_in_the_turn_is_the_leads_own() {
+    let mut r = repo_rig().await;
+    r.lead_caps = Some(DelegateCaps {
+        background: true,
+        ..Default::default()
+    });
+    let (_, outs) = r.lead_turn("delegate: dev=run: echo one > b.txt").await;
+    let child = child_of(&outs[0]);
+    let before = r.files();
+    let script = json!([
+        {"tool": "delegate", "input": {"agent": "dev", "session": child.to_string(), "background": true, "task": "run: echo two > c.txt"}},
+        {"tool": "bash", "input": {"command": "sleep 2"}},
+    ]);
+    let (turn, _) = r.lead_turn(&format!("script: {script}")).await;
+    assert_eq!(r.read("c.txt").as_deref(), Some("two\n"));
+    let turn = turn.id.expect("a turn checkpoint");
+    let undo = r.restore(&turn, false).await;
+    assert_eq!(undo.result, Ok(()));
+    assert_eq!(r.files(), before);
+}
+
+/// The person stops the lead while its foreground shared child still runs:
+/// whatever the child writes before it ends is in that turn, and the turn's
+/// Undo restores the folder without asking.
+#[tokio::test]
+async fn undo_of_a_stopped_leads_turn_restores_what_its_running_shared_child_wrote() {
+    let mut r = repo_rig().await;
+    let lead = r.session_id();
+    let before = r.files();
+    prompt(
+        &mut r,
+        lead,
+        "delegate: dev=run: sleep 2; echo a > a.txt".into(),
+    );
+    r.until(|k| matches!(k, EventKind::SessionCreated(c) if c.parent_session.is_some()))
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    r.n += 1;
+    r.send(MasterToNode::Cancel {
+        req_id: format!("c{}", r.n),
+        session_id: lead,
+    });
+    loop {
+        r.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+        let last = r
+            .seen
+            .iter()
+            .rev()
+            .find(|e| matches!(e.typed(), Ok(EventKind::TurnEnded(_))))
+            .unwrap();
+        if last.session_id == lead {
+            break;
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+    let turn = last_turn(&r, lead);
+    let undo = r.restore(&turn, false).await;
+    assert_eq!(undo.result, Ok(()));
+    assert_eq!(r.files(), before);
+}
+
+/// A node restart between the delegating turn and the Undo: the plain
+/// "delegate, the child writes, the turn ends, restart, Undo" does not ask,
+/// and puts the folder back exactly.
+#[tokio::test]
+async fn a_restart_between_the_delegating_turn_and_its_undo_does_not_make_it_ask() {
+    let mut r = repo_rig().await;
+    let before = r.files();
+    let (turn, _) = r
+        .lead_turn("delegate: dev=run: echo v2 > keep.txt; echo new > made.txt")
+        .await;
+    let turn = turn.id.expect("a turn checkpoint");
+    r.restart().await;
+    let undo = r.restore(&turn, false).await;
+    assert_eq!(undo.result, Ok(()));
+    assert_eq!(r.files(), before);
+}

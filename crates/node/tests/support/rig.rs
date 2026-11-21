@@ -36,7 +36,8 @@ pub struct Rig {
     pub lead_tools: Option<Vec<&'static str>>,
     pub dir: tempfile::TempDir,
     pub ws: PathBuf,
-    _node: NodeRuntime,
+    _node: Option<NodeRuntime>,
+    policy: NodePolicy,
     link: NodeLink,
     pub seen: Vec<RawEvent>,
     /// What the node's hello announced.
@@ -147,6 +148,7 @@ impl Rig {
             ..Default::default()
         };
         tweak(&mut policy);
+        let kept_policy = policy.clone();
         let cfg = NodeConfig {
             node_id: "local".into(),
             hostname: "test".into(),
@@ -186,7 +188,8 @@ impl Rig {
             lead_tools: None,
             dir,
             ws,
-            _node: node,
+            _node: Some(node),
+            policy: kept_policy,
             link,
             seen: vec![],
             caps,
@@ -209,6 +212,47 @@ impl Rig {
         rig.until(|k| matches!(k, EventKind::SessionCreated(_)))
             .await;
         rig
+    }
+
+    /// Stop the node and start another on the same data directory (its
+    /// logs, checkpoints and sessions), as a restart does; the sessions are
+    /// loaded again from their logs on first use.
+    pub async fn restart(&mut self) {
+        drop(self._node.take());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let store = Store::open(&self.dir.path().join("node.db"), Durability::Full).unwrap();
+        let node = NodeRuntime::start(NodeConfig {
+            node_id: "local".into(),
+            hostname: "test".into(),
+            policy: self.policy.clone(),
+            store,
+            backend: Arc::new(NativeBackend::new(
+                Arc::new(Recording {
+                    inner: Mock {
+                        delay: Duration::from_millis(5),
+                    },
+                    seen: self.requests.clone(),
+                }),
+                harness_tools::builtin(),
+                NativeConfig::default(),
+            )),
+            default_model: "mock".into(),
+            secrets: harness_core::SecretSet::new(vec![]),
+            profile: harness_core::event::Profile::Agentic,
+            incognito_ttl: None,
+            checkpoints_dir: Some(self.dir.path().join("checkpoints")),
+            git_sandbox: None,
+            artifacts: None,
+        })
+        .await
+        .unwrap();
+        let mut link = node.attach().await;
+        match link.from_node.recv().await.unwrap() {
+            NodeToMaster::Hello { .. } => {}
+            other => panic!("expected hello, got {other:?}"),
+        }
+        self.link = link;
+        self._node = Some(node);
     }
 
     /// The rig's one session.
