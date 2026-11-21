@@ -519,6 +519,35 @@ export default function Conversation(props: {
     fill(m.text, [], m.pictures, false);
     box.current?.focus();
   };
+  // A rewind undone (by this tab, or seen arriving from another): the message
+  // is in the chat again, so a box that still holds exactly what the rewind
+  // put there (its text and pictures, nothing attached) is emptied, or Enter
+  // would send it twice. Edited, it stays. Rewinds already undone when the chat
+  // opened are not acted on. Runs after every render: the view is mutated in place.
+  const undoneSeen = useRef<{ sid: string; seqs: Set<number> } | null>(null);
+  useEffect(() => {
+    if (!view) return;
+    const now = (view.rewinds ?? []).filter((r) => r.undone);
+    const seen = undoneSeen.current;
+    if (!seen || seen.sid !== sessionId) {
+      undoneSeen.current = { sid: sessionId, seqs: new Set(now.map((r) => r.seq)) };
+      return;
+    }
+    for (const r of now) {
+      if (seen.seqs.has(r.seq)) continue;
+      seen.seqs.add(r.seq);
+      const at = view.items.findIndex((x, k) => x.type === "user" && seqAt(view, k) === r.message_seq);
+      const item = view.items[at];
+      const m = item?.type === "user" ? resend(item) : null;
+      const held = box.current?.content();
+      if (!m || !held || held.files > 0) continue;
+      const keys = m.pictures.map((p) => p.key).sort();
+      if (held.text.trim() === m.text.trim() && held.pictures.length === keys.length && [...held.pictures].sort().every((k, n) => k === keys[n])) {
+        box.current?.setText("");
+        box.current?.setPictures([]);
+      }
+    }
+  });
   const afterRewind = (m: Resend | null) => {
     if (m && box.current?.empty()) putRewound(m);
     else box.current?.focus();

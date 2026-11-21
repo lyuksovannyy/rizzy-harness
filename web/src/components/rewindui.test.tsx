@@ -324,6 +324,44 @@ describe("the box and a rewind that is on screen already", () => {
     await type("");
     expect(named("Put the message back in the box")).toBeDefined();
   });
+
+  const withImage = [
+    created,
+    ...turn(2, "t1", "look at this", { images: [{ media_id: "m1", sha256: "x", mime: "image/png", name: "shot.png", width: 1, height: 1 }] }),
+  ];
+  const rewoundAndRefilled = async (log: RawEvent[], messageSeq: number, turnId: string) => {
+    await show(log);
+    rewind.mockImplementationOnce(async () => {
+      apply(current, rewound(current.head_seq + 1, messageSeq, turnId));
+      return { ok: true };
+    });
+    await click(actions()[0]);
+    await wait();
+    await click(named("Rewind conversation"));
+    await draw();
+  };
+  const undone = async () => {
+    const r = current.rewinds!.find((x) => !x.undone)!;
+    apply(current, ev(current.head_seq + 1, "conversation_rewind_undone", { rewind_seq: r.seq }));
+    await draw();
+  };
+
+  test("an undo empties the box when it holds exactly what the rewind put there: text and pictures", async () => {
+    await rewoundAndRefilled(withImage, 3, "t1");
+    expect(textarea().value).toBe("look at this");
+    expect(host.querySelector(".composer .image-chip")).not.toBeNull();
+    await undone();
+    expect(textarea().value).toBe("");
+    expect(host.querySelector(".composer .image-chip")).toBeNull();
+  });
+
+  test("an undo leaves the box alone when the person edited it", async () => {
+    await rewoundAndRefilled(two.slice(0, 5), 3, "t1");
+    expect(textarea().value).toBe("first");
+    await type("first, but better");
+    await undone();
+    expect(textarea().value).toBe("first, but better");
+  });
 });
 
 describe("the rewound block", () => {
