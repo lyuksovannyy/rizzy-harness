@@ -1241,3 +1241,45 @@ fn a_hostile_call_id_tool_name_and_title_print_as_short_plain_tokens() {
     // The result is still read by what the label shows.
     assert!(ask(&log, json!({"turn": 1, "call": rid})).contains("RESULT"));
 }
+
+/// Whatever a model sends, the tool answers (with text or a sentence) and
+/// does not panic: huge numbers, wrong types, odd scripts in a search.
+#[test]
+fn odd_arguments_are_answered_never_panic() {
+    let mut log = Log::new();
+    log.turn(None, "hello", &[("read", json!({}), "res")], "ok");
+    log.turn(None, "hello2", &[("read", json!({}), "res2")], "ok");
+    for input in [
+        json!({"turn": 1, "search": "abc"}),
+        json!({"turn": 1, "call": "t1c0", "part": 0}),
+        json!({"turn": 1, "call": "t1c0", "part": 99999999999u64}),
+        json!({"page": 0}),
+        json!({"page": 999999999}),
+        json!({"page": 4294967295u64}),
+        json!({"turn": 2, "call": "t1c0"}),
+        json!({"turn": "1"}),
+        json!({"turn": 1.5}),
+        json!({"turn": -1}),
+        json!({"turn": u64::MAX}),
+        json!({"turn": 1, "image": 4294967295u64}),
+        json!({"turn": 1, "message": 4294967295u64}),
+        json!({"turn": 1, "message": 2, "part": 1}),
+        json!({"turn": 1, "foo": "bar"}),
+        json!({"turn": 1, "call": 5}),
+        json!({"turn": 1, "call": "#0"}),
+        json!({"turn": 1, "call": "#99999999999999999999"}),
+        json!({"search": "  ab  "}),
+        json!({"search": "éé"}),
+        json!({"search": "ǅǅǅ"}),
+        json!({"search": "İİİ"}),
+        json!({"search": "%%%"}),
+        json!([1, 2]),
+        json!(null),
+        json!("x"),
+    ] {
+        match Ask::parse(&input).and_then(|a| history::read(&log.events, &a)) {
+            Ok(Reply::Text(t)) => assert!(t.chars().count() <= BUDGET, "{input}"),
+            Ok(Reply::Image { .. }) | Err(_) => {}
+        }
+    }
+}
