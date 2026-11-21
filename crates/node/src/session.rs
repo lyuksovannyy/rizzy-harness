@@ -4390,14 +4390,14 @@ impl Session {
                     .collect();
                 names.sort();
                 names.dedup();
-                let (what, verb) = if names.len() == 1 {
-                    ("sub-agent", "is")
+                let (who, verb, them) = if names.len() == 1 {
+                    ("a sub-agent", "is", "it")
                 } else {
-                    ("sub-agents", "are")
+                    ("sub-agents", "are", "them")
                 };
                 return Err(format!(
-                    "its background {what} {} {verb} still working in this folder: stop it or \
-                     wait for it, then undo",
+                    "{who} of this chat ({}) {verb} still working in this folder: stop {them} or \
+                     wait for {them} to finish",
                     names.join(", ")
                 ));
             }

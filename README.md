@@ -1580,8 +1580,8 @@ or after its last one. Undo (and a rewind that puts files back) asks first
 and names those files; "Undo anyway" puts them back, and what a background
 sub-agent wrote after the turn ended is undone in its own chat (its Undo),
 not in the agent's. While a background sub-agent still works in the folder
-Undo is refused, naming it ("its background sub-agent @name is still working
-in this folder: stop it or wait for it, then undo"). If its record could not
+Undo is refused, naming it ("a sub-agent of this chat (@name) is still working
+in this folder: stop it or wait for it to finish"). If its record could not
 be written, nothing un-writes its changes; the result says so and the turn's
 Undo restores them. With
 `folder: "own"`, or on a node that says so, a sub-agent that can change

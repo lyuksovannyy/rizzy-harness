@@ -494,8 +494,8 @@ async fn an_undo_while_a_background_sub_agent_runs_names_it_and_says_what_to_do(
     let err = undo.result.expect_err("refused while the sub-agent works");
     assert!(
         err.contains(
-            "its background sub-agent @dev is still working in this folder: stop it or wait \
-             for it, then undo"
+            "a sub-agent of this chat (@dev) is still working in this folder: stop it or wait \
+             for it to finish"
         ),
         "{err}"
     );
