@@ -136,6 +136,52 @@ impl Made {
     pub(crate) fn record(&self) {
         self.recent().push_back(Instant::now());
     }
+
+    /// Take a place in the hour's allowance now, under the lock that counts
+    /// it, so copies that run at once cannot all pass [`Made::room`] before
+    /// any records: the place is given back when the [`Slot`] is dropped
+    /// unless [`Slot::keep`] says a folder was made.
+    pub(crate) fn reserve(&self, per_hour: usize) -> Result<Slot<'_>, String> {
+        let mut q = self.recent();
+        if q.len() >= per_hour {
+            return Err(format!(
+                "this node has made {per_hour} project folders in the last hour, its limit \
+                 ([limits] projects_per_hour in its node.toml); try again later"
+            ));
+        }
+        let at = Instant::now();
+        q.push_back(at);
+        Ok(Slot {
+            made: self,
+            at,
+            kept: false,
+        })
+    }
+}
+
+/// A place in the hour's allowance ([`Made::reserve`]).
+pub(crate) struct Slot<'a> {
+    made: &'a Made,
+    at: Instant,
+    kept: bool,
+}
+
+impl Slot<'_> {
+    /// A folder was made: the place stays used.
+    pub(crate) fn keep(mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        if !self.kept {
+            let mut q = self.made.recent();
+            if let Some(i) = q.iter().position(|t| *t == self.at) {
+                q.remove(i);
+            }
+        }
+    }
 }
 
 /// Why a node makes no project folder at all.
@@ -270,6 +316,19 @@ pub(crate) struct Build {
     name: String,
     fd: OwnedFd,
     path: PathBuf,
+    /// The folder was moved into the projects folder: nothing of it is
+    /// left in staging to remove.
+    moved: bool,
+}
+
+/// A build that is dropped (a failure, a cancelled request) removes its
+/// folder at once; the sweep at the next start is the second line only.
+impl Drop for Build {
+    fn drop(&mut self) {
+        if !self.moved {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 impl Build {
@@ -291,6 +350,7 @@ impl Build {
             staging,
             name,
             fd,
+            moved: false,
         })
     }
 
@@ -341,7 +401,7 @@ impl Build {
     /// then check, from `top`, that the name holds this very folder with
     /// its real `.git`, and that a session may run at its path. Its path.
     pub(crate) fn move_into(
-        self,
+        mut self,
         policy: &NodePolicy,
         top: &OwnedFd,
         names: &[String],
@@ -378,6 +438,9 @@ impl Build {
                     return Err(io("cannot move the new folder into", &dir, e));
                 }
             }
+        }
+        if placed.is_some() {
+            self.moved = true;
         }
         let Some(n) = placed else {
             self.discard();
@@ -454,6 +517,51 @@ fn remove_made(top: &OwnedFd, child: &OwnedFd, name: &OsStr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A place is taken under the lock before the work starts, so two
+    /// requests at once cannot both pass a limit of one; a dropped slot gives
+    /// it back, a kept one stays used.
+    #[test]
+    fn a_reserved_place_is_given_back_unless_kept() {
+        let made = Made::default();
+        let a = made.reserve(1).unwrap();
+        assert!(made.reserve(1).is_err(), "the limit was passed by a second");
+        drop(a);
+        let b = made.reserve(1).unwrap();
+        b.keep();
+        assert!(made.reserve(1).is_err());
+        assert!(made.room(1).is_err());
+        assert!(made.reserve(2).is_ok());
+    }
+
+    /// A build folder that is dropped (a failed or cancelled request) is
+    /// removed at once; one that was moved in is not touched.
+    #[test]
+    fn a_dropped_build_removes_its_folder_at_once() {
+        let d = tempfile::tempdir().unwrap();
+        let data = d.path().canonicalize().unwrap().join("data");
+        let ws = d.path().canonicalize().unwrap().join("ws");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        let mut policy = NodePolicy {
+            workspace_roots: vec![ws.clone()],
+            ..Default::default()
+        };
+        policy.projects.dir = Some(ws.join("projects"));
+        policy.protect(&data);
+        policy.locate_projects(&data).unwrap();
+        let staging = data.join("projects-staging");
+        let b = Build::new(&policy).unwrap();
+        let at = b.path().to_path_buf();
+        std::fs::write(at.join("part"), "x").unwrap();
+        assert!(at.is_dir());
+        drop(b);
+        assert!(
+            !at.exists(),
+            "left in staging: {:?}",
+            std::fs::read_dir(&staging).map(|d| d.count())
+        );
+    }
     use crate::policy::ProjectsPolicy;
 
     #[test]

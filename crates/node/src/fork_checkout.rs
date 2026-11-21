@@ -180,7 +180,9 @@ pub(crate) async fn make(
         }
     };
     fork_copy::version_ok().await?;
-    made.room(policy.limits.projects_per_hour)?;
+    // Reserved now and given back on any failure: copies that run at once
+    // cannot all pass the hour's limit before one records.
+    let slot = made.reserve(policy.limits.projects_per_hour)?;
     let max = policy.limits.clone_max_mb.saturating_mul(1024 * 1024);
     // Room, before anything is made.
     let git_bytes = fork_copy::git_dir_bytes(&source, max.saturating_add(1)).await;
@@ -266,7 +268,7 @@ pub(crate) async fn make(
     let root = tokio::task::spawn_blocking(move || build.move_into(&p, &top, &names))
         .await
         .map_err(|e| format!("moving the folder: {e}"))??;
-    made.record();
+    slot.keep();
     let mut notes = Vec::new();
     let folder = if at_sub {
         root.join(&sub)
@@ -574,6 +576,59 @@ mod tests {
         assert!(e.contains("file list could not be read"), "{e}");
         assert_eq!(r.staging(), Vec::<String>::new());
         assert_eq!(r.projects(), Vec::<String>::new());
+    }
+
+    /// Copies that run at once cannot all pass the hour's limit: the place
+    /// is taken before the copy starts, not recorded after it ends.
+    #[tokio::test]
+    async fn copies_at_once_cannot_pass_the_hourly_limit_together() {
+        let mut r = rig(true).await;
+        r.policy.limits.projects_per_hour = 1;
+        let (a, b) = tokio::join!(
+            make(&r.policy, &r.made, r.request(), &|| "aaaa".into()),
+            make(&r.policy, &r.made, r.request(), &|| "bbbb".into()),
+        );
+        assert_eq!(
+            [a.is_ok(), b.is_ok()].iter().filter(|x| **x).count(),
+            1,
+            "{a:?} / {b:?}"
+        );
+    }
+
+    /// A copy that fails gives its place back; one that is cancelled gives
+    /// it back and removes its folders from staging at once.
+    #[tokio::test]
+    async fn a_failed_copy_gives_its_place_back_and_a_cancelled_one_leaves_no_folder() {
+        let mut r = rig(true).await;
+        r.policy.limits.projects_per_hour = 1;
+        let real = String::from_utf8(
+            std::process::Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let script = r.data.join("slow-git/git");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        // The clone hangs (a huge repository, a slow disk).
+        crate::test_script::script(
+            &script,
+            &format!(
+                "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = clone ]; then sleep 30; fi; done\n\
+                 exec {} \"$@\"\n",
+                real.trim()
+            ),
+        );
+        crate::git::use_test_git(Some(script));
+        let res = tokio::time::timeout(Duration::from_millis(1500), r.make()).await;
+        assert!(res.is_err(), "the slow copy finished: {res:?}");
+        // Nothing waits for the next start: the future's drop removed it.
+        assert_eq!(r.staging(), Vec::<String>::new());
+        crate::git::use_test_git(None);
+        // The cancelled copy gave its place back: a limit of one still has room.
+        r.make().await.unwrap();
+        assert_eq!(r.staging(), Vec::<String>::new());
     }
 
     /// A name that is taken (a folder, or a link) is never replaced or
