@@ -690,6 +690,11 @@ and `session_forks` links the two sessions. Files come back from the forge (the 
 branch, if there is one); a fork copies no files. The new session's node must be attached to
 the session's workspace; a fork never changes a session's workspace.
 
+This is the fork to another node, and its lossy seed is for that. The fork on the same node
+(ADOPTION_PLAN X.48, `docs/fork.md`) keeps every event: the new chat's log is the parent's
+events up to a finished turn, copied whole at the same `seq`, then `session_forked`; it
+shares the parent's folder until it gets a checkout of its own.
+
 ### 4.10 A node in several workspaces
 
 #### 4.10.1 The attached list and the checks

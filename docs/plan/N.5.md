@@ -6,7 +6,7 @@
 
 ## Adds beyond the note
 
-Session epoch (C.1); fork by copy (C.2)
+Session epoch (C.1); fork by copy (C.2: the same-node fork is built, X.48; the cross-node seed is not)
 
 ## Abuse tests beyond the note's
 
