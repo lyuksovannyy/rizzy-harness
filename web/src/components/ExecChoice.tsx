@@ -25,17 +25,19 @@ export function ExecChoice(props: {
   const [asking, setAsking] = useState(false);
   if (props.pickable === false)
     return (
-      <label>
-        Commands
-        <span className="exec-only" aria-label="How this chat's commands run">
-          {props.offered.includes("sandbox") ? MODE_LABEL.sandbox : "no sandbox on this node"}
-        </span>
+      <>
+        <label>
+          Commands
+          <span className="exec-only" aria-label="How this chat's commands run">
+            {props.offered.includes("sandbox") ? MODE_LABEL.sandbox : "no sandbox on this node"}
+          </span>
+        </label>
         {props.hostOff && (
           <span className="muted small exec-hint" role="note">
             the host shell is off on this node: set <code>host = true</code> under <code>[execution]</code> in its node.toml and restart it
           </span>
         )}
-      </label>
+      </>
     );
   return (
     <>

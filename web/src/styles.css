@@ -5734,6 +5734,12 @@ button.pp-row:hover:not(:disabled),
 .exec-only {
   color: var(--fg);
 }
+/* The new-chat hint on a node without the host shell: its own line, wrapped. */
+.exec-hint {
+  flex: 1 0 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 
 /* Plugins (X.34): the Shared / Assigned editor under a row. */
 .plugin-row {
