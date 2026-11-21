@@ -9,11 +9,11 @@
 // Remove are yours alone: an approval covers your own chats in this
 // folder, and the page says where the node runs them (inside the sandbox,
 // or as the node's own user in a host chat, which the node offers or not),
-// above the list and beside each Approve. Reload asks the node to read the
+// once, above the list. Reload asks the node to read the
 // file again; nothing else does. Part of the project page's lazy chunk.
 import { own } from "../emptyView";
 import { useCallback, useEffect, useState } from "react";
-import { call } from "../api";
+import { call, HttpError } from "../api";
 import type { ExecMode } from "../types";
 import "./ProjectMcp.css";
 
@@ -102,19 +102,26 @@ function Runs(props: { command: string; args: string[]; env: McpEnv[]; label: st
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/** The node's answer when its node.toml keeps project servers off: a 409
+ * naming the setting (`crates/node/src/project_mcp.rs` OFF). */
+const isOff = (e: unknown) => e instanceof HttpError && e.status === 409 && e.message.includes("project_servers");
+
 export default function ProjectMcp(props: { projectId: string; hasFolder: boolean; modes?: ExecMode[] }) {
   const host = !!props.modes?.includes("host");
   const [list, setList] = useState<McpList | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [off, setOff] = useState(false);
   const [busy, setBusy] = useState(false);
   const base = `/api/projects/${encodeURIComponent(props.projectId)}/mcp`;
   const run = useCallback(async (p: Promise<McpList>) => {
     setBusy(true);
     setError(null);
+    setOff(false);
     try {
       setList(await p);
     } catch (e) {
-      setError(message(e));
+      if (isOff(e)) setOff(true);
+      else setError(message(e));
     } finally {
       setBusy(false);
     }
@@ -134,8 +141,14 @@ export default function ProjectMcp(props: { projectId: string; hasFolder: boolea
         you approve it again. Approving pins the command, its arguments and its environment as shown here, not the
         files it runs.
       </p>
-      <p className="field-hint">{whereItRuns(props.modes)}</p>
+      {!off && <p className="field-hint">{whereItRuns(props.modes)}</p>}
       {!props.hasFolder && <p className="muted">This project has no folder on a node, so it has no .mcp.json.</p>}
+      {off && (
+        <p className="muted mcp-off">
+          Project MCP servers are off on this node. Setting <code>project_servers = "ask"</code> under <code>[mcp]</code> in its
+          node.toml turns them on (the default is "off").
+        </p>
+      )}
       {error && <p className="error-text">{error}</p>}
       {list?.note && <p className="error-text">{list.note}</p>}
       {list?.unreadable && (
@@ -168,7 +181,6 @@ export default function ProjectMcp(props: { projectId: string; hasFolder: boolea
               </div>
               {e.reason && <p className="muted small">{e.reason}</p>}
               {own(WHAT, e.state) && <p className="muted small">{own(WHAT, e.state)}</p>}
-              {(e.state === "new" || e.state === "changed") && <p className="muted small">{whereItRuns(props.modes)}</p>}
               {host && (e.env.length > 0 || (e.approved_env?.length ?? 0) > 0) && ["new", "approved", "changed"].includes(e.state) && (
                 <p className="muted small">{HOST_ENV}</p>
               )}
