@@ -151,6 +151,38 @@ impl Drop for Copy {
     }
 }
 
+/// A fork's short id, for its branch and its folder's name: the last eight
+/// letters and digits of the new chat's id. The id is a UUIDv7, whose first
+/// half is the time: its first eight would be the same for every fork made
+/// within about a minute.
+pub(crate) fn short_id(session_id: &str) -> String {
+    let all: Vec<char> = session_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
+    all[all.len().saturating_sub(8)..].iter().collect()
+}
+
+/// `name` without the `-fork-<short id>` (and the `-<suffix>` a taken name
+/// got) that an earlier own-copy fork added, so a fork of a fork is named
+/// after the original repository and not `x-fork-…-fork-…`.
+fn original_name(name: &str) -> &str {
+    let Some(at) = name.rfind("-fork-") else {
+        return name;
+    };
+    let tail = &name[at + "-fork-".len()..];
+    let (id, suffix) = match tail.split_once('-') {
+        Some((id, suffix)) => (id, Some(suffix)),
+        None => (tail, None),
+    };
+    let plain = |s: &str, n: usize| s.len() == n && s.chars().all(|c| c.is_ascii_alphanumeric());
+    if at > 0 && plain(id, 8) && suffix.is_none_or(|x| plain(x, 4)) {
+        &name[..at]
+    } else {
+        name
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// Tests: the free bytes on the projects folder's disk.
@@ -243,7 +275,7 @@ pub(crate) async fn make(
         .file_name()
         .map(|n| projects::slug(&n.to_string_lossy()))
         .unwrap_or_else(|| projects::EMPTY_SLUG.to_string());
-    let base = format!("{name}-fork-{}", req.short);
+    let base = format!("{}-fork-{}", original_name(&name), req.short);
     let mut names = vec![base.clone()];
     names.extend((0..projects::TRIES - 1).map(|_| format!("{base}-{}", make_suffix())));
     let p = policy.clone();
@@ -357,6 +389,31 @@ pub(crate) async fn make(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_forks_short_id_is_the_random_end_of_its_chats_id() {
+        // Two UUIDv7 ids made in the same millisecond share their first half.
+        let a = short_id("01a1fd7b-3c2e-7a10-9f3e-5b6c7d8e9f01");
+        let b = short_id("01a1fd7b-3c2e-7a10-8d2c-1a2b3c4d5e6f");
+        assert_eq!(a, "7d8e9f01");
+        assert_eq!(b, "3c4d5e6f");
+        assert_ne!(a, b);
+        assert_eq!(short_id("ab"), "ab");
+    }
+
+    #[test]
+    fn a_fork_of_a_fork_is_named_after_the_original_repository() {
+        assert_eq!(original_name("proj"), "proj");
+        assert_eq!(original_name("proj-fork-01a1fd79"), "proj");
+        assert_eq!(original_name("proj-fork-01a1fd79-raem"), "proj");
+        // Not one of ours: kept.
+        assert_eq!(original_name("my-fork-of-x"), "my-fork-of-x");
+        assert_eq!(original_name("-fork-01a1fd79"), "-fork-01a1fd79");
+        assert_eq!(
+            original_name("proj-fork-01a1fd79-toolong"),
+            "proj-fork-01a1fd79-toolong"
+        );
+    }
+
     use super::*;
     use harness_core::SessionId;
     use harness_core::event::{HeadAt, HeadMoved};

@@ -47,11 +47,18 @@ export function ForkChoice(props: { sessionId: string; turnId: string }) {
     const away = (e: Event) => {
       if (e.target instanceof Node && !root.current?.contains(e.target)) close(false);
     };
+    // Escape closes the panel wherever the focus went (a Tab can take it
+    // out of the panel while it stays open).
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented && !root.current?.contains(e.target as Node)) close(false);
+    };
     document.addEventListener("pointerdown", away, true);
+    document.addEventListener("keydown", esc);
     return () => {
       clearTimeout(id);
       drop();
       document.removeEventListener("pointerdown", away, true);
+      document.removeEventListener("keydown", esc);
     };
   }, [open]);
 

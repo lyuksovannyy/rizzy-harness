@@ -140,6 +140,14 @@ describe("the choice", () => {
     expect(location.hash).toBe("#/s/33333333-3333-3333-3333-333333333333");
   });
 
+  test("Escape closes it also when the focus has left the panel", async () => {
+    await render(plain());
+    await click(opener());
+    expect(panel()).not.toBeNull();
+    await act(async () => document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(panel()).toBeNull();
+  });
+
   test("Escape and a click outside close it, Escape puts the focus back on the link", async () => {
     await render(plain());
     await click(opener());

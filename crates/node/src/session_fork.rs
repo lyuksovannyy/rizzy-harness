@@ -214,12 +214,7 @@ impl Session {
             .acquire_owned()
             .await
             .map_err(|e| e.to_string())?;
-        let short: String = new
-            .to_string()
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .take(8)
-            .collect();
+        let short = crate::fork_checkout::short_id(&new.to_string());
         let req = crate::fork_checkout::Request {
             bounds: self.bounds(&dir),
             cwd: dir,
