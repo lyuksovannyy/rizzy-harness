@@ -1899,6 +1899,13 @@ pub fn rebuild_spans(
     history: &[RawEvent],
     how: &Rebuild<'_>,
 ) -> (Vec<ChatMsg>, Vec<shorten::Span>) {
+    // Rewound turns are not there (X.45): the model is sent the chat as it
+    // stands after the person's rewind, whatever slice of the log a caller
+    // holds. A log nothing rewound is read as it is.
+    let history = &*harness_core::rewind::visible(history);
+    // The harness's line the first message after a rewind that kept the
+    // files opens with, built from the log as the loop built it.
+    let rewind_lines = harness_core::rewind::opening_lines(history);
     // Where each turn's messages begin; a message of no turn of its own
     // (a tool result, a note) belongs to the turn before it.
     let mut spans: Vec<shorten::Span> = Vec::new();
@@ -2002,6 +2009,9 @@ pub fn rebuild_spans(
             }
             EventKind::UserMessage(m) => {
                 close_open(&mut out, &mut open);
+                if let Some(line) = rewind_lines.get(&e.seq) {
+                    out.push(ChatMsg::Note(line.clone()));
+                }
                 mark(&mut spans, out.len(), &m.turn_id);
                 let env = opening
                     .take()
@@ -2615,6 +2625,20 @@ impl AgentBackend for NativeBackend {
 impl NativeBackend {
     /// One turn. Every append that fails ends it (see [`Logged`]).
     async fn turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome {
+        let mut ctx = ctx;
+        // A rewound range is not part of the chat (X.45): not what the
+        // model is sent, not what it has read (the file tools' guard is
+        // rebuilt from this), not the summary's or the task list's. The
+        // line a turn after a rewind that kept the files opens with is
+        // taken first, from the whole log.
+        let rewind_line = harness_core::rewind::next_opening_line(&ctx.history);
+        let hidden = match harness_core::rewind::visible(&ctx.history) {
+            std::borrow::Cow::Owned(v) => Some(v),
+            std::borrow::Cow::Borrowed(_) => None,
+        };
+        if let Some(v) = hidden {
+            ctx.history = v;
+        }
         let host = ctx.host;
         let agent = ctx.agent.as_ref();
         let author = agent.map(|a| a.agent_id.clone());
@@ -3169,6 +3193,12 @@ impl NativeBackend {
             // Recorded as read after `turn_started`, where the log has
             // them on every later request.
             messages.extend(ctx.extra.queued.iter().map(queued_msg));
+            // The person's first message after a rewind that kept the
+            // files: the harness's line stands before it, as the rebuild
+            // puts it (`rewind::opening_lines`).
+            if let Some(line) = &rewind_line {
+                messages.push(ChatMsg::Note(line.clone()));
+            }
         }
         messages.push(opening_msg(plan.as_ref()));
         let mut user_idx = messages.len() - 1;

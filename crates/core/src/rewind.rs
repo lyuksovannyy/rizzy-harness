@@ -142,7 +142,7 @@ pub fn rewound(log: &[RawEvent]) -> Ranges {
 
 /// `log` as the model and the hand-off note read it: the events of rewound
 /// ranges are not there, nor is the `turn_started` of a turn a rewind went
-/// back to, except `checkpoint` events (state, not conversation: nothing
+/// back to and the late end of a command one of them started, except `checkpoint` events (state, not conversation: nothing
 /// reads them for the conversation, and a rewind that kept the files names
 /// them from these). The two rewind events stay, so a second pass over the
 /// result is the same list. Borrowed when nothing is rewound.
@@ -151,6 +151,13 @@ pub fn visible(log: &[RawEvent]) -> Cow<'_, [RawEvent]> {
     if ranges.is_empty() {
         return Cow::Borrowed(log);
     }
+    // The end of a command a rewound turn started, recorded after the
+    // rewind, is not news to the chat either.
+    let gone: HashSet<String> = log
+        .iter()
+        .filter(|e| e.kind == "background_started" && ranges.holds(e.seq))
+        .filter_map(|e| e.payload.get("bg_id")?.as_str().map(str::to_string))
+        .collect();
     Cow::Owned(
         log.iter()
             .filter(|e| {
@@ -158,6 +165,14 @@ pub fn visible(log: &[RawEvent]) -> Cow<'_, [RawEvent]> {
                     return true;
                 }
                 if ranges.holds(e.seq) {
+                    return false;
+                }
+                if e.kind == "background_ended"
+                    && e.payload
+                        .get("bg_id")
+                        .and_then(|b| b.as_str())
+                        .is_some_and(|b| gone.contains(b))
+                {
                     return false;
                 }
                 // The target's own start stands before its message.
