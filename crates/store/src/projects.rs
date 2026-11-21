@@ -33,33 +33,6 @@ CREATE TABLE IF NOT EXISTS projects (
     CHECK ((source_host IS NULL) = (source_name IS NULL))
 );
 CREATE INDEX IF NOT EXISTS projects_ws ON projects(workspace_id);
--- A project whose folder a node is cloning now, or whose clone failed
--- (ADOPTION_PLAN X.27 step 3, PLAN.md T86 and T77). Not a project: no
--- route that takes a project id reads this table, so nothing can start a
--- chat in it, link it, give it a folder or write its memory or board. When
--- the clone ends well the row is deleted and the project written, with the
--- same id, in one transaction; when it fails the row stays `failed` with
--- the reason for its starter to read and dismiss. At the master's start
--- every `cloning` row becomes `failed` (no clone outlives the master's
--- wait for it).
-CREATE TABLE IF NOT EXISTS project_clones (
-    project_id   TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
-    name         TEXT NOT NULL,
-    node_id      TEXT NOT NULL,
-    host         TEXT NOT NULL,
-    full_name    TEXT NOT NULL,
-    created_by   TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    started_ms   INTEGER NOT NULL,
-    state        TEXT NOT NULL CHECK (state IN ('cloning', 'failed')),
-    reason       TEXT,
-    ended_ms     INTEGER,
-    CHECK ((state = 'failed') = (reason IS NOT NULL))
-);
-CREATE INDEX IF NOT EXISTS project_clones_ws ON project_clones(workspace_id);
--- One clone of a repository per person and node at a time.
-CREATE UNIQUE INDEX IF NOT EXISTS project_clones_one
-    ON project_clones(created_by, node_id, host, lower(full_name)) WHERE state = 'cloning';
 -- Which project a chat is in (at most one). No foreign key on session_id: a
 -- link may be written right after the create, and delete_session drops it.
 CREATE TABLE IF NOT EXISTS session_projects (

@@ -517,26 +517,33 @@ CREATE INDEX IF NOT EXISTS session_workspaces_ws ON session_workspaces(workspace
 /// last one leaves, as recorded (`schema/<n>.sql`, n = `MIGRATIONS.len()`).
 pub const DB_SCHEMA: migrate::Schema<'static> = migrate::Schema {
     steps: MIGRATIONS,
-    recorded: include_str!("../schema/1.sql"),
+    recorded: include_str!("../schema/2.sql"),
 };
 
 /// The schema of `master.db`, `chat.db` and `node.db`, one entry per version.
-pub const MIGRATIONS: &[migrate::Migration] = &[&[
-    SCHEMA,
-    projects::SCHEMA,
-    // In this order: each one's tables reference the ones before.
-    blobs::SCHEMA,
-    media::SCHEMA,
-    artifacts::SCHEMA,
-    routines::SCHEMA,
-    session_images::SCHEMA,
-    profile_images::SCHEMA,
-    workspace_agents::SCHEMA,
-    plugin_access::SCHEMA,
-    stored_skills::SCHEMA,
-    connections::SCHEMA,
-    custom_connectors::SCHEMA,
-]];
+/// An entry that is recorded (`schema/<n>.sql`) never changes: a schema
+/// change is a new entry at the end (PLAN.md §0).
+pub const MIGRATIONS: &[migrate::Migration] = &[
+    // 1: the whole schema as frozen on 2026-11-21 (commit 3f0859a3's).
+    &[
+        SCHEMA,
+        projects::SCHEMA,
+        // In this order: each one's tables reference the ones before.
+        blobs::SCHEMA,
+        media::SCHEMA,
+        artifacts::SCHEMA,
+        routines::SCHEMA,
+        session_images::SCHEMA,
+        profile_images::SCHEMA,
+        workspace_agents::SCHEMA,
+        plugin_access::SCHEMA,
+        stored_skills::SCHEMA,
+        connections::SCHEMA,
+        custom_connectors::SCHEMA,
+    ],
+    // 2: projects being cloned (X.27 step 3).
+    &[project_clones::SCHEMA],
+];
 
 /// A session's effective workspace: its `session_workspaces` row while the
 /// owner is still a member of that workspace (or the chat has no owner),

@@ -57,7 +57,9 @@ Evidence cites `research/round2/synth/<file>` by number and heading, for example
    model, the note in `docs/` for design, all in the same pull request.
 9. **Say what was not run.** Tests needing Podman or Node are marked; if not run locally, the
    pull request says so and names where they ran.
-10. **No compatibility code before the first tag.** Event and schema changes are in place.
+10. **A data directory in use is never wiped** (owner, 2026-11-21): a database schema change
+    is a new migration, an event change is additive. No other compatibility code before the
+    first tag.
 
 Sizes: **S** under half a day, **M** one to two days, **L** three to five days, for one person
 working with an agent. Estimates, not promises.

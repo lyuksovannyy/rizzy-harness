@@ -248,9 +248,9 @@ fn a_migration_that_leaves_a_dangling_reference_fails_and_leaves_the_file_byte_i
 }
 
 /// Review R43-2: the version is only trusted together with the schema. A
-/// file at version 1 that lacks an index migration 1 makes (migration 1
-/// edited in place before the tag), or has a table no migration makes (a
-/// pre-release file, another program's file), is refused unchanged.
+/// file at the latest version that lacks an index its migrations make, or
+/// has a table no migration makes (a file from a development build older
+/// than version 1, another program's file), is refused unchanged.
 #[test]
 fn a_store_whose_schema_is_not_its_versions_is_refused_and_left_byte_identical() {
     let dir = tempfile::tempdir().unwrap();
@@ -266,14 +266,11 @@ fn a_store_whose_schema_is_not_its_versions_is_refused_and_left_byte_identical()
             .unwrap();
         let before = std::fs::read(&path).unwrap();
         let err = match Store::open(&path, Durability::Normal) {
-            Ok(_) => panic!("{case}: a file that is not schema version 1 was opened"),
+            Ok(_) => panic!("{case}: a file that is not its version's schema was opened"),
             Err(e) => e.to_string(),
         };
-        for part in [
-            "master.db",
-            "does not match schema version 1",
-            "not changed",
-        ] {
+        let version = format!("does not match schema version {}", MIGRATIONS.len());
+        for part in ["master.db", version.as_str(), "not changed"] {
             assert!(err.contains(part), "{case}: {part:?} missing from: {err}");
         }
         assert_eq!(std::fs::read(&path).unwrap(), before, "{case}");
@@ -407,8 +404,9 @@ fn the_preflight_refuses_a_newer_file_and_passes_an_absent_or_current_one() {
         .unwrap();
     let before = std::fs::read(&other).unwrap();
     let err = migrate::check_file(&other, &harness_store::DB_SCHEMA).unwrap_err();
+    let latest = MIGRATIONS.len() as i64;
     assert!(
-        matches!(err, MigrateError::Mismatch { version: 1, .. }),
+        matches!(err, MigrateError::Mismatch { version, .. } if version == latest),
         "{err:?}"
     );
     assert!(err.to_string().contains("node.db"), "{err}");
@@ -587,7 +585,8 @@ fn a_file_migrated_by_another_process_while_this_one_waited_is_not_migrated_agai
 }
 
 /// Owner decision (b): a version-0 file that already has tables is
-/// adopted as version 1 only when its schema is exactly version 1's.
+/// adopted as version 1 only when its schema is exactly version 1's; the
+/// later migrations then run over it as over any version 1 file.
 #[test]
 fn an_unversioned_file_with_exactly_version_1s_schema_is_adopted_as_version_1() {
     let dir = tempfile::tempdir().unwrap();
@@ -605,7 +604,7 @@ fn an_unversioned_file_with_exactly_version_1s_schema_is_adopted_as_version_1() 
     }
     assert_eq!(version_of(&path), 0);
     drop(Store::open(&path, Durability::Normal).unwrap());
-    assert_eq!(version_of(&path), 1);
+    assert_eq!(version_of(&path), MIGRATIONS.len() as i64);
     let users: i64 = Connection::open(&path)
         .unwrap()
         .query_row("SELECT count(*) FROM users", [], |r| r.get(0))
@@ -635,7 +634,7 @@ fn an_unversioned_file_whose_tables_break_migration_1_is_refused_as_a_mismatch()
         "chat.db",
         "does not match schema version 1",
         "not changed",
-        "remove this data directory",
+        "move this data directory aside",
     ] {
         assert!(err.contains(part), "{part:?} missing from: {err}");
     }
@@ -810,16 +809,16 @@ fn write_mode_fills_an_emptied_file() {
 }
 
 /// Every version's schema as recorded in `crates/store/schema/<k>.sql`. A
-/// migration that is already released must never change: a database made
-/// with it would no longer match what the next one expects. Change the
-/// schema with a new migration and record its file
-/// (`HARNESS_WRITE_SCHEMA=1 cargo test -p harness-store --test migrations`,
-/// which only fills files that are missing or empty). Before the first
-/// tag, migration 1 is still edited in place (PLAN.md §0): empty `1.sql`
-/// (`: > crates/store/schema/1.sql`; deleting it breaks the build), record
-/// it again with that command (that run's other tests fail: the crate was
-/// built with the empty file), run the tests once more without it, and
-/// wipe dev data directories.
+/// recorded version never changes (PLAN.md §0; since 2026-11-21 that holds
+/// before the first tag too): a database made with it would no longer
+/// match what the next migration expects, and a data directory in use
+/// would be refused. Change the schema with a NEW migration and record its
+/// file: create it empty (`: > crates/store/schema/<n>.sql`), point
+/// `DB_SCHEMA` at it, run
+/// `HARNESS_WRITE_SCHEMA=1 cargo test -p harness-store --test migrations`
+/// (it only fills files that are missing or empty; that run's other tests
+/// fail, the crate was built with the empty file), then run the tests once
+/// more without it. Never empty or edit a file that is already recorded.
 #[test]
 fn every_version_matches_its_recorded_schema() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema");
@@ -831,4 +830,85 @@ fn every_version_matches_its_recorded_schema() {
         "DB_SCHEMA must include_str! schema/{}.sql",
         MIGRATIONS.len()
     );
+}
+
+/// A database exactly as version 1 is recorded, the schema the data
+/// directories in use had when the schema was frozen (PLAN.md §0), with a
+/// row in it.
+fn version_1_database(path: &Path) {
+    let c = Connection::open(path).unwrap();
+    c.execute_batch(include_str!("../schema/1.sql")).unwrap();
+    c.execute_batch(
+        "INSERT INTO events (session_id, seq, ts_ms, kind, payload) VALUES ('s', 1, 5, 'k', '{}');
+         PRAGMA user_version = 1;",
+    )
+    .unwrap();
+}
+
+/// The first migration after the freeze: a version 1 database is not
+/// refused and not wiped. It gets the table version 2 adds on its next
+/// open and keeps what it held.
+#[test]
+fn a_version_1_database_is_migrated_to_the_latest_and_keeps_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, d) in [
+        ("master.db", Durability::Normal),
+        ("node.db", Durability::Full),
+    ] {
+        let path = dir.path().join(name);
+        version_1_database(&path);
+        // The start-up check passes it on to the open that migrates it.
+        migrate::check_file(&path, &harness_store::DB_SCHEMA).unwrap();
+        {
+            let c = Connection::open(&path).unwrap();
+            assert_eq!(count(&c, "events"), 1);
+            let has: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = 'project_clones'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(has, 0, "version 1 has no project_clones");
+        }
+        drop(Store::open(&path, d).unwrap_or_else(|e| panic!("{name}: {e}")));
+        assert_eq!(version_of(&path), MIGRATIONS.len() as i64, "{name}");
+        let c = Connection::open(&path).unwrap();
+        assert_eq!(count(&c, "events"), 1, "{name}: the row is kept");
+        assert_eq!(
+            count(&c, "project_clones"),
+            0,
+            "{name}: the new table is there"
+        );
+        // And once more: an up-to-date file opens as it is.
+        drop(c);
+        drop(Store::open(&path, d).unwrap());
+    }
+}
+
+/// Version 1 is what was recorded when the schema was frozen: the file is
+/// compared with a copy of its own text, so editing or re-recording it
+/// fails here and not on someone's data directory.
+#[test]
+fn the_recorded_version_1_is_the_frozen_one() {
+    let recorded = include_str!("../schema/1.sql");
+    assert!(
+        !recorded.contains("project_clones"),
+        "version 1 was recorded before project_clones; that table is migration 2"
+    );
+    assert_eq!(recorded.len(), FROZEN_V1_BYTES, "schema/1.sql was changed");
+    assert_eq!(
+        fnv1a(recorded.as_bytes()),
+        FROZEN_V1_FNV1A,
+        "schema/1.sql was changed"
+    );
+}
+
+const FROZEN_V1_BYTES: usize = 23440;
+const FROZEN_V1_FNV1A: u64 = 0x1c7e_eb5b_77db_b503;
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }

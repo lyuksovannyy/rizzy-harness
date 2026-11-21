@@ -53,27 +53,32 @@ rewritten after the layout mockup (foundations, UI shell and bar first, onboardi
   inside it), workspace admin (members, defaults) and server. Agentic sessions (a shell on a
   worker node) need a per-user grant, and the workspace role must allow them too. Localhost by
   default; remote only with an explicit flag. Shared chats and shared memory are not built.
-* **No compatibility code before the first release.** Nothing has shipped, so the schema is
-  created complete, with no aliases or renames; a dev data dir is simply wiped when the schema
-  changes. **Schema versions** (fix plan 4.3, `crates/store/src/migrate.rs`): every database
-  (`master.db`, `chat.db`, `node.db` through `Store`, `memory.db` through `SqliteMemory`)
-  carries `PRAGMA user_version` and is opened through numbered migrations; migration 1 is the
-  whole schema. Until the first tag migration 1 is edited in place and its recorded schema
-  (`crates/store/schema/1.sql`, `crates/memory/schema/1.sql`) emptied and recorded again with
-  `HARNESS_WRITE_SCHEMA=1`, which only fills files that are missing or empty (not deleted:
-  `include_str!` needs the file to build); the recorded text is
+* **A data directory in use is never wiped; no other compatibility code before the first
+  release.** The owner's decision of 2026-11-21 (it replaces "the schema is changed in place
+  and dev data directories are wiped"): the harness is in daily use before its first tag, and
+  every schema edit made that data directory unusable. **Schema versions** (fix plan 4.3,
+  `crates/store/src/migrate.rs`): every database (`master.db`, `chat.db`, `node.db` through
+  `Store`, `memory.db` through `SqliteMemory`) carries `PRAGMA user_version` and is opened
+  through numbered migrations. Version 1 is the whole schema as it was frozen: for `Store`
+  the schema of commit `3f0859a3` (2026-11-19), which the data directory in use had, compared
+  object by object; the `project_clones` table added after it is migration 2. A recorded
+  version (`crates/store/schema/<n>.sql`, `crates/memory/schema/<n>.sql`) is never edited and
+  never recorded again: every change is a new migration with its own recorded file
+  (`HARNESS_WRITE_SCHEMA=1` only fills a file that is missing or empty), the tests fail
+  otherwise, and a test holds version 1's text fixed. The recorded text is
   what the migrations make (SQLite's own `sqlite_*` objects and FTS5's shadow tables are left
   out, so a SQLite update does not change it). **The version is trusted only with the schema:**
-  a file at a known version must have exactly that version's recorded schema, and a migrated
-  one must end with it before its version is bumped, or it is refused unchanged. So from this
-  change on **every** pre-tag schema edit, an added table or index included, needs a wiped dev
-  data directory (the build names the file and refuses to start), and no pre-tag file is ever
-  taken for a released version 1. **Open, for the owner before the first tag** (review R43-8):
+  a file at the latest version must have exactly its recorded schema, and a migrated
+  one must end with it before its version is bumped, or it is refused unchanged. A database
+  from a development build older than version 1 is refused, named and left as it is; it
+  cannot be migrated. **Events:** a kind or a payload field is added, never renamed, removed
+  or given another meaning, so a log written before a change still decodes and folds; the
+  wire between master and node and the configuration files carry no aliases yet (a master
+  and its nodes are updated together). **Open** (review R43-8):
   `master.db`, `chat.db` and `node.db` share one migration list, so a master-only change bumps
   every node's `node.db` (and a node rolled back afterwards is refused over a table it never
-  reads), and node and chat files carry the account tables unused. One list per role is cheap
-  to split before the tag and a migration per role after it. From the tag on a released migration never changes, every change
-  is a new migration with its own recorded file, and the tests fail otherwise. A value that is
+  reads), and node and chat files carry the account tables unused. Splitting the list per role
+  is now a migration per role. A value that is
   queried or joined is a column; the `kv` table holds opaque documents only.
 
 ### Omnibox (the new-tab bar)
