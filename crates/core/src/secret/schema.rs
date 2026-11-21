@@ -19,6 +19,10 @@
 //! position not on that list is scrubbed: a field added later is scrubbed
 //! unless someone adds it on purpose.
 //!
+//! A number that holds a secret (a value made of digits can be written as
+//! a number) becomes its scrubbed text where free JSON stands, and stays
+//! where the types fix a number: such a position cannot hold the marker.
+//!
 //! A class is learned from a node that can tell: a string, or an object or
 //! array with something in it. A `null`, an empty object or array, a number
 //! or a bool holds no text, so it is passed over and teaches nothing (an
@@ -256,14 +260,35 @@ enum Seg {
     Index(usize),
 }
 
-/// Whether anything in `v`, a string or a key, holds a secret.
-fn any_hit(set: &SecretSet, v: &Value) -> bool {
+/// Whether anything in `v`, a string, a key or (with `nums`) a number,
+/// holds a secret.
+fn any_hit(set: &SecretSet, nums: bool, v: &Value) -> bool {
     match v {
         Value::String(s) => set.scrub(s) != *s,
-        Value::Array(a) => a.iter().any(|x| any_hit(set, x)),
-        Value::Object(m) => m.iter().any(|(k, x)| set.scrub(k) != *k || any_hit(set, x)),
+        Value::Array(a) => a.iter().any(|x| any_hit(set, nums, x)),
+        Value::Object(m) => m
+            .iter()
+            .any(|(k, x)| set.scrub(k) != *k || any_hit(set, nums, x)),
+        Value::Number(_) => number_hit(set, nums, v).is_some(),
         _ => false,
     }
+}
+
+/// What a number that holds a secret is replaced with: the number as
+/// `serde_json` writes it, scrubbed. A secret made of digits (a PIN, a
+/// numeric token) can be written as a number, where no string match sees
+/// it. `nums`: whether the set holds a value that could be a number at
+/// all ([`SecretSet::any_numeric`]); without one no number is looked at.
+fn number_hit(set: &SecretSet, nums: bool, v: &Value) -> Option<String> {
+    let Value::Number(n) = v else {
+        return None;
+    };
+    if !nums {
+        return None;
+    }
+    let text = n.to_string();
+    let to = set.scrub(&text);
+    (to != text).then_some(to)
 }
 
 fn at<'a>(v: &'a Value, path: &[Seg]) -> Option<&'a Value> {
@@ -372,6 +397,10 @@ fn shape(v: &Value) -> Option<usize> {
 /// The classes known, per kind, path and shape of the node (see [`shape`]),
 /// for the life of the process.
 type Cache = HashMap<String, HashMap<String, [Option<Class>; 3]>>;
+/// How many numbers one pass over an event asks the types about
+/// ([`Classifier::number_is_free`]); past it a number that holds a secret
+/// is taken as free JSON and the check of the result decides.
+const NUMBER_PROBES: usize = 256;
 static CLASSES: LazyLock<Mutex<Cache>> = LazyLock::new(Mutex::default);
 
 /// The payload is not as the typed event writes it: no probe can be read.
@@ -382,6 +411,8 @@ struct Classifier<'a, 'b> {
     base: &'a Value,
     cache: &'a mut Cache,
     sk: Option<Value>,
+    /// Numbers asked about in this pass ([`NUMBER_PROBES`]).
+    number_probes: usize,
 }
 
 impl Classifier<'_, '_> {
@@ -400,6 +431,13 @@ impl Classifier<'_, '_> {
         {
             return Ok(c);
         }
+        let c = probe(self.s, self.skeleton()?, path);
+        self.learn(g, shape, c);
+        Ok(c)
+    }
+
+    /// The copy the probes are read against, made once per event.
+    fn skeleton(&mut self) -> Result<&Value, NotWritten> {
         if self.sk.is_none() {
             // A probe is read against the payload as it is: only one the
             // typed event writes back unchanged can be read, or every
@@ -410,15 +448,42 @@ impl Classifier<'_, '_> {
             }
             self.sk = Some(sk);
         }
-        let c = probe(self.s, self.sk.as_ref().expect("set above"), path);
+        Ok(self.sk.as_ref().expect("set above"))
+    }
+
+    fn learn(&mut self, g: &str, shape: usize, c: Class) {
         self.cache
             .entry(self.s.kind.to_string())
             .or_default()
             .entry(g.to_string())
             .or_default()[shape] = Some(c);
-        Ok(c)
     }
 
+    /// Whether the number at `path` stands in free JSON, where a string
+    /// may take its place: probed with a string there (a typed number, an
+    /// exit code or a count, does not take one). Asked of each such number
+    /// on its own and never remembered: a general path can name a typed
+    /// number in one element of a list and free JSON in the next, and an
+    /// answer kept for the path would leave the free one unscrubbed for
+    /// the life of the process. Only a number that holds a secret is
+    /// asked about, so this is rare; past [`NUMBER_PROBES`] in one pass
+    /// the answer is "free" (when in doubt, scrub) and the check of the
+    /// result decides.
+    fn number_is_free(&mut self, path: &[Seg]) -> Result<bool, NotWritten> {
+        if self.number_probes >= NUMBER_PROBES {
+            return Ok(true);
+        }
+        self.number_probes += 1;
+        let s = self.s;
+        let mut c = self.skeleton()?.clone();
+        if let Some(x) = at_mut(&mut c, path) {
+            *x = Value::String("\u{1}probe".into());
+        }
+        Ok((s.holds)(c).0)
+    }
+}
+
+impl Classifier<'_, '_> {
     /// The class of the position at `path` and its general path; `Free`
     /// as soon as an ancestor is free JSON.
     fn resolve(&mut self, path: &[Seg]) -> Result<(Class, String), NotWritten> {
@@ -482,9 +547,18 @@ fn rename_keys(m: &mut Map<String, Value>, renames: &[(String, String)]) {
     }
 }
 
-/// Free JSON scrubbed: every string and key. Whether anything changed.
-fn scrub_free(set: &SecretSet, v: &mut Value) -> bool {
+/// Free JSON scrubbed: every string and key, and (with `nums`) a number
+/// that holds a secret, which becomes its scrubbed text. Whether anything
+/// changed.
+fn scrub_free(set: &SecretSet, nums: bool, v: &mut Value) -> bool {
     match v {
+        Value::Number(_) => match number_hit(set, nums, v) {
+            Some(to) => {
+                *v = Value::String(to);
+                true
+            }
+            None => false,
+        },
         Value::String(s) => {
             let c = set.scrub(s);
             let changed = c != *s;
@@ -493,9 +567,13 @@ fn scrub_free(set: &SecretSet, v: &mut Value) -> bool {
             }
             changed
         }
-        Value::Array(a) => a.iter_mut().fold(false, |ch, x| scrub_free(set, x) | ch),
+        Value::Array(a) => a
+            .iter_mut()
+            .fold(false, |ch, x| scrub_free(set, nums, x) | ch),
         Value::Object(m) => {
-            let mut changed = m.values_mut().fold(false, |ch, x| scrub_free(set, x) | ch);
+            let mut changed = m
+                .values_mut()
+                .fold(false, |ch, x| scrub_free(set, nums, x) | ch);
             let renames: Vec<(String, String)> = m
                 .keys()
                 .filter_map(|k| {
@@ -516,6 +594,8 @@ fn scrub_free(set: &SecretSet, v: &mut Value) -> bool {
 /// paths it names are changed (the fallback); `touched`: the paths changed.
 struct Walk<'a, 'b, 'c> {
     set: &'a SecretSet,
+    /// Whether a secret could be a number ([`number_hit`]).
+    nums: bool,
     cls: Classifier<'a, 'b>,
     allow: Option<&'c [String]>,
     touched: Vec<String>,
@@ -536,6 +616,18 @@ impl Walk<'_, '_, '_> {
         path: &mut Vec<Seg>,
         g: &mut String,
     ) -> Result<(), NotWritten> {
+        if v.is_number() {
+            // A number that holds a secret, where the types take a string
+            // (free JSON): its scrubbed text. A typed number stays: it
+            // cannot hold the marker.
+            if let Some(to) = number_hit(self.set, self.nums, v)
+                && self.cls.number_is_free(path)?
+                && self.may(g)
+            {
+                *v = Value::String(to);
+            }
+            return Ok(());
+        }
         let class = self.cls.class(v, path, g)?;
         // A class that does not fit the node (none is learned from another
         // shape, so none is expected): scrubbed as free text, never skipped.
@@ -549,13 +641,13 @@ impl Walk<'_, '_, '_> {
             Class::Free => match self.allow {
                 // The first pass: one scan, as the old scrubber did.
                 None => {
-                    if scrub_free(self.set, v) {
+                    if scrub_free(self.set, self.nums, v) {
                         self.may(g);
                     }
                 }
                 Some(_) => {
                     if self.may(g) {
-                        scrub_free(self.set, v);
+                        scrub_free(self.set, self.nums, v);
                     }
                 }
             },
@@ -644,15 +736,18 @@ fn run(
     payload: &mut Value,
     cache: &mut Cache,
 ) -> Result<Outcome, NotWritten> {
+    let nums = set.any_numeric();
     let pass = |allow: Option<&[String]>, cache: &mut Cache| {
         let mut out = payload.clone();
         let mut w = Walk {
             set,
+            nums,
             cls: Classifier {
                 s,
                 base: payload,
                 cache,
                 sk: None,
+                number_probes: 0,
             },
             allow,
             touched: vec![],
@@ -748,7 +843,7 @@ impl SecretSet {
     /// decodes of a copy with long strings cut short); after that a scrub is
     /// one pass, the lookups and one decode.
     pub fn scrub_event(&self, kind: &str, payload: &mut Value) -> Outcome {
-        if self.is_empty() || !any_hit(self, payload) {
+        if self.is_empty() || !any_hit(self, self.any_numeric(), payload) {
             return Outcome::Clean;
         }
         let keep = keep_of(self, kind);
@@ -830,6 +925,7 @@ pub fn positions(kind: &str, payload: &Value) -> Vec<(String, Class)> {
             base: payload,
             cache: &mut cache,
             sk: None,
+            number_probes: 0,
         };
         let Ok((class, g)) = c.resolve(&p) else {
             return vec![];
@@ -1026,6 +1122,70 @@ mod tests {
                 obj,
                 serde_json::json!({ "w": { "longfield": "a [REDACTED]" } })
             );
+        }
+    }
+
+    /// One general path, `xs[].n`, that is free JSON in one element and a
+    /// typed number in the next (the event schema has none). Each number
+    /// is asked about on its own: the free one is scrubbed and the typed
+    /// one stays, whichever the process met first. An answer remembered
+    /// for the path left the free one unscrubbed for good, with no
+    /// fallback to log it, when the typed one came first.
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct N {
+        xs: Vec<Z>,
+    }
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    #[serde(tag = "t", rename_all = "snake_case")]
+    enum Z {
+        A { n: Value },
+        B { n: i64 },
+    }
+
+    fn holds_n(v: Value) -> (bool, Value) {
+        let ok =
+            N::deserialize(&v).is_ok_and(|x| serde_json::to_value(&x).is_ok_and(|back| back == v));
+        (ok, v)
+    }
+
+    #[test]
+    fn a_number_is_asked_about_on_its_own_not_by_its_path() {
+        let set = SecretSet::new(vec![Secret::new("12345678901".into())]);
+        let keep = |_: &str, _: &str| Keep::No;
+        let s = Schema {
+            kind: "n",
+            holds: &holds_n,
+            keep: &keep,
+        };
+        let a = serde_json::json!({ "t": "a", "n": 12345678901u64 });
+        let b = serde_json::json!({ "t": "b", "n": 12345678901u64 });
+        let a_done = serde_json::json!({ "t": "a", "n": "[REDACTED]" });
+        for order in [[&a, &b], [&b, &a]] {
+            let mut cache = Cache::new();
+            // Twice: what the first event taught must not change the second.
+            for _ in 0..2 {
+                let mut v = serde_json::json!({ "xs": order });
+                let out = run(&set, &s, &mut v, &mut cache).ok();
+                assert_eq!(out, Some(Outcome::Scrubbed), "{v}");
+                let want: Vec<&Value> = order
+                    .iter()
+                    .map(|x| if *x == &a { &a_done } else { &b })
+                    .collect();
+                assert_eq!(v, serde_json::json!({ "xs": want }));
+            }
+            // The typed one alone, then the free one alone.
+            let mut cache = Cache::new();
+            let mut only_b = serde_json::json!({ "xs": [b] });
+            assert_eq!(
+                run(&set, &s, &mut only_b, &mut cache).ok(),
+                Some(Outcome::Clean)
+            );
+            let mut only_a = serde_json::json!({ "xs": [a] });
+            assert_eq!(
+                run(&set, &s, &mut only_a, &mut cache).ok(),
+                Some(Outcome::Scrubbed)
+            );
+            assert_eq!(only_a, serde_json::json!({ "xs": [a_done] }));
         }
     }
 
