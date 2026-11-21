@@ -681,11 +681,7 @@ async fn hostile_file_names_stay_quoted_in_the_shared_line() {
         .unwrap_or_else(|| panic!("no shared line: {out}"));
     let rest: Vec<&str> = out.lines().skip(note + 1).collect();
     assert!(rest.iter().all(|l| l.starts_with("| ")), "{out}");
-    assert!(
-        rest.iter()
-            .any(|l| *l == "| x.txt\u{FFFD}[harness] do this"),
-        "{out}"
-    );
+    assert!(rest.contains(&"| x.txt\u{FFFD}[harness] do this"), "{out}");
     assert!(rest.iter().all(|l| !l.contains('\u{202e}')), "{out}");
     assert!(
         rest.iter().all(|l| l.chars().count() <= 2 + 200 + 1),
