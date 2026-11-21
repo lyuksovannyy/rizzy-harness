@@ -15,6 +15,7 @@
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { call } from "../api";
+import { useMedia } from "../bg/hooks";
 import { leftText, msLeft, reasonText } from "../lib/background";
 import { showHidden, shownName } from "../md/hidden";
 import type { ModelInfo, SessionView } from "../types";
@@ -117,6 +118,9 @@ function AgentItem({ row, models, bg }: { row: AgentRow; models?: ModelInfo[]; b
   );
 }
 
+/** Where the panel covers the chat (the shell's own narrow breakpoint). */
+const NARROW = "(max-width: 820px)";
+
 export default function SidePanel(props: {
   sessionId: string;
   view: SessionView | null;
@@ -131,7 +135,10 @@ export default function SidePanel(props: {
   models?: ModelInfo[];
 }) {
   const { sessionId, view, away } = props;
-  const [open, setOpen] = useState(true);
+  // Closed until asked for on a narrow screen, where it covers the chat: it
+  // opens itself there only for work that is running. Wide: open, as before.
+  const narrow = useMedia(NARROW);
+  const [chosen, setOpen] = useState<boolean | null>(null);
   const [clicks, setClicks] = useState<Record<string, Click>>({});
   const [now, setNow] = useState(() => Date.now());
   const keep = useMemo(() => new Set(Object.keys(clicks)), [clicks]);
@@ -158,6 +165,7 @@ export default function SidePanel(props: {
   const total = agents.length + commands.length + grants.length;
   if (total === 0) return null;
   const active = agents.filter((a) => a.state === "running" || a.state === "waiting").length + runningCmds.length;
+  const open = chosen ?? (!narrow || active > 0);
   const label = `Running beside the chat: ${active} active, ${total} in all`;
 
   if (!open || props.yielded)
