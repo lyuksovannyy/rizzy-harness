@@ -489,6 +489,11 @@ pub struct SessionView {
     /// Every turn's start (seq, turn id), for a rewind's turn count.
     #[serde(skip)]
     turn_starts: Vec<(u64, String)>,
+    /// The person's messages that opened a turn (not queued ones), by seq:
+    /// a rewind counts only when it names one of its turn
+    /// (`rewind::counts`; the fold sees the whole log).
+    #[serde(skip)]
+    messages: std::collections::HashMap<u64, String>,
     /// Every `todo_updated` (seq, its list): a rewind takes the list the
     /// rewound turns set back, and an undo brings it back.
     #[serde(skip)]
@@ -668,7 +673,7 @@ impl SessionView {
             EventKind::UserMessage(m) => {
                 self.no_more_undo();
                 if !m.queued {
-                    self.ranges.message(seq, &m.turn_id);
+                    self.messages.insert(seq, m.turn_id.clone());
                 }
                 self.items.push(Item::User {
                     turn_id: m.turn_id,
@@ -1040,7 +1045,9 @@ impl SessionView {
                     .len() as u32;
                 // One that names no message of its turn counts for nothing
                 // and is not listed.
-                if self.ranges.add(seq, r.message_seq, &r.turn_id) {
+                if self.messages.get(&r.message_seq) == Some(&r.turn_id)
+                    && self.ranges.add(seq, r.message_seq, &r.turn_id)
+                {
                     self.rewinds.push(RewindInfo {
                         seq,
                         message_seq: r.message_seq,

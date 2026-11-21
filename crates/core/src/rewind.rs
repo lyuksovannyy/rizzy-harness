@@ -60,56 +60,15 @@ struct Target1 {
 pub struct Ranges {
     active: Vec<Active>,
     targets: Vec<Target1>,
-    /// The person's messages that opened a turn (not queued ones) seen so
-    /// far, by seq, with their turn: a rewind counts only when it names
-    /// one of them.
-    messages: HashMap<u64, String>,
 }
 
 impl Ranges {
-    /// Read one event of a log, in order: a rewind joins (if it counts,
-    /// [`Self::add`]), an undo removes its rewind (one that is not here, or
-    /// already gone, changes nothing). The person's messages are read too
-    /// ([`KINDS`] holds them), so a reader that cuts a log must keep them.
-    pub fn apply(&mut self, e: &RawEvent) {
-        match e.kind.as_str() {
-            "user_message" => {
-                if e.payload.get("queued").and_then(|q| q.as_bool()) != Some(true)
-                    && let Some(t) = e.payload.get("turn_id").and_then(|t| t.as_str())
-                {
-                    self.message(e.seq, t);
-                }
-            }
-            "conversation_rewound" => {
-                if let Ok(EventKind::ConversationRewound(r)) = e.typed() {
-                    self.add(e.seq, r.message_seq, &r.turn_id);
-                }
-            }
-            "conversation_rewind_undone" => {
-                if let Ok(EventKind::ConversationRewindUndone(u)) = e.typed() {
-                    self.remove(u.rewind_seq);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// The person's message at `seq` opened turn `turn_id` (not a queued
-    /// message: it opens nothing).
-    pub fn message(&mut self, seq: u64, turn_id: &str) {
-        self.messages.insert(seq, turn_id.to_string());
-    }
-
     /// A rewind written at `rewind_seq` that went back to `message_seq`.
-    /// It counts only when its range is not empty and `message_seq` is the
-    /// seq of a message of `turn_id` read before ([`Self::message`]); one
-    /// that does not (a corrupt or hostile event) counts for nothing: it
-    /// hides nothing, not even its turn's `turn_started`. Whether it did.
+    /// The caller has decided that it counts ([`counts`]); an empty or
+    /// inverted range counts for nothing whatever the caller says.
     pub fn add(&mut self, rewind_seq: u64, message_seq: u64, turn_id: &str) -> bool {
         self.remove(rewind_seq);
-        if message_seq >= rewind_seq
-            || self.messages.get(&message_seq).map(String::as_str) != Some(turn_id)
-        {
+        if message_seq == 0 || message_seq >= rewind_seq {
             return false;
         }
         self.active.push(Active {
@@ -160,12 +119,47 @@ impl Ranges {
     }
 }
 
-/// The ranges of every rewind in `log` that is not undone. Reads only the
-/// two rewind kinds, so a log cut to [`KINDS`] gives the same answer.
+/// Whether the rewind written at `rewind_seq` in `log` counts: its range is
+/// not empty and `message_seq` is the seq of a message of the person's (not
+/// a queued one) of its own `turn_id`. A corrupt or hostile event (seq 0,
+/// the future, a turn's start, another turn's message) counts for nothing:
+/// it hides nothing, its turn's `turn_started` included. When `log` has no
+/// event at `message_seq` (it was cut down: the master reads [`KINDS`],
+/// [`visible`] drops what a rewind took) the rewind is taken at its word.
+pub fn counts(log: &[RawEvent], rewind_seq: u64, message_seq: u64, turn_id: &str) -> bool {
+    if message_seq == 0 || message_seq >= rewind_seq {
+        return false;
+    }
+    match log.binary_search_by_key(&message_seq, |e| e.seq) {
+        Ok(at) => matches!(
+            log[at].typed(),
+            Ok(EventKind::UserMessage(m)) if !m.queued && m.turn_id == turn_id
+        ),
+        Err(_) => true,
+    }
+}
+
+/// The ranges of every rewind in `log` that counts ([`counts`]) and is not
+/// undone. Reads the two rewind kinds and the person's messages, so a log
+/// cut to [`KINDS`] gives the same answer.
 pub fn rewound(log: &[RawEvent]) -> Ranges {
     let mut r = Ranges::default();
     for e in log {
-        r.apply(e);
+        match e.kind.as_str() {
+            "conversation_rewound" => {
+                if let Ok(EventKind::ConversationRewound(w)) = e.typed()
+                    && counts(log, e.seq, w.message_seq, &w.turn_id)
+                {
+                    r.add(e.seq, w.message_seq, &w.turn_id);
+                }
+            }
+            "conversation_rewind_undone" => {
+                if let Ok(EventKind::ConversationRewindUndone(u)) = e.typed() {
+                    r.remove(u.rewind_seq);
+                }
+            }
+            _ => {}
+        }
     }
     r
 }
@@ -196,6 +190,15 @@ pub fn visible(log: &[RawEvent]) -> Cow<'_, [RawEvent]> {
                 // result must find the rewind it undid undone again.
                 if e.kind == "checkpoint" || e.kind == "conversation_rewind_undone" {
                     return true;
+                }
+                // A rewind that counts for nothing is no news to anyone (and
+                // a second pass, with the messages gone, would read it as a
+                // cut log's).
+                if e.kind == "conversation_rewound"
+                    && !matches!(e.typed(), Ok(EventKind::ConversationRewound(w))
+                        if counts(log, e.seq, w.message_seq, &w.turn_id))
+                {
+                    return false;
                 }
                 if ranges.holds(e.seq) {
                     return false;
@@ -356,21 +359,27 @@ pub fn kept_files(log: &[RawEvent], message_seq: u64, rewind_seq: u64) -> Vec<St
     out
 }
 
-/// The harness's line the first message after a rewind that kept the files
+/// The harness's line the first turn after a rewind that kept the files
 /// opens with: what the model was shown from the rewound turns is gone, and
-/// what they did to the files was not undone. The names are the files'
+/// (when `files` is not empty) what they did to the files was not undone. The names are the files'
 /// (data): each is quoted on a line of its own, behind [`OUTPUT_QUOTE`], at
 /// most [`KEPT_NAMES`] of them, the rest counted.
 pub fn kept_line(files: &[String]) -> String {
     let mut t = format!(
         "{NOTE_LEAD} The person took this conversation back to an earlier message: the messages, \
          answers and tool calls after it are no longer part of it, and nothing you did in them \
-         counts as read or known. Files those turns changed were kept as they are on disk, so \
-         read a file again before you edit it."
+         counts as read or known."
     );
+    // Nothing the removed turns changed is still changed (the range
+    // changed none, or each change was put back before): saying files were
+    // kept would be false.
     if files.is_empty() {
         return t;
     }
+    t.push_str(
+        " Files those turns changed were kept as they are on disk, so read a file again before \
+         you edit it.",
+    );
     t.push_str(" The files they changed (the harness's list, quoted):");
     for f in files.iter().take(KEPT_NAMES) {
         t.push('\n');
@@ -385,51 +394,56 @@ pub fn kept_line(files: &[String]) -> String {
     t
 }
 
-/// The line that opens each message that started a turn after rewinds that
-/// kept the files, by that message's seq: [`kept_line`] over the files of
-/// every such rewind since the turn before, not undone. A message that is
-/// itself rewound has none that matters. Built from the log alone, so a
-/// rebuild writes the bytes the turn was sent with.
+/// The line that opens the first turn after rewinds that kept the files,
+/// by the seq of the event the rebuild stands it before: [`kept_line`] over
+/// the files of every such rewind (not undone, and counting) since the turn
+/// before. A person's turn: its message (or, for a turn that only reads
+/// messages sent meanwhile, the `queued_delivered` that opens it); a turn
+/// the harness started (a callback, an agent a message called, a retry):
+/// its `turn_started`. Built from the log alone, so a rebuild writes the
+/// bytes the turn was sent with.
 pub fn opening_lines(log: &[RawEvent]) -> HashMap<u64, String> {
     let mut out = HashMap::new();
-    let mut waiting: Vec<(u64, u64)> = Vec::new();
-    for e in log {
-        match e.kind.as_str() {
-            "conversation_rewound" => {
-                if let Ok(EventKind::ConversationRewound(r)) = e.typed()
-                    && !r.files
-                {
-                    waiting.push((e.seq, r.message_seq));
-                }
-            }
-            "conversation_rewind_undone" => {
-                if let Ok(EventKind::ConversationRewindUndone(u)) = e.typed() {
-                    waiting.retain(|(r, _)| *r != u.rewind_seq);
-                }
-            }
-            "user_message" => {
-                if let Ok(EventKind::UserMessage(UserMessage { queued: false, .. })) = e.typed() {
-                    if let Some(line) = line_for(log, &waiting) {
-                        out.insert(e.seq, line);
-                    }
-                    waiting.clear();
-                }
-            }
-            _ => {}
-        }
-    }
+    scan(log, &mut out);
     out
 }
 
-/// [`opening_lines`] for the message that would come next, after the whole
-/// of `log`: what a turn that starts now opens with.
+/// [`opening_lines`] for the turn that would come next, after the whole of
+/// `log`: what a turn that starts now opens with, whatever starts it.
 pub fn next_opening_line(log: &[RawEvent]) -> Option<String> {
+    let (waiting, pending) = scan(log, &mut HashMap::new());
+    // A person's turn that has begun and has no message in the log yet is
+    // the one the line is for.
+    pending
+        .map(|(_, line)| line)
+        .or_else(|| line_for(log, &waiting))
+}
+
+/// One pass over `log`: fills `out` (see [`opening_lines`]) and returns the
+/// rewinds still waiting for a turn, (rewind seq, message seq), and a
+/// person's turn that has begun and has no opening yet, with its line.
+fn scan(
+    log: &[RawEvent],
+    out: &mut HashMap<u64, String>,
+) -> (Vec<(u64, u64)>, Option<(String, String)>) {
+    // Turns that have a person's message of their own.
+    let with_message: HashSet<&str> = log
+        .iter()
+        .filter(|e| {
+            e.kind == "user_message"
+                && e.payload.get("queued").and_then(|q| q.as_bool()) != Some(true)
+        })
+        .filter_map(|e| e.payload.get("turn_id")?.as_str())
+        .collect();
     let mut waiting: Vec<(u64, u64)> = Vec::new();
+    // A person's turn that has begun and whose opening is still to come.
+    let mut pending: Option<(String, String)> = None;
     for e in log {
         match e.kind.as_str() {
             "conversation_rewound" => {
                 if let Ok(EventKind::ConversationRewound(r)) = e.typed()
                     && !r.files
+                    && counts(log, e.seq, r.message_seq, &r.turn_id)
                 {
                     waiting.push((e.seq, r.message_seq));
                 }
@@ -439,15 +453,45 @@ pub fn next_opening_line(log: &[RawEvent]) -> Option<String> {
                     waiting.retain(|(r, _)| *r != u.rewind_seq);
                 }
             }
-            "user_message" => {
-                if let Ok(EventKind::UserMessage(UserMessage { queued: false, .. })) = e.typed() {
+            "turn_started" => {
+                pending = None;
+                if let Ok(EventKind::TurnStarted(t)) = e.typed()
+                    && !waiting.is_empty()
+                {
+                    let line = line_for(log, &waiting).unwrap_or_default();
                     waiting.clear();
+                    if t.cause.is_some() || t.retry.is_some() {
+                        out.insert(e.seq, line);
+                    } else {
+                        pending = Some((t.turn_id, line));
+                    }
+                }
+            }
+            "user_message" => {
+                if let Ok(EventKind::UserMessage(UserMessage {
+                    queued: false,
+                    turn_id,
+                    ..
+                })) = e.typed()
+                    && pending.as_ref().is_some_and(|(t, _)| *t == turn_id)
+                    && let Some((_, line)) = pending.take()
+                {
+                    out.insert(e.seq, line);
+                }
+            }
+            "queued_delivered" => {
+                if let Ok(EventKind::QueuedDelivered(d)) = e.typed()
+                    && pending.as_ref().is_some_and(|(t, _)| *t == d.turn_id)
+                    && !with_message.contains(d.turn_id.as_str())
+                    && let Some((_, line)) = pending.take()
+                {
+                    out.insert(e.seq, line);
                 }
             }
             _ => {}
         }
     }
-    line_for(log, &waiting)
+    (waiting, pending)
 }
 
 fn line_for(log: &[RawEvent], waiting: &[(u64, u64)]) -> Option<String> {
@@ -836,5 +880,89 @@ mod tests {
         let r = k.rewind(b, "t2", false);
         k.undo(r);
         assert_eq!(next_opening_line(&k.events), None);
+    }
+
+    /// The line is for the first turn after the rewind whatever starts it:
+    /// a person's message, a turn that only reads messages sent meanwhile,
+    /// a callback, an agent a message called, a retry; and then not again.
+    #[test]
+    fn the_line_goes_to_the_first_turn_whatever_started_it() {
+        let mention = TurnCause::Mention(MentionCall {
+            message_seq: 1,
+            by: CalledBy::Person,
+            tags: vec![],
+        });
+        let cases: [(&str, Option<TurnCause>, bool); 3] = [
+            (
+                "callback",
+                Some(TurnCause::Callback(vec!["bg-1".into()])),
+                false,
+            ),
+            ("mention", Some(mention), false),
+            ("retry", None, true),
+        ];
+        for (what, cause, retry) in cases {
+            let mut l = Log::new();
+            l.turn("t0");
+            l.started("t1", None);
+            let m1 = l.message("t1", false);
+            l.checkpoint("t1", CheckpointPhase::After, &["a.rs"]);
+            l.ended("t1");
+            l.rewind(m1, "t1", false);
+            let line = next_opening_line(&l.events).unwrap();
+            let at = l.push(EventKind::TurnStarted(TurnStarted {
+                turn_id: "t2".into(),
+                agent: None,
+                cause,
+                environment: None,
+                retry: retry.then(|| RetryOf {
+                    turn_id: "t0".into(),
+                    reason: TurnEndReason::Error,
+                    error: None,
+                    failed_model: None,
+                    model: None,
+                }),
+                continued_by: None,
+            }));
+            l.ended("t2");
+            let lines = opening_lines(&l.events);
+            assert_eq!(lines.get(&at), Some(&line), "{what}");
+            assert_eq!(lines.len(), 1, "{what}");
+            assert_eq!(next_opening_line(&l.events), None, "{what}");
+            // Not again for the turn after it.
+            let m3 = l.turn("t3");
+            assert!(!opening_lines(&l.events).contains_key(&m3), "{what}");
+        }
+        // A turn that only reads messages sent while an answer ran: the
+        // `queued_delivered` that opens it.
+        let mut l = Log::new();
+        l.turn("t0");
+        l.started("t1", None);
+        let m1 = l.message("t1", false);
+        l.ended("t1");
+        l.rewind(m1, "t1", false);
+        l.started("t2", None);
+        let q = l.message("t2", true);
+        let d = l.push(EventKind::QueuedDelivered(QueuedDelivered {
+            turn_id: "t2".into(),
+            seqs: vec![q],
+        }));
+        let lines = opening_lines(&l.events);
+        assert_eq!(lines.keys().copied().collect::<Vec<_>>(), vec![d]);
+        // The same from what the model reads (`visible`): the rewind stays
+        // and counts there, as a cut log's.
+        let v = visible(&l.events).into_owned();
+        assert_eq!(
+            opening_lines(&v).keys().copied().collect::<Vec<_>>(),
+            vec![d]
+        );
+    }
+
+    #[test]
+    fn the_line_says_nothing_of_files_when_none_is_still_changed() {
+        let t = kept_line(&[]);
+        assert!(t.contains("no longer part of it") && !t.contains("kept") && !t.contains("files"));
+        let t = kept_line(&["a.rs".into()]);
+        assert!(t.contains("kept as they are on disk") && t.contains("| a.rs"));
     }
 }

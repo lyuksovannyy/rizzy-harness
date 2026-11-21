@@ -284,8 +284,9 @@ rewound, and **you can put them back until you send the next message**. You
 choose whether the files go back too, as **Rewind files to before this turn**
 does today (refused, with the reason, and nothing rewound, if you edited a file
 since or another chat worked in the folder; **Undo anyway** is the same
-`force`); if you leave the files, the agent's next message tells it which
-files the removed turns changed and that they are as they were left. A rewind
+`force`); if you leave the files, the agent's next turn (whatever starts it)
+is told the conversation was taken back and, when the removed turns still
+changed files, which ones and that they are as they were left. A rewind
 is refused while an answer, a `/compact` or a background command or
 sub-agent of the chat is running, in a sub-agent's chat, to a message that a
 summary already replaced (compacted chats cannot be taken back past the
