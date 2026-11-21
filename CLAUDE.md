@@ -146,9 +146,13 @@ Breaking one of these needs the owner's explicit yes and an update to
   check before adding one: exact version pin, API read on docs.rs, released
   at least two weeks ago, passes `cargo deny check` (permissive licences
   only). Say in the change why this crate and not another.
-- **No compatibility code before the first tagged release.** Until then the
-  schema is changed in place and dev data directories are wiped. From the
-  first tag on, every schema change is a migration.
+- **Data directories are never wiped again** (owner's decision,
+  2026-11-21). Every database schema change is a new numbered migration
+  with its own recorded `schema/<n>.sql`; a recorded version is never
+  edited or recorded again. Event kinds and payloads change additively
+  only, so an existing log still decodes. Other compatibility code
+  (protocol aliases, renamed config keys) is still not written before the
+  first tagged release.
 - **Auth, the node link, tools and the approval path** are security code:
   small changes, full stress test, a test for the abuse case.
 - **Do not grow the monoliths.** New HTTP handlers go in

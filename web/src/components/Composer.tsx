@@ -14,6 +14,7 @@ import { abilities, allEngines, type CustomEngine, engineByUrl, engineMention, e
 import { EngineIcon } from "./EngineIcon";
 import { Select } from "./Select";
 import { AgentMark, agentAlert } from "./AgentAvatar";
+import type { ConnState } from "../live";
 import type { Agent, ApprovalMode, AvatarState, Effort, ExecMode, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
 import { type HostRight, mayPickHost } from "../lib/execModes";
 import { shownName } from "../md/hiddenChars";
@@ -152,6 +153,8 @@ export function Composer(props: {
   modeNote?: string;
   /** Session: a /compact runs; Stop cancels it. */
   compacting?: boolean;
+  /** The page's live connection, in a chat. */
+  link?: ConnState;
 }) {
   const home = props.where === "home";
   const [text, setText] = useState(() => (props.draft ? readDraft(props.draft) : ""));
@@ -255,6 +258,12 @@ export function Composer(props: {
     }
   };
   const [err, setErr] = useState<string | null>(null);
+  // "The server is not reachable" is true only until the live connection is
+  // back (a chat passes its connection; the home screen has none to follow).
+  const link = props.link;
+  useEffect(() => {
+    if (link === "live") setErr((e) => (e === t("error.unreachable") ? null : e));
+  }, [link]);
   const ta = useRef<HTMLTextAreaElement>(null);
   // Caret to restore right after React commits a programmatic text change,
   // before the next keystroke can land in the wrong place.
@@ -347,9 +356,13 @@ export function Composer(props: {
       // Focus waits on the choice's container (never a button): the rest of
       // a typing burst lands there and is dropped, not in the page.
       if (typing.current || at === document.body) props.choiceBox?.current?.focus({ preventScroll: true });
-    } else if (typing.current) {
+    } else {
+      // Focus on nothing (the page) is where the choice's own button left it
+      // when it went; a second call asked after the first leaves no memory of
+      // the typing in between (the browser drops focus from a hidden field).
+      const lost = typing.current || document.activeElement === document.body;
       typing.current = false;
-      el?.focus();
+      if (lost && !props.readOnly) el?.focus();
     }
   }, [props.choosing]);
 

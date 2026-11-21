@@ -101,6 +101,14 @@ describe("usage totals", () => {
     expect(first.textContent).toContain("p::big");
   });
 
+  test("each table sits in its own scroll container, so a narrow screen scrolls it, not the page", async () => {
+    get.mockResolvedValue(answer());
+    await render();
+    const tables = host.querySelectorAll(".usage-group table");
+    expect(tables).toHaveLength(2);
+    for (const t of tables) expect(t.parentElement?.classList.contains("usage-scroll")).toBe(true);
+  });
+
   test("sorts by tokens on request", async () => {
     get.mockResolvedValue(
       answer({ people: [person("u1", "alex", [row("p::cheap", 100, 0)]), person("u2", "bob", [row("p::big", 50, 0)])] }),

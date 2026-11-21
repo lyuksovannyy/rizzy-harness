@@ -10,7 +10,15 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { McpList } from "./ProjectMcp";
 
 const call = vi.fn();
-vi.mock("../api", () => ({ call }));
+class HttpError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+vi.mock("../api", () => ({ call, HttpError }));
 const { default: ProjectMcp } = await import("./ProjectMcp");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -109,6 +117,29 @@ test("the node's refusal and a project without a folder are said", async () => {
 });
 
 const text = () => host.textContent ?? "";
+
+test("the where-it-runs sentence is said once, for the section, not under each server", async () => {
+  call.mockResolvedValue(list);
+  await act(async () => root.render(<ProjectMcp projectId="p1" hasFolder modes={["sandbox"]} />));
+  expect(text().split("inside the sandbox").length - 1).toBe(1);
+  expect(host.querySelector(".mcp-entry")!.textContent).not.toContain("inside the sandbox");
+});
+
+test("a node that keeps project servers off is told calmly, with the setting that turns them on", async () => {
+  call.mockRejectedValue(
+    new HttpError(409, "node n1 does not run a repository's MCP servers: its node.toml has no [mcp] project_servers = \"ask\""),
+  );
+  await show();
+  expect(host.querySelector(".error-text")).toBeNull();
+  expect(host.querySelector(".mcp-off")!.textContent).toBe(
+    'Project MCP servers are off on this node. Setting project_servers = "ask" under [mcp] in its node.toml turns them on (the default is "off").',
+  );
+  // Another refusal stays an error.
+  call.mockRejectedValue(new HttpError(409, "the folder is gone"));
+  await act(async () => button("Reload").click());
+  expect(host.querySelector(".mcp-off")).toBeNull();
+  expect(host.querySelector(".error-text")!.textContent).toBe("the folder is gone");
+});
 
 test("the page says where an approved server runs, by the modes the node offers", async () => {
   call.mockResolvedValue(list);
