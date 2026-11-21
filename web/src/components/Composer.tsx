@@ -843,7 +843,14 @@ export function Composer(props: {
               />
             </>
           )}
-          <span className="spacer" />
+          {props.running && props.onStop && !props.readOnly ? (
+            // Inside the box's row: a line under the strip would move the box when a turn starts or ends.
+            <span className="composer-hint muted" title={t("composer.runningHint")}>
+              {t("composer.runningHint")}
+            </span>
+          ) : (
+            <span className="spacer" />
+          )}
           {props.voice && mode !== "search" && (
             <button
               type="button"
@@ -882,6 +889,12 @@ export function Composer(props: {
         </div>
       </div>
       <div className="composer-strip" role="group" aria-label={t("composer.strip")}>
+        {/* A sentence, so a line of its own above the controls (they stay one row). */}
+        {!home && props.approval && !props.readOnly && props.choosing && props.modeNote && (
+          <span className="approval-pending-note small muted" role="note">
+            {props.modeNote}
+          </span>
+        )}
         <div className="strip-controls">
           {mode !== "search" && props.agents.length > 0 && (
             <span
@@ -927,11 +940,6 @@ export function Composer(props: {
                 }}
               />
             </Suspense>
-          )}
-          {!home && props.approval && !props.readOnly && props.choosing && props.modeNote && (
-            <span className="approval-pending-note small muted" role="note">
-              {props.modeNote}
-            </span>
           )}
           {!home && props.steps && !props.readOnly && (
             <Suspense fallback={null}>
@@ -1145,7 +1153,6 @@ export function Composer(props: {
       </div>
       {home && props.agenticBlocked && <div className="hint muted">{props.agenticBlocked}</div>}
       {props.readOnly && <div className="hint muted">{t("conv.readOnly", { reason: props.readOnly })}</div>}
-      {props.running && props.onStop && !props.readOnly && <div className="hint muted composer-hint">{t("composer.runningHint")}</div>}
       {err && <div className="error-text">{err}</div>}
     </div>
   );

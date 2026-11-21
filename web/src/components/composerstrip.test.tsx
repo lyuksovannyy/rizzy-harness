@@ -157,6 +157,25 @@ describe("while a choice has taken the field's place, and read-only", () => {
     c.unmount();
   });
 
+  test("the note is a line of its own above the controls, not between the pickers", async () => {
+    const c = mount({ choosing: true, modeNote: "The call above still waits for your answer." });
+    await until(c.host, ".step-pick button");
+    const strip = c.host.querySelector(".composer-strip")!;
+    const note = strip.querySelector(".approval-pending-note")!;
+    expect(note.parentElement).toBe(strip);
+    expect(strip.firstElementChild).toBe(note);
+    expect(strip.querySelector(".strip-controls .approval-pending-note")).toBeNull();
+    c.unmount();
+  });
+
+  test("the running hint is in the box, so a turn starting or ending moves nothing under it", async () => {
+    const c = mount({ running: true, onStop: () => {} });
+    await until(c.host, ".step-pick button");
+    expect(c.host.querySelector(".composer .composer-hint")?.textContent).toMatch(/Read after the current step/);
+    expect(c.host.querySelector(".composer-wrap > .composer-hint")).toBeNull();
+    c.unmount();
+  });
+
   test("read-only: no approval mode, no step limit, the agent picker stays, the figures stay", async () => {
     const c = mount({ readOnly: "Viewer" }, <span>f</span>);
     for (let i = 0; i < 3; i++) await tick();

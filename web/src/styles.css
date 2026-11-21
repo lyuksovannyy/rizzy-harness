@@ -3652,6 +3652,21 @@ button.swatch:hover:not(:disabled) {
   line-height: 20px;
   color: var(--fg-2);
 }
+/* A sentence while a choice waits: a line of its own above the controls. */
+.composer-strip > .approval-pending-note { order: -1; flex: 1 1 100%; max-width: none; align-self: stretch; }
+/* The running hint sits in the box's row (muted, at most two lines in the
+   row's own height), so a turn starting or ending moves nothing. */
+.composer-row .composer-hint {
+  flex: 1;
+  min-width: 0;
+  padding: 0 var(--space-2);
+  font-size: var(--text-2xs);
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
 .composer-strip.alone { flex: 1; justify-content: flex-end; margin: 0; }
 .strip-controls {
   display: flex;
