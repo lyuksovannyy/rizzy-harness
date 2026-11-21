@@ -1600,18 +1600,34 @@ select.pill {
   color: var(--fg);
   text-decoration: underline;
 }
-/* Narrow: the suffix wraps under the title; the buttons stay at the right. */
+/* Narrow: two tidy lines. The title and the buttons first; under them the
+   suffix, whole (it wraps, it is never cut). */
 @media (max-width: 600px) {
-  .conv-title {
-    flex-wrap: wrap;
+  .conv-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "title actions" "suffix suffix";
+    column-gap: var(--space-2);
     row-gap: 0;
   }
+  .conv-title {
+    display: contents;
+  }
   .chat-title-row {
-    flex: 1 1 100%;
+    grid-area: title;
+    min-width: 0;
+  }
+  .conv-actions {
+    grid-area: actions;
   }
   .chat-suffix {
-    flex: 1 1 100%;
+    grid-area: suffix;
     flex-wrap: wrap;
+    white-space: normal;
+  }
+  .chat-part {
+    flex: 0 0 auto;
+    max-width: 100%;
   }
 }
 .timeline {
