@@ -4,6 +4,8 @@
 
 Change an agent's model and its fallbacks from the agent's own page (the Models block was read-only: "Chosen per agent in Settings → AI provider").
 Where the viewer may change the chain in the scope the page is opened in (a server admin at the server's scope; in a workspace whoever holds its `settings` permission, the one `PATCH /api/workspaces/{id}` and the agent edits ask for), the block is an editor: a main model or none of its own, up to 8 fallbacks in order, unavailable models marked, a Save that shows the server's answer.
+The chain the editor starts from is read where it will be written (the server's from a listing at `?scope=server`, a workspace's from its settings document), never from the page's own listing, which is in the active workspace's scope; if that read fails the block shows the read-only line and a retry instead of an editor.
+For an agent edited whole the page's one Save saves the agent, then its chain; the other agents keep "Save models" in the block.
 No new route: the server's `PUT /api/admin/agent-models` with only this agent's entry, a workspace's `PATCH` with its settings read again just before and sent whole, so another agent's chain or another setting changed meanwhile survives.
 A new agent's form has the same block and saves the chain right after the agent is made; if that fails the page says the agent exists and its models were not saved, keeps what was typed and offers a retry.
 A Personal workspace has no settings: its server admin edits the server's chain, others read who sets it.

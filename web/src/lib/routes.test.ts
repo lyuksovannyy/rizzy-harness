@@ -27,6 +27,15 @@ describe("parseRoute", () => {
     });
   });
 
+  it("reads the agent open in a settings panel, and writes it back", () => {
+    const r = parseRoute("#/settings/workspace/agents/coder");
+    expect(r).toEqual({ kind: "settings", section: "workspace", tab: "agents", item: "coder" });
+    expect(routeHash(r)).toBe("#/settings/workspace/agents/coder");
+    expect(parseRoute("#/settings/workspace/agents/new")).toEqual({ kind: "settings", section: "workspace", tab: "agents", item: "new" });
+    expect(parseRoute("#/settings/workspace/agents/Bad_Id")).toEqual({ kind: "home" });
+    expect(routeHash({ kind: "settings", section: "workspace", tab: "agents" })).toBe("#/settings/workspace/agents");
+  });
+
   it("reads a project, its tab, or the create form; nothing else under #/p/", () => {
     const id = "0193f1c2a4b57d6e8f9012345678abcd";
     expect(parseRoute(`#/p/${id}`)).toEqual({ kind: "project", id });

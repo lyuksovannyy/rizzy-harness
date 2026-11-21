@@ -284,6 +284,8 @@ fills the field; nothing is saved until the user presses Save.
 
 - Sidebar entry "Agents" under the workspace switcher; routes `#/agents`, `#/agents/new`,
   `#/agents/<id>` in `web/src/lib/routes.ts` (the old `#/settings/server/agents` opens the list).
+  A workspace's agent opened in Settings → Workspace → Agents has the route
+  `#/settings/workspace/agents/<id|new>`, so a reload comes back to it.
   The Server → Agents tab is gone: its avatar editor moved to `AvatarEditor.tsx`, and its model
   line to the agent page.
 - The list page and the agent page as above, plus Duplicate for built-in and file agents.
@@ -299,7 +301,16 @@ fills the field; nothing is saved until the user presses Save.
   default model" at the server, "Use the server's chain" in a workspace; for an agent the workspace
   made, "Use the default model", since the server has no chain for it), the fallbacks in order
   (add, remove, move; at most 8, none repeating the main model or another), unavailable models
-  marked as Settings marks them, and a Save of its own that shows what the server answered. It
+  marked as Settings marks them, and a Save that shows what the server answered. For an agent the
+  viewer edits whole (its own custom agent) the page's one Save saves the agent and then its chain
+  (if the chain fails the agent stays saved, the page says "@id was saved, but its models were not
+  saved" and Save tries the chain again only); for the others (built in, files, a server agent seen
+  from a workspace: only the chain and the additional instructions change) the block keeps its own
+  "Save models". The chain the editor starts from is read where it will be written, never from the
+  page's own listing, which is in the active workspace's scope: the server's chain from a listing at
+  `?scope=server`, a workspace's own chain from its settings document (`agent_models[id]`; absent
+  means "use the server's chain"). If that read fails the block is not an editor: the read-only line,
+  the reason and "Try again"; a Save never writes a guess. An untouched editor sends nothing. It
   saves through the routes Settings uses and adds none: at the server `PUT /api/admin/agent-models`
   with only this agent's entry (server admins), in a workspace `PATCH /api/workspaces/{id}` with
   the settings read again just before and sent whole with this agent's chain changed (the workspace's
