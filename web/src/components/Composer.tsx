@@ -1,5 +1,5 @@
 import { ArrowUp, AtSign, CornerDownRight, FileText, Globe, Image, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
-import { type Dispatch, lazy, type SetStateAction, Suspense, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { type Dispatch, lazy, type SetStateAction, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { isTag, marked, mentionable, pickable } from "../lib/agents";
 import { activeMention, filterAgents, matchedAlias, insertMention, isPathToken, leadingMention } from "../lib/mentions";
@@ -7,7 +7,6 @@ import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
 import { modelLabel, offeredModels, resolveModel } from "../lib/models";
 import { radioKeys, radioTab } from "../lib/radios";
 import { api } from "../api";
-import { LiveCtx } from "../lib/liveCtx";
 import { readDraft, writeDraft } from "../lib/drafts";
 import { parseCompact } from "../lib/compactCommand";
 import type { Picture } from "../lib/downscale";
@@ -15,6 +14,7 @@ import { abilities, allEngines, type CustomEngine, engineByUrl, engineMention, e
 import { EngineIcon } from "./EngineIcon";
 import { Select } from "./Select";
 import { AgentMark, agentAlert } from "./AgentAvatar";
+import type { ConnState } from "../live";
 import type { Agent, ApprovalMode, AvatarState, Effort, ExecMode, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
 import { type HostRight, mayPickHost } from "../lib/execModes";
 import { shownName } from "../md/hiddenChars";
@@ -153,6 +153,8 @@ export function Composer(props: {
   modeNote?: string;
   /** Session: a /compact runs; Stop cancels it. */
   compacting?: boolean;
+  /** The page's live connection, in a chat. */
+  link?: ConnState;
 }) {
   const home = props.where === "home";
   const [text, setText] = useState(() => (props.draft ? readDraft(props.draft) : ""));
@@ -257,12 +259,8 @@ export function Composer(props: {
   };
   const [err, setErr] = useState<string | null>(null);
   // "The server is not reachable" is true only until the live connection is
-  // back (in a chat; the home screen has no connection to follow).
-  const live = useContext(LiveCtx);
-  const link = useSyncExternalStore(
-    (l) => (live ? live.subscribe(l) : () => {}),
-    () => live?.state,
-  );
+  // back (a chat passes its connection; the home screen has none to follow).
+  const link = props.link;
   useEffect(() => {
     if (link === "live") setErr((e) => (e === t("error.unreachable") ? null : e));
   }, [link]);

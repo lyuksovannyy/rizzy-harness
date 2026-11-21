@@ -8,8 +8,7 @@ import { describe, expect, test, vi } from "vitest";
 import type { Mode } from "../lib/modes";
 import { api } from "../api";
 import { Composer, type Submission } from "./Composer";
-import type { Live } from "../live";
-import { LiveCtx } from "../lib/liveCtx";
+import type { ConnState } from "../live";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -730,26 +729,15 @@ describe("calling several agents (X.37)", () => {
 describe("the send error after the server went away", () => {
   const OFFLINE = "The server is not reachable. Check that it is running, then try again.";
   function chat(onSubmit: (s: Submission) => Promise<void>) {
-    const listeners = new Set<() => void>();
-    const link = {
-      state: "offline",
-      version: 0,
-      subscribe: (l: () => void) => (listeners.add(l), () => listeners.delete(l)),
-      set(s: string) {
-        link.state = s;
-        act(() => listeners.forEach((l) => l()));
-      },
-    };
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
-    act(() =>
-      root.render(
-        <LiveCtx.Provider value={link as unknown as Live}>
-          <Composer where="session" agents={[]} models={[]} workers={[]} agentId="" onAgentChange={() => {}} agenticBlocked={null} onSubmit={onSubmit} />
-        </LiveCtx.Provider>,
-      ),
-    );
+    const draw = (link: ConnState) =>
+      act(() =>
+        root.render(<Composer where="session" agents={[]} models={[]} workers={[]} agentId="" onAgentChange={() => {}} agenticBlocked={null} onSubmit={onSubmit} link={link} />),
+      );
+    draw("offline");
+    const link = { set: draw };
     const textarea = host.querySelector("textarea")!;
     const send = async (value: string) => {
       act(() => {

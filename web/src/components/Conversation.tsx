@@ -1199,6 +1199,7 @@ export default function Conversation(props: {
             modeNote={t("approval.modeNote")}
             // While a /compact runs, Stop cancels it (the same route).
             compacting={summarise.compacting && !running}
+            link={live.state}
             draft={keepsDraft ? sessionId : undefined}
             voice={props.voice}
             onStop={() => void pageApi.cancel(sessionId)}
