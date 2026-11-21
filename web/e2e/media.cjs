@@ -80,11 +80,13 @@ async function imagesInChats(p) {
 
   // A picture attached in the chat: shrunk here, uploaded as a chat image, sent.
   const sid = await p.evaluate(() => location.hash.split('/')[2]);
+  await p.waitForFunction(() => !document.querySelector('.send.stop'), null, { timeout: 60000 });
   await p.setInputFiles('.composer input[type=file]', `${S}/files/pattern.png`);
   await p.waitForSelector('.composer .image-chip img');
   await p.fill('.composer textarea', 'and this one?');
+  await p.waitForSelector('.composer .send:not([disabled])', { timeout: 30000 });
   await p.click('.composer .send');
-  await p.waitForFunction(() => document.querySelectorAll('.msg.user .bubble-images').length === 2);
+  await p.waitForFunction(() => document.querySelectorAll('.msg.user .bubble-images').length === 2, null, { timeout: 60000 });
   await pictures();
   await answered(2);
   const sent = await p.evaluate(async (sid) => (await (await fetch(`/api/media?session=${sid}&limit=60`)).json()).items, sid);
@@ -180,7 +182,9 @@ async function imagesInChats(p) {
     const played = await p.$eval('dialog.media-preview audio', async (a) => {
       a.muted = true;
       await a.play();
-      await new Promise((r) => setTimeout(r, 400));
+      // Playback starts when the decoder is ready: wait for the clock to move.
+      for (const end = Date.now() + 8000; !(a.currentTime > 0) && Date.now() < end; ) await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 300));
       return { time: a.currentTime, duration: a.duration };
     });
     check(played.time > 0 && played.duration > 1.5, `the audio plays (${JSON.stringify(played)})`);

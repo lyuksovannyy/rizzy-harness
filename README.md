@@ -137,8 +137,9 @@ in the draft until it is sent.
 
 **Writing while the agent works.** The reply box stays open while a turn
 runs: Enter (or Send, next to Stop) sends the message at once, and a line under
-the box says what happens to it ("Read after the current step. Stop
-interrupts."). The node stores the message before it says yes, so a message
+the box says what happens to it, in small muted type inside its bottom row
+("Read after the current step. Stop interrupts."), so the box does not move
+when a turn starts or ends. The node stores the message before it says yes, so a message
 that was taken is never lost, and the chat shows it where you sent it, marked
 "sent while working" until the agent has read it. The agent reads it before
 its next model request, right after the results of the tools it was running,
@@ -400,8 +401,10 @@ characters dropped); only you can rename your chats, and the new title is what
 the list and search show. After the title, in muted type, the header says
 **project · node · how commands run** (for example `test-project · local ·
 sandbox`; hover it for the chat's folder). The project there is the picker that
-moves the chat into another project or out; a chat in no project, or a plain
-chat with no folder, shows only what applies. The download
+moves the chat into another project or out ("No project", in muted words,
+when it has none); a plain chat with no folder shows only what applies. On a
+narrow screen the header is two lines: the title and the buttons, then the
+suffix, whole. The download
 button at the right saves the chat as a Markdown file: your messages, the
 answers, and each tool call as one line (tick **Include tool outputs** for
 their full output). The file is made in your browser from what the chat

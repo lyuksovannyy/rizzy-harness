@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { claimCode, createOwner, keywordsOnly, keyed } = require('./onboard.cjs');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2ecost-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -52,7 +53,10 @@ const check = (c, m) => { if (!c) throw new Error(m); };
     const hint = await meter.getAttribute('title');
     check(hint.includes('not the bill'), 'labelled an estimate: ' + hint);
     const sid = (await p.evaluate(() => location.hash)).split('/').pop();
-    const ev = await p.evaluate(async (id) => (await (await fetch(`/api/sessions/${id}/events`)).json()).events, sid);
+    // The figure can show before the turn's end is in the log: wait for it.
+    const events = (id) => p.evaluate(async (id) => (await (await fetch(`/api/sessions/${id}/events`)).json()).events, id);
+    let ev = await events(sid);
+    for (const end = Date.now() + 30000; !ev.some((e) => e.kind === 'turn_ended') && Date.now() < end; ) { await sleep(300); ev = await events(sid); }
     const usage = ev.find((e) => e.kind === 'turn_ended').payload.usage;
     check(usage.by_model && usage.by_model['demo::mock'], 'the turn recorded its model: ' + JSON.stringify(usage));
     check(usage.by_model['demo::mock'].input_tokens === usage.input_tokens, 'every token under it: ' + JSON.stringify(usage));
@@ -64,11 +68,16 @@ const check = (c, m) => { if (!c) throw new Error(m); };
     await cur.waitFor();
     check((await cur.inputValue()) === 'USD', 'USD by default');
     await cur.fill('eur');
-    await p.click('label:has-text("Currency of model prices") ~ button:text-is("Save")');
+    // Save is enabled once the field is edited; click it, then wait for the
+    // file (what the click is for), not for the button's state.
+    const save = p.locator('label:has-text("Currency of model prices") ~ button:text-is("Save")');
+    await save.waitFor();
     await p.waitForFunction(() => {
       const i = [...document.querySelectorAll('label')].find((l) => l.textContent.startsWith('Currency of model prices'));
-      return i && i.parentElement.querySelector('button').disabled;
+      return i && !i.parentElement.querySelector('button').disabled;
     });
+    await save.click();
+    for (const end = Date.now() + 20000; !/currency = "EUR"/.test(fs.readFileSync(`${S}/data/config.toml`, 'utf8')) && Date.now() < end; ) await sleep(300);
     const toml = fs.readFileSync(`${S}/data/config.toml`, 'utf8');
     check(/\[pricing\]\s*currency = "EUR"/.test(toml), 'config.toml:\n' + toml);
     await p.goto(`${URL_}#/s/${sid}`);

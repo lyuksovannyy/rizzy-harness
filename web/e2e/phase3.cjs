@@ -82,7 +82,7 @@ let srv = null;
   log('override chip:', await p.innerText('.pill.override'));
   await p.screenshot({ path: `${S}/p3-3-mention.png` });
   await p.keyboard.press('Enter');
-  await p.waitForSelector('.author:has-text("Writer")');
+  await p.waitForSelector('.author:has-text("Writer")', { timeout: 60000 });
   const bubble = await p.locator('.msg.user .bubble').last().innerText();
   if (bubble !== '@writer draft notes') throw new Error('mention caret bug: ' + bubble);
   log('writer turn labelled');

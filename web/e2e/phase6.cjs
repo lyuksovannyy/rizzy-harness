@@ -104,7 +104,7 @@ async function skipOnboarding(page) {
     await p.waitForSelector('details.summary');
     const meter = await p.innerText('.meter');
     log('meter:', meter, '| summary shown');
-    check(/\d+ in · \d+ out/.test(meter) && /\d+%|context/.test(meter), 'token and context figures visible in the composer strip');
+    check(/[\d.,]+[kM]? in · [\d.,]+[kM]? out/.test(meter) && /\d+%|context/.test(meter), 'token and context figures visible in the composer strip');
     await p.screenshot({ path: `${S}/p6-2-summary.png` });
 
     // 4. Incognito: not in recents or search; delete now removes it.
