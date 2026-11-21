@@ -334,9 +334,11 @@ had changed and not committed is there, uncommitted, and a file it deleted
 afterwards is back. **Not copied:** files git ignores (build output,
 `node_modules`, `.env`), repositories nested in it and submodule contents,
 stashes, and the original's git hooks and local config. The copy is made from
-outside the original repository, by the node, without running anything from its
-`.git`; a repository the node cannot copy that way (not a git repository, a
-`.git` that is a file or a link, borrowed objects, a checkpoint the node no
+outside the original repository, by the node, which copies only the original's
+history files itself and never lets git open its `.git`; a repository the node
+cannot copy that way (not a git repository, a `.git` that is a file, a link or
+special file anywhere in its history files, borrowed objects, sha256 objects,
+reftable refs, a checkpoint the node no
 longer keeps, no room on the disk, a git older than 2.45.1) is refused with the
 reason, and the fork can then go **in the same folder**, where both chats work
 in the same files (the page says so under the title): what one changes is in the

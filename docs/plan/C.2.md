@@ -23,7 +23,7 @@ A cross-node fork stays with N.5 and the note's lossy seed.
 
 ## What was built (part 2: the fork's own folder)
 
-The note said "same-node forks may seed files from the cut's checkpoint". Built as a clone of the parent's repository, made from outside it (`git clone --no-local --no-checkout --template=`, the hardened runner, cwd outside both folders), in the node's projects folder, with the working files written from the cut's checkpoint and the index set to the branch's commit, so the parent's uncommitted work shows as uncommitted in the fork.
+The note said "same-node forks may seed files from the cut's checkpoint". Built as a clone of a sanitised copy of the parent's history files (the harness's own no-follow walk, then `git clone --no-local --no-checkout --template=` in the jail; git never opens the parent), in the node's projects folder, with the working files written from the cut's checkpoint and the index set to the branch's commit, so the parent's uncommitted work shows as uncommitted in the fork.
 Not a `git worktree add`: it would run inside a repository an agent may have written (config, hooks), and the node is not sandboxed (PLAN.md T92 has the quoted documentation and the minimum git version).
 The person chooses where the files live: `session.fork` carries `checkout: "own" | "shared"`; `session_created.forked.own_folder` records it; the node refuses an own copy with a sentence where it cannot and "the same folder" stays possible.
 A fork's title is numbered per original chat: "X (fork)", "X (fork 2)".

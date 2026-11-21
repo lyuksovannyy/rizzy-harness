@@ -2,8 +2,9 @@
 //! T92): where it goes, what must hold before anything is written, and
 //! what is left behind on no path.
 //!
-//! The copy itself is `git::fork_copy` (a clone made from outside the
-//! parent's repository; the node's git never runs in that repository).
+//! The copy itself is `git::fork_copy` (a sanitised copy of the parent's
+//! history files made by our own walk, then a clone of that; the node's git
+//! never opens the parent's repository).
 //! This module decides the rest, on the node's own policy:
 //!
 //! - **Where.** In the node's projects folder (`[projects] dir`, where forge

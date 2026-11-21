@@ -78,11 +78,16 @@ The caller still gets the timeout error and finds the fork in the list.
 A clone of the parent's repository, made from outside it, in the node's projects folder (`[projects] dir`, where forge clones go), named `<repository name>-fork-<short id>`, with a branch `fork/<short id>`.
 The fork's folder is the same sub-folder of the copy that the parent worked in.
 
-**Why not `git worktree add`.**
-It runs inside the parent's repository: it reads that repository's config (shared by all worktrees) and runs its `post-checkout` hook.
-An agent in a sandboxed chat can write `.git/config` and `.git/hooks` of its folder, and the node is not sandboxed.
-The node's git has always run in a shadow repository of its own for that reason (`crates/node/src/git.rs`).
-So the only command that touches the parent is `git clone --no-local --no-checkout --template= -- <root> <dest>`, run by the hardened runner with its working directory outside both folders: git's documented safe way to copy an untrusted repository.
+**Why not `git worktree add`, and why not a plain clone of the parent.**
+`git worktree add` runs inside the parent's repository: it reads that repository's config (shared by all worktrees) and runs its `post-checkout` hook.
+A `git clone --no-local` of the parent was the first design; its `upload-pack` runs in the parent's `.git` as the node's user and follows every link an agent planted in `refs/` and `objects/` (and in `config`), so a link to another repository on the disk put that repository's history into the fork.
+An agent in a sandboxed chat can write all of that, and the node is not sandboxed.
+So git never opens the parent.
+Stage 1 is the harness's own walk (`git/fork_sanitise.rs`), with file descriptors and `O_NOFOLLOW`, into the node's staging folder: it copies only `HEAD`, `refs/`, `packed-refs`, `shallow` and `objects/` as new files (never a link, never a hard link), and reads `config` and `info/exclude` as capped data.
+Anything that is not a plain file or folder in what it copies (a link, a FIFO, a socket) refuses the whole copy with a sentence naming the path; so do alternates, sha256 objects and reftable refs.
+It copies no config, hooks, `info/`, worktrees, modules, index, logs or grafts.
+Stage 2 is `git clone --no-local --no-checkout --template= -- <sanitised copy> <dest>` by the hardened runner, in the node's sandbox jail when it has one (only this copy's folders visible read-write; without a jail it runs hardened and unjailed), and the sanitised copy is deleted.
+Bounds: `clone_max_mb` bytes, 1,000,000 files and folders, 32 levels, 1 MiB each for the config and `info/exclude`, `clone_timeout_s` per stage.
 The reasoning, the quoted documentation, the minimum git version and the proof are in `docs/threats/T92.md`.
 
 **What the copy is.**
@@ -95,8 +100,8 @@ The index is the branch's commit, so what the parent had uncommitted at the cut 
 Not copied: files git ignores, nested repositories and submodule contents, stashes, the parent's hooks and local config.
 The parent's `info/exclude` is copied (patterns), so the same files stay ignored.
 
-**Refused, with a sentence that says which and that "the same folder" is possible:** a chat with no folder, a folder that is no git repository (or a `.git` the node does not read: a file, a link, a `commondir`, borrowed objects), no projects folder, no checkpoint store, a pruned checkpoint, a git below the minimum, no room on the disk, a copy over `clone_max_mb` or `clone_timeout_s`, more folders than `projects_per_hour`.
-Nothing is written before the checks; a failure removes the build folder; the chat is written only after the folder exists, and a copy whose chat could not be written is removed.
+**Refused, with a sentence that says which and that "the same folder" is possible:** a chat with no folder, a folder that is no git repository (or a `.git` the node does not copy: a file, a link anywhere in what is copied, a `commondir`, borrowed objects, sha256 objects, reftable refs), no projects folder, no checkpoint store, a pruned checkpoint, a git below the minimum, no room on the disk, a copy over `clone_max_mb` or `clone_timeout_s`, more folders than `projects_per_hour`.
+Nothing is written before the checks; a failure or a cancelled copy removes the build folder and the sanitised copy at once, and a kill before the chat leaves a marker that the next start uses to remove the unused folder; the chat is written only after the folder exists, and a copy whose chat could not be written is removed.
 
 **Running.**
 The copy runs in the new chat's lane (nothing else uses it yet), off every other chat's, behind a small limit on copies at once (two; the rest wait).
