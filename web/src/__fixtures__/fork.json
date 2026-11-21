@@ -369,14 +369,21 @@
         "author": null,
         "done": true,
         "message_id": "m-t1",
+        "seq": 6,
         "text": "One.",
         "type": "assistant",
         "variant": null
       },
       {
+        "at": 1700000000007,
         "reason": "completed",
         "turn_id": "t1",
-        "type": "turn_end"
+        "type": "turn_end",
+        "usage": {
+          "context_tokens": 105,
+          "input_tokens": 100,
+          "output_tokens": 10
+        }
       },
       {
         "text": "Second",
@@ -387,14 +394,21 @@
         "author": null,
         "done": true,
         "message_id": "m-t2",
+        "seq": 14,
         "text": "Two.",
         "type": "assistant",
         "variant": null
       },
       {
+        "at": 1700000000015,
         "reason": "completed",
         "turn_id": "t2",
-        "type": "turn_end"
+        "type": "turn_end",
+        "usage": {
+          "context_tokens": 205,
+          "input_tokens": 200,
+          "output_tokens": 20
+        }
       },
       {
         "parent": "01a19bf2-0000-7000-8000-00000000fa01",
@@ -419,14 +433,21 @@
         "author": null,
         "done": true,
         "message_id": "m-u1",
+        "seq": 23,
         "text": "Mine.",
         "type": "assistant",
         "variant": null
       },
       {
+        "at": 1700000000024,
         "reason": "completed",
         "turn_id": "u1",
-        "type": "turn_end"
+        "type": "turn_end",
+        "usage": {
+          "context_tokens": 45,
+          "input_tokens": 40,
+          "output_tokens": 4
+        }
       }
     ],
     "meta": {

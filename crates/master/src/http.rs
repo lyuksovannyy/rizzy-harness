@@ -29,6 +29,7 @@ mod levels;
 mod links;
 mod media;
 mod memory;
+mod pins;
 mod plugins;
 mod pricing;
 mod profile;
@@ -248,6 +249,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(step_limit::routes())
         .merge(compact::routes())
         .merge(retry::routes())
+        .merge(pins::routes())
         .merge(rewind::routes())
         .merge(fork::routes())
         .merge(storage::routes())

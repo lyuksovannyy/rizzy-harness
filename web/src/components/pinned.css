@@ -1,0 +1,72 @@
+/* The chat header's "Pinned (n)" list and the mark on a pinned message (PinnedList.tsx). */
+.pinned-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  height: 32px;
+}
+.pinned-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.pinned-pop {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  right: 0;
+  width: min(26rem, calc(100vw - 2rem));
+  max-height: 60vh;
+  overflow: auto;
+  padding: var(--space-2);
+  background: var(--surface-pop);
+  -webkit-backdrop-filter: var(--blur-thick);
+  backdrop-filter: var(--blur-thick);
+  color: var(--fg);
+  border-radius: var(--r-md);
+  box-shadow: var(--edge), var(--shadow-2);
+}
+.pinned-pop ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.pinned-pop li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+}
+.pinned-go {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  background: none;
+}
+.pinned-text {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.pinned-meta {
+  font-size: var(--text-xs);
+}
+.msg.msg-pinned {
+  position: relative;
+}
+.pin-mark {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  display: inline-flex;
+  color: var(--fg-2);
+}
+.msg.pin-flash {
+  outline: 2px solid var(--ac-blue-2);
+  outline-offset: 4px;
+  border-radius: var(--r-md);
+}

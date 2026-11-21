@@ -129,6 +129,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Retry(RetryMsg { session_id, .. })
         | MasterToNode::Rewind { session_id, .. }
         | MasterToNode::RewindUndo { session_id, .. }
+        | MasterToNode::Pin { session_id, .. }
         | MasterToNode::Handoff { session_id, .. }
         | MasterToNode::Compact { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
@@ -850,6 +851,9 @@ impl NodeRuntime {
             // A person's rewind of the conversation to an earlier message
             // and its undo (X.46), in chats of either profile.
             capabilities.push(harness_protocol::CAP_REWIND.into());
+            // The owner's bookmark on a message (docs/pins.md), in chats
+            // of either profile.
+            capabilities.push(harness_protocol::CAP_PIN.into());
             // A person's fork of a chat at a finished turn (C.2), in chats
             // of either profile.
             capabilities.push(harness_protocol::CAP_FORK.into());
@@ -1863,6 +1867,18 @@ impl NodeRuntime {
                 self.audit("session.rewind_undo", session_id).await;
                 match self.session(session_id) {
                     Some(s) => s.rewind_undo(rewind_seq).await,
+                    None => Err("unknown session".into()),
+                }
+            }
+            MasterToNode::Pin {
+                session_id,
+                message_seq,
+                pinned,
+                ..
+            } => {
+                self.audit("session.pin", session_id).await;
+                match self.session(session_id) {
+                    Some(s) => s.pin_message(message_seq, pinned).await,
                     None => Err("unknown session".into()),
                 }
             }

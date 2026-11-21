@@ -6,12 +6,19 @@ import { rt } from "./strings";
 /** The hover action under a final assistant message: copies the Markdown as
  * rendered (hidden characters stripped, math normalised). */
 export function CopyMessage({ text }: { text: string }) {
-  const [copied, copy] = useCopy();
   return (
     <div className="msg-actions">
-      <button type="button" className="link small" title={rt("copyMessageHint")} onClick={() => copy(prepare(text))}>
-        {copied ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />} {copied ? rt("copied") : rt("copyMessage")}
-      </button>
+      <CopyButton text={text} />
     </div>
+  );
+}
+
+/** The button alone, for a row that holds more than Copy. */
+export function CopyButton({ text }: { text: string }) {
+  const [copied, copy] = useCopy();
+  return (
+    <button type="button" className="link small" title={rt("copyMessageHint")} onClick={() => copy(prepare(text))}>
+      {copied ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />} {copied ? rt("copied") : rt("copyMessage")}
+    </button>
   );
 }

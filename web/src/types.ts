@@ -259,6 +259,8 @@ export type ItemKind =
       author: string | null;
       variant: Variant | null;
       blocks?: UiBlock[];
+      /** The seq of its final `assistant_message`: what a pin names. Absent while it streams. */
+      seq?: number;
     }
   | {
       /** A step's thinking (X.25): each block's kind and readable text (never a signature). */
@@ -280,7 +282,8 @@ export type ItemKind =
     }
   /** `notice`: information for the person, not a failure (T.9's file-count notes). */
   | { type: "error"; message: string; notice?: true }
-  | { type: "turn_end"; turn_id: string; reason: TurnEndReason }
+  /** `at`: when it ended (the event's time, ms; the fold always writes it, a hand-built item may not). `usage`: what the turn used, its foreground sub-agents included (the final figure, or the last running one of a turn that ended without). */
+  | { type: "turn_end"; turn_id: string; reason: TurnEndReason; at?: number; usage?: Usage }
   /** The chat ran another agent or model from the message after it. */
   | { type: "agent_changed"; agent: AgentRef; model?: string }
   /** The owner changed the approval mode; `requested` when the node gave less. */
@@ -381,6 +384,20 @@ export interface SessionView {
   follow_ups?: string[];
   /** The chat's rewinds (X.46), in the order they were made; absent when none. */
   rewinds?: RewindInfo[];
+  /** The chat's pinned messages (`message_pinned`, docs/pins.md) in log order, without those a rewind hides; absent when none. */
+  pins?: PinInfo[];
+}
+
+/** One pinned message as the view lists it. */
+export interface PinInfo {
+  /** The seq of the message's event. */
+  seq: number;
+  who: "user" | "assistant";
+  /** Its first 120 characters on one line. */
+  text: string;
+  turn_id: string;
+  /** When the message was written (ms). */
+  at: number;
 }
 
 /** One rewind of the chat (`conversation_rewound`) as the view lists it. */
