@@ -1726,6 +1726,24 @@ impl Master {
     /// The replication rule (PLAN.md §3). True when the event is in the
     /// mirror now (taken, or already there).
     async fn apply(&self, node_id: &str, e: RawEvent) -> bool {
+        // How much of this chat is its parent's copies (C.2, forks.rs),
+        // asked BEFORE the event is taken: a read that fails stops the event
+        // here (it is not in the mirror, so the node sends it again) and is
+        // never taken for "not a fork" (which would run the copies' side
+        // effects). The first event is nobody's copy and says what the chat
+        // is: what was known of the id is dropped.
+        let through = if e.seq < 2 {
+            forks::forget(e.session_id);
+            0
+        } else {
+            match forks::through(self, e.session_id).await {
+                Ok(t) => t,
+                Err(err) => {
+                    tracing::warn!(node = %node_id, session = %e.session_id, error = %err, "could not read a chat's lineage; the event is not taken");
+                    return false;
+                }
+            }
+        };
         let owner = node_id.to_string();
         let ev = e.clone();
         let res = self.inner.mirror.call(move |s| s.append(&owner, &ev)).await;
@@ -1737,7 +1755,7 @@ impl Master {
                 // (forks.rs). One branch, before every side effect below:
                 // one added later is skipped for a copy without anyone
                 // remembering to.
-                if forks::copied(self, &e).await {
+                if harness_core::fork::inherited(through, e.seq) {
                     let _ = self.inner.live.send(Live::Event(e));
                     return landed;
                 }
@@ -3256,6 +3274,7 @@ impl Master {
         self.inner.board.forget(sid);
         self.inner.stored_skills.forget(sid);
         self.inner.connectors.calls.forget(sid);
+        forks::forget(sid);
         let res = self
             .inner
             .mirror

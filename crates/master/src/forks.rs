@@ -1,6 +1,6 @@
 //! Forks on the master (ADOPTION_PLAN C.2, docs/fork.md).
 //!
-//! Two jobs. [`copied`] is the guard `Master::apply` runs first: an event of
+//! Two jobs. [`through`] is what the guard in `Master::apply` asks first: an event of
 //! a fork that is a copy of its parent's (`harness_core::fork::inherited`)
 //! is mirrored and shown, and **nothing it did when the master first applied
 //! it happens again**: no memory fact is filed (the dedupe key holds the
@@ -24,9 +24,11 @@ use harness_store::SessionRow;
 use crate::{CommandError, Live, Master, create_intent_key, lock};
 
 /// `through_seq` of the chats this process has met, 0 for one that is no
-/// fork: read from the mirror once per chat. A chat's lineage is written
-/// with its first event and never changes, so the answer cannot go stale
-/// (ids are not reused).
+/// fork. A chat's lineage is written with its first event and never changes
+/// (ids are not reused), so a successful answer cannot go stale. Only
+/// successful answers are kept: a failed read is no answer, and "not a fork"
+/// is kept only for a chat whose first event the mirror holds (a later event
+/// that arrived first says nothing yet). A deleted chat's entry is dropped.
 fn known() -> &'static Mutex<HashMap<SessionId, u64>> {
     static KNOWN: OnceLock<Mutex<HashMap<SessionId, u64>>> = OnceLock::new();
     KNOWN.get_or_init(Mutex::default)
@@ -35,34 +37,70 @@ fn known() -> &'static Mutex<HashMap<SessionId, u64>> {
 /// More chats than this and the table starts again (it only saves reads).
 const KNOWN_MAX: usize = 100_000;
 
-/// Whether `e`, just taken into the mirror, is a copy of its fork's
-/// parent's event. The fork's own first event is never one.
-pub(crate) async fn copied(m: &Master, e: &RawEvent) -> bool {
-    if e.seq < 2 {
-        return false;
+/// What the mirror says about a chat's lineage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lookup {
+    /// A fork, its first `through` events copies.
+    Fork(u64),
+    /// A chat the mirror holds and that is no fork.
+    NotFork,
+    /// A chat the mirror does not hold (yet): no answer to keep.
+    NotYet,
+}
+
+/// Read a chat's lineage from the mirror.
+pub(crate) fn lookup(s: &harness_store::Store, sid: SessionId) -> harness_store::Result<Lookup> {
+    if let Some(f) = s.fork_of(sid)? {
+        return Ok(Lookup::Fork(f.through_seq));
     }
-    let sid = e.session_id;
-    let cached = lock(known()).get(&sid).copied();
-    let through = match cached {
-        Some(t) => t,
-        None => {
-            let t = m
-                .inner
-                .mirror
-                .call(move |s| s.fork_of(sid))
-                .await
-                .ok()
-                .flatten()
-                .map_or(0, |f| f.through_seq);
-            let mut k = lock(known());
-            if k.len() >= KNOWN_MAX {
-                k.clear();
-            }
-            k.insert(sid, t);
-            t
-        }
+    Ok(if s.session(sid)?.is_some() {
+        Lookup::NotFork
+    } else {
+        Lookup::NotYet
+    })
+}
+
+/// How many of `sid`'s first events are copies, from `cache` or from
+/// `find` (whose answer is kept when it is one). An error is returned and
+/// kept nowhere.
+fn resolve<E>(
+    cache: &Mutex<HashMap<SessionId, u64>>,
+    sid: SessionId,
+    find: impl FnOnce() -> Result<Lookup, E>,
+) -> Result<u64, E> {
+    if let Some(t) = lock(cache).get(&sid).copied() {
+        return Ok(t);
+    }
+    let through = match find()? {
+        Lookup::NotYet => return Ok(0),
+        Lookup::NotFork => 0,
+        Lookup::Fork(t) => t,
     };
-    fork::inherited(through, e.seq)
+    let mut k = lock(cache);
+    if k.len() >= KNOWN_MAX {
+        k.clear();
+    }
+    k.insert(sid, through);
+    Ok(through)
+}
+
+/// How many of the chat's first events are its parent's copies (0: none):
+/// what `Master::apply` asks, before it takes an event of seq 2 or more, so
+/// a read that fails stops the event there (the node sends it again, as for
+/// any store failure) and is never taken for "not a fork". An event is
+/// a copy when [`harness_core::fork::inherited`] says so.
+pub(crate) async fn through(m: &Master, sid: SessionId) -> harness_store::Result<u64> {
+    if let Some(t) = lock(known()).get(&sid).copied() {
+        return Ok(t);
+    }
+    let found = m.inner.mirror.call(move |s| lookup(s, sid)).await?;
+    resolve(known(), sid, || Ok::<_, harness_store::StoreError>(found))
+}
+
+/// The chat is gone (deleted, or its first event arrives again): what was
+/// known of it goes.
+pub(crate) fn forget(sid: SessionId) {
+    lock(known()).remove(&sid);
 }
 
 /// Fork `parent` at the end of `turn_id` (the caller checked the owner, the
@@ -145,4 +183,92 @@ pub(crate) async fn fork_session(
         m.nudge(Live::ProjectsChanged(crate::Audience::Chat(sid)));
     }
     Ok(sid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cache() -> Mutex<HashMap<SessionId, u64>> {
+        Mutex::default()
+    }
+
+    /// A failed read is passed on and kept nowhere: the next ask reads again
+    /// and gets the real answer (never a remembered "not a fork").
+    #[test]
+    fn a_failed_read_is_not_cached() {
+        let c = cache();
+        let sid = SessionId::new();
+        let failed: Result<u64, &str> = resolve(&c, sid, || Err("disk I/O error"));
+        assert_eq!(failed, Err("disk I/O error"));
+        assert!(lock(&c).get(&sid).is_none(), "nothing was kept");
+        let then: Result<u64, &str> = resolve(&c, sid, || Ok(Lookup::Fork(7)));
+        assert_eq!(then, Ok(7));
+    }
+
+    /// An event that arrives before the chat's first one finds no chat: no
+    /// answer, so none is kept, and the lineage written with event 1 is read
+    /// when the next event asks.
+    #[test]
+    fn an_event_that_arrives_before_the_first_poisons_nothing() {
+        let c = cache();
+        let sid = SessionId::new();
+        let early: Result<u64, &str> = resolve(&c, sid, || Ok(Lookup::NotYet));
+        assert_eq!(early, Ok(0));
+        assert!(lock(&c).get(&sid).is_none());
+        let later: Result<u64, &str> = resolve(&c, sid, || Ok(Lookup::Fork(5)));
+        assert_eq!(later, Ok(5));
+    }
+
+    /// A real answer, a fork or not, is read once.
+    #[test]
+    fn a_real_answer_is_read_once() {
+        let c = cache();
+        let (a, b) = (SessionId::new(), SessionId::new());
+        for (sid, found, want) in [(a, Lookup::Fork(4), 4), (b, Lookup::NotFork, 0)] {
+            assert_eq!(resolve(&c, sid, || Ok::<_, &str>(found)), Ok(want));
+            let again: Result<u64, &str> = resolve(&c, sid, || Err("not asked again"));
+            assert_eq!(again, Ok(want));
+        }
+    }
+
+    /// A deleted chat's entry is dropped.
+    #[test]
+    fn a_deleted_chats_entry_is_dropped() {
+        let sid = SessionId::new();
+        assert_eq!(
+            resolve(known(), sid, || Ok::<_, &str>(Lookup::Fork(3))),
+            Ok(3)
+        );
+        assert!(lock(known()).contains_key(&sid));
+        forget(sid);
+        assert!(!lock(known()).contains_key(&sid));
+    }
+
+    /// The mirror's answer: a chat with a lineage row, a chat without one,
+    /// and an id the mirror does not hold.
+    #[test]
+    fn the_lookup_tells_no_fork_from_no_chat() {
+        let s = harness_store::Store::open_in_memory().unwrap();
+        let sid = SessionId::new();
+        assert_eq!(lookup(&s, sid).unwrap(), Lookup::NotYet);
+        let created = |sid: SessionId, forked: serde_json::Value| RawEvent {
+            session_id: sid,
+            seq: 1,
+            ts_ms: 1,
+            kind: "session_created".into(),
+            payload: serde_json::json!({"title": "t", "cwd": "/w", "model": "m", "forked": forked}),
+        };
+        s.append("n", &created(sid, serde_json::Value::Null))
+            .unwrap();
+        assert_eq!(lookup(&s, sid).unwrap(), Lookup::NotFork);
+        let f = SessionId::new();
+        let parent = SessionId::new();
+        s.append(
+            "n",
+            &created(f, serde_json::json!({"parent": parent, "through_seq": 6})),
+        )
+        .unwrap();
+        assert_eq!(lookup(&s, f).unwrap(), Lookup::Fork(6));
+    }
 }

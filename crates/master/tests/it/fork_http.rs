@@ -226,6 +226,19 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Node) {
                             }
                             f.turn(*session_id, text);
                         }
+                        MasterToNode::Resume { session_id, last_seq } => {
+                            let log = f.logs.get(session_id).cloned().unwrap_or_default();
+                            let events: Vec<RawEvent> = log
+                                .iter()
+                                .filter(|e| e.seq > *last_seq)
+                                .cloned()
+                                .collect();
+                            let _ = tx.try_send(NodeToMaster::Snapshot {
+                                session_id: *session_id,
+                                head_seq: log.len() as u64,
+                                events,
+                            });
+                        }
                         MasterToNode::Fork { session_id, parent, turn_id, title, .. } => {
                             let log = f.logs.get(parent).cloned().unwrap_or_default();
                             match harness_core::fork::check(&log, turn_id) {
@@ -272,12 +285,18 @@ struct T {
     memory: Arc<SqliteMemory>,
     /// The master's mirror, to read what it kept.
     store: Store,
+    /// The mirror's file, when the test asked for one (to break it).
+    db: std::path::PathBuf,
     _dir: tempfile::TempDir,
 }
 
 const TOKEN: &str = "api-secret";
 
 async fn start() -> T {
+    start_with(false).await
+}
+
+async fn start_with(file: bool) -> T {
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -288,7 +307,12 @@ async fn start() -> T {
             code: Secret::new("CLAIM".into()),
             path: claim_path,
         });
-    let store = Store::open_in_memory().unwrap();
+    let db = dir.path().join("master.db");
+    let store = if file {
+        Store::open(&db, harness_store::Durability::Full).unwrap()
+    } else {
+        Store::open_in_memory().unwrap()
+    };
     let master = harness_master::Master::new(store.clone(), auth);
     master.set_agents(harness_agents::AgentSet::load(&dir.path().join("none")).0);
     let memory = Arc::new(SqliteMemory::open_in_memory().unwrap());
@@ -331,6 +355,7 @@ async fn start() -> T {
         old,
         memory,
         store,
+        db,
         _dir: dir,
     }
 }
@@ -838,4 +863,110 @@ async fn the_nodes_list_says_which_nodes_fork() {
     };
     assert_eq!(fork_of("local"), json!(true));
     assert_eq!(fork_of("old"), json!(false));
+}
+
+/// The first event of a fork the node writes by hand (`forked` naming a
+/// parent the mirror may not even hold).
+fn forked_created(parent: SessionId, through: u64) -> (String, Value) {
+    EventKind::SessionCreated(SessionCreated {
+        forked: Some(ForkedFrom {
+            parent,
+            through_seq: through,
+        }),
+        exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
+        no_callbacks: false,
+        title: "Hand made (fork)".into(),
+        cwd: "/w".into(),
+        model: "demo::mock".into(),
+        backend: "native".into(),
+        node_id: "local".into(),
+        approval_mode: ApprovalMode::Ask,
+        profile: Profile::Agentic,
+        agent_id: None,
+        incognito: false,
+        parent_session: None,
+    })
+    .into_parts()
+}
+
+fn break_table(t: &T, sql: &str) {
+    let c = rusqlite::Connection::open(&t.db).unwrap();
+    c.execute_batch(sql).unwrap();
+}
+
+/// A read of the lineage that fails is not an answer: the copied events
+/// arriving meanwhile are not applied (not taken into the mirror, no side
+/// effect), and not turned into "not a fork" for good. Once the read works
+/// again the node's resume brings them, and they are the copies they are:
+/// the copied `remember` files nothing.
+#[tokio::test]
+async fn a_failed_lineage_read_is_not_cached_and_the_copy_is_not_applied() {
+    let t = start_with(true).await;
+    let owner = account_id(&t).await;
+    let parent = SessionId::new();
+    let new = SessionId::new();
+    let (kind, payload) = forked_created(parent, 6);
+    t.local.put(new, &kind, payload);
+    for _ in 0..500 {
+        if t.store.session(new).unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    t.store.claim_session(new, Some(&owner), None).unwrap();
+    assert!(
+        t.store.fork_of(new).unwrap().is_some(),
+        "the lineage is there"
+    );
+    // The lineage cannot be read now.
+    break_table(
+        &t,
+        "ALTER TABLE session_forks RENAME TO session_forks_gone;",
+    );
+    t.local.put(new, "turn_started", json!({"turn_id": "tm"}));
+    t.local.put(
+        new,
+        "user_message",
+        json!({"turn_id": "tm", "text": "remember it"}),
+    );
+    t.local.put(
+        new,
+        "tool_call_started",
+        json!({"turn_id": "tm", "call_id": "c1", "tool": "remember",
+               "input": {"text": "Alex rides the number 9 tram"}}),
+    );
+    t.local.put(
+        new,
+        "tool_call_finished",
+        json!({"call_id": "c1", "ok": true, "output": "saved", "truncated": false}),
+    );
+    t.local.put(
+        new,
+        "turn_ended",
+        json!({"turn_id": "tm", "reason": "completed"}),
+    );
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        events(&t, &t.alex, new).await.len(),
+        1,
+        "nothing was taken while the lineage could not be read"
+    );
+    assert_eq!(t.memory.list(Some(&owner)).await.unwrap().len(), 0);
+    // The read works again; the divider arrives, the gap is resumed.
+    break_table(
+        &t,
+        "ALTER TABLE session_forks_gone RENAME TO session_forks;",
+    );
+    t.local.put(
+        new,
+        "session_forked",
+        json!({"parent": parent, "through_seq": 6, "turn_id": "tm"}),
+    );
+    caught_up(&t, &t.alex, new, 7).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        t.memory.list(Some(&owner)).await.unwrap().len(),
+        0,
+        "the copy filed nothing, as copies do not"
+    );
 }
