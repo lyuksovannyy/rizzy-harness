@@ -113,9 +113,16 @@ pub(crate) struct Copy {
     /// the folder itself.
     pub notes: Vec<String>,
     made: Identity,
+    /// The marker that says the folder has no chat yet ([`Copy::created`]).
+    pending: Option<projects::Pending>,
 }
 
 impl Copy {
+    /// The fork's chat is stored: a start no longer removes the folder.
+    pub(crate) fn created(&mut self) {
+        self.pending = None;
+    }
+
     /// Remove this copy: its chat could not be written. Only while the
     /// path is still the folder that was made (never what replaced it).
     pub(crate) async fn discard(self) {
@@ -264,6 +271,9 @@ pub(crate) async fn make(
             return Err(e);
         }
     };
+    // A kill from here to the chat's creation leaves a complete, unused
+    // folder: the marker has the next start remove it.
+    let pending = build.mark_pending()?;
     let p = policy.clone();
     let root = tokio::task::spawn_blocking(move || build.move_into(&p, &top, &names))
         .await
@@ -308,6 +318,7 @@ pub(crate) async fn make(
         upstream: filled.upstream.is_some(),
         notes,
         made: id,
+        pending: Some(pending),
     })
 }
 
@@ -456,12 +467,16 @@ mod tests {
     #[tokio::test]
     async fn a_copy_is_made_in_the_projects_folder_and_discard_removes_only_it() {
         let r = rig(true).await;
-        let c = r.make().await.unwrap();
+        let mut c = r.make().await.unwrap();
         let projects = r.ws.join("projects").canonicalize().unwrap();
         assert_eq!(c.root, projects.join("proj-fork-ab12cd34"));
         assert_eq!(c.folder, c.root);
         assert_eq!(c.branch, "fork/ab12cd34");
         assert!(c.root.join("a.txt").is_file() && c.root.join(".git").is_dir());
+        // Until the chat is stored the folder has a marker in staging.
+        assert_eq!(r.staging().len(), 1, "{:?}", r.staging());
+        assert!(r.staging()[0].starts_with("pending-fork-"));
+        c.created();
         assert_eq!(r.staging(), Vec::<String>::new());
         // A folder swapped in at the path is not what was made: not removed.
         let root = c.root.clone();
@@ -686,6 +701,41 @@ mod tests {
         r.policy.locate_projects(&r.data).unwrap();
         assert_eq!(r.staging(), Vec::<String>::new());
         assert_eq!(r.projects(), Vec::<String>::new());
+    }
+
+    /// A kill between the move into the projects folder and the chat's
+    /// creation leaves a complete, unused folder and its marker; the next
+    /// start removes that folder (and only it). Once the chat exists the
+    /// marker is gone and a start leaves the folder alone.
+    #[tokio::test]
+    async fn a_copy_whose_chat_was_never_written_is_removed_at_the_next_start() {
+        let mut r = rig(true).await;
+        let killed = r.make().await.unwrap();
+        let kept = make(&r.policy, &r.made, r.request(), &|| "yyyy".into()).await;
+        let mut kept = kept.unwrap();
+        // A folder of the person's, in the same place, which nothing names.
+        let theirs = r.ws.join("projects/mine");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("f"), "x").unwrap();
+        let (gone, stays) = (killed.root.clone(), kept.root.clone());
+        assert!(gone.is_dir() && stays.is_dir());
+        // The second one's chat was stored; the first one's process was killed.
+        kept.created();
+        std::mem::forget(killed);
+        assert!(
+            names(&r.data.join("projects-staging"))
+                .iter()
+                .any(|n| n.starts_with("pending-fork-")),
+            "no marker was written"
+        );
+        r.policy.locate_projects(&r.data).unwrap();
+        assert!(!gone.exists(), "the unused folder was left");
+        assert!(
+            stays.join("a.txt").is_file(),
+            "a folder with a chat was removed"
+        );
+        assert!(theirs.join("f").is_file());
+        assert_eq!(r.staging(), Vec::<String>::new());
     }
 
     /// A copy counts against the folders-per-hour limit like a project.

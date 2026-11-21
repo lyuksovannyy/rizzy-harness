@@ -483,6 +483,93 @@ impl Build {
     }
 }
 
+/// The marker file of a fork's copy between its move into the projects
+/// folder and the writing of its chat: `<staging>/pending-fork-<build>`
+/// holds the folder's device and inode. A kill in that window leaves the
+/// marker (and a complete, unused folder); the next start removes the
+/// folder it names ([`sweep_pending`]). Dropping this removes the marker.
+#[derive(Debug)]
+pub(crate) struct Pending {
+    file: PathBuf,
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.file);
+    }
+}
+
+/// What starts a marker's file name.
+pub(crate) const PENDING_PREFIX: &str = "pending-fork-";
+
+impl Build {
+    /// Write the marker for this folder, before it is moved in.
+    pub(crate) fn mark_pending(&self) -> Result<Pending, String> {
+        let st = nix::sys::stat::fstat(&self.fd).map_err(|e| e.to_string())?;
+        let file = self
+            .path
+            .with_file_name(format!("{PENDING_PREFIX}{}", self.name));
+        std::fs::write(&file, format!("{} {}\n", st.st_dev, st.st_ino))
+            .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+        Ok(Pending { file })
+    }
+}
+
+/// At node start, before the staging folder is emptied: remove the folder a
+/// leftover marker names, if it is still a folder in the projects folder
+/// `projects` (its direct children, compared by device and inode, a link
+/// never matches), and the marker. A fork's copy whose chat was never
+/// written is complete but unused; the chat's own folder is never this: its
+/// marker is removed as soon as its chat is stored. Returns how many folders
+/// were removed.
+pub(crate) fn sweep_pending(staging: &Path, projects: &Path) -> usize {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(staging) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for e in entries.flatten() {
+        let name = e.file_name();
+        if !name.to_string_lossy().starts_with(PENDING_PREFIX)
+            || !e.file_type().is_ok_and(|t| t.is_file())
+        {
+            continue;
+        }
+        let text = std::fs::File::open(e.path())
+            .ok()
+            .map(|f| {
+                use std::io::Read;
+                let mut t = String::new();
+                let _ = f.take(64).read_to_string(&mut t);
+                t
+            })
+            .unwrap_or_default();
+        let _ = std::fs::remove_file(e.path());
+        let mut it = text.split_whitespace().map(|n| n.parse::<u64>().ok());
+        let (Some(Some(dev)), Some(Some(ino))) = (it.next(), it.next()) else {
+            continue;
+        };
+        let Ok(children) = std::fs::read_dir(projects) else {
+            continue;
+        };
+        for c in children.flatten() {
+            let Ok(md) = std::fs::symlink_metadata(c.path()) else {
+                continue;
+            };
+            if md.is_dir() && (md.dev(), md.ino()) == (dev, ino) {
+                tracing::warn!(
+                    folder = ?c.path(),
+                    "removing a fork's copy whose chat was never written (the node was stopped)"
+                );
+                if std::fs::remove_dir_all(c.path()).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    removed
+}
+
 /// Remove the folder this call moved in, `name` in `top`: only when it is
 /// still the one made and holds nothing but `.git` (removed with it);
 /// otherwise it is left as it is and logged.
@@ -532,6 +619,44 @@ mod tests {
         assert!(made.reserve(1).is_err());
         assert!(made.room(1).is_err());
         assert!(made.reserve(2).is_ok());
+    }
+
+    /// The sweep removes the folder a marker names, by device and inode, in
+    /// the projects folder's direct children: not a link to it, not another
+    /// folder, not what a malformed marker says.
+    #[test]
+    fn the_sweep_removes_only_the_folder_a_marker_names() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let (staging, projects) = (top.join("staging"), top.join("projects"));
+        for p in [
+            &staging,
+            &projects,
+            &projects.join("a"),
+            &projects.join("b"),
+        ] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::write(projects.join("a/f"), "x").unwrap();
+        std::os::unix::fs::symlink(projects.join("b"), projects.join("link-to-b")).unwrap();
+        let id = |p: &Path| {
+            let m = std::fs::symlink_metadata(p).unwrap();
+            format!("{} {}\n", m.dev(), m.ino())
+        };
+        std::fs::write(staging.join("pending-fork-1"), id(&projects.join("a"))).unwrap();
+        std::fs::write(staging.join("pending-fork-2"), "garbage").unwrap();
+        std::fs::write(staging.join("pending-fork-3"), "1 2\n").unwrap();
+        std::fs::write(staging.join("other"), id(&projects.join("b"))).unwrap();
+        assert_eq!(sweep_pending(&staging, &projects), 1);
+        assert!(!projects.join("a").exists());
+        assert!(projects.join("b").is_dir() && projects.join("link-to-b").exists());
+        assert!(
+            staging.join("other").is_file(),
+            "a file that is no marker was touched"
+        );
+        assert!(!staging.join("pending-fork-1").exists());
+        assert!(!staging.join("pending-fork-2").exists());
     }
 
     /// A build folder that is dropped (a failed or cancelled request) is

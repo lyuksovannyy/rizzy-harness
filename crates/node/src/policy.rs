@@ -611,6 +611,9 @@ impl NodePolicy {
         let parent_id = Identity::of(&parent)?;
         let data = std::path::absolute(data_dir).map_err(|e| e.to_string())?;
         let staging = data.join(ProjectsPolicy::STAGING);
+        // A fork's copy moved in whose chat was never written (a kill
+        // between the two) goes first, while its marker is still there.
+        crate::projects::sweep_pending(&staging, &real);
         match std::fs::symlink_metadata(&staging) {
             Ok(m) if m.is_dir() => std::fs::remove_dir_all(&staging),
             Ok(_) => std::fs::remove_file(&staging),

@@ -78,7 +78,7 @@ impl Session {
         // The copy is made before anything of the chat is written, off the
         // parent's actor (this runs in the new chat's lane, which nothing
         // else uses yet): a failure leaves no chat and no folder.
-        let copy = match checkout {
+        let mut copy = match checkout {
             ForkCheckout::Shared => None,
             ForkCheckout::Own => Some(
                 self.own_copy(node, new, cut.through_seq)
@@ -156,6 +156,10 @@ impl Session {
             // No chat: no folder either.
             discard(copy).await;
             return Err(e.to_string());
+        }
+        // The chat exists: the folder is its own, no start sweeps it.
+        if let Some(c) = copy.as_mut() {
+            c.created();
         }
         let s = Session::load(node.clone(), new)
             .await
