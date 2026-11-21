@@ -864,3 +864,172 @@ fn an_image_the_provider_refused_is_refused_with_the_reason() {
     assert!(e.contains("withheld") && e.contains("refused"), "{e}");
     assert!(ask(&log, json!({"turn": 1})).contains("withheld"));
 }
+
+// ---- a queued message counts only where it was delivered ----
+
+/// A queued message with an attachment, a mentioned file and an image, sent
+/// while turn `turn` ran.
+fn queued_with_extras(turn: &str, text: &str) -> UserMessage {
+    UserMessage {
+        queued: true,
+        attachments: vec![Attachment {
+            name: "queued-notes.txt".into(),
+            mime: "text/plain".into(),
+            text: "QUEUED ATTACHMENT BODY".into(),
+            truncated: false,
+        }],
+        files: vec![FileMention {
+            path: "/etc/queued-mention".into(),
+            state: MentionState::File,
+            text: "x".into(),
+            lines: 1,
+            shown: 1,
+            bytes: 0,
+            note: None,
+            seen: None,
+        }],
+        images: vec![png_ref(&"c".repeat(64))],
+        ..UserMessage::plain(turn, text)
+    }
+}
+
+/// The model's own rebuild never sends a queued message nobody read, so
+/// nothing of it is listed, counted, searched or shown.
+#[test]
+fn an_undelivered_queued_message_is_not_in_the_index_the_turn_the_image_or_the_search() {
+    let mut log = Log::new();
+    log.turn(None, "first", &[], "ok");
+    log.push(EventKind::UserMessage(queued_with_extras(
+        "t1",
+        "UNDELIVERED QUEUED TEXT",
+    )));
+    let sent = format!("{:?}", rebuild(&log.events, &Rebuild::default()));
+    assert!(
+        !sent.contains("UNDELIVERED"),
+        "the model is sent it: {sent}"
+    );
+    let idx = ask(&log, json!({}));
+    assert!(
+        idx.contains("0 attachments") && idx.contains("0 images"),
+        "{idx}"
+    );
+    let view = ask(&log, json!({"turn": 1}));
+    for gone in [
+        "UNDELIVERED",
+        "queued-notes.txt",
+        "QUEUED ATTACHMENT BODY",
+        "queued-mention",
+        "image",
+    ] {
+        assert!(!view.contains(gone), "{gone} is in the turn: {view}");
+    }
+    let e = call(&log, json!({"turn": 1, "image": 1})).unwrap_err();
+    assert!(e.contains("0 images"), "{e}");
+    let e = call(&log, json!({"turn": 1, "attachment": 1})).unwrap_err();
+    assert!(e.contains("0 attachments"), "{e}");
+    for words in ["UNDELIVERED", "QUEUED ATTACHMENT", "queued-notes"] {
+        assert!(
+            ask(&log, json!({"search": words})).contains("0 turns"),
+            "{words} was found"
+        );
+    }
+}
+
+/// Read in turn 2, the queued message's attachment, file and image belong
+/// to turn 2, listed with the message, not under the first person block.
+#[test]
+fn a_delivered_queued_messages_extras_are_listed_where_it_was_delivered() {
+    let mut log = Log::new();
+    log.turn(None, "first", &[], "ok");
+    let q = log.push(EventKind::UserMessage(queued_with_extras(
+        "t2",
+        "DELIVERED QUEUED TEXT",
+    )));
+    log.turn(None, "second", &[], "ok 2");
+    log.push(EventKind::QueuedDelivered(QueuedDelivered {
+        turn_id: "t2".into(),
+        seqs: vec![q],
+    }));
+    let idx = ask(&log, json!({}));
+    let line = |n: usize| {
+        idx.lines()
+            .find(|l| l.starts_with(&format!("{n}. ")))
+            .unwrap()
+            .to_string()
+    };
+    assert!(
+        line(1).contains("0 attachments") && line(1).contains("0 images"),
+        "{idx}"
+    );
+    assert!(
+        line(2).contains("1 attachment") && line(2).contains("1 image"),
+        "{idx}"
+    );
+    let view = ask(&log, json!({"turn": 2}));
+    let at = |s: &str| {
+        view.find(s)
+            .unwrap_or_else(|| panic!("{s} missing: {view}"))
+    };
+    let text = at("DELIVERED QUEUED TEXT");
+    assert!(at("second") < at("assistant"), "{view}");
+    assert!(
+        text < at("attachment 1 \"queued-notes.txt\""),
+        "the attachment is listed before its message: {view}"
+    );
+    assert!(
+        at("assistant") < at("attachment 1"),
+        "under the first person block: {view}"
+    );
+    assert!(
+        at("attachment 1") < at("mentioned file \"/etc/queued-mention\""),
+        "{view}"
+    );
+    assert!(ask(&log, json!({"turn": 2, "attachment": 1})).contains("QUEUED ATTACHMENT BODY"));
+    assert!(matches!(
+        call(&log, json!({"turn": 2, "image": 1})),
+        Ok(Reply::Image { .. })
+    ));
+    assert!(ask(&log, json!({"search": "QUEUED ATTACHMENT"})).contains("turn 2"));
+    // The first turn has none of it.
+    assert!(!ask(&log, json!({"turn": 1})).contains("queued-notes"));
+}
+
+/// The queued message stands before a rewound range and its delivery
+/// inside it: the model is not sent it, so it is not shown.
+#[test]
+fn a_queued_message_whose_delivery_a_rewind_hid_is_not_shown() {
+    let mut log = Log::new();
+    log.turn(None, "first", &[], "ok");
+    let q = log.push(EventKind::UserMessage(queued_with_extras(
+        "t1",
+        "HIDDEN DELIVERY TEXT",
+    )));
+    let back = log.events.len() as u64 + 2;
+    log.turn(None, "undo me", &[], "ok 2");
+    log.push(EventKind::QueuedDelivered(QueuedDelivered {
+        turn_id: "t2".into(),
+        seqs: vec![q],
+    }));
+    log.push(EventKind::ConversationRewound(ConversationRewound {
+        message_seq: back,
+        turn_id: "t2".into(),
+        files: false,
+    }));
+    let sent = format!("{:?}", rebuild(&log.events, &Rebuild::default()));
+    assert!(!sent.contains("HIDDEN DELIVERY"), "{sent}");
+    let idx = ask(&log, json!({}));
+    assert!(idx.contains("turns 1-1 of 1"), "{idx}");
+    assert!(
+        idx.contains("0 attachments") && idx.contains("0 images"),
+        "{idx}"
+    );
+    let view = ask(&log, json!({"turn": 1}));
+    assert!(
+        !view.contains("queued-notes")
+            && !view.contains("HIDDEN")
+            && !view.contains("queued-mention"),
+        "{view}"
+    );
+    assert!(call(&log, json!({"turn": 1, "image": 1})).is_err());
+    assert!(ask(&log, json!({"search": "QUEUED ATTACHMENT"})).contains("0 turns"));
+}

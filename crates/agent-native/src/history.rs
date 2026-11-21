@@ -287,9 +287,20 @@ struct Turn {
     last_seq: u64,
     /// The person's first message, one line.
     lead: String,
+    /// Of every user message of the turn the model is sent, in order.
     attachments: Vec<Attachment>,
     mentions: Vec<(String, MentionState)>,
     user_images: Vec<ImageRef>,
+    /// One per user-role message of the turn in [`Chat::msgs`], in order:
+    /// how many of `attachments` and `mentions` that message brought.
+    messages: Vec<Brought>,
+}
+
+/// What one user message brought (a slice of its turn's lists).
+#[derive(Debug, Clone, Copy, Default)]
+struct Brought {
+    attachments: usize,
+    mentions: usize,
 }
 
 /// A piece of a turn's view: one message, one call, one result, one
@@ -330,6 +341,21 @@ pub struct Chat {
     through: Option<u64>,
 }
 
+impl Turn {
+    /// A user message the model is sent in this turn: its attachments,
+    /// mentioned files and images join the turn's lists.
+    fn take(&mut self, m: harness_core::event::UserMessage) {
+        self.messages.push(Brought {
+            attachments: m.attachments.len(),
+            mentions: m.files.len(),
+        });
+        self.attachments.extend(m.attachments);
+        self.mentions
+            .extend(m.files.into_iter().map(|f| (f.path, f.state)));
+        self.user_images.extend(m.images);
+    }
+}
+
 impl Chat {
     /// Read `log` (the session's own, in order).
     pub fn of(log: &[RawEvent]) -> Chat {
@@ -359,8 +385,13 @@ impl Chat {
                 attachments: Vec::new(),
                 mentions: Vec::new(),
                 user_images: Vec::new(),
+                messages: Vec::new(),
             });
         }
+        // Queued messages wait here until a visible `queued_delivered`
+        // names them, as the rebuild holds them: one nobody read is not
+        // sent to the model, so it is not listed either.
+        let mut queued: HashMap<u64, harness_core::event::UserMessage> = HashMap::new();
         let at = |turn: &str| by_turn.get(turn).copied();
         for e in log {
             let Ok(k) = e.typed() else { continue };
@@ -378,19 +409,30 @@ impl Chat {
                             .map(|a| head(&shown_name(&a.name), WHO_CHARS).to_string());
                     }
                 }
+                EventKind::UserMessage(m) if m.queued => {
+                    queued.insert(e.seq, m);
+                }
                 EventKind::UserMessage(m) => {
                     if let Some(i) = at(&m.turn_id) {
                         let turn = &mut turns[i];
-                        if !m.queued && !turn.person {
+                        if !turn.person {
                             turn.person = true;
                             turn.lead = m.text.chars().take(LEAD_CHARS * 2).collect();
                         }
-                        turn.attachments.extend(m.attachments);
-                        turn.mentions
-                            .extend(m.files.into_iter().map(|f| (f.path, f.state)));
-                        turn.user_images.extend(m.images);
+                        turn.take(m);
                         if turn.first_seq == 0 {
                             turn.first_seq = e.seq;
+                        }
+                        turn.last_seq = turn.last_seq.max(e.seq);
+                    }
+                }
+                EventKind::QueuedDelivered(d) => {
+                    if let Some(i) = at(&d.turn_id) {
+                        let turn = &mut turns[i];
+                        for seq in &d.seqs {
+                            if let Some(m) = queued.remove(seq) {
+                                turn.take(m);
+                            }
                         }
                         turn.last_seq = turn.last_seq.max(e.seq);
                     }
@@ -509,7 +551,7 @@ impl Chat {
     fn blocks(&self, t: &Turn) -> Vec<Block> {
         let calls = self.call_table(t);
         let mut out: Vec<Block> = Vec::new();
-        let mut person_seen = false;
+        let (mut users, mut att, mut men) = (0usize, 0usize, 0usize);
         let agent = t.agent.clone().unwrap_or_else(|| "assistant".into());
         let mut pics = 0usize;
         for m in &self.msgs[t.start..t.end] {
@@ -525,35 +567,35 @@ impl Chat {
                         text: person_text(text).to_string(),
                         key: Key::Message,
                     });
-                    if !person_seen {
-                        person_seen = true;
-                        for (i, a) in t.attachments.iter().enumerate() {
-                            out.push(Block {
-                                label: format!(
-                                    "attachment {} \"{}\" ({}){}",
-                                    i + 1,
-                                    shown_name(&a.name),
-                                    clean_line(&a.mime, 80),
-                                    if a.truncated {
-                                        ", cut at the size limit when it was attached"
-                                    } else {
-                                        ""
-                                    }
-                                ),
-                                text: a.text.clone(),
-                                key: Key::Attachment(i + 1),
-                            });
-                        }
-                        for (path, state) in &t.mentions {
-                            out.push(Block {
-                                label: format!(
-                                    "mentioned file \"{}\" ({state:?})",
-                                    shown_name(path)
-                                ),
-                                text: String::new(),
-                                key: Key::Message,
-                            });
-                        }
+                    // What this message brought, listed under it: a queued
+                    // message's under the turn that read it, with the
+                    // message.
+                    let brought = t.messages.get(users).copied().unwrap_or_default();
+                    users += 1;
+                    for a in &t.attachments[att..att + brought.attachments] {
+                        att += 1;
+                        out.push(Block {
+                            label: format!(
+                                "attachment {att} \"{}\" ({}){}",
+                                shown_name(&a.name),
+                                clean_line(&a.mime, 80),
+                                if a.truncated {
+                                    ", cut at the size limit when it was attached"
+                                } else {
+                                    ""
+                                }
+                            ),
+                            text: a.text.clone(),
+                            key: Key::Attachment(att),
+                        });
+                    }
+                    for (path, state) in &t.mentions[men..men + brought.mentions] {
+                        men += 1;
+                        out.push(Block {
+                            label: format!("mentioned file \"{}\" ({state:?})", shown_name(path)),
+                            text: String::new(),
+                            key: Key::Message,
+                        });
                     }
                 }
                 ChatMsg::Assistant {
