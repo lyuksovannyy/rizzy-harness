@@ -82,12 +82,13 @@ export function ForkDivider(props: { parent: string }) {
   );
 }
 
-/** Under the header of a fork that works in a folder: it is the parent's
+/** The first line of a fork's conversation, in the normal flow (a banner
+ * over the timeline hid the first message), for a fork that works in a folder: it is the parent's
  * folder, so each chat's changes are in the other's files. */
 export function ForkNote(props: { parent: string }) {
   const p = useParent(props.parent);
   return (
-    <div className="incognito-banner fork-note" role="note" data-testid="fork-note">
+    <div className="fork-note small muted" role="note" data-testid="fork-note">
       <span>
         This chat shares its folder with{" "}
         {p && p !== "gone" ? (

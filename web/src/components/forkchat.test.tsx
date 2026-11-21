@@ -217,4 +217,74 @@ describe("a fork", () => {
     expect(buttons.filter((b) => b === "Undo file changes").length).toBe(1);
     expect(buttons.filter((b) => b === "Show changes").length).toBe(1);
   });
+
+  test("a fresh fork's header says 0 tokens spent and the context the model will be sent", async () => {
+    session.mockResolvedValue({ title: "Parent chat" });
+    await render(fixture.events.slice(0, 16));
+    const meter = host.querySelector(".conv-meta .meter");
+    expect(meter?.textContent).toContain("0 tokens");
+    expect(meter?.querySelector(".context-meter")?.textContent).toContain("205");
+  });
+
+  test("a copied tool card does not claim the grant holds here; the fork's own call keeps the label", async () => {
+    session.mockResolvedValue({ title: "Parent chat" });
+    const call = (seq: number, id: string) => [
+      ev(seq, "tool_call_started", { turn_id: "t1", call_id: id, tool: "write", input: { path: "a.txt" } }),
+      ev(seq + 1, "approval_requested", { approval_id: `a-${id}`, call_id: id, tool: "write", input: { path: "a.txt" }, reason: "r", chat_allow: true }),
+      ev(seq + 2, "approval_resolved", { approval_id: `a-${id}`, decision: "allow_chat", by: "user" }),
+      ev(seq + 3, "tool_call_finished", { call_id: id, ok: true, output: "ok" }),
+    ];
+    const head = { ...(fixture.events[0]!.payload as object) };
+    const log = [
+      ev(1, "session_created", head),
+      ev(2, "turn_started", { turn_id: "t1" }),
+      ...call(3, "c-copied"),
+      ev(7, "turn_ended", { turn_id: "t1", reason: "completed" }),
+      ev(8, "session_forked", { parent: PARENT, through_seq: 7, turn_id: "t1" }),
+      ev(9, "turn_started", { turn_id: "u1" }),
+      ...call(10, "c-own"),
+    ].map((e) => (e.kind === "session_created" ? { ...e, payload: { ...e.payload, forked: { parent: PARENT, through_seq: 7 } } } : e)) as RawEvent[];
+    await render(log);
+    const notes = [...host.querySelectorAll(".approval-note")].map((n) => n.textContent);
+    expect(notes).toEqual(["Allowed in the chat this was forked from", "Allowed for this chat"]);
+  });
+
+  test("copied cards inside a web-research group do not claim the grant either", async () => {
+    session.mockResolvedValue({ title: "Parent chat" });
+    const call = (seq: number, id: string) => [
+      ev(seq, "tool_call_started", { turn_id: "t1", call_id: id, tool: "web_fetch", input: { url: "https://example.org/" } }),
+      ev(seq + 1, "approval_requested", { approval_id: `a-${id}`, call_id: id, tool: "web_fetch", input: { url: "https://example.org/" }, reason: "r", chat_allow: true }),
+      ev(seq + 2, "approval_resolved", { approval_id: `a-${id}`, decision: "allow_chat", by: "user" }),
+      ev(seq + 3, "tool_call_finished", { call_id: id, ok: true, output: "ok" }),
+    ];
+    const head = { ...(fixture.events[0]!.payload as object) };
+    const log = [
+      ev(1, "session_created", head),
+      ev(2, "turn_started", { turn_id: "t1" }),
+      ...call(3, "w-1"),
+      ...call(7, "w-2"),
+      ev(11, "turn_ended", { turn_id: "t1", reason: "completed" }),
+      ev(12, "session_forked", { parent: PARENT, through_seq: 11, turn_id: "t1" }),
+    ].map((e) => (e.kind === "session_created" ? { ...e, payload: { ...e.payload, forked: { parent: PARENT, through_seq: 11 } } } : e)) as RawEvent[];
+    await render(log);
+    const group = host.querySelector<HTMLButtonElement>(".tool-group-head");
+    expect(group, "the two web calls draw as one group").not.toBeNull();
+    if (group!.getAttribute("aria-expanded") !== "true") await act(async () => group!.click());
+    const notes = [...host.querySelectorAll(".approval-note")].map((n) => n.textContent);
+    expect(notes).toEqual(["Allowed in the chat this was forked from", "Allowed in the chat this was forked from"]);
+  });
+
+  test("the folder note is a plain line at the top of the conversation, not a banner over it", async () => {
+    session.mockResolvedValue({ title: "Parent chat" });
+    await render(fixture.events);
+    const note = host.querySelector("[data-testid=fork-note]")!;
+    expect(note.classList.contains("incognito-banner")).toBe(false);
+    expect(note.parentElement?.classList.contains("column")).toBe(true);
+    expect(note.parentElement?.firstElementChild).toBe(note);
+    const at = css.indexOf(".fork-note {");
+    const rule = css.slice(at, css.indexOf("}", at));
+    expect(at).toBeGreaterThan(0);
+    expect(rule).not.toMatch(/position:\s*(sticky|fixed|absolute)/);
+  });
 });
+

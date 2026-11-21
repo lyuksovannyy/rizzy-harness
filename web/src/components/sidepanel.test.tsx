@@ -403,3 +403,38 @@ describe("background sub-agents in the side panel", () => {
     expect(button("Stop bg-1")).toBeUndefined();
   });
 });
+
+describe("a narrow screen", () => {
+  const narrow = (on: boolean) => {
+    window.matchMedia = ((q: string) =>
+      ({ matches: on && q.includes("max-width"), media: q, addEventListener: () => {}, removeEventListener: () => {} }) as unknown as MediaQueryList) as typeof window.matchMedia;
+  };
+  const real = window.matchMedia;
+  afterEach(() => {
+    window.matchMedia = real;
+  });
+  const granted = () => ({ ...view({}), chat_allows: { g1: { tool: "write", input: { path: "a" } } } }) as SessionView;
+
+  test("does not open the panel over the chat for a grant alone, and the button still opens it", async () => {
+    narrow(true);
+    await show(granted());
+    expect(strip()).toBeNull();
+    const open = host.querySelector<HTMLButtonElement>(".side-toggle")!;
+    expect(open).not.toBeNull();
+    await act(async () => open.click());
+    expect(strip()).not.toBeNull();
+  });
+
+  test("still opens for running background work", async () => {
+    narrow(true);
+    await show(view({ "bg-1": {} }));
+    expect(strip()).not.toBeNull();
+  });
+
+  test("a wide screen opens it for a grant as before", async () => {
+    narrow(false);
+    await show(granted());
+    expect(strip()).not.toBeNull();
+  });
+});
+
