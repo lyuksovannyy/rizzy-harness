@@ -14,12 +14,15 @@ import { fold } from "../fold";
 import { whyNotSwitchable } from "../lib/execSwitch";
 import type { ExecMode, RawEvent } from "../types";
 import { ExecChoice } from "./ExecChoice";
+import { Composer } from "./Composer";
 import { ExecSwitch } from "./ExecSwitch";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 beforeAll(async () => {
   await import("./HostWarning");
+  await import("./ExecSwitch");
+  await import("./ApprovalModePick");
 }, 30_000);
 
 const tick = () => act(async () => new Promise((r) => setTimeout(r, 10)));
@@ -87,7 +90,7 @@ describe("the strip's Commands control", () => {
     expect(text).toContain("Switch this chat's commands to the host shell?");
     expect(text).toContain("as the node's own user, with nothing between them and the machine");
     // What Auto means here, and what does not carry over.
-    expect(text).toContain("This chat is in Auto: from its next message every command runs in the host shell with no question asked");
+    expect(text).toContain("This chat is in Auto: from its next turn every command runs in the host shell with no question asked");
     expect(text).toContain("does not carry over");
     c.press(d, "Cancel");
     expect(document.querySelector("dialog.host-warning")).toBeNull();
@@ -124,11 +127,70 @@ describe("the strip's Commands control", () => {
   });
 });
 
+describe("the reason, in words (D4)", () => {
+  const mountStrip = (busy: string | null) => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const render = (b: string | null) =>
+      act(() =>
+        root.render(
+          <Composer
+            where="session"
+            agents={[]}
+            models={[]}
+            workers={[]}
+            agentId=""
+            onAgentChange={() => {}}
+            agenticBlocked={null}
+            approval={{ value: "auto", max: "auto", host: false, onChange: async () => {} }}
+            exec={{ value: "sandbox", offered: ["sandbox", "host"], mayHost: true, node: "box", busy: b, onChange: async () => {} }}
+            onSubmit={async () => {}}
+          />,
+        ),
+      );
+    render(busy);
+    return { host, render, unmount: () => act(() => root.unmount()) };
+  };
+  test("a click on the disabled control puts the reason in the strip's note line; nothing opens; it goes when the chat is idle", async () => {
+    const c = mountStrip("Answer the approval first, then switch");
+    await until(() => c.host.querySelector(".exec-switch .select-button"));
+    // Not on every running turn: no note until asked for.
+    expect(c.host.querySelector('[data-testid="exec-busy-note"]')).toBeNull();
+    const b = c.host.querySelector<HTMLButtonElement>(".exec-switch .select-button")!;
+    expect(b.getAttribute("aria-disabled")).toBe("true");
+    act(() => b.click());
+    const note = c.host.querySelector<HTMLElement>('[data-testid="exec-busy-note"]')!;
+    expect(note.textContent).toBe("Answer the approval first, then switch");
+    const strip = c.host.querySelector(".composer-strip")!;
+    expect(note.parentElement).toBe(strip);
+    expect(strip.firstElementChild).toBe(note);
+    expect(c.host.querySelector(".exec-switch li")).toBeNull();
+    c.render(null);
+    expect(c.host.querySelector('[data-testid="exec-busy-note"]')).toBeNull();
+    c.unmount();
+  });
+});
+
+describe("a mode nobody reads (D3)", () => {
+  test("the strip shows 'mode unknown' and no picker", () => {
+    const c = mount({ value: undefined });
+    expect(c.host.querySelector(".select-button")).toBeNull();
+    const label = c.host.querySelector<HTMLElement>(".exec-only")!;
+    expect(label.textContent).toBe("mode unknown");
+    expect(label.title).toContain("runs nothing");
+    c.unmount();
+  });
+});
+
 describe("when the mode may be switched", () => {
   const idle = { running: false, compacting: false, waiting: false };
   test("only while nothing runs, and the reason names what to stop", () => {
     expect(whyNotSwitchable(null, idle)).toBeNull();
     expect(whyNotSwitchable(null, { ...idle, running: true })).toContain("Stop the agent");
+    // An approval waiting is the reason to act on, though its turn runs too.
+    expect(whyNotSwitchable(null, { ...idle, running: true, waiting: true })).toContain("Answer the approval");
+    expect(whyNotSwitchable(null, { ...idle, subAgent: true })).toContain("sub-agent");
     expect(whyNotSwitchable(null, { ...idle, waiting: true })).toContain("Answer the approval");
     expect(whyNotSwitchable(null, { ...idle, compacting: true })).toContain("summarised");
     const bg = (ended: boolean) => ({ background: { "bg-1": { call_id: "c", ends_by_ms: 0, timeout_s: 1, ended } } });
@@ -178,10 +240,23 @@ describe("the fold", () => {
     expect(v.meta?.exec_mode).toBe("host");
   });
 
-  test("a mode this page does not know is dropped and counted, not folded", () => {
-    const v = fold([created, ev(2, "exec_mode_changed", { mode: "quantum", from: "sandbox" })]);
-    expect(v.meta?.exec_mode).toBe("sandbox");
-    expect(v.unknown_events).toBe(1);
+  test("a mode this page does not know is unreadable: no mode, a flag, never the previous mode (as exec_mode::step)", () => {
+    const bad = (seq: number, payload: Record<string, unknown>) => ev(seq, "exec_mode_changed", payload);
+    for (const payload of [{ mode: "quantum", from: "sandbox" }, { from: "sandbox" }, { mode: 7, from: "sandbox" }]) {
+      const v = fold([created, bad(2, payload)]);
+      expect(v.meta?.exec_mode, JSON.stringify(payload)).toBeUndefined();
+      expect(v.exec_mode_unknown).toBe(true);
+      expect(v.unknown_events).toBe(1);
+      // A later good change clears it.
+      const w = fold([created, bad(2, payload), bad(3, { mode: "host", from: "sandbox" })]);
+      expect(w.meta?.exec_mode).toBe("host");
+      expect(w.exec_mode_unknown).toBeUndefined();
+    }
+    // A readable mode with a `from` nobody reads is the mode (the node reads `mode` alone), without its divider.
+    const v = fold([created, bad(2, { mode: "host", from: "quantum" })]);
+    expect(v.meta?.exec_mode).toBe("host");
+    expect(v.exec_mode_unknown).toBeUndefined();
+    expect(v.items.some((i) => i.type === "exec_mode_changed")).toBe(false);
   });
 });
 

@@ -489,3 +489,146 @@ async fn the_mirror_follows_the_event_and_fails_closed() {
     assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
     assert!(v.to_string().contains("execution mode is not known"), "{v}");
 }
+
+/// B1: ONE rule everywhere, a session's mode is what its own log says: a
+/// sub-agent's row keeps the mode it was created in when its chat is
+/// switched (the node takes no turn of it once the two differ), so the
+/// work rule and the lowering sweep read the same mode the node runs. The
+/// parent's own row moves, and a lowered owner is refused there.
+#[tokio::test]
+async fn a_sub_agents_row_keeps_its_own_mode_when_its_chat_is_switched() {
+    let s = start().await;
+    let (alex, alex_id) = host_account(&s, "alexp").await;
+    let parent = chat(&s, &alex, BOTH, None).await;
+    let child = SessionId::new();
+    let (kind, mut payload) = EventKind::SessionCreated(harness_core::event::SessionCreated {
+        forked: None,
+        title: "@helper".into(),
+        cwd: "/w".into(),
+        model: "m".into(),
+        backend: "native".into(),
+        node_id: BOTH.into(),
+        approval_mode: harness_core::policy::ApprovalMode::Ask,
+        profile: harness_core::event::Profile::Agentic,
+        agent_id: None,
+        incognito: false,
+        parent_session: Some(parent.parse().unwrap()),
+        no_callbacks: true,
+        exec_mode: Some(ExecMode::Sandbox),
+    })
+    .into_parts();
+    payload["parent_session"] = json!(parent);
+    s.mirror
+        .append(
+            BOTH,
+            &RawEvent {
+                session_id: child,
+                seq: 1,
+                ts_ms: 0,
+                kind,
+                payload,
+            },
+        )
+        .unwrap();
+    let (st, v) = switch(&s, &alex, &parent, "host").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = call(
+        &s,
+        Method::PUT,
+        &format!("/api/users/{alex_id}/exec-ceiling"),
+        Some(json!({"level": "sandbox"})),
+        &s.admin,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let prow = s.mirror.session(parent.parse().unwrap()).unwrap().unwrap();
+    let crow = s.mirror.session(child).unwrap().unwrap();
+    assert_eq!(prow.exec_mode.as_deref(), Some("host"));
+    assert_eq!(
+        crow.exec_mode.as_deref(),
+        Some("sandbox"),
+        "the child's row moved"
+    );
+    // The lowered owner: the host chat is refused by the work rule; the
+    // child, in the sandbox its log says, is within their level (the node
+    // refuses it for its mode: `exec_switch.rs`, B1).
+    let (st, v) = call(
+        &s,
+        Method::POST,
+        &format!("/api/sessions/{parent}/prompt"),
+        Some(json!({"text": "hi"})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    let (st, v) = call(
+        &s,
+        Method::POST,
+        &format!("/api/sessions/{child}/prompt"),
+        Some(json!({"text": "hi"})),
+        &alex,
+    )
+    .await;
+    assert!(
+        !v.to_string().contains("does not include the host mode"),
+        "the child was judged as a host chat: {st} {v}"
+    );
+}
+
+/// D2 through the master: a fork of an earlier turn, made after the chat was
+/// switched, is a chat in the mode its parent has now; its log carries its
+/// own `exec_mode_changed`, and the mirror's row agrees.
+#[tokio::test]
+async fn a_fork_after_a_switch_is_in_the_parents_mode_now() {
+    let s = start().await;
+    let (alex, _) = host_account(&s, "alexf").await;
+    let sid = chat(&s, &alex, BOTH, None).await;
+    let turn = |n: usize| {
+        let (s, alex, sid) = (&s, alex.clone(), sid.clone());
+        async move {
+            let (st, v) = call(
+                s,
+                Method::POST,
+                &format!("/api/sessions/{sid}/prompt"),
+                Some(json!({"text": "hello"})),
+                &alex,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{v}");
+            for _ in 0..500 {
+                let ended: Vec<Value> = events(s, &alex, &sid)
+                    .await
+                    .into_iter()
+                    .filter(|e| e["kind"] == "turn_ended")
+                    .collect();
+                if ended.len() >= n {
+                    return ended[n - 1]["payload"]["turn_id"]
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("turn {n} did not end");
+        }
+    };
+    let first = turn(1).await;
+    let (st, v) = switch(&s, &alex, &sid, "host").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = call(
+        &s,
+        Method::POST,
+        &format!("/api/sessions/{sid}/fork"),
+        Some(json!({"turn_id": first})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let fork = v["session_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        until_changes(&s, &alex, &fork, 1).await,
+        [("host".to_string(), "sandbox".to_string())]
+    );
+    let row = s.mirror.session(fork.parse().unwrap()).unwrap().unwrap();
+    assert_eq!(row.exec_mode.as_deref(), Some("host"));
+}

@@ -83,7 +83,7 @@ export function HostWarning(props: {
               The approval card is then the only check, and only in Ask.
               {props.switching.approval === "auto" || props.switching.approval === "accept_edits"
                 ? props.switching.approval === "auto"
-                  ? " This chat is in Auto: from its next message every command runs in the host shell with no question asked."
+                  ? " This chat is in Auto: from its next turn every command runs in the host shell with no question asked."
                   : " This chat is in Accept edits: its edits go through unasked, and its commands ask."
                 : ""}{" "}
               The approval mode stays as it is; change it first if you want questions.

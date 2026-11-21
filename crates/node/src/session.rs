@@ -1382,6 +1382,7 @@ impl Session {
         }
         // Its mode is still one this node offers (N.10a).
         self.node.cfg.policy.check_exec(self.exec_mode_now())?;
+        self.sub_agent_mode_mismatch()?;
         let dir = match self.pin() {
             Some(pin) => pin.check()?,
             None => {
@@ -4698,6 +4699,9 @@ impl Session {
         if child.parent_session != Some(self.id) || child.id == self.id {
             return Err(not_yours());
         }
+        // Not in a mode its chat has left (N.10b): the model is told what
+        // to do instead.
+        child.sub_agent_mode_mismatch()?;
         // This session's own log names it as the result of one of its
         // `delegate` calls; the last such result says whether its changes
         // were applied.
@@ -5340,18 +5344,55 @@ impl Session {
         Ok(())
     }
 
-    /// How this session's commands run now: its own mode from the log, or
-    /// for a sub-agent's chat the chat's above it (N.10b: the mode its
-    /// parent has now, so a sub-agent continued after a switch never runs
-    /// in a mode its chat has left). `None` runs nothing.
+    /// How this session's commands run now: what its own log says (one
+    /// rule everywhere: the master's checks read the same row). A sub-agent's
+    /// chat has no switch of its own, so its mode is the one it was created
+    /// with: its chat's at that time. `None` runs nothing.
     pub(crate) fn exec_mode_now(&self) -> Option<harness_core::policy::ExecMode> {
-        if let Some(parent) = self.parent_session
-            && let Some(p) = self.node.session(parent)
-            && p.id != self.id
-        {
-            return p.exec_mode_now();
-        }
         *self.exec_mode.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// A sub-agent's chat takes no turn once its recorded mode differs from
+    /// the mode of the chat at the top of its parents (N.10b): the chat was
+    /// switched after the sub-agent was made, and what the sub-agent was
+    /// started to do was decided for the other shell. The sentence is for
+    /// whoever asked (the model's `delegate` follow-up, or the person), and
+    /// says what to do.
+    fn sub_agent_mode_mismatch(&self) -> Result<(), String> {
+        let Some(mut up) = self.parent_session else {
+            return Ok(());
+        };
+        let mine = self.exec_mode_now();
+        let mut root = None;
+        for _ in 0..8 {
+            match self.node.session(up) {
+                Some(p) if p.id != self.id => {
+                    root = Some(p.clone());
+                    match p.parent_session {
+                        Some(next) => up = next,
+                        None => break,
+                    }
+                }
+                _ => break,
+            }
+        }
+        let Some(root) = root else { return Ok(()) };
+        let (Some(m), Some(r)) = (mine, root.exec_mode_now()) else {
+            return Ok(());
+        };
+        if m == r {
+            return Ok(());
+        }
+        let word = |x: harness_core::policy::ExecMode| match x {
+            harness_core::policy::ExecMode::Sandbox => "the sandbox",
+            harness_core::policy::ExecMode::Host => "the host shell",
+        };
+        Err(format!(
+            "this sub-agent ran in {} and this chat's commands now run in {}: start a new \
+             sub-agent (a sub-agent's mode does not change)",
+            word(m),
+            word(r)
+        ))
     }
 
     fn current_cancel(&self) -> Option<CancellationToken> {

@@ -326,6 +326,8 @@ export default function Conversation(props: {
   projects?: ProjectSummary[];
   /** Who is looking: their level, for the strip's switch to the host shell (N.10b). */
   hostRight?: HostRight;
+  /** A sub-agent of this chat has a turn running (from the session list). */
+  subAgentRunning?: boolean;
 }) {
   const { live, sessionId } = props;
   useEffect(() => {
@@ -728,6 +730,7 @@ export default function Conversation(props: {
         node={node}
         nodeId={nodeId}
         execMode={meta?.exec_mode}
+        execUnknown={!!view?.exec_mode_unknown}
         cwd={meta?.cwd}
         exportDisabled={!view || view.items.length === 0}
         onExport={() => setExporting(true)}
@@ -1365,13 +1368,13 @@ export default function Conversation(props: {
             exec={
               // The owner's own agentic chat on a node that switches it
               // (N.10b): a person's chat only, as for the approval mode.
-              meta?.profile === "agentic" && meta.exec_mode && !meta.parent_session && !meta.no_callbacks && !routine && node?.exec_switch
+              meta?.profile === "agentic" && (meta.exec_mode || view?.exec_mode_unknown) && !meta.parent_session && !meta.no_callbacks && !routine && node?.exec_switch
                 ? {
                     value: meta.exec_mode,
                     offered: node.exec_modes ?? [],
                     mayHost: props.hostRight?.level === "host",
                     node: node.embedded ? "local" : shownName(node.hostname),
-                    busy: whyNotSwitchable(view, { running, compacting: summarise.compacting, waiting: !!holding[0] }),
+                    busy: whyNotSwitchable(view, { running, compacting: summarise.compacting, waiting: !!holding[0], subAgent: props.subAgentRunning }),
                     onChange: (m) => pageApi.setExecMode(sessionId, m),
                   }
                 : undefined

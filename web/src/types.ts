@@ -370,6 +370,8 @@ export interface SessionView {
   max_steps?: number;
   /** A model call waits to be sent again (`model_retry`); absent otherwise. */
   retry?: ModelRetry;
+  /** The chat's log names an execution mode this page does not read (an `exec_mode_changed` with an unknown or missing `mode`): the node runs nothing in it; `meta.exec_mode` is then absent. */
+  exec_mode_unknown?: true;
   /** The latest turn's limits (`turn_ended.usage`): the window of the model it
    * started on, and the history size at which the next summary is written
    * (0: never). Absent when not known. */

@@ -148,7 +148,7 @@ export function Composer(props: {
   /** Session: the chat's execution mode and how to switch it (N.10b); absent:
    * not switchable here (a chat, a sub-agent's, a routine's, an old node). */
   exec?: {
-    value: ExecMode;
+    value?: ExecMode;
     offered: ExecMode[];
     mayHost: boolean;
     node: string;
@@ -181,6 +181,12 @@ export function Composer(props: {
   figures?: React.ReactNode;
 }) {
   const home = props.where === "home";
+  // The reason the commands control is disabled is shown once it is asked for.
+  const [execNote, setExecNote] = useState(false);
+  const execBusy = props.exec?.busy ?? null;
+  useEffect(() => {
+    if (!execBusy) setExecNote(false);
+  }, [execBusy]);
   const [text, setText] = useState(() => (props.draft ? readDraft(props.draft) : ""));
   const [mode, setMode] = useState<Mode>("ask");
   // Once the user picks a mode for this message, the classifier stays quiet.
@@ -901,6 +907,12 @@ export function Composer(props: {
       </div>
       <div className="composer-strip" role="group" aria-label={t("composer.strip")}>
         {/* A sentence, so a line of its own above the controls (they stay one row). */}
+        {/* Why the commands control is disabled, said when it is clicked: a note on every running turn would move the box. */}
+        {!home && props.exec?.busy && execNote && (
+          <span className="approval-pending-note small muted" role="note" data-testid="exec-busy-note">
+            {props.exec.busy}
+          </span>
+        )}
         {!home && props.approval && !props.readOnly && props.choosing && props.modeNote && (
           <span className="approval-pending-note small muted" role="note">
             {props.modeNote}
@@ -961,6 +973,7 @@ export function Composer(props: {
                 node={props.exec.node}
                 approval={props.approval?.value ?? ""}
                 busy={props.exec.busy}
+                onBlocked={() => setExecNote(true)}
                 onChange={(m) => {
                   setErr(null);
                   props.exec!.onChange(m).catch((x) => setErr(x instanceof Error ? x.message : String(x)));

@@ -14,8 +14,8 @@ import { Select } from "./Select";
 const HostWarning = lazy(() => import("./HostWarning"));
 
 export function ExecSwitch(props: {
-  /** The chat's mode now (its log). */
-  value: ExecMode;
+  /** The chat's mode now (its log); none when the log names one this page does not read. */
+  value?: ExecMode;
   /** What the node offers. */
   offered: ExecMode[];
   /** The person's level allows `host` (the master decides again). */
@@ -26,8 +26,22 @@ export function ExecSwitch(props: {
   /** Why it cannot be switched now, or null. */
   busy: string | null;
   onChange: (m: ExecMode) => void;
+  /** A click or Enter on the control while it is disabled: the strip says why, in words. */
+  onBlocked?: () => void;
 }) {
   const [asking, setAsking] = useState(false);
+  // A mode nobody reads: nothing runs in the chat, and no picker offers a
+  // way out (a switch would not repair a log the node cannot read).
+  if (!props.value)
+    return (
+      <span
+        className="exec-only pill"
+        aria-label="Commands: mode unknown"
+        title="This chat's execution mode is not known here (its log names none this page reads), so it runs nothing: start a new chat"
+      >
+        mode unknown
+      </span>
+    );
   const other: ExecMode = props.value === "host" ? "sandbox" : "host";
   const reach = props.offered.includes(other) && (other === "sandbox" || props.mayHost);
   if (!reach)
@@ -53,6 +67,7 @@ export function ExecSwitch(props: {
         stacked
         label="Commands"
         disabled={!!props.busy}
+        onBlocked={props.onBlocked}
         value={props.value}
         options={(["sandbox", "host"] as ExecMode[]).map((m) => ({
           value: m,

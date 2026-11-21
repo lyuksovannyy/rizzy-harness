@@ -96,6 +96,9 @@ impl Session {
                     .into(),
             );
         }
+        if let Some(why) = self.sub_agent_working() {
+            return Err(why);
+        }
         if self.unclosed.load(Ordering::SeqCst) {
             return Err(
                 "the commands cannot be switched: the last turn's end is not in the log yet; \
@@ -137,6 +140,41 @@ impl Session {
         drop(slot);
         drop(queue);
         Ok(())
+    }
+
+    /// A loaded session of a sub-agent of this chat (any depth) that holds a
+    /// turn or has an approval waiting: its turn would span the switch, with
+    /// its calls changing confinement between two of them. The sentence says
+    /// what to do.
+    fn sub_agent_working(&self) -> Option<String> {
+        let all: Vec<Arc<Session>> = self
+            .node
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        all.iter().find(|c| c.id != self.id && c.descends_from(self.id) && c.is_busy()).map(|c| {
+            format!(
+                "a sub-agent of this chat ({}) is still working: stop it or wait for it to end, \
+                 then switch the commands",
+                c.id
+            )
+        })
+    }
+
+    /// Whether a turn runs in this session or an approval of it waits.
+    fn is_busy(&self) -> bool {
+        self.turn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+            || !self
+                .approvals
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty()
     }
 
     /// Remove every chat grant, recorded one by one. If the log refuses one,

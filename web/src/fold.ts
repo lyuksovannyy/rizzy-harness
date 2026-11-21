@@ -543,6 +543,7 @@ export function apply(v: SessionView, e: RawEvent): void {
   }
   v.session_id = e.session_id;
   v.head_seq = e.seq;
+  if (e.kind === "exec_mode_changed") execModeStep(v, e.payload);
   const p = Object.hasOwn(KINDS, e.kind) ? struct(KINDS[e.kind]!, e.payload) : BAD;
   if (p === BAD || p === UNKNOWN) return notShown(v, e);
   // A cause is one variant (`callback` or `mention`), as serde reads it.
@@ -559,6 +560,21 @@ export function apply(v: SessionView, e: RawEvent): void {
     // also counted. Accepted: making it atomic needs a copy of the view per
     // event, for a case no input reaches.
     notShown(v, e);
+  }
+}
+
+/** The chat's mode in force (`exec_mode::step` in Rust, the one rule): the latest
+ * change's `mode`; a missing or unknown one makes it unreadable (the node runs
+ * nothing), never the previous mode. `from` is not read. The event may still be
+ * dropped and counted below, which only skips its divider. */
+function execModeStep(v: SessionView, payload: unknown): void {
+  const m = payload && typeof payload === "object" ? (payload as { mode?: unknown }).mode : undefined;
+  if (m === "sandbox" || m === "host") {
+    if (v.meta) v.meta.exec_mode = m;
+    delete v.exec_mode_unknown;
+  } else {
+    if (v.meta) delete v.meta.exec_mode;
+    v.exec_mode_unknown = true;
   }
 }
 
@@ -927,7 +943,6 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       // The mode in force (N.10b), as the approval mode is: the latest
       // change, else the creation's. State, not conversation: a rewind
       // hides the divider, never moves this.
-      if (v.meta) v.meta.exec_mode = p.mode;
       pushItem(v, e.seq, { type: "exec_mode_changed", mode: p.mode, from: p.from });
       break;
     }

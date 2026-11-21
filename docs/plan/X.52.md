@@ -4,7 +4,7 @@
 
 Switch an existing agentic chat between the sandbox and the host shell (the owner, 2026-11-21: "im not able to change sandboxing state during session creation nor during active session"; asked whether to build the switch for a running chat, "Yes, build it"; then "when chat is active/running sandbox change is unavailable but if chat is stopped then no problem").
 The reference our research found is the DeepSeek harness, whose sandbox mode changes are log events with the last one winning (`research/harnesses-round-1-appendix.md`, "Strict log discipline"; round 2: "Mode precedence: approved mode, last `sandbox/mode`, deployment default"): the same shape as `exec_mode_changed`; we found no harness of the others that documents a switch, and the alternative here was a new chat, which loses the conversation.
-The chat's owner may switch it while nothing of the chat runs, in the strip under the message box ("Commands"), with the existing host warning (and a sentence about Auto); a divider marks the change; the new-chat screen says how to turn the host shell on when the node does not offer it.
+The chat's owner may switch it while nothing of the chat or of a sub-agent of it runs, in the strip under the message box ("Commands"), with the existing host warning (and a sentence about Auto); a divider marks the change; the new-chat screen says how to turn the host shell on when the node does not offer it.
 
 ## Safeguards and abuse tests
 

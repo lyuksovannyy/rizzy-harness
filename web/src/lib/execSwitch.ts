@@ -9,10 +9,12 @@ import type { SessionView } from "../types";
  * approval card waits. */
 export function whyNotSwitchable(
   view: Pick<SessionView, "background"> | null | undefined,
-  state: { running: boolean; compacting: boolean; waiting: boolean },
+  state: { running: boolean; compacting: boolean; waiting: boolean; subAgent?: boolean },
 ): string | null {
-  if (state.running) return "Stop the agent or wait for it to finish, then switch";
+  // An approval first: it is the reason to act on (the turn that asks it is running too).
   if (state.waiting) return "Answer the approval first, then switch";
+  if (state.running) return "Stop the agent or wait for it to finish, then switch";
+  if (state.subAgent) return "A sub-agent of this chat is still working: stop it or wait for it, then switch";
   if (state.compacting) return "The chat is being summarised: switch when that is done";
   const open = Object.values(view?.background ?? {}).filter((b) => !b.ended).length;
   if (open > 0) return `${open === 1 ? "A background command or sub-agent is" : "Background commands or sub-agents are"} still running: stop ${open === 1 ? "it" : "them"} first`;

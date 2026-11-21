@@ -179,6 +179,31 @@ impl N {
         in_force(&self.log(sid))
     }
 
+    /// The ids of the turns of `sid` that ended, in order.
+    fn turn_ids(&self, sid: SessionId) -> Vec<String> {
+        self.log(sid)
+            .iter()
+            .filter_map(|e| match e.typed() {
+                Ok(EventKind::TurnEnded(t)) => Some(t.turn_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A fork of `parent` at the end of `turn`: the new chat.
+    async fn fork(&mut self, parent: SessionId, turn: &str) -> SessionId {
+        let child = SessionId::new();
+        self.send(MasterToNode::Fork {
+            req_id: format!("f-{child}"),
+            session_id: child,
+            parent,
+            turn_id: turn.into(),
+            title: "t (fork)".into(),
+        });
+        self.ack().await.unwrap();
+        child
+    }
+
     fn changes(&self, sid: SessionId) -> Vec<(ExecMode, ExecMode)> {
         self.log(sid)
             .iter()
@@ -523,19 +548,29 @@ async fn a_restart_and_a_fork_read_the_switched_mode_from_the_log() {
                 _ => None,
             })
             .collect();
-        // Forks of both cuts, while the parent is on the host.
+        // A fork starts in the mode its parent has NOW, whatever its cut:
+        // the fork of the turn before the switch says so in an event of its
+        // own (after `session_forked`); the one after it needs none.
         for (i, turn) in turns.iter().enumerate() {
-            let child = SessionId::new();
-            n.send(MasterToNode::Fork {
-                req_id: format!("f{i}"),
-                session_id: child,
-                parent: sid,
-                turn_id: turn.clone(),
-                title: "t (fork)".into(),
-            });
-            n.ack().await.unwrap();
-            let want = [ExecMode::Sandbox, ExecMode::Host][i];
-            assert_eq!(n.mode(child), InForce::Mode(want), "fork {i}");
+            let child = n.fork(sid, turn).await;
+            assert_eq!(n.mode(child), InForce::Mode(ExecMode::Host), "fork {i}");
+            let own: Vec<(ExecMode, ExecMode)> = n.changes(child);
+            assert_eq!(own, [(ExecMode::Host, ExecMode::Sandbox)], "fork {i}");
+            let forked_at = n
+                .log(child)
+                .iter()
+                .position(|e| e.kind == "session_forked")
+                .unwrap();
+            let change_at = n
+                .log(child)
+                .iter()
+                .rposition(|e| e.kind == "exec_mode_changed")
+                .unwrap();
+            assert_eq!(
+                change_at > forked_at,
+                i == 0,
+                "fork {i}: the fork's own event comes after its divider only for the earlier cut"
+            );
         }
         (sid, turns[0].clone(), turns[1].clone())
     };
@@ -575,6 +610,56 @@ async fn a_restart_and_a_fork_read_the_switched_mode_from_the_log() {
         cards[0].reason.contains("host shell"),
         "{}",
         cards[0].reason
+    );
+}
+
+/// D2: a fork made after the parent came back to the sandbox, at a cut that
+/// was in the host shell, is a sandbox chat (log and fold say so, with its
+/// own `exec_mode_changed`); the reverse likewise; a fork of a chat that was
+/// never switched has none.
+#[tokio::test]
+async fn a_fork_starts_in_the_mode_its_parent_has_now() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), offers(true, true)),
+        Profile::Agentic,
+    )
+    .await;
+    let sid = n.create(&ws(dir.path()), ApprovalMode::Ask, None).await;
+    n.turn(sid, "one", |_| Decision::Allow).await;
+    let plain = n.fork(sid, &n.turn_ids(sid)[0]).await;
+    assert_eq!(n.mode(plain), InForce::Mode(ExecMode::Sandbox));
+    assert!(n.changes(plain).is_empty(), "no switch, no event");
+    n.switch(sid, ExecMode::Host).await.unwrap();
+    n.turn(sid, "two", |_| Decision::Allow).await;
+    n.switch(sid, ExecMode::Sandbox).await.unwrap();
+    let turns = n.turn_ids(sid);
+    // The cut in the host shell, the parent in the sandbox now.
+    let f = n.fork(sid, &turns[1]).await;
+    assert_eq!(n.mode(f), InForce::Mode(ExecMode::Sandbox));
+    assert_eq!(
+        n.changes(f).last(),
+        Some(&(ExecMode::Sandbox, ExecMode::Host))
+    );
+    // Its first command asks as a sandbox chat's, not as the host's.
+    let cards = n
+        .turn(f, &script(&[("bash", json!({"command": "true"}))]), |_| {
+            Decision::Allow
+        })
+        .await;
+    assert!(
+        !cards[0].reason.contains("host shell"),
+        "{}",
+        cards[0].reason
+    );
+    // And the reverse: the parent on the host, the cut in the sandbox.
+    n.switch(sid, ExecMode::Host).await.unwrap();
+    let g = n.fork(sid, &turns[0]).await;
+    assert_eq!(n.mode(g), InForce::Mode(ExecMode::Host));
+    assert_eq!(
+        n.changes(g).last(),
+        Some(&(ExecMode::Host, ExecMode::Sandbox))
     );
 }
 
@@ -789,4 +874,242 @@ async fn nothing_a_model_writes_switches_the_mode() {
             t.name()
         );
     }
+}
+
+/// A sub-agent's AGENT spec as the tests delegate to it.
+fn agent_spec(
+    id: &str,
+    tools: Vec<String>,
+    delegates: Vec<harness_core::agent::AgentSpec>,
+) -> harness_core::agent::AgentSpec {
+    harness_core::agent::AgentSpec {
+        agent_id: id.into(),
+        name: id.into(),
+        system_prompt: "work".into(),
+        tools: harness_core::agent::ToolSelection::List(tools),
+        model: None,
+        fallbacks: vec![],
+        unavailable: vec![],
+        no_effort: vec![],
+        vision: vec![],
+        context_windows: Default::default(),
+        effort: None,
+        ui: Default::default(),
+        no_personalisation: false,
+        prompt_hash: "h".into(),
+        deny_tools: vec![],
+        deny_skills: vec![],
+        deny_mcp_servers: vec![],
+        stored_skills: vec![],
+        connector_tools: vec![],
+        delegates,
+        caps: None,
+    }
+}
+
+impl N {
+    /// Run the lead's prompt `text` in `parent` with a `scout` it may
+    /// delegate to, answering every card, until the parent's turn ends.
+    async fn lead(&mut self, parent: SessionId, text: &str) {
+        let scout = agent_spec("scout", vec!["read".into(), "bash".into()], vec![]);
+        let lead = agent_spec("lead", vec!["bash".into()], vec![scout]);
+        self.send(MasterToNode::Prompt(PromptMsg {
+            req_id: format!("p-{}", harness_core::new_id()),
+            agent: Some(lead),
+            ..PromptMsg::test(parent, text)
+        }));
+        loop {
+            let NodeToMaster::Event { event } = self.next().await else {
+                continue;
+            };
+            match event.typed().unwrap() {
+                EventKind::ApprovalRequested(a) => self.send(MasterToNode::ApprovalRespond {
+                    req_id: format!("a-{}", a.approval_id),
+                    session_id: event.session_id,
+                    approval_id: a.approval_id.clone(),
+                    decision: Decision::Allow,
+                    note: None,
+                }),
+                EventKind::TurnEnded(_) if event.session_id == parent => return,
+                _ => {}
+            }
+        }
+    }
+
+    fn child_of(&self, parent: SessionId) -> SessionId {
+        self.node
+            .store()
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.session_id)
+            .find(|s| *s != parent)
+            .expect("a child")
+    }
+}
+
+/// B1: a sub-agent's chat runs in the mode its own log says, for good (it
+/// has no switch). One made BEFORE its chat was switched takes no turn from
+/// anyone afterwards, in either direction: the model's follow-up through
+/// `delegate` and the person's message are refused with a sentence that says
+/// what to do, and nothing runs; once the chat is back in the child's mode
+/// it works again.
+#[tokio::test]
+async fn a_sub_agent_made_before_a_switch_takes_no_turn_after_it() {
+    for (start_mode, then) in [
+        (ExecMode::Sandbox, ExecMode::Host),
+        (ExecMode::Host, ExecMode::Sandbox),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = ws(dir.path());
+        std::fs::write(ws.join("keep.txt"), "hello\n").unwrap();
+        let mut n = start(
+            &dir.path().join("node.db"),
+            policy(dir.path(), offers(true, true)),
+            Profile::Agentic,
+        )
+        .await;
+        let parent = n.create(&ws, ApprovalMode::Auto, Some(start_mode)).await;
+        n.lead(parent, "delegate: scout=read: keep.txt").await;
+        let child = n.child_of(parent);
+        assert_eq!(n.mode(child), InForce::Mode(start_mode));
+        let turns_before = n
+            .log(child)
+            .iter()
+            .filter(|e| e.kind == "turn_started")
+            .count();
+        n.switch(parent, then).await.unwrap();
+        // The child's own mode did not move.
+        assert_eq!(n.mode(child), InForce::Mode(start_mode));
+        let words = |m: ExecMode| {
+            if m == ExecMode::Host {
+                "the host shell"
+            } else {
+                "the sandbox"
+            }
+        };
+        let want = format!(
+            "ran in {} and this chat's commands now run in {}: start a new sub-agent",
+            words(start_mode),
+            words(then)
+        );
+        // The person's message.
+        let marker = dir.path().join("ran.txt");
+        n.send(prompt(
+            child,
+            &format!("run: echo ran > {}", marker.display()),
+        ));
+        let e = n.ack().await.unwrap_err();
+        assert!(e.contains(&want), "{start_mode:?}: {e}");
+        // The model's follow-up.
+        n.lead(
+            parent,
+            &script(&[(
+                "delegate",
+                json!({"agent": "scout", "session": child.to_string(), "task": "read: keep.txt"}),
+            )]),
+        )
+        .await;
+        let outs: Vec<String> = n
+            .log(parent)
+            .iter()
+            .filter_map(|e| match e.typed() {
+                Ok(EventKind::ToolCallFinished(f)) => Some(f.output),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            outs.last().unwrap().contains(&want),
+            "{start_mode:?}: {outs:?}"
+        );
+        assert!(!marker.exists(), "something ran");
+        assert_eq!(
+            n.log(child)
+                .iter()
+                .filter(|e| e.kind == "turn_started")
+                .count(),
+            turns_before,
+            "the child took a turn"
+        );
+        // Back in its mode, the child takes a message again.
+        n.switch(parent, start_mode).await.unwrap();
+        n.send(prompt(child, "hello again"));
+        n.ack().await.unwrap();
+    }
+}
+
+/// D1: the chat's switch is refused while a turn of a sub-agent of it runs
+/// or one of its approvals waits (its calls would change confinement
+/// between two of them); the card it showed still said what it ran in.
+#[tokio::test]
+async fn a_switch_is_refused_while_a_sub_agents_turn_waits() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = ws(dir.path());
+    std::fs::write(ws.join("keep.txt"), "hello\n").unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), offers(true, true)),
+        Profile::Agentic,
+    )
+    .await;
+    let parent = n
+        .create(&ws, ApprovalMode::Ask, Some(ExecMode::Sandbox))
+        .await;
+    n.lead(parent, "delegate: scout=read: keep.txt").await;
+    let child = n.child_of(parent);
+    n.send(prompt(
+        child,
+        &script(&[
+            ("bash", json!({"command": "echo first"})),
+            ("bash", json!({"command": "echo second"})),
+        ]),
+    ));
+    let first = loop {
+        let NodeToMaster::Event { event } = n.next().await else {
+            continue;
+        };
+        if let Ok(EventKind::ApprovalRequested(a)) = event.typed() {
+            break a;
+        }
+    };
+    let e = n.switch(parent, ExecMode::Host).await.unwrap_err();
+    assert!(e.contains("a sub-agent of this chat"), "{e}");
+    assert!(e.contains(&child.to_string()), "{e}");
+    assert!(n.changes(parent).is_empty());
+    // Both calls of the child's turn run in the mode they started in.
+    let mut reasons = vec![first.reason.clone()];
+    n.send(MasterToNode::ApprovalRespond {
+        req_id: "a1".into(),
+        session_id: child,
+        approval_id: first.approval_id,
+        decision: Decision::Allow,
+        note: None,
+    });
+    loop {
+        let NodeToMaster::Event { event } = n.next().await else {
+            continue;
+        };
+        if event.session_id != child {
+            continue;
+        }
+        if let Ok(EventKind::ApprovalRequested(a)) = event.typed() {
+            reasons.push(a.reason.clone());
+            n.send(MasterToNode::ApprovalRespond {
+                req_id: "a2".into(),
+                session_id: child,
+                approval_id: a.approval_id,
+                decision: Decision::Allow,
+                note: None,
+            });
+        }
+        if event.kind == "turn_ended" {
+            break;
+        }
+    }
+    assert!(
+        reasons.iter().all(|r| !r.contains("host shell")),
+        "{reasons:?}"
+    );
+    // Its turn over, the switch goes through.
+    n.switch(parent, ExecMode::Host).await.unwrap();
 }

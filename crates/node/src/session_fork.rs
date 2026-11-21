@@ -82,8 +82,18 @@ impl Session {
             .call(move |s| s.events_after(parent, 0, through))
             .await
             .map_err(|e| e.to_string())?;
+        // The fork starts in the mode its parent has NOW (N.10b): the copied
+        // events carry the mode of the cut, and when the parent was switched
+        // after it the fork says so in an event of its own, below.
+        let at_cut = harness_core::exec_mode::in_force(&events);
+        let now = self.exec_mode_now();
         let cwd = self
-            .fork_folder(harness_core::exec_mode::in_force(&events))
+            .fork_folder(match now {
+                Some(m) if self.profile == Profile::Agentic => {
+                    harness_core::exec_mode::InForce::Mode(m)
+                }
+                _ => at_cut,
+            })
             .map_err(refused)?;
         let title: String = title.chars().take(MAX_TITLE_CHARS).collect();
         let mut built = fork::build(
@@ -96,6 +106,26 @@ impl Session {
         )
         .map_err(refused)?;
         drop(events);
+        if let (Some(now), Some(then)) = (now, at_cut.mode())
+            && now != then
+            && self.profile == Profile::Agentic
+        {
+            let (kind, payload) = harness_core::event::EventKind::ExecModeChanged(
+                harness_core::event::ExecModeChanged {
+                    mode: now,
+                    from: then,
+                },
+            )
+            .into_parts();
+            let seq = built.len() as u64 + 1;
+            built.push(RawEvent {
+                session_id: new,
+                seq,
+                ts_ms: harness_core::now_ms(),
+                kind,
+                payload,
+            });
+        }
         // The title is text from outside the log: scrubbed like any event's
         // free text (T3); the copied events were scrubbed when written.
         let kind = built[0].kind.clone();

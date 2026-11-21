@@ -135,9 +135,16 @@ still shown until the node's next hello.
   owner may (below). A mode the log names that this build does not know is
   unreadable and fails closed: nothing runs, and a switch does not repair it.
 * Chat-profile sessions have no mode; a create that asks for one is refused.
-* A sub-agent's session gets its parent's mode (`run_child`), as it is then;
-  one continued later follows its chat's mode now (`Session::exec_mode_now`),
-  so a sub-agent never runs in a mode its chat has left.
+* A sub-agent's session is created in its parent's mode as it is then
+  (`run_child`; its `session_created` says so) and keeps it: one rule
+  everywhere, a session's mode is what its own log says, which is also what
+  the master's row and its level checks read. It has no switch. One made
+  BEFORE its chat was switched takes no more turns once its mode differs
+  from that of the chat at the top of its parents (`checked_folder`, every
+  turn, retry, callback, peer call and restore; and the `delegate`
+  follow-up): "this sub-agent ran in the sandbox and this chat's commands now
+  run in the host shell: start a new sub-agent" (and the reverse); it takes
+  turns again if the chat returns to its mode.
 * The backend picks the confinement by the mode (`NativeConfig::
   confinement`): `sandbox` sessions get the node's contained sandbox, which
   refuses a shell command when it has no containment rather than run it
@@ -168,7 +175,9 @@ active/running sandbox change is unavailable but if chat is stopped then no
 problem"), reversing "chosen at creation, never changed" (N.10a).
 
 **Who and when.** The chat's owner, for an existing agentic chat of a
-person, while nothing of it runs. Nobody else: not an admin, not a
+person, while nothing of it runs: no turn of its own or of a sub-agent of
+it (any depth), no `/compact`, no approval waiting, no background command
+or sub-agent. Nobody else: not an admin, not a
 workspace admin, not the API token on a person's chat (the 404 of a chat
 that does not exist); not a chat without tools, a sub-agent's chat (it
 follows its parent) or a routine's (always `sandbox`); not a chat nobody
@@ -213,8 +222,9 @@ The refusal says what to stop.
 
 **What was built under the old mode, and what happens to it:** the MCP
 servers (stopped); the chat grants (dropped); the background table
-(nothing runs at a switch: refused otherwise); sub-agents (none run; one
-started or continued later takes the chat's mode then); the per-call
+(nothing runs at a switch: refused otherwise); sub-agents (none works at a
+switch: refused otherwise; one made before it takes no more turns, one made
+after it is created in the new mode); the per-call
 confinement, the bash tool's description and the approval card's wording
 (read from the session's mode at each call and turn: nothing kept); the
 environment line of the next turn (it names the mode and, once, the
@@ -225,14 +235,25 @@ folder and its session temp folder (the residual below: what one mode
 writes, the other may run). The provider's prompt cache of the tool
 descriptions is lost once per switch.
 
-**The approval mode is the person's and stays.** In `auto` the next message
-runs host commands unasked; the web warning says so.
+**The approval mode is the person's and stays.** In `auto` the next turn
+(a message, a callback, a peer's) runs host commands unasked; the web
+warning says so.
+
+**Switching back does not undo the host's side effects.** What host
+commands started outside their own process group (a tmux server, a
+service, a container) keeps running uncontained after the chat is back in
+the sandbox, and what a sandbox turn wrote in the folder runs with the
+host's rights once a host command executes it (a script, a `Makefile`,
+`.git/hooks`).
 
 **State, not conversation.** A rewind does not move the mode back (as it
 never moves the approval mode back; the divider in the conversation is
-hidden with its turns, the mode is not). A fork's copied events include the
-changes up to its cut, so a fork has the mode its cut had, a fork made
-before a switch keeps the old one. The master's mirror
+hidden with its turns, the mode is not). A fork starts in the mode its
+parent has NOW: its copied events carry the changes up to its cut, and when
+the parent was switched after the cut the node appends an
+`exec_mode_changed` of the fork's own, right after `session_forked`, so its
+log, fold and mirror say the truth (the fork route's level check reads the
+parent's row, which is that mode). The master's mirror
 (`sessions.exec_mode`) follows the latest event; a mode it cannot read stays
 as written and fails closed (`MODE_UNKNOWN`).
 
