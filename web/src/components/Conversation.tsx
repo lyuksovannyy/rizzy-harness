@@ -918,7 +918,15 @@ export default function Conversation(props: {
                     return notes.attached.has(i) ? null : <FallbackNote key={i} note={it} />;
                   case "tool":
                     return (
-                      <ToolCard key={i} sessionId={sessionId} item={it} blocked={!!blocked} projectId={props.row?.project_id} cwd={meta?.cwd} />
+                      <ToolCard
+                        key={i}
+                        sessionId={sessionId}
+                        item={it}
+                        blocked={!!blocked}
+                        projectId={props.row?.project_id}
+                        cwd={meta?.cwd}
+                        inherited={meta?.forked != null && (seqAt(view, i) ?? Infinity) <= meta.forked.through_seq}
+                      />
                     );
                   case "artifact":
                     return <SavedItem key={i} staged={it.staged} />;

@@ -163,10 +163,13 @@ export function ToolCard({
   item,
   blocked,
   cwd,
+  inherited,
 }: {
   sessionId: string;
   item: Tool;
   blocked?: boolean;
+  /** A copy of the parent's event (a fork): the grant it shows does not hold here. */
+  inherited?: boolean;
   projectId?: string | null;
   cwd?: string;
 }) {
@@ -263,7 +266,7 @@ export function ToolCard({
         </div>
       )}
       {item.approval?.decision === "allow_chat" && (
-        <div className="approval-note muted">Allowed for this chat</div>
+        <div className="approval-note muted">{inherited ? "Allowed in the chat this was forked from" : "Allowed for this chat"}</div>
       )}
       {item.approval && item.approval.decision !== null && item.approval.by !== "user" && (
         <div className="approval-note muted">

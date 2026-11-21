@@ -225,5 +225,28 @@ describe("a fork", () => {
     expect(meter?.textContent).toContain("0 tokens");
     expect(meter?.querySelector(".context-meter")?.textContent).toContain("205");
   });
+
+  test("a copied tool card does not claim the grant holds here; the fork's own call keeps the label", async () => {
+    session.mockResolvedValue({ title: "Parent chat" });
+    const call = (seq: number, id: string) => [
+      ev(seq, "tool_call_started", { turn_id: "t1", call_id: id, tool: "write", input: { path: "a.txt" } }),
+      ev(seq + 1, "approval_requested", { approval_id: `a-${id}`, call_id: id, tool: "write", input: { path: "a.txt" }, reason: "r", chat_allow: true }),
+      ev(seq + 2, "approval_resolved", { approval_id: `a-${id}`, decision: "allow_chat", by: "user" }),
+      ev(seq + 3, "tool_call_finished", { call_id: id, ok: true, output: "ok" }),
+    ];
+    const head = { ...(fixture.events[0]!.payload as object) };
+    const log = [
+      ev(1, "session_created", head),
+      ev(2, "turn_started", { turn_id: "t1" }),
+      ...call(3, "c-copied"),
+      ev(7, "turn_ended", { turn_id: "t1", reason: "completed" }),
+      ev(8, "session_forked", { parent: PARENT, through_seq: 7, turn_id: "t1" }),
+      ev(9, "turn_started", { turn_id: "u1" }),
+      ...call(10, "c-own"),
+    ].map((e) => (e.kind === "session_created" ? { ...e, payload: { ...e.payload, forked: { parent: PARENT, through_seq: 7 } } } : e)) as RawEvent[];
+    await render(log);
+    const notes = [...host.querySelectorAll(".approval-note")].map((n) => n.textContent);
+    expect(notes).toEqual(["Allowed in the chat this was forked from", "Allowed for this chat"]);
+  });
 });
 
