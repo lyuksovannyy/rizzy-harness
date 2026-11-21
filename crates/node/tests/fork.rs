@@ -12,7 +12,7 @@ use std::time::Duration;
 use harness_agent_native::provider::ChatRequest;
 use harness_agent_native::{NativeBackend, NativeConfig, history_to_messages, mock::Mock};
 use harness_core::event::*;
-use harness_core::policy::ApprovalMode;
+use harness_core::policy::{ApprovalMode, Decision};
 use harness_core::view::{Item, SessionView};
 use harness_core::{RawEvent, SessionId};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
@@ -114,6 +114,10 @@ struct Forked {
 
 impl H {
     async fn new() -> H {
+        H::with_mode(ApprovalMode::Auto).await
+    }
+
+    async fn with_mode(mode: ApprovalMode) -> H {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("ws");
         std::fs::create_dir(&ws).unwrap();
@@ -144,7 +148,7 @@ impl H {
                 title: "Parent".into(),
                 cwd: h.ws.display().to_string(),
                 model: None,
-                approval_mode: Some(ApprovalMode::Auto),
+                approval_mode: Some(mode),
             })
             .unwrap();
         let sid = h.sid;
@@ -233,6 +237,39 @@ impl H {
     async fn turn(&mut self, text: &str) {
         let sid = self.sid;
         self.turn_of(sid, text).await;
+    }
+
+    /// One turn of `sid` that answers every approval card with `decision`;
+    /// the number of cards it raised.
+    async fn cards_of(&mut self, sid: SessionId, text: &str, decision: Decision) -> usize {
+        self.prompt(sid, text);
+        let mut cards = 0;
+        loop {
+            match self.recv().await {
+                NodeToMaster::Event { event } if event.session_id == sid => {
+                    match event.typed().unwrap() {
+                        EventKind::ApprovalRequested(a) => {
+                            cards += 1;
+                            self.n += 1;
+                            let req_id = format!("a{}", self.n);
+                            self.link
+                                .to_node
+                                .try_send(MasterToNode::ApprovalRespond {
+                                    req_id,
+                                    session_id: sid,
+                                    approval_id: a.approval_id,
+                                    decision,
+                                    note: None,
+                                })
+                                .unwrap();
+                        }
+                        EventKind::TurnEnded(_) => return cards,
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// The ids of the turns of `log` that ended, in order.
@@ -826,4 +863,113 @@ async fn a_forks_copied_events_are_not_another_chats_work_for_the_parents_undo()
         }
     }
     assert!(!h.ws.join("a.txt").exists(), "the parent's turn was undone");
+}
+
+/// The mock's call of `bash` with `command`.
+fn bash(command: &str) -> String {
+    format!(r#"script:[{{"tool":"bash","input":{{"command":"{command}"}}}}]"#)
+}
+
+/// "Allow for this chat" is the parent's, bound to its folder: the fork
+/// runs the same command and is ASKED, while the parent still is not.
+#[tokio::test]
+async fn a_chat_grant_is_not_inherited_by_the_fork() {
+    let mut h = H::with_mode(ApprovalMode::Ask).await;
+    let sid = h.sid;
+    let call = bash("echo granted");
+    assert_eq!(h.cards_of(sid, &call, Decision::AllowChat).await, 1);
+    assert!(h.log().iter().any(|e| e.kind == "chat_allow_added"));
+    assert_eq!(h.cards_of(sid, &call, Decision::Deny).await, 0, "granted");
+    let turns = H::ended(&h.log());
+    let f = h.fork(sid, turns.last().unwrap()).await;
+    f.result.clone().unwrap();
+    assert_eq!(
+        h.cards_of(f.sid, &call, Decision::Deny).await,
+        1,
+        "the fork is asked: the grant is the parent's"
+    );
+    assert_eq!(h.cards_of(sid, &call, Decision::Deny).await, 0);
+    // The same after a restart.
+    h.restart().await;
+    assert_eq!(h.cards_of(f.sid, &call, Decision::Deny).await, 1);
+    assert_eq!(h.cards_of(sid, &call, Decision::Deny).await, 0);
+}
+
+fn png_image() -> harness_protocol::ChatImage {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let png = b"\x89PNG\r\n\x1a\nfork-image";
+    harness_protocol::ChatImage {
+        media_id: "m1".into(),
+        sha256: hex::encode(sha2::Sha256::digest(png)),
+        mime: "image/png".into(),
+        name: "shot.png".into(),
+        width: 1,
+        height: 1,
+        data: base64::engine::general_purpose::STANDARD.encode(png),
+    }
+}
+
+/// An image sent in an inherited message is the fork's too: its bytes are
+/// under the fork's id, it goes to the model on the fork's first turn, and
+/// deleting the parent afterwards does not take it away.
+#[tokio::test]
+async fn an_inherited_image_is_the_forks_own_and_survives_the_parents_deletion() {
+    let mut h = H::new().await;
+    let img = png_image();
+    h.n += 1;
+    h.link
+        .to_node
+        .try_send(MasterToNode::Prompt(PromptMsg {
+            req_id: format!("p{}", h.n),
+            images: vec![img.clone()],
+            ..PromptMsg::test(h.sid, "look at this")
+        }))
+        .unwrap();
+    let sid = h.sid;
+    h.until(sid, |k| matches!(k, EventKind::TurnEnded(_))).await;
+    let turns = H::ended(&h.log());
+    let f = h.fork(sid, &turns[0]).await;
+    f.result.clone().unwrap();
+    let held = |h: &H, who: SessionId| {
+        h.store()
+            .session_images(&who.to_string(), std::slice::from_ref(&img.sha256))
+            .unwrap()
+            .len()
+    };
+    assert_eq!(held(&h, f.sid), 1, "a row under the fork's id");
+    // The parent goes; the fork keeps its copy.
+    h.n += 1;
+    h.link
+        .to_node
+        .try_send(MasterToNode::Delete {
+            req_id: format!("d{}", h.n),
+            session_id: sid,
+        })
+        .unwrap();
+    loop {
+        if let NodeToMaster::Ack { ok, error, .. } = h.recv().await {
+            assert!(ok, "{error:?}");
+            break;
+        }
+    }
+    assert_eq!(held(&h, sid), 0, "the parent's went with it");
+    assert_eq!(held(&h, f.sid), 1, "the fork's did not");
+    let mark = h.mark();
+    h.turn_of(f.sid, "and now?").await;
+    let sent = h.requests.lock().unwrap()[mark].clone();
+    let shown: usize = sent
+        .messages
+        .iter()
+        .map(|m| match m {
+            harness_agent_native::provider::ChatMsg::UserImages { images, .. } => {
+                images.iter().filter(|i| i.data.is_some()).count()
+            }
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(
+        shown, 1,
+        "the model sees the inherited image with its bytes"
+    );
 }
