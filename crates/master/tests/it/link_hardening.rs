@@ -533,6 +533,76 @@ async fn a_late_session_created_is_claimed_by_whoever_asked_for_it() {
     );
 }
 
+/// A create whose ack timed out and whose chat turns up later still joins
+/// its project and follows the model defaults, as one acked in time does
+/// (the intent carries both).
+#[tokio::test(start_paused = true)]
+async fn a_late_create_still_joins_its_project_and_the_defaults() {
+    let store = Store::open_in_memory().unwrap();
+    people(&store);
+    let ws = store
+        .create_workspace("Team", "carol")
+        .unwrap()
+        .workspace_id;
+    store
+        .create_project(
+            &harness_store::NewProject {
+                project_id: "p1".into(),
+                workspace_id: ws.clone(),
+                name: "P".into(),
+                description: String::new(),
+                icon: "folder".into(),
+                accent: "blue".into(),
+                instructions: String::new(),
+                settings: "{}".into(),
+                created_by: Some("carol".into()),
+                columns: vec![harness_store::NewColumn {
+                    name: "To do".into(),
+                    done: false,
+                }],
+                source: None,
+            },
+            10,
+        )
+        .unwrap();
+    let m = master_on(&store);
+    m.set_agents(harness_agents::AgentSet::load(std::path::Path::new("/nonexistent")).0);
+    let (l, mut c, tx) = open_link("n1", vec![]);
+    m.add_link(l, false).await.unwrap();
+    let m2 = m.clone();
+    let made = tokio::spawn(async move {
+        m2.create_session(harness_master::CreateSpec {
+            workspace_id: Some(ws),
+            project_id: Some("p1".into()),
+            ..create_spec("carol")
+        })
+        .await
+    });
+    let (_, sid) = next_create(&mut c).await;
+    assert!(matches!(
+        made.await.unwrap(),
+        Err(harness_master::CommandError::Timeout)
+    ));
+    send(&tx, event(sid, 1, "")).await;
+    barrier(&store, &tx).await;
+    assert_eq!(
+        store
+            .session_project(sid)
+            .unwrap()
+            .map(|l| l.project_id)
+            .as_deref(),
+        Some("p1"),
+        "a create that timed out left the chat outside its project"
+    );
+    assert!(
+        store
+            .kv_get(&format!("session-model-auto:{sid}"))
+            .unwrap()
+            .is_some(),
+        "and not following the defaults"
+    );
+}
+
 /// Gate 3 fix review 6, N-2: a create that timed out and never landed left
 /// its intent row for good. An intent lives for `CREATE_INTENT_TTL`: an
 /// older one is removed by the next create and claims nothing.

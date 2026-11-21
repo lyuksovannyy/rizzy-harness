@@ -1842,26 +1842,39 @@ impl Master {
             .call(move |s| {
                 let key = create_intent_key(sid);
                 let Some(v) = s.kv_get(&key)? else {
-                    return Ok(false);
+                    return Ok(None);
                 };
                 if intent_expired(&v, harness_core::now_ms()) {
                     s.kv_delete(&key)?;
-                    return Ok(false);
+                    return Ok(None);
                 }
                 let v: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
                 if v["node"].as_str() != Some(node.as_str()) {
-                    return Ok(false);
+                    return Ok(None);
                 }
                 s.claim_session(sid, v["owner"].as_str(), v["workspace"].as_str())?;
+                // What the create does after its ack: the model follows the
+                // defaults, and the chat joins its project (only where it
+                // landed: the link is refused otherwise).
+                if v["auto"].as_bool() == Some(true) {
+                    s.kv_set(&auto_model_key(sid), "1")?;
+                }
+                let linked = match v["project"].as_str() {
+                    Some(p) => s.link_new_session(sid, p)?,
+                    None => false,
+                };
                 s.kv_delete(&key)?;
-                Ok::<_, harness_store::StoreError>(true)
+                Ok::<_, harness_store::StoreError>(Some(linked))
             })
             .await;
         match res {
-            Ok(true) => {
-                tracing::info!(node = %node_id, session = %sid, "a chat that arrived after its create was claimed for whoever asked for it")
+            Ok(Some(linked)) => {
+                tracing::info!(node = %node_id, session = %sid, "a chat that arrived after its create was claimed for whoever asked for it");
+                if linked {
+                    self.nudge(Live::ProjectsChanged(Audience::Chat(sid)));
+                }
             }
-            Ok(false) => {}
+            Ok(None) => {}
             Err(e) => {
                 tracing::warn!(node = %node_id, session = %sid, error = %e, "could not claim a late chat")
             }
@@ -2164,9 +2177,12 @@ impl Master {
         // for them when it lands, instead of staying a chat nobody owns
         // (Gate 3 review P-6).
         let now = harness_core::now_ms();
+        // The project and the follow-the-defaults mark go with it: a chat
+        // that lands late gets them as one whose ack came in time does.
         let intent = (owner.is_some() || workspace.is_some()).then(|| {
-            serde_json::json!({"node": node_id, "owner": owner, "workspace": workspace, "at": now})
-                .to_string()
+            serde_json::json!({"node": node_id, "owner": owner, "workspace": workspace,
+                "at": now, "project": project, "auto": chosen.is_none()})
+            .to_string()
         });
         let key = create_intent_key(sid);
         let v = intent.clone();

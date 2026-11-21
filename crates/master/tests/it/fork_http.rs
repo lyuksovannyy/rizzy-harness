@@ -47,6 +47,8 @@ struct Node {
     put: mpsc::UnboundedSender<Do>,
     /// The sub-agents' chats the node opened.
     children: Arc<Mutex<Vec<SessionId>>>,
+    /// While set, the node writes a fork but never acks it (a late ack).
+    mute_fork_ack: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Node {
@@ -197,6 +199,8 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Node) {
     let children: Arc<Mutex<Vec<SessionId>>> = Arc::default();
     let kids = children.clone();
     let (put, mut puts) = mpsc::unbounded_channel::<Do>();
+    let mute_fork_ack: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+    let mute = mute_fork_ack.clone();
     let mut f = Fake {
         tx: tx.clone(),
         logs: HashMap::new(),
@@ -256,7 +260,9 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Node) {
                         }
                         _ => {}
                     }
-                    if let Some(req_id) = msg.req_id() {
+                    let withheld = matches!(msg, MasterToNode::Fork { .. })
+                        && mute.load(std::sync::atomic::Ordering::SeqCst);
+                    if let Some(req_id) = msg.req_id().filter(|_| !withheld) {
                         let _ = tx.try_send(NodeToMaster::Ack {
                             req_id: req_id.into(),
                             ok: nack.is_none(),
@@ -273,6 +279,7 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Node) {
             seen,
             put,
             children,
+            mute_fork_ack,
         },
     )
 }
@@ -283,6 +290,7 @@ struct T {
     local: Node,
     old: Node,
     memory: Arc<SqliteMemory>,
+    master: harness_master::Master,
     /// The master's mirror, to read what it kept.
     store: Store,
     /// The mirror's file, when the test asked for one (to break it).
@@ -338,6 +346,7 @@ async fn start_with(file: bool) -> T {
         false,
     );
     let m2 = master.clone();
+    let master = master;
     tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });
     let base = format!("http://{addr}");
     let r = reqwest::Client::new()
@@ -349,6 +358,7 @@ async fn start_with(file: bool) -> T {
     assert_eq!(r.status(), StatusCode::OK);
     let alex = common::signed_in(r).await;
     T {
+        master,
         base,
         alex,
         local,
@@ -1041,4 +1051,57 @@ async fn a_copied_background_end_applied_before_the_divider_calls_nothing_back()
     caught_up(&t, &t.alex, new, 7).await;
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert!(t.local.callbacks().iter().all(|(s, _)| *s != new));
+}
+
+/// A fork whose ack comes late still gets what the normal path gives it:
+/// the intent the master recorded carries the parent's project and the
+/// auto-model mark, and the late claim applies them.
+#[tokio::test]
+async fn a_fork_whose_ack_is_late_still_gets_its_project_and_the_auto_model() {
+    let t = start().await;
+    let (st, p) = req(
+        &t,
+        Method::POST,
+        "/api/projects",
+        Some(json!({"name": "Garden", "icon": "house", "accent": "green"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    let project = p["project_id"].as_str().unwrap().to_string();
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"cwd": "/w", "title": "Parent", "node_id": "local", "project_id": project})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let sid: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    let first = send(&t, &t.alex, sid, "first").await;
+    let linked = |id: SessionId| t.store.session_project(id).unwrap().map(|l| l.project_id);
+    assert_eq!(linked(sid).as_deref(), Some(project.as_str()));
+    let auto = |id: SessionId| t.store.kv_get(&format!("session-model-auto:{id}")).unwrap();
+    assert!(auto(sid).is_some(), "the parent follows the defaults");
+    // The node writes the fork and says nothing in time.
+    t.master.set_ack_timeout_for_test(Duration::from_millis(50));
+    t.local
+        .mute_fork_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (st, v) = fork(&t, &t.alex, sid, &first).await;
+    assert_ne!(st, StatusCode::OK, "the ack never came: {v}");
+    let new = t.local.forks()[0].0;
+    caught_up(&t, &t.alex, new, 5).await;
+    assert_eq!(
+        t.store.session(new).unwrap().unwrap().owner_id.is_some(),
+        true,
+        "claimed for whoever asked"
+    );
+    assert_eq!(
+        linked(new).as_deref(),
+        Some(project.as_str()),
+        "in the parent's project"
+    );
+    assert!(auto(new).is_some(), "following the defaults, as the parent");
 }

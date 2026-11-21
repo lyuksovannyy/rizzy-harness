@@ -122,9 +122,22 @@ pub(crate) async fn fork_session(
     // Who asked, recorded before the node hears of it (as a create does):
     // the fork's first event that arrives after the ack, or after the ack
     // timed out, is claimed for them when it lands.
+    // The parent's project and whether it follows the model defaults go
+    // with it: a fork whose ack is late gets them from the late claim.
+    let (project, auto) = m
+        .inner
+        .mirror
+        .call(move |s| {
+            Ok::<_, harness_store::StoreError>((
+                s.session_project(pid)?.map(|p| p.project_id),
+                s.kv_get(&crate::auto_model_key(pid))?.is_some(),
+            ))
+        })
+        .await?;
     let intent = (owner.is_some() || workspace.is_some()).then(|| {
-        serde_json::json!({"node": node_id, "owner": owner, "workspace": workspace, "at": now})
-            .to_string()
+        serde_json::json!({"node": node_id, "owner": owner, "workspace": workspace,
+            "at": now, "project": project, "auto": auto})
+        .to_string()
     });
     let key = create_intent_key(sid);
     let v = intent.clone();
@@ -168,11 +181,11 @@ pub(crate) async fn fork_session(
             if owner.is_some() || workspace.is_some() {
                 s.claim_session(sid, owner.as_deref(), workspace.as_deref())?;
             }
-            if s.kv_get(&crate::auto_model_key(pid))?.is_some() {
+            if auto {
                 s.kv_set(&crate::auto_model_key(sid), "1")?;
             }
-            let linked = match s.session_project(pid)? {
-                Some(p) => s.link_new_session(sid, &p.project_id)?,
+            let linked = match &project {
+                Some(p) => s.link_new_session(sid, p)?,
                 None => false,
             };
             Ok::<_, harness_store::StoreError>(linked)
