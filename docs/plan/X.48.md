@@ -14,7 +14,7 @@ A copy costs the fork nothing, grants nothing, and its checkpoints cannot be res
 The lineage is `session_forks`, migration 3 with its own recorded `schema/3.sql`.
 Tests: `core/src/fork.rs`, `core/tests/fork_fixture.rs`, `store/tests/forks.rs`, `store/tests/migrations.rs`, `node/tests/fork.rs` (a restart right after the fork, the parent still running, a fork of a fork, of a compacted chat, after a rewind, a folder the node no longer allows), `master/tests/it/fork_http.rs` (one test per side effect), `web/src/fork.test.ts`, `web/src/components/forkchat.test.tsx`.
 Fix round: grants and images are proven on the node; "earlier chats" and hand-off notes read a fork's own events only (`harness_core::fork::own`); the lineage is read before an event is taken and a failed or early read is never cached; the guard has a test per effect that fails without it; a copied event leaves the fork's row state alone; a late-acked fork (and an ordinary create) still joins its project and the model defaults; a cut inside a message that called several agents is said in the fork (`peers_skipped`, reason `forked`); "Fork from here" shows on hover and focus.
-Left for part 2: a fork's own checkout of the files (today both chats share the folder, and the page says so).
+Not built, by the owner's decision of 2026-11-21: a fork's own checkout of the files (both chats share the folder, and the page says so; the work is on the closed pull request 213).
 
 ## Invariants
 

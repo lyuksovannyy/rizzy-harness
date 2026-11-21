@@ -796,3 +796,68 @@ fn a_forks_row_stays_idle_after_every_copied_event() {
     assert_eq!((running, pending, asks), (0, 1, 1));
     assert!(attention > 0);
 }
+
+/// A fork of `parent` (an id the mirror may or may not hold), written as a
+/// lineage row by its first event.
+fn lineage(s: &Store, parent: SessionId) -> SessionId {
+    let f = SessionId::new();
+    let e = RawEvent {
+        session_id: f,
+        seq: 1,
+        ts_ms: 1,
+        kind: "session_created".into(),
+        payload: json!({"title": "t", "cwd": "/w", "model": "m", "backend": "native",
+            "node_id": "n", "approval_mode": "ask", "profile": "agentic",
+            "forked": {"parent": parent, "through_seq": 4}}),
+    };
+    assert_eq!(s.append(NODE, &e).unwrap(), AppendOutcome::Applied);
+    f
+}
+
+/// Titles are numbered per original chat: the forks of a chat and of its
+/// forks count together; a deleted parent does not reset the count.
+#[test]
+fn the_number_of_forks_of_an_original_counts_the_whole_family() {
+    let s = store();
+    let root = SessionId::new();
+    assert_eq!(s.forks_of_original(root).unwrap(), 0);
+    let a = lineage(&s, root);
+    assert_eq!(s.forks_of_original(root).unwrap(), 1);
+    let b = lineage(&s, root);
+    assert_eq!(s.forks_of_original(root).unwrap(), 2);
+    // A fork of a fork belongs to the same original, asked from either end.
+    let aa = lineage(&s, a);
+    assert_eq!(s.forks_of_original(a).unwrap(), 3);
+    assert_eq!(s.forks_of_original(b).unwrap(), 3);
+    assert_eq!(s.forks_of_original(aa).unwrap(), 3);
+    assert_eq!(s.forks_of_original(root).unwrap(), 3);
+    // Another original is its own family.
+    let other = SessionId::new();
+    lineage(&s, other);
+    assert_eq!(s.forks_of_original(other).unwrap(), 1);
+    assert_eq!(s.forks_of_original(root).unwrap(), 3);
+    // A fork that was deleted is not counted any more.
+    s.delete_session(b, false).unwrap();
+    assert_eq!(s.forks_of_original(root).unwrap(), 2);
+}
+
+/// A node that lies in `forked` (a cycle) cannot make the walk run away.
+#[test]
+fn a_lineage_cycle_ends_the_count() {
+    let s = store();
+    let a = SessionId::new();
+    let b = lineage(&s, a);
+    // `a` claims `b` as its parent.
+    let e = RawEvent {
+        session_id: a,
+        seq: 1,
+        ts_ms: 1,
+        kind: "session_created".into(),
+        payload: json!({"title": "t", "cwd": "/w", "model": "m", "backend": "native",
+            "node_id": "n", "approval_mode": "ask", "profile": "agentic",
+            "forked": {"parent": b, "through_seq": 4}}),
+    };
+    s.append(NODE, &e).unwrap();
+    let n = s.forks_of_original(a).unwrap();
+    assert!(n <= 2, "{n}");
+}
