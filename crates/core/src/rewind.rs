@@ -763,6 +763,7 @@ mod tests {
             parent_session: Some(SessionId::new()),
             no_callbacks: false,
             exec_mode: None,
+            sub_folder: None,
         }));
         let m = l.turn("t1");
         assert!(check(&l.events, m).unwrap_err().contains("sub-agent"));

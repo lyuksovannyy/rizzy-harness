@@ -120,7 +120,7 @@ async fn sub_agent_changes_count_toward_the_turn_that_applied_them() {
     let before = r.files();
     let (turn, outs) = r
         .lead_turn(&format!(
-            "delegate: dev=run: {} | dev=run: {}",
+            "delegate: dev#own=run: {} | dev#own=run: {}",
             files("a", 60),
             files("b", 50)
         ))

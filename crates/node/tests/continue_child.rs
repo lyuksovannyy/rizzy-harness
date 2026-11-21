@@ -20,7 +20,19 @@ const A: &str = "alpha-7f3\n";
 
 /// A repository with `a.txt` = [`A`].
 async fn rig() -> Rig {
-    let r = Rig::new().await;
+    init(Rig::new().await)
+}
+
+/// [`rig`] on a node that says `sub_agent_folder = "own"` (every writer
+/// gets a copy of its own).
+async fn rig_own() -> Rig {
+    init(
+        Rig::with_policy(|p| p.limits.sub_agent_folder = harness_core::subagent::SubFolder::Own)
+            .await,
+    )
+}
+
+fn init(r: Rig) -> Rig {
     r.git(&["init", "-q"]);
     r.write("a.txt", A);
     r.git(&["add", "."]);
@@ -358,7 +370,7 @@ async fn a_writing_childs_follow_up_works_in_a_fresh_copy_and_merges_back() {
     let mut r = rig().await;
     let (_, outs) = r
         .lead_turn(&delegate(&[
-            json!({"agent": "dev", "task": "run: echo one > b.txt"}),
+            json!({"agent": "dev", "folder": "own", "task": "run: echo one > b.txt"}),
         ]))
         .await;
     let child = child_of(&outs[0]);
@@ -406,7 +418,7 @@ async fn a_writing_childs_follow_up_works_in_a_fresh_copy_and_merges_back() {
 async fn a_child_whose_changes_were_not_applied_sees_the_folder_without_them() {
     let mut r = rig().await;
     let (_, outs) = r
-        .lead_turn("delegate: dev=run: echo ONE > a.txt | dev=run: echo TWO > a.txt")
+        .lead_turn("delegate: dev#own=run: echo ONE > a.txt | dev#own=run: echo TWO > a.txt")
         .await;
     let refused = outs
         .iter()
@@ -696,7 +708,7 @@ async fn nothing_of_the_first_copy_survives_into_the_follow_up() {
     );
     let (_, outs) = r
         .lead_turn(&delegate(&[
-            json!({"agent": "dev", "task": format!("run: {cmd}")}),
+            json!({"agent": "dev", "folder": "own", "task": format!("run: {cmd}")}),
         ]))
         .await;
     let child = child_of(&outs[0]);
@@ -1135,7 +1147,10 @@ async fn entering_plan_mode_denies_a_continued_childs_waiting_card() {
 /// too. Nothing runs in any of them.
 #[tokio::test]
 async fn a_child_whose_agent_now_needs_another_folder_is_not_continued() {
-    let mut r = rig().await;
+    // On a node that gives every writer a copy: a copy is not something a
+    // follow-up can start from a reader (`shared_follow_ups_*` in
+    // shared_folder.rs: where the folder is shared, it can).
+    let mut r = rig_own().await;
     for (id, first, then) in [
         (
             "scout",

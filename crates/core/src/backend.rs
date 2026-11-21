@@ -69,6 +69,10 @@ pub trait TurnHost: Send + Sync {
     /// web results from `refs`, the caller's book. `observed` is the URL
     /// provenance the caller holds (the user's words and trusted tool
     /// results, never the task): the child's `web_fetch` may follow these.
+    /// `folder`: where a sub-agent that can change files works, as the call
+    /// asked (`None`: it left the field out); the node decides
+    /// (`[limits] sub_agent_folder`, PLAN.md T32) and a reader ignores it.
+    #[allow(clippy::too_many_arguments)]
     async fn delegate(
         &self,
         _agent: crate::agent::AgentSpec,
@@ -77,6 +81,7 @@ pub trait TurnHost: Send + Sync {
         _observed: std::sync::Arc<Vec<String>>,
         _cancel: CancellationToken,
         _started: Box<dyn FnOnce(crate::SessionId) + Send>,
+        _folder: Option<crate::subagent::SubFolder>,
     ) -> Result<DelegateOutcome, String> {
         Err("delegation is not available here".into())
     }
@@ -129,6 +134,7 @@ pub trait TurnHost: Send + Sync {
         _call_id: String,
         _observed: std::sync::Arc<Vec<String>>,
         _max_tokens: u64,
+        _folder: Option<crate::subagent::SubFolder>,
     ) -> Result<BackgroundDelegated, String> {
         Err("background sub-agents are not available here".into())
     }
@@ -354,8 +360,11 @@ pub struct DelegateOutcome {
     /// The harness's own note after the report: what became of the child's
     /// changes, or why it stopped.
     pub note: Option<String>,
-    /// The child's changes against its base when they were not applied to
-    /// the folder (plain lines; quoted when rendered for the parent).
+    /// Plain lines the parent's result quotes behind the note: the child's
+    /// changes against its base when they were not applied to the folder,
+    /// or, for a sub-agent that worked in the chat's folder, the names of
+    /// the files that changed there (`subagent::shared_files`). Quoted
+    /// when rendered for the parent.
     pub unapplied: Option<String>,
     /// Its changes are in the folder (always, for a child that could not
     /// change files). `false`: the `delegate` result is not ok and ends

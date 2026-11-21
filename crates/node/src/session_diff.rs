@@ -186,6 +186,7 @@ impl Session {
             before: Some(before.to_string()),
             after: Some(target.to_string()),
             own: crate::others::own_writes(&calls, since, end),
+            me: Some(self.id),
         }
     }
 }

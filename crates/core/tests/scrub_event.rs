@@ -439,6 +439,7 @@ fn a_schema_word_secret_leaves_the_schema_and_not_the_text() {
         parent_session: None,
         no_callbacks: false,
         exec_mode: None,
+        sub_folder: None,
     })
     .into_parts();
     set.scrub_event(&kind, &mut p);
@@ -466,6 +467,7 @@ fn harness_written_values_are_kept() {
         parent_session: None,
         no_callbacks: false,
         exec_mode: None,
+        sub_folder: None,
     })
     .into_parts();
     set.scrub_event(&kind, &mut p);

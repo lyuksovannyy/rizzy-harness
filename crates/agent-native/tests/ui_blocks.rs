@@ -136,6 +136,7 @@ fn session_created(parent: Option<SessionId>) -> RawEvent {
         agent_id: None,
         incognito: false,
         parent_session: parent,
+        sub_folder: None,
     })
     .into_parts();
     RawEvent {

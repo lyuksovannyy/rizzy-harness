@@ -91,7 +91,7 @@ fn events() -> Vec<RawEvent> {
             backend: "native".into(),
             node_id: "local".into(),
             approval_mode: ApprovalMode::Ask,
-        }),
+         sub_folder: None, }),
         EventKind::TurnStarted(TurnStarted {
             cause: None,
             agent: None,

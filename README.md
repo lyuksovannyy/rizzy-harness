@@ -1552,11 +1552,43 @@ size on disk; a snapshot that takes over 60 s leaves the turn without a
 checkpoint and the chat says so. Add such folders to the repository's
 `.gitignore` to keep them out. The
 first checkpoint of a large repository reads every file once. Undo writes
-back the exact bytes. Sub-agents that can change files (with `write`, `edit` or `bash`) get
-a folder of their own, a copy of yours that the node keeps in its data
-directory (`sessions/<id>/files`), so your folder must be a git
+back the exact bytes. **Sub-agents and your folder.** A sub-agent that can change files (with
+`write`, `edit` or `bash`) works in the chat's own folder by default
+(`folder: "shared"` in the `delegate` call): no copy is made, nothing is
+merged, it works in a folder that is not a git repository too, and its
+sandbox is the chat's own (it can write the folder and reach nothing a
+sub-agent could not reach before). The delegating agent can ask for
+`folder: "own"` instead, for larger work and for sub-agents that run at
+the same time on the same files: a copy of its own, described below, that
+costs time to make and can conflict when it is merged back. The node
+decides: `sub_agent_folder = "own"` in `node.toml` gives every writing
+sub-agent a copy whatever the agent asks (and refuses it where the folder is
+not a git repository); the default is `"shared"`. In the shared folder two
+writers can overwrite each other's files through commands (`bash`);
+`edit` and `write` refuse a file that changed since that agent read it, so
+the lead that read a file a sub-agent then changed has to read it again,
+and its `delegate` result ends with a line saying so and the names of the
+files that changed meanwhile (quoted, one per line, at most 20). **Undo:**
+the turn's Undo and "Show changes" cover what a sub-agent changed in a turn
+when the agent's own `delegate` call started that sub-agent's work: its
+first run, or a follow-up sent through `delegate`. That is the agent's own
+work, undone without asking, and it holds for a sub-agent started in the
+background too while the agent's turn runs. Anything else a sub-agent's
+chat does is another chat's work: a message you send to a sub-agent's chat
+yourself, and what a background sub-agent writes between the agent's turns
+or after its last one. Undo (and a rewind that puts files back) asks first
+and names those files; "Undo anyway" puts them back, and what a background
+sub-agent wrote after the turn ended is undone in its own chat (its Undo),
+not in the agent's. While a background sub-agent still works in the folder
+Undo is refused, naming it ("a sub-agent of this chat (@name) is still working
+in this folder: stop it or wait for it to finish"). If its record could not
+be written, nothing un-writes its changes; the result says so and the turn's
+Undo restores them. With
+`folder: "own"`, or on a node that says so, a sub-agent that can change
+files gets a folder of its own, a copy of yours that the node keeps in its
+data directory (`sessions/<id>/files`), so your folder must be a git
 repository (inside the node's `workspace_roots`, with a plain `.git`
-directory) for them: elsewhere such a sub-agent is not started and the
+directory) for it: elsewhere such a sub-agent is not started and the
 agent that delegated is told why. The copy holds the folder as it is,
 your uncommitted work included, and a git repository of its own whose
 history is yours (`git log` works; `git status` shows your uncommitted
@@ -1583,9 +1615,10 @@ already written are put back; if even that fails, the card says which
 files hold the sub-agent's version and which checkpoint holds the folder
 as it was. A child with more than 500 files changed on both sides, or
 whose merging takes over 60 seconds, is handed back the same way.
-Several sub-agents started in one step work at the same time (each one
-that writes on its own copy) and do not see each other's changes; the
-agents are told to start together only work that is independent. Merging
+Several sub-agents started in one step work at the same time (those
+with `folder: "own"` each on a copy of their own, which they do not share)
+and may not see each other's changes; the agents are told to start together
+only work that is independent. Merging
 needs git 2.43 or newer on the node. None of this runs your repository's config, hooks, filters, merge drivers or
 attributes. Sub-agents that only
 read work in the folder itself, and so do those whose only tools that
@@ -1902,6 +1935,7 @@ model_first_byte_timeout_s = 600     # wait for a model's first answer (10 .. 36
 model_idle_timeout_s = 300           # then the longest gap between its events (10 .. 3600)
 max_subagents = 4                    # sub-agents one turn may start; the master may ask for fewer (0 .. 32)
 max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub-agents not; 0: off (0 .. 4)
+sub_agent_folder = "shared"          # where a sub-agent that can write works: "shared" (the chat's folder) or "own" (a copy of its own, merged back; needs a git repository); "own" here beats what an agent asks for (see "Sub-agents")
 background_per_session = 8           # background commands one chat may run at once; 0: off (0 .. 32)
 background_per_node = 64             # background commands this node runs at once, all chats (0 .. 256)
 background_output_kb = 256           # output kept in memory per background command (16 .. 4096)
@@ -2164,7 +2198,7 @@ starts the command. A command may:
 
 Nothing else can be opened: not the rest of your home folder (`~/.ssh`,
 `~/.aws`, browser profiles), not the data directory, not `/tmp`, not other
-users' folders, not `/dev/tty`. A sub-agent works in its own folder in
+users' folders, not `/dev/tty`. A sub-agent that was given a copy works in its own folder in
 the node's data directory (with its own git repository there, so `git
 status`, `add`, `commit`, `diff` and `log` work), and may only read your
 repository's object store for its history: nothing of your `.git` is
@@ -4773,8 +4807,8 @@ panel lists the sub-agent once with its number of runs.
 (off for every agent but the built-in Senior Teamlead; it needs **Launch
 sub-agents** too) may call `delegate` with `background: true`. The call
 returns at once with the sub-agent's id and `bg-<n>`; the sub-agent is the
-same kind of sub-agent as any (its own copy of the folder when it can change
-files, your folder when it only reads; plan mode starts only readers, which
+same kind of sub-agent as any (your folder, or its own copy when it can change
+files and `folder: "own"` was asked for; plan mode starts only readers, which
 stay in plan mode), but the agent goes on with other work or ends its turn
 instead of waiting. When the sub-agent ends, its result reaches the agent
 once, as a foreground result reads: at the agent's next step if a turn is

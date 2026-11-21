@@ -144,7 +144,7 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
                                            agent_id: None,
                                            incognito: false,
                                            parent_session: None,
-                                       })
+                                        sub_folder: None, })
                                        .into_parts();
                                        let _ = tx.try_send(NodeToMaster::Event {
                                            event: RawEvent {

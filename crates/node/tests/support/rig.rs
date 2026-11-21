@@ -32,9 +32,12 @@ pub struct Rig {
     /// lead's own `deny_skills`.
     pub lead_stored: Vec<harness_core::skills::StoredSkillEntry>,
     pub lead_deny_skills: Vec<String>,
+    /// The lead's own tools in [`Rig::lead_turn`] (`None`: `bash`, `write`).
+    pub lead_tools: Option<Vec<&'static str>>,
     pub dir: tempfile::TempDir,
     pub ws: PathBuf,
-    _node: NodeRuntime,
+    _node: Option<NodeRuntime>,
+    policy: NodePolicy,
     link: NodeLink,
     pub seen: Vec<RawEvent>,
     /// What the node's hello announced.
@@ -100,7 +103,17 @@ impl Rig {
 
     /// A rig whose node keeps `keep` checkpoints.
     pub async fn with_keep(keep: usize) -> Self {
-        Self::build(keep, NativeConfig::default()).await
+        Self::build(keep, NativeConfig::default(), |_| {}).await
+    }
+
+    /// A rig whose node's policy is changed by `f` (after the rig's own).
+    pub async fn with_policy(f: impl FnOnce(&mut NodePolicy)) -> Self {
+        Self::build(
+            NodePolicy::default().checkpoints_keep,
+            NativeConfig::default(),
+            f,
+        )
+        .await
     }
 
     /// A rig whose agents summarise their history past `tokens`.
@@ -111,31 +124,35 @@ impl Rig {
                 summarize_after_tokens: Some(tokens),
                 ..Default::default()
             },
+            |_| {},
         )
         .await
     }
 
-    async fn build(keep: usize, native: NativeConfig) -> Self {
+    async fn build(keep: usize, native: NativeConfig, tweak: impl FnOnce(&mut NodePolicy)) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("ws");
         std::fs::create_dir(&ws).unwrap();
         let store = Store::open(&dir.path().join("node.db"), Durability::Full).unwrap();
         let requests: Requests = Arc::default();
+        let mut policy = NodePolicy {
+            workspace_roots: vec![dir.path().into()],
+            max_approval_mode: harness_core::policy::ApprovalMode::Auto,
+            checkpoints_keep: keep,
+            // Never the developer's own skills (`~/.agents/skills`):
+            // they would be in every turn's context.
+            skills: harness_node::SkillsPolicy {
+                roots: vec![],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        tweak(&mut policy);
+        let kept_policy = policy.clone();
         let cfg = NodeConfig {
             node_id: "local".into(),
             hostname: "test".into(),
-            policy: NodePolicy {
-                workspace_roots: vec![dir.path().into()],
-                max_approval_mode: harness_core::policy::ApprovalMode::Auto,
-                checkpoints_keep: keep,
-                // Never the developer's own skills (`~/.agents/skills`):
-                // they would be in every turn's context.
-                skills: harness_node::SkillsPolicy {
-                    roots: vec![],
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
+            policy,
             store,
             backend: Arc::new(NativeBackend::new(
                 Arc::new(Recording {
@@ -168,9 +185,11 @@ impl Rig {
             lead_context: None,
             lead_stored: vec![],
             lead_deny_skills: vec![],
+            lead_tools: None,
             dir,
             ws,
-            _node: node,
+            _node: Some(node),
+            policy: kept_policy,
             link,
             seen: vec![],
             caps,
@@ -193,6 +212,47 @@ impl Rig {
         rig.until(|k| matches!(k, EventKind::SessionCreated(_)))
             .await;
         rig
+    }
+
+    /// Stop the node and start another on the same data directory (its
+    /// logs, checkpoints and sessions), as a restart does; the sessions are
+    /// loaded again from their logs on first use.
+    pub async fn restart(&mut self) {
+        drop(self._node.take());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let store = Store::open(&self.dir.path().join("node.db"), Durability::Full).unwrap();
+        let node = NodeRuntime::start(NodeConfig {
+            node_id: "local".into(),
+            hostname: "test".into(),
+            policy: self.policy.clone(),
+            store,
+            backend: Arc::new(NativeBackend::new(
+                Arc::new(Recording {
+                    inner: Mock {
+                        delay: Duration::from_millis(5),
+                    },
+                    seen: self.requests.clone(),
+                }),
+                harness_tools::builtin(),
+                NativeConfig::default(),
+            )),
+            default_model: "mock".into(),
+            secrets: harness_core::SecretSet::new(vec![]),
+            profile: harness_core::event::Profile::Agentic,
+            incognito_ttl: None,
+            checkpoints_dir: Some(self.dir.path().join("checkpoints")),
+            git_sandbox: None,
+            artifacts: None,
+        })
+        .await
+        .unwrap();
+        let mut link = node.attach().await;
+        match link.from_node.recv().await.unwrap() {
+            NodeToMaster::Hello { .. } => {}
+            other => panic!("expected hello, got {other:?}"),
+        }
+        self.link = link;
+        self._node = Some(node);
     }
 
     /// The rig's one session.
@@ -316,7 +376,7 @@ impl Rig {
     pub fn lead(&self) -> harness_core::agent::AgentSpec {
         let mut lead = Self::spec(
             "lead",
-            &["bash", "write"],
+            self.lead_tools.as_deref().unwrap_or(&["bash", "write"]),
             vec![
                 Self::spec("dev", &["bash", "write"], vec![]),
                 Self::spec("look", &["read", "grep"], vec![]),
@@ -407,13 +467,25 @@ impl Rig {
 
     /// Undo `turn`, or with `rewind` it and every later turn.
     pub async fn restore_with(&mut self, turn: &str, force: bool, rewind: bool) -> Restore {
+        self.restore_of(self.sid, turn, force, rewind).await
+    }
+
+    /// [`Rig::restore_with`] in the chat `sid` (another chat of the rig,
+    /// or a sub-agent's).
+    pub async fn restore_of(
+        &mut self,
+        sid: SessionId,
+        turn: &str,
+        force: bool,
+        rewind: bool,
+    ) -> Restore {
         self.n += 1;
         let req = format!("r{}", self.n);
         let mark = self.seen.len();
         let folder_before = self.files();
         self.send(MasterToNode::Restore {
             req_id: req.clone(),
-            session_id: self.sid,
+            session_id: sid,
             turn_id: turn.into(),
             force,
             rewind,
@@ -453,11 +525,21 @@ impl Rig {
         turn: &str,
         rewind: bool,
     ) -> Result<harness_protocol::TurnDiff, String> {
+        self.diff_of(self.sid, turn, rewind).await
+    }
+
+    /// [`Rig::diff`] of a turn of the chat `sid`.
+    pub async fn diff_of(
+        &mut self,
+        sid: SessionId,
+        turn: &str,
+        rewind: bool,
+    ) -> Result<harness_protocol::TurnDiff, String> {
         self.n += 1;
         let req = format!("d{}", self.n);
         self.send(MasterToNode::Diff {
             req_id: req.clone(),
-            session_id: self.sid,
+            session_id: sid,
             turn_id: turn.into(),
             rewind,
         });

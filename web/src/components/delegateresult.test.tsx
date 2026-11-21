@@ -43,18 +43,18 @@ const delegate = (out: string | null): Tool => ({
   result: out === null ? null : { ok: true, output: out, exit_code: null },
   approval: null,
 });
-const childView = (model: string): SessionView => ({
+const childView = (model: string, sub_folder?: "shared" | "own"): SessionView => ({
   ...emptyView(),
   session_id: CHILD,
   head_seq: 3,
-  meta: { title: "t", cwd: "/", model, backend: "native", node_id: "n", approval_mode: "ask", profile: "agentic" } as SessionView["meta"],
+  meta: { title: "t", cwd: "/", model, backend: "native", node_id: "n", approval_mode: "ask", profile: "agentic", sub_folder } as SessionView["meta"],
 });
-async function show(item: Tool, model: string | null = "rizzy::claude/claude-opus-5-5") {
+async function show(item: Tool, model: string | null = "rizzy::claude/claude-opus-5-5", folder?: "shared" | "own") {
   let watched = false;
   const live = {
     watch: vi.fn(() => (watched = true)),
     unwatch: vi.fn(() => (watched = false)),
-    view: () => (watched && model ? childView(model) : undefined),
+    view: () => (watched && model ? childView(model, folder) : undefined),
     subscribe: () => () => {},
     version: 1,
   } as unknown as Live;
@@ -122,6 +122,24 @@ describe("the delegate card", () => {
     expect(a.querySelector('a[href^="javascript"]')).toBeNull();
     expect(a.textContent).toContain("docs.example");
     expect(a.innerHTML).not.toContain('src="https://evil.example');
+  });
+});
+
+describe("where the sub-agent worked", () => {
+  test("the card says it worked in the chat's folder or in a copy of its own, from the child's log", async () => {
+    await show(delegate(output("done")), "m", "shared");
+    expect(host.querySelector(".child-folder")!.textContent).toBe("· worked in this chat's folder");
+    await act(async () => root.render(null));
+    await show(delegate(output("done")), "m", "own");
+    expect(host.querySelector(".child-folder")!.textContent).toBe("· worked in a copy of the folder of its own");
+  });
+
+  test("a reader, or a child not known yet, says nothing about a folder", async () => {
+    await show(delegate(output("done")), "m");
+    expect(host.querySelector(".child-folder")).toBeNull();
+    await act(async () => root.render(null));
+    await show(delegate(null), null, "shared");
+    expect(host.querySelector(".child-folder")).toBeNull();
   });
 });
 

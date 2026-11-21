@@ -77,6 +77,7 @@ impl Fake {
             agent_id: None,
             incognito: false,
             parent_session: parent,
+            sub_folder: None,
         });
         self.emit(sid, k);
     }

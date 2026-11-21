@@ -6,6 +6,7 @@
 // own lines around it ("finished: done", the cut note) are never part of it.
 import { useContext, useEffect, useState, useSyncExternalStore } from "react";
 import { LiveCtx } from "../lib/liveCtx";
+import { folderWords } from "../lib/subFolder";
 import { Markdown } from "./Markdown";
 import { useFollow } from "./SubagentActivity";
 
@@ -50,6 +51,7 @@ export const GIVE_UP_MS = 10_000;
 export function ChildModel({ sessionId, running, done }: { sessionId: string; running: boolean; done: boolean }) {
   const live = useContext(LiveCtx);
   const [model, setModel] = useState<string | null>(null);
+  const [folder, setFolder] = useState<string | null>(null);
   const [ref, wanted] = useFollow(running);
   const [gaveUp, setGaveUp] = useState(false);
   const refused = !!live?.refused?.(sessionId);
@@ -67,14 +69,25 @@ export function ChildModel({ sessionId, running, done }: { sessionId: string; ru
   }, [follow, done]);
   const version = () => live?.version ?? 0;
   useSyncExternalStore((l) => (live ? live.subscribe(l) : () => {}), version, version);
-  const seen = follow ? live?.view(sessionId)?.meta?.model : undefined;
+  const meta = follow ? live?.view(sessionId)?.meta : undefined;
+  const seen = meta?.model;
+  const seenFolder = meta?.sub_folder;
   useEffect(() => {
     if (seen) setModel(seen);
-  }, [seen]);
+    if (seenFolder) setFolder(seenFolder);
+  }, [seen, seenFolder]);
+  const where = folderWords(folder ?? undefined);
   return (
-    <span ref={ref} className="child-model mono muted" title="The model this sub-agent runs on">
-      {model}
-    </span>
+    <>
+      <span ref={ref} className="child-model mono muted" title="The model this sub-agent runs on">
+        {model}
+      </span>
+      {where && (
+        <span className="child-folder muted small" title="Where this sub-agent changed files">
+          · worked {where}
+        </span>
+      )}
+    </>
   );
 }
 

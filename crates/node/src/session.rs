@@ -236,6 +236,11 @@ pub(crate) struct Session {
     /// The chat's folder's `.mcp.json` was read once for this chat (when
     /// its owner was first learned, X.36): never again for it.
     looked: AtomicBool,
+    /// The id of the first turn the delegation that created this sub-agent's
+    /// chat may start in it (set by `start_child`, in memory only). A
+    /// sub-agent's chat in whose log no turn has ever started takes a first
+    /// turn only with this id: see [`Self::guard_first_turn`].
+    delegation_turn: Mutex<Option<String>>,
     /// Ends that came while a turn ran: recorded at its next step boundary
     /// (`delivered`), or after its end.
     bg_queue: Mutex<Vec<harness_tools::background::Ended>>,
@@ -460,6 +465,10 @@ struct Isolation {
 struct Prepared {
     child: Arc<Session>,
     iso: Option<Isolation>,
+    /// It can change files and works in its parent's folder
+    /// (`folder: "shared"`, PLAN.md T32): its result says so, and which
+    /// files changed there.
+    shared: bool,
     msg: UserMessage,
     history: Vec<RawEvent>,
     agent: AgentSpec,
@@ -500,6 +509,10 @@ pub(crate) const MODE_CHAT: &str = "a chat without tools has no approval mode to
 pub(crate) const STEPS_SUB_AGENT: &str =
     "a sub-agent's steps follow the chat that started it; change that chat's step limit";
 pub(crate) const STEPS_ROUTINE: &str = "a routine's chat keeps the node's step limit";
+/// A sub-agent's chat whose delegation never started its task (the first
+/// turn's start failed) takes no turn from anyone else.
+pub(crate) const NEVER_STARTED: &str = "this sub-agent never started its task: delegate again \
+     from the chat that started it";
 pub(crate) const STEPS_CHAT: &str = "a chat without tools has no step limit to change";
 
 /// Everything needed to start a session, already validated by the runtime.
@@ -518,6 +531,8 @@ pub(crate) struct NewSession {
     pub no_callbacks: bool,
     /// Chosen by the runtime (or the parent's, for a sub-agent).
     pub exec_mode: Option<harness_core::policy::ExecMode>,
+    /// Where a sub-agent that can change files works (recorded).
+    pub sub_folder: Option<harness_core::subagent::SubFolder>,
 }
 
 impl Session {
@@ -538,6 +553,7 @@ impl Session {
             owned,
             no_callbacks,
             exec_mode,
+            sub_folder,
         } = new;
         let (bg, ends) = background_table(&node, profile, parent_session, 1);
         let s = Arc::new(Self {
@@ -594,6 +610,7 @@ impl Session {
             owner: Mutex::new(None),
             identity: Mutex::new(None),
             looked: AtomicBool::new(false),
+            delegation_turn: Mutex::new(None),
         });
         Self::record_ends(&s, ends);
         s.append(EventKind::SessionCreated(SessionCreated {
@@ -610,6 +627,7 @@ impl Session {
             node_id: node.cfg.node_id.clone(),
             approval_mode: mode,
             exec_mode,
+            sub_folder,
         }))
         .await?;
         Ok(s)
@@ -742,6 +760,7 @@ impl Session {
             owner: Mutex::new(None),
             identity: Mutex::new(None),
             looked: AtomicBool::new(false),
+            delegation_turn: Mutex::new(None),
         });
         Self::record_ends(&s, ends);
         Ok(s)
@@ -1214,7 +1233,46 @@ impl Session {
         self.append_at(&mut head, kind.into()).await.map(Some)
     }
 
+    /// The one place a `turn_started` is written (`append_at`) asks this
+    /// before it writes one in a sub-agent's chat: a sub-agent's chat in
+    /// whose log no turn has ever started takes a first turn only from the
+    /// delegation that created it (`delegation_turn`). Otherwise a chat
+    /// whose first start failed (the log, a claim, a stop) would take a
+    /// person's message as its "first" turn, and T32/T57 read a sub-agent's
+    /// first turn as the lead's own work (`delegated_spans`). Every path
+    /// that starts a turn goes through `append_at`, so none can forget it.
+    async fn guard_first_turn(&self, turn_id: &str) -> Result<(), StoreError> {
+        if self.parent_session.is_none() {
+            return Ok(());
+        }
+        if self
+            .delegation_turn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_deref()
+            == Some(turn_id)
+        {
+            return Ok(());
+        }
+        let id = self.id;
+        let started = self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_since_turn_at(id, i64::MAX, &["turn_started"]))
+            .await?;
+        if started.is_empty() {
+            return Err(StoreError::Refused(NEVER_STARTED.into()));
+        }
+        Ok(())
+    }
+
     async fn append_at(&self, head: &mut u64, kind: Append) -> Result<RawEvent, StoreError> {
+        if let Append::Raw(EventKind::TurnStarted(t))
+        | Append::Scrubbed(EventKind::TurnStarted(t)) = &kind
+        {
+            self.guard_first_turn(&t.turn_id).await?;
+        }
         let (kind, payload) = match kind {
             Append::Raw(k) => {
                 let (kind, mut payload) = k.into_parts();
@@ -3831,6 +3889,7 @@ impl Session {
                 (None, false) => Some(after.clone()),
             },
             own: crate::others::own_writes(&events, since, end),
+            me: Some(self.id),
         };
         if !rewind && cp.restored {
             return Err("already undone".into());
@@ -4086,8 +4145,9 @@ impl Session {
 
     /// Other chats' work in this folder over `span` on the files an undo
     /// writes (`others::foreign_work`): the chats on this node whose folder
-    /// overlaps the checkpoint's, other than this one and its sub-agents,
-    /// and the write tombstones of deleted ones (pruned here once older
+    /// overlaps the checkpoint's, other than this one (its sub-agents count
+    /// for the turns its calls started them in: see the body), and the
+    /// write tombstones of deleted ones (pruned here once older
     /// than every checkpoint kept for this folder). None of the chats can
     /// be running: the folder is claimed (or, for a diff, it is a view).
     async fn foreign_work(
@@ -4104,25 +4164,32 @@ impl Session {
             .values()
             .map(|s| (s.id, s.parent_session, s.cwd.clone()))
             .collect();
-        let parent: HashMap<SessionId, Option<SessionId>> =
-            all.iter().map(|(id, p, _)| (*id, *p)).collect();
-        // This chat's sub-agents (and theirs) work for this turn.
-        let mine = |mut id: SessionId| {
-            for _ in 0..64 {
-                if id == self.id {
-                    return true;
+        // This chat's sub-agents (and theirs) work for its turns only in the
+        // turns its own `delegate` calls started: the delegation's first
+        // turn and a follow-up it sent. What they write then is the turn's
+        // (the checkpoint holds it, Undo takes it back). Any other turn of
+        // theirs (a person's message to that chat, a callback) is another
+        // chat's work, and so is what a background one does outside this
+        // chat's turns (PLAN.md T32, T57).
+        let turns = self.turn_spans().await;
+        let mut own: HashMap<SessionId, Vec<(i64, i64)>> = HashMap::new();
+        own.insert(self.id, turns);
+        let mut todo = vec![self.id];
+        while let Some(up) = todo.pop() {
+            let up_own = own.get(&up).cloned().unwrap_or_default();
+            for (id, _, _) in all.iter().filter(|(_, p, _)| *p == Some(up)) {
+                if own.contains_key(id) {
+                    continue;
                 }
-                match parent.get(&id).copied().flatten() {
-                    Some(p) => id = p,
-                    None => return false,
-                }
+                let started = self.delegated_spans(*id).await;
+                own.insert(*id, crate::others::within(&started, &up_own));
+                todo.push(*id);
             }
-            false
-        };
+        }
         let root = real_path(&repo.root);
         let ids: Vec<(SessionId, PathBuf)> = all
             .iter()
-            .filter(|(id, _, _)| !mine(*id))
+            .filter(|(id, _, _)| *id != self.id)
             .map(|(id, _, cwd)| (*id, real_path(cwd)))
             .filter(|(_, cwd)| overlaps(cwd, &root))
             .collect();
@@ -4141,6 +4208,9 @@ impl Session {
                 id: s.id,
                 cwd,
                 repo: theirs,
+                // A sub-agent of this chat: only what it did outside the
+                // turns this chat's calls started is another chat's.
+                during: own.get(&s.id).cloned(),
             });
         }
         let store = &self.node.cfg.store;
@@ -4163,6 +4233,83 @@ impl Session {
             }
         };
         crate::others::foreign_work(store, repo, others, &tombstones, span, touched).await
+    }
+
+    /// The time spans of this chat's own turns (an open one runs until now).
+    async fn turn_spans(&self) -> Vec<(i64, i64)> {
+        let me = self.id;
+        let events = self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_since_turn_at(me, i64::MIN, &["turn_started", "turn_ended"]))
+            .await
+            .unwrap_or_default();
+        let mut open: HashMap<String, i64> = HashMap::new();
+        let mut spans = Vec::new();
+        for e in &events {
+            match e.typed() {
+                Ok(EventKind::TurnStarted(t)) => {
+                    open.insert(t.turn_id, e.ts_ms);
+                }
+                Ok(EventKind::TurnEnded(t)) => {
+                    if let Some(from) = open.remove(&t.turn_id) {
+                        spans.push((from, e.ts_ms));
+                    }
+                }
+                _ => {}
+            }
+        }
+        spans.extend(open.into_values().map(|from| (from, i64::MAX)));
+        spans
+    }
+
+    /// The time spans of the turns of the sub-agent chat `child` that its
+    /// parent's `delegate` call started: its first turn (nothing marks it
+    /// but its place in the log, which `guard_first_turn` guarantees: a
+    /// sub-agent's chat takes a first turn only from the delegation that
+    /// created it; a fork's turns before the fork are another chat's copy,
+    /// so a fork has none) and each follow-up
+    /// (`turn_started.continued_by` names the call). Every other turn in
+    /// that chat was started by someone else.
+    async fn delegated_spans(&self, child: SessionId) -> Vec<(i64, i64)> {
+        let events = self
+            .node
+            .cfg
+            .store
+            .call(move |s| {
+                s.events_since_turn_at(
+                    child,
+                    i64::MIN,
+                    &["session_created", "turn_started", "turn_ended"],
+                )
+            })
+            .await
+            .unwrap_or_default();
+        let mut forked = false;
+        let mut first = true;
+        let mut open: HashMap<String, i64> = HashMap::new();
+        let mut spans = Vec::new();
+        for e in &events {
+            match e.typed() {
+                Ok(EventKind::SessionCreated(c)) => forked = c.forked.is_some(),
+                Ok(EventKind::TurnStarted(t)) => {
+                    let delegated = t.continued_by.is_some() || (first && !forked);
+                    first = false;
+                    if delegated {
+                        open.insert(t.turn_id, e.ts_ms);
+                    }
+                }
+                Ok(EventKind::TurnEnded(t)) => {
+                    if let Some(from) = open.remove(&t.turn_id) {
+                        spans.push((from, e.ts_ms));
+                    }
+                }
+                _ => {}
+            }
+        }
+        spans.extend(open.into_values().map(|from| (from, i64::MAX)));
+        spans
     }
 
     /// Register a restore of `root` (the checkpoint's folder: the
@@ -4212,10 +4359,48 @@ impl Session {
         if reg.iter().any(|r| overlaps(r, &root)) {
             return Err(UNDO_RUNNING.into());
         }
-        if others
+        let busy: Vec<&Arc<Session>> = others
             .iter()
-            .any(|(s, cwd)| overlaps(cwd, &root) && s.is_running())
-        {
+            .filter(|(s, cwd)| overlaps(cwd, &root) && s.is_running())
+            .map(|(s, _)| s)
+            .collect();
+        if !busy.is_empty() {
+            // This chat's own background sub-agents (none of its foreground
+            // ones can run: its own turn does not): say which, and what to do.
+            let mine = |s: &Session| {
+                let mut at = s.parent_session;
+                for _ in 0..64 {
+                    match at {
+                        Some(id) if id == self.id => return true,
+                        Some(id) => {
+                            at = others
+                                .iter()
+                                .find(|(o, _)| o.id == id)
+                                .and_then(|(o, _)| o.parent_session);
+                        }
+                        None => return false,
+                    }
+                }
+                false
+            };
+            if busy.iter().all(|s| mine(s)) {
+                let mut names: Vec<String> = busy
+                    .iter()
+                    .map(|s| format!("@{}", s.running_agent().unwrap_or_else(|| "agent".into())))
+                    .collect();
+                names.sort();
+                names.dedup();
+                let (who, verb, them) = if names.len() == 1 {
+                    ("a sub-agent", "is", "it")
+                } else {
+                    ("sub-agents", "are", "them")
+                };
+                return Err(format!(
+                    "{who} of this chat ({}) {verb} still working in this folder: stop {them} or \
+                     wait for {them} to finish",
+                    names.join(", ")
+                ));
+            }
             return Err(
                 "another chat is working in this folder right now; wait for it to finish \
                  or cancel it"
@@ -4280,6 +4465,7 @@ impl Session {
     }
 
     /// Run a delegated sub-task in a new child session and wait for it.
+    #[allow(clippy::too_many_arguments)]
     async fn run_child(
         &self,
         agent: AgentSpec,
@@ -4288,6 +4474,7 @@ impl Session {
         observed: Arc<Vec<String>>,
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
+        folder: Option<harness_core::subagent::SubFolder>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
         let p = self
             .start_child(
@@ -4298,6 +4485,7 @@ impl Session {
                 cancel,
                 started,
                 ChildRun::Foreground,
+                folder,
             )
             .await?;
         Ok(self.run_prepared(p).await)
@@ -4320,7 +4508,7 @@ impl Session {
                 p.by_stop,
             )
             .await;
-        self.child_outcome(&p.child, p.iso, &turn_id, reason, usage)
+        self.child_outcome(&p.child, p.iso, p.shared, &turn_id, reason, usage)
             .await
     }
 
@@ -4338,6 +4526,7 @@ impl Session {
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
         run: ChildRun,
+        folder: Option<harness_core::subagent::SubFolder>,
     ) -> Result<Prepared, String> {
         let max_tokens = run.max_tokens();
         // No new sub-agent while the node stops (its parent is cancelled
@@ -4349,10 +4538,13 @@ impl Session {
         let short: String = task.chars().take(60).collect();
         // The parent's folder is still its own before a child works there.
         let here = self.checked_folder()?;
-        // A sub-agent that can change files works in its own folder,
-        // so parallel sub-agents do not trample each other and a child whose
-        // log failed leaves the folder alone; without one it is not started.
-        let iso = self.isolate(&agent, child_id, &here).await?;
+        // A sub-agent that can change files works in this chat's folder
+        // (`folder: "shared"`, the default) or, when it was asked for or
+        // the node says so, in a folder of its own, so parallel sub-agents
+        // do not trample each other and a child whose log failed leaves the
+        // folder alone; a copy that cannot be made is not started.
+        let iso = self.isolate(&agent, child_id, &here, folder).await?;
+        let shared = iso.is_none() && self.can_change_files(&agent);
         let cwd = iso.as_ref().map(|i| i.cwd.clone()).unwrap_or(here);
         let child = match Session::create(
             self.node.clone(),
@@ -4377,6 +4569,11 @@ impl Session {
                     .as_ref()
                     .map(|i| i.child.owned())
                     .or_else(|| self.owned()),
+                sub_folder: if iso.is_some() {
+                    Some(harness_core::subagent::SubFolder::Own)
+                } else {
+                    shared.then_some(harness_core::subagent::SubFolder::Shared)
+                },
             },
         )
         .await
@@ -4396,6 +4593,11 @@ impl Session {
             .insert(child_id, child.clone());
         started(child_id);
         let turn_id = new_id();
+        // The only first turn this chat takes (`guard_first_turn`).
+        *child
+            .delegation_turn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(turn_id.clone());
         // The parent turn's token-saving methods and its context from the
         // master; never the parent's history.
         let (savings, context, standing, began, parent_turn) = self
@@ -4491,6 +4693,7 @@ impl Session {
         Ok(Prepared {
             child,
             iso,
+            shared,
             msg,
             history,
             agent,
@@ -4509,6 +4712,7 @@ impl Session {
         &self,
         child: &Arc<Session>,
         iso: Option<Isolation>,
+        shared: bool,
         turn_id: &str,
         reason: TurnEndReason,
         usage: Option<Usage>,
@@ -4563,6 +4767,27 @@ impl Session {
             .log_failed
             .load(Ordering::SeqCst)
             .then_some("the sub-agent stopped because its session log could not be written");
+        // A sub-agent that worked in this chat's folder: nothing was merged,
+        // so the lead is told where it worked and which files changed there
+        // (from its turn's checkpoints; none when its record failed: then
+        // nothing un-writes what it changed, and the turn's Undo is the way
+        // back).
+        let mut unapplied = unapplied;
+        let merge_note = merge_note.or_else(|| {
+            shared.then(|| {
+                let files = log.iter().find_map(|e| match e.typed() {
+                    Ok(EventKind::Checkpoint(c))
+                        if c.turn_id == turn_id && c.phase == CheckpointPhase::After =>
+                    {
+                        Some(c.files)
+                    }
+                    _ => None,
+                });
+                // The names follow the note, quoted line by line.
+                unapplied = harness_core::subagent::shared_files(files.as_deref(), log_failed);
+                harness_core::subagent::shared_note(files.as_deref(), log_failed)
+            })
+        });
         let note = match (stopped, merge_note) {
             (Some(s), Some(n)) => Some(format!("{s}; {n}")),
             (Some(s), None) => Some(s.to_string()),
@@ -4775,7 +5000,31 @@ impl Session {
                  files, and nothing may change in plan mode. Describe the work in your plan."
             ));
         }
-        if wrote != writes {
+        // A sub-agent that shares this chat's folder (a reader, or a writer
+        // made with `folder: "shared"`: its folder is this one either way)
+        // may be asked to write now where a new one of its agent would work
+        // here too: the node's `shared`, and no writer under a sub-agent.
+        let shared_now = !wrote
+            && writes
+            && self.node.cfg.policy.limits.sub_agent_folder
+                == harness_core::subagent::SubFolder::Shared
+            && self.parent_session.is_none();
+        if !wrote && writes && !shared_now {
+            // It worked in this chat's folder, and may not write there now.
+            let why = if self.parent_session.is_some() {
+                "a sub-agent's own sub-agents may only read: ask it to read, or make the change \
+                 yourself"
+            } else {
+                "this node now gives every sub-agent that changes files a copy of its own \
+                 (`sub_agent_folder = \"own\"`), and this one worked in this chat's folder. \
+                 Start a new one instead"
+            };
+            return Err(format!(
+                "@{started_as} `{child_id}` cannot be given a follow-up: its agent can change \
+                 files now, but {why}."
+            ));
+        }
+        if wrote != writes && !shared_now {
             return Err(format!(
                 "@{started_as} `{child_id}` cannot be given a follow-up: its agent {} files now \
                  and it {} when it was started. Start a new one instead.",
@@ -4838,7 +5087,15 @@ impl Session {
             ));
         }
         let iso = if wrote {
-            match self.isolate(&agent, child_id, &here).await {
+            match self
+                .isolate(
+                    &agent,
+                    child_id,
+                    &here,
+                    Some(harness_core::subagent::SubFolder::Own),
+                )
+                .await
+            {
                 Ok(Some(i)) if i.cwd == child.cwd => Some(i),
                 Ok(Some(i)) => {
                     crate::git::remove_folder(&i.child).await;
@@ -4930,6 +5187,7 @@ impl Session {
         Ok(Prepared {
             child,
             iso,
+            shared: shared_now,
             msg,
             history,
             agent,
@@ -4973,7 +5231,9 @@ impl Session {
         agent: &AgentSpec,
         child: SessionId,
         here: &std::path::Path,
+        folder: Option<harness_core::subagent::SubFolder>,
     ) -> Result<Option<Isolation>, String> {
+        use harness_core::subagent::SubFolder;
         if !self.can_change_files(agent) {
             return Ok(None);
         }
@@ -4986,6 +5246,20 @@ impl Session {
                  change yourself, or delegate to a sub-agent that only reads."
             )
         };
+        // The node's word first: `own` there gives every writer a copy,
+        // whatever the call asked; otherwise the call's (`shared` when it
+        // left the field out). PLAN.md T32.
+        let node_own = self.node.cfg.policy.limits.sub_agent_folder == SubFolder::Own;
+        if !node_own && folder != Some(SubFolder::Own) {
+            // In this chat's folder, which a sub-agent's own sub-agents
+            // never get to write: one level of writers.
+            if self.parent_session.is_some() {
+                return Err(not_started(
+                    "a sub-agent's own sub-agents may only read".to_string(),
+                ));
+            }
+            return Ok(None);
+        }
         if self.owned().is_some() {
             return Err(not_started(
                 "a sub-agent's own sub-agents may only read".to_string(),
@@ -5005,13 +5279,29 @@ impl Session {
         {
             Ok(Some(s)) => s,
             Ok(None) => {
+                let how = if node_own && folder == Some(SubFolder::Shared) {
+                    "you asked for `folder: \"shared\"`, but this node's `sub_agent_folder = \
+                     \"own\"` gives every sub-agent that changes files a copy of its own, and a \
+                     copy needs a git repository; this folder is not one (within this node's \
+                     workspace roots)"
+                        .to_string()
+                } else if node_own {
+                    "this node's `sub_agent_folder = \"own\"` gives every sub-agent that changes \
+                     files a copy of its own of a git repository, but this folder is not a git \
+                     repository (within this node's workspace roots)"
+                        .to_string()
+                } else {
+                    "`folder: \"own\"` gives a sub-agent that changes files a copy of its own of \
+                     a git repository, but this folder is not a git repository (within this \
+                     node's workspace roots); to work in this chat's folder instead, leave \
+                     `folder` out"
+                        .to_string()
+                };
                 return Err(format!(
                     "@{who} was not started: it can change files (a tool that writes, publishes \
-                     or is an MCP server's), and a \
-                     sub-agent that changes files works on its own copy of a git repository, \
-                     but this folder is not a git repository (within this node's workspace \
-                     roots). Make the change yourself, delegate to a sub-agent that only reads, \
-                     or ask the user to run `git init` in this folder."
+                     or is an MCP server's), and {how}. Make the change yourself, delegate to \
+                     a sub-agent that only reads, or ask the user to run `git init` in this \
+                     folder."
                 ));
             }
             Err(e) => return Err(not_started(e)),
@@ -5205,6 +5495,15 @@ impl Session {
         &self.cwd
     }
 
+    /// The agent of the running turn, if one runs under an agent.
+    fn running_agent(&self) -> Option<String> {
+        self.turn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .and_then(|t| t.agent_id.clone())
+    }
+
     pub(crate) fn is_running(&self) -> bool {
         self.turn
             .lock()
@@ -5328,8 +5627,9 @@ impl TurnHost for Session {
         observed: Arc<Vec<String>>,
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
+        folder: Option<harness_core::subagent::SubFolder>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
-        self.run_child(agent, task, refs, observed, cancel, started)
+        self.run_child(agent, task, refs, observed, cancel, started, folder)
             .await
     }
 
@@ -5345,9 +5645,12 @@ impl TurnHost for Session {
         call_id: String,
         observed: Arc<Vec<String>>,
         max_tokens: u64,
+        folder: Option<harness_core::subagent::SubFolder>,
     ) -> Result<harness_core::backend::BackgroundDelegated, String> {
-        self.start_background(agent, task, follow_up, call_id, observed, max_tokens)
-            .await
+        self.start_background(
+            agent, task, follow_up, call_id, observed, max_tokens, folder,
+        )
+        .await
     }
 
     async fn keep_image(&self, image: harness_core::backend::KeptImage) -> Result<(), String> {

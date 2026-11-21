@@ -758,6 +758,7 @@ fn seed_other_chat(store: &Store, ws: &Path, turns: u64, age_ms: i64) {
         backend: "native".into(),
         node_id: "local".into(),
         approval_mode: harness_core::policy::ApprovalMode::Auto,
+        sub_folder: None,
     }));
     let file = ws.join("f.txt").display().to_string();
     for t in 0..turns {

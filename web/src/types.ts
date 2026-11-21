@@ -41,6 +41,8 @@ export interface SessionCreated {
   no_callbacks?: boolean;
   /** How its commands run; absent for a chat (no commands). */
   exec_mode?: ExecMode;
+  /** A sub-agent that can change files: where it works (the chat's folder, or a copy of its own); absent for a reader and for a chat. */
+  sub_folder?: "shared" | "own";
   /** Set on a fork (C.2): events 2 through `through_seq` are the parent's, copied at the same seqs. */
   forked?: { parent: string; through_seq: number };
 }
