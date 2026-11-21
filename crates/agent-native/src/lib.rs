@@ -13,6 +13,8 @@ pub mod context;
 mod delegate_availability_tests;
 #[cfg(test)]
 mod edit_guard_tests;
+#[cfg(test)]
+mod history_tests;
 pub mod images;
 pub mod live_usage;
 pub mod llm;
@@ -1833,6 +1835,14 @@ pub struct Rebuild<'a> {
     /// says (results whole, a fold's note on its own), not as requests
     /// send it.
     pub transcript: bool,
+    /// The log's shortening is not applied: no `context_shortened` stub,
+    /// fold or dropped thinking. What `history` reads (PLAN.md T91): the
+    /// conversation as the log holds it, every other rule of the rebuild
+    /// kept (rewound ranges, the chosen variant, withheld images, where a
+    /// queued message was read). A summary (`history_summarized`) is not
+    /// applied by [`rebuild`] either: [`split_summary`] does that for the
+    /// loop, and a caller that does not call it holds the whole log.
+    pub unshortened: bool,
 }
 
 /// The harness's line in front of an earlier answer of another agent of
@@ -1885,6 +1895,9 @@ fn tool_image_msg(call_id: String, name: String, i: &harness_core::event::ToolIm
 /// the log shortened (`context_shortened`, X.15) applied.
 pub fn rebuild(history: &[RawEvent], how: &Rebuild<'_>) -> Vec<ChatMsg> {
     let (msgs, spans) = rebuild_spans(history, how);
+    if how.unshortened {
+        return msgs;
+    }
     let how = if how.transcript {
         shorten::How::TRANSCRIPT
     } else {
