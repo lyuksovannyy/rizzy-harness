@@ -486,16 +486,34 @@ impl Build {
 /// The marker file of a fork's copy between its move into the projects
 /// folder and the writing of its chat: `<staging>/pending-fork-<build>`
 /// holds the folder's device and inode. A kill in that window leaves the
-/// marker (and a complete, unused folder); the next start removes the
-/// folder it names ([`sweep_pending`]). Dropping this removes the marker.
+/// marker (and a complete, unused folder); the next start decides about the
+/// folder it names ([`sweep_pending`]). Dropping this removes the marker,
+/// unless it was [released](Pending::release).
 #[derive(Debug)]
 pub(crate) struct Pending {
     file: PathBuf,
+    armed: bool,
+}
+
+impl Pending {
+    /// The marker at `file`, removed when this is dropped.
+    pub(crate) fn at(file: PathBuf) -> Self {
+        Self { file, armed: true }
+    }
+
+    /// Keep the marker on disk whatever happens to the caller (a cancelled
+    /// request): the path of the file, for [`Pending::at`].
+    pub(crate) fn release(mut self) -> PathBuf {
+        self.armed = false;
+        self.file.clone()
+    }
 }
 
 impl Drop for Pending {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.file);
+        if self.armed {
+            let _ = std::fs::remove_file(&self.file);
+        }
     }
 }
 
@@ -511,7 +529,23 @@ impl Build {
             .with_file_name(format!("{PENDING_PREFIX}{}", self.name));
         std::fs::write(&file, format!("{} {}\n", st.st_dev, st.st_ino))
             .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
-        Ok(Pending { file })
+        Ok(Pending::at(file))
+    }
+
+    /// The marker and the move in, as ONE blocking task's work (the caller
+    /// runs this inside `spawn_blocking`): a request cancelled meanwhile
+    /// either never gets here or finds the marker in place beside the folder
+    /// it names, for the next start to decide about. On a failure no marker
+    /// is left. Returns the folder's path and the marker's file.
+    pub(crate) fn mark_and_move_into(
+        self,
+        policy: &NodePolicy,
+        top: &OwnedFd,
+        names: &[String],
+    ) -> Result<(PathBuf, PathBuf), String> {
+        let marker = self.mark_pending()?;
+        let root = self.move_into(policy, top, names)?;
+        Ok((root, marker.release()))
     }
 }
 

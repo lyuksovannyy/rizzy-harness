@@ -121,19 +121,33 @@ pub(crate) struct Copy {
 impl Copy {
     /// The fork's chat is stored: a start no longer removes the folder.
     pub(crate) fn created(&mut self) {
+        // Dropping the armed marker removes it.
         self.pending = None;
     }
 
     /// Remove this copy: its chat could not be written. Only while the
     /// path is still the folder that was made (never what replaced it).
-    pub(crate) async fn discard(self) {
-        let (root, made) = (self.root, self.made);
+    pub(crate) async fn discard(mut self) {
+        let (root, made) = (self.root.clone(), self.made);
         let _ = tokio::task::spawn_blocking(move || {
             if Identity::of(&root).ok() == Some(made) {
                 let _ = std::fs::remove_dir_all(&root);
             }
         })
         .await;
+        // The folder is gone (or is not ours): the marker has nothing to say.
+        self.pending = None;
+    }
+}
+
+/// A copy dropped with neither [`Copy::created`] nor [`Copy::discard`] (its
+/// caller was cancelled before the chat was stored) keeps its marker: the
+/// folder exists and the next start decides about it.
+impl Drop for Copy {
+    fn drop(&mut self) {
+        if let Some(p) = self.pending.take() {
+            p.release();
+        }
     }
 }
 
@@ -233,9 +247,11 @@ pub(crate) async fn make(
     let mut names = vec![base.clone()];
     names.extend((0..projects::TRIES - 1).map(|_| format!("{base}-{}", make_suffix())));
     let p = policy.clone();
+    let key = pp.staging.clone().unwrap_or_default();
     let (top, build) = tokio::task::spawn_blocking(move || {
         let top = projects::open_projects(&p, &dir)?;
         let build = Build::new(&p)?;
+        fork_copy::hook("build", &key);
         Ok::<_, String>((top, build))
     })
     .await
@@ -278,13 +294,23 @@ pub(crate) async fn make(
             return Err(e);
         }
     };
-    // A kill from here to the chat's creation leaves a complete, unused
-    // folder: the marker has the next start remove it.
-    let pending = build.mark_pending()?;
+    // A kill (or a cancel) from here to the chat's creation leaves a
+    // complete, unused folder: its marker is made in the same blocking task
+    // as the move, so a folder in the projects folder always has one, and
+    // the next start decides about it.
     let p = policy.clone();
-    let root = tokio::task::spawn_blocking(move || build.move_into(&p, &top, &names))
-        .await
-        .map_err(|e| format!("moving the folder: {e}"))??;
+    let key = build
+        .path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let (root, marker) = tokio::task::spawn_blocking(move || {
+        fork_copy::hook("move", &key);
+        build.mark_and_move_into(&p, &top, &names)
+    })
+    .await
+    .map_err(|e| format!("moving the folder: {e}"))??;
+    let pending = projects::Pending::at(marker);
     slot.keep();
     let mut notes = Vec::new();
     let folder = if at_sub {
@@ -649,8 +675,177 @@ mod tests {
         assert_eq!(r.staging(), Vec::<String>::new());
         crate::git::use_test_git(None);
         // The cancelled copy gave its place back: a limit of one still has room.
-        r.make().await.unwrap();
+        let mut c = r.make().await.unwrap();
+        c.created();
         assert_eq!(r.staging(), Vec::<String>::new());
+    }
+
+    /// What `make` leaves when its future is dropped at `stage` (blocked in
+    /// the stage's blocking closure by a hook): `(left while blocked, left
+    /// once the closure ended)` as (staging, projects) listings.
+    async fn abort_at(
+        r: &Rig,
+        stage: &'static str,
+    ) -> ((Vec<String>, Vec<String>), (Vec<String>, Vec<String>)) {
+        use std::sync::{Arc, Mutex, mpsc};
+        let key = r.policy.projects.staging.clone().unwrap();
+        let (reached_tx, reached_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (reached_tx, go_rx) = (Mutex::new(reached_tx), Mutex::new(go_rx));
+        fork_copy::set_hook(
+            &key,
+            Some(Arc::new(move |s: &str| {
+                if s == stage {
+                    let _ = reached_tx.lock().unwrap().send(());
+                    let _ = go_rx.lock().unwrap().recv_timeout(Duration::from_secs(30));
+                }
+            })),
+        );
+        let reached = tokio::task::spawn_blocking(move || {
+            reached_rx.recv_timeout(Duration::from_secs(30)).is_ok()
+        });
+        {
+            let fut = r.make();
+            tokio::pin!(fut);
+            tokio::select! {
+                res = &mut fut => panic!("{stage}: finished before it was stopped: {res:?}"),
+                ok = reached => assert!(ok.unwrap(), "{stage}: never reached"),
+            }
+            // The future is dropped here, the closure still blocked.
+        }
+        let blocked = (r.staging(), r.projects());
+        go_tx.send(()).unwrap();
+        // The closure ends and what it owns is dropped: wait for it to settle.
+        let mut last = (r.staging(), r.projects());
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let now = (r.staging(), r.projects());
+            if now == last
+                && now
+                    .0
+                    .iter()
+                    .all(|n| !n.starts_with("build-") && !n.starts_with("forksrc-"))
+            {
+                break;
+            }
+            last = now;
+        }
+        fork_copy::set_hook(&key, None);
+        (blocked, last)
+    }
+
+    /// Nothing is left in staging but a marker, and a marker exists
+    /// whenever a folder does.
+    fn assert_settled(stage: &str, left: &(Vec<String>, Vec<String>)) {
+        let (staging, projects) = left;
+        assert!(
+            staging.iter().all(|n| n.starts_with("pending-fork-")),
+            "{stage}: left in staging: {staging:?}"
+        );
+        assert!(
+            projects.is_empty() || !staging.is_empty(),
+            "{stage}: a folder {projects:?} with no marker: nothing would remove it"
+        );
+    }
+
+    /// The future dropped while the walk of stage 1 is running: the walk's
+    /// blocking task owns the staging folder, so it is not removed under the
+    /// walk, and it is gone when the task ends.
+    #[tokio::test]
+    async fn a_cancel_during_the_walk_does_not_remove_its_folder_under_it() {
+        let r = rig(true).await;
+        let (blocked, settled) = abort_at(&r, "walk").await;
+        assert!(
+            blocked.0.iter().any(|n| n.starts_with("forksrc-")),
+            "the staging folder was removed while the walk could still write into it: {:?}",
+            blocked.0
+        );
+        assert_settled("walk", &settled);
+        assert_eq!(settled.1, Vec::<String>::new());
+    }
+
+    /// The future dropped while the folder is made: nothing is left.
+    #[tokio::test]
+    async fn a_cancel_while_the_build_folder_is_made_leaves_nothing() {
+        let r = rig(true).await;
+        let (_, settled) = abort_at(&r, "build").await;
+        assert_eq!(settled, (Vec::new(), Vec::new()));
+    }
+
+    /// The future dropped while the folder is marked and moved in: the one
+    /// blocking task makes the marker and the move, so a folder in the
+    /// projects folder always has its marker, and the next start removes it.
+    #[tokio::test]
+    async fn a_cancel_during_the_move_leaves_a_marker_for_the_folder_it_made() {
+        let mut r = rig(true).await;
+        let (_, settled) = abort_at(&r, "move").await;
+        assert_settled("move", &settled);
+        assert_eq!(settled.1.len(), 1, "the move did not finish: {settled:?}");
+        r.policy.locate_projects(&r.data).unwrap();
+        assert_eq!(r.projects(), Vec::<String>::new());
+        assert_eq!(r.staging(), Vec::<String>::new());
+    }
+
+    /// A copy whose caller was cancelled before it stored the chat (the
+    /// `Copy` is dropped, neither `created` nor `discard` called): the folder
+    /// keeps its marker, so the next start decides about it.
+    #[tokio::test]
+    async fn a_copy_dropped_before_its_chat_keeps_its_marker() {
+        let r = rig(true).await;
+        let c = r.make().await.unwrap();
+        drop(c);
+        assert_settled("drop", &(r.staging(), r.projects()));
+        assert_eq!(r.projects().len(), 1);
+        assert_eq!(r.staging().len(), 1, "{:?}", r.staging());
+    }
+
+    /// The future dropped while git clones: git is killed, and nothing is left.
+    #[tokio::test]
+    async fn a_cancel_during_the_clone_leaves_nothing() {
+        let r = rig(true).await;
+        let real = String::from_utf8(
+            std::process::Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let script = r.data.join("slow-git/git");
+        let reached = r.data.join("clone-reached");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        crate::test_script::script(
+            &script,
+            &format!(
+                "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = clone ]; then touch '{}'; sleep 30; fi; done\n\
+                 exec {} \"$@\"\n",
+                reached.display(),
+                real.trim()
+            ),
+        );
+        crate::git::use_test_git(Some(script));
+        {
+            let fut = r.make();
+            tokio::pin!(fut);
+            let wait = async {
+                while !reached.exists() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            tokio::select! {
+                res = &mut fut => panic!("finished: {res:?}"),
+                () = wait => {}
+            }
+        }
+        crate::git::use_test_git(None);
+        for _ in 0..100 {
+            if r.staging().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(r.staging(), Vec::<String>::new());
+        assert_eq!(r.projects(), Vec::<String>::new());
     }
 
     /// A name that is taken (a folder, or a link) is never replaced or

@@ -110,6 +110,43 @@ pub(crate) enum Mutation {
     PlainClone,
 }
 
+/// Tests: a function called at named stages of a copy (`build`, `walk`,
+/// `move`), keyed by the node's staging folder, from inside the blocking
+/// closures: a test blocks there, drops the future, and looks at what is
+/// left.
+#[cfg(test)]
+pub(crate) type Hook = Arc<dyn Fn(&str) + Send + Sync>;
+
+#[cfg(test)]
+static HOOKS: std::sync::Mutex<Vec<(PathBuf, Hook)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn set_hook(key: &Path, hook: Option<Hook>) {
+    let mut h = HOOKS.lock().unwrap();
+    h.retain(|(k, _)| k != key);
+    if let Some(f) = hook {
+        h.push((key.to_path_buf(), f));
+    }
+}
+
+/// The stage `stage` of the copy that works in the staging folder `key`.
+#[cfg(test)]
+pub(crate) fn hook(stage: &str, key: &Path) {
+    let f = HOOKS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, f)| f.clone());
+    if let Some(f) = f {
+        f(stage);
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) fn hook(_stage: &str, _key: &Path) {}
+
 #[cfg(test)]
 pub(crate) fn pretend_version(v: Option<(u32, u32, u32)>) {
     VERSION.with(|c| c.set(v));
@@ -495,7 +532,7 @@ pub(crate) async fn fill(p: &Plan<'_>) -> Result<Filled, String> {
     version_ok().await?;
     // Stage 1: a sanitised copy, no git process.
     let work = Scratch::new(p.outside)?;
-    let data = sanitise(p, &work).await?;
+    let (work, data) = sanitise(p, work).await?;
     let git_dir = work.repo.clone();
     let (head, _branch) = tokio::task::spawn_blocking(move || user_repo::head_of(&git_dir))
         .await
@@ -592,8 +629,11 @@ pub(crate) async fn fill(p: &Plan<'_>) -> Result<Filled, String> {
 }
 
 /// Stage 1 on a blocking thread, within the stage's time; the walk is told
-/// to stop if this future is dropped.
-async fn sanitise(p: &Plan<'_>, work: &Scratch) -> Result<fork_sanitise::Data, String> {
+/// to stop if this future is dropped. The blocking task OWNS the staging
+/// folder's guard while it writes into it: a cancelled future cannot remove
+/// the folder under the walk, and the folder goes when the task ends (its
+/// output, the guard included, is dropped after the walk has stopped).
+async fn sanitise(p: &Plan<'_>, work: Scratch) -> Result<(Scratch, fork_sanitise::Data), String> {
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let _stop = StopOnDrop(cancel.clone());
     let lim = fork_sanitise::Limits {
@@ -602,10 +642,16 @@ async fn sanitise(p: &Plan<'_>, work: &Scratch) -> Result<fork_sanitise::Data, S
         deadline: Instant::now() + p.timeout,
         cancel,
     };
-    let (root, into) = (p.source.to_path_buf(), work.repo.clone());
-    tokio::task::spawn_blocking(move || fork_sanitise::copy(&root, &into, &lim))
-        .await
-        .map_err(|e| format!("copying the repository: {e}"))?
+    let root = p.source.to_path_buf();
+    let key = p.outside.to_path_buf();
+    let (work, data) = tokio::task::spawn_blocking(move || {
+        hook("walk", &key);
+        let data = fork_sanitise::copy(&root, &work.repo, &lim);
+        (work, data)
+    })
+    .await
+    .map_err(|e| format!("copying the repository: {e}"))?;
+    data.map(|d| (work, d))
 }
 
 /// The parent's `origin` URL (validated, no credentials), from the bytes of
