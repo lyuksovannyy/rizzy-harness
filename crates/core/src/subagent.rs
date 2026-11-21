@@ -153,6 +153,38 @@ pub fn finish_in(events: impl IntoIterator<Item = EventKind>) -> Option<Finish> 
     found
 }
 
+/// Where a sub-agent that can change files works (the owner, 2026-11-21):
+/// in the delegating chat's own folder, or in a copy of its own that is
+/// merged back per file when it ends. A sub-agent that only reads always
+/// works in the chat's folder. The `delegate` call's `folder` field and
+/// node.toml's `[limits] sub_agent_folder` use the same two words; the
+/// node's setting wins (PLAN.md T32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubFolder {
+    /// The chat's folder: the default.
+    #[default]
+    Shared,
+    /// A copy of its own, merged back when it ends (needs a git repository).
+    Own,
+}
+
+impl SubFolder {
+    pub const ALL: [SubFolder; 2] = [SubFolder::Shared, SubFolder::Own];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubFolder::Shared => "shared",
+            SubFolder::Own => "own",
+        }
+    }
+
+    /// Exactly `"shared"` or `"own"`.
+    pub fn parse(s: &str) -> Option<SubFolder> {
+        Self::ALL.into_iter().find(|f| f.as_str() == s)
+    }
+}
+
 /// How a child's turn came out, for the parent.
 pub struct ChildResult<'a> {
     pub child: crate::SessionId,
@@ -738,5 +770,23 @@ mod follow_up_tests {
         assert!(follow_up_writes(Landed::Part).contains("some of your files are in this copy"));
         assert!(follow_up_writes(Landed::None).contains("NOT applied"));
         assert!(!follow_up_writes(Landed::All).contains("NOT"));
+    }
+}
+
+#[cfg(test)]
+mod sub_folder_tests {
+    use super::SubFolder;
+
+    /// Two words, exactly: the tool's `folder` and node.toml's
+    /// `sub_agent_folder` share them, and `shared` is the default.
+    #[test]
+    fn the_two_words_parse_exactly_and_shared_is_the_default() {
+        assert_eq!(SubFolder::parse("shared"), Some(SubFolder::Shared));
+        assert_eq!(SubFolder::parse("own"), Some(SubFolder::Own));
+        for bad in ["", "Own", "SHARED", " own", "copy", "own\n"] {
+            assert_eq!(SubFolder::parse(bad), None, "{bad:?}");
+        }
+        assert_eq!(SubFolder::default(), SubFolder::Shared);
+        assert_eq!(serde_json::to_string(&SubFolder::Own).unwrap(), "\"own\"");
     }
 }

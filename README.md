@@ -1849,6 +1849,7 @@ model_first_byte_timeout_s = 600     # wait for a model's first answer (10 .. 36
 model_idle_timeout_s = 300           # then the longest gap between its events (10 .. 3600)
 max_subagents = 4                    # sub-agents one turn may start; the master may ask for fewer (0 .. 32)
 max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub-agents not; 0: off (0 .. 4)
+sub_agent_folder = "shared"          # where a sub-agent that can write works: "shared" (the chat's folder) or "own" (a copy of its own, merged back; needs a git repository); "own" here beats what an agent asks for (see "Sub-agents")
 background_per_session = 8           # background commands one chat may run at once; 0: off (0 .. 32)
 background_per_node = 64             # background commands this node runs at once, all chats (0 .. 256)
 background_output_kb = 256           # output kept in memory per background command (16 .. 4096)

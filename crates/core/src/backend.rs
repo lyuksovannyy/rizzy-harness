@@ -69,6 +69,9 @@ pub trait TurnHost: Send + Sync {
     /// web results from `refs`, the caller's book. `observed` is the URL
     /// provenance the caller holds (the user's words and trusted tool
     /// results, never the task): the child's `web_fetch` may follow these.
+    /// `folder`: where a sub-agent that can change files works, as the call
+    /// asked (`None`: it left the field out); the node decides
+    /// (`[limits] sub_agent_folder`, PLAN.md T32) and a reader ignores it.
     async fn delegate(
         &self,
         _agent: crate::agent::AgentSpec,
@@ -77,6 +80,7 @@ pub trait TurnHost: Send + Sync {
         _observed: std::sync::Arc<Vec<String>>,
         _cancel: CancellationToken,
         _started: Box<dyn FnOnce(crate::SessionId) + Send>,
+        _folder: Option<crate::subagent::SubFolder>,
     ) -> Result<DelegateOutcome, String> {
         Err("delegation is not available here".into())
     }
@@ -129,6 +133,7 @@ pub trait TurnHost: Send + Sync {
         _call_id: String,
         _observed: std::sync::Arc<Vec<String>>,
         _max_tokens: u64,
+        _folder: Option<crate::subagent::SubFolder>,
     ) -> Result<BackgroundDelegated, String> {
         Err("background sub-agents are not available here".into())
     }

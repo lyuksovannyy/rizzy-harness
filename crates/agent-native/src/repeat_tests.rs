@@ -113,6 +113,7 @@ impl TurnHost for Host {
         _observed: Arc<Vec<String>>,
         _cancel: tokio_util::sync::CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
+        _folder: Option<harness_core::subagent::SubFolder>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
         let child = SessionId::new();
         started(child);

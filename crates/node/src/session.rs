@@ -5328,6 +5328,7 @@ impl TurnHost for Session {
         observed: Arc<Vec<String>>,
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
+        _folder: Option<harness_core::subagent::SubFolder>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
         self.run_child(agent, task, refs, observed, cancel, started)
             .await
@@ -5345,6 +5346,7 @@ impl TurnHost for Session {
         call_id: String,
         observed: Arc<Vec<String>>,
         max_tokens: u64,
+        _folder: Option<harness_core::subagent::SubFolder>,
     ) -> Result<harness_core::backend::BackgroundDelegated, String> {
         self.start_background(agent, task, follow_up, call_id, observed, max_tokens)
             .await
