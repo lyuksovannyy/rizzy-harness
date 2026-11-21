@@ -9,7 +9,7 @@
 // scope). A lazy chunk.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type Scope } from "../../api";
-import { NEW_AGENT } from "../../lib/agents";
+import { mayEditAgents, NEW_AGENT } from "../../lib/agents";
 import type { Agent, NewAgent } from "../../types";
 import { AgentPage, confirmDelete } from "../AgentPage";
 import { AgentList } from "../Agents";
@@ -58,6 +58,8 @@ export default function WorkspaceAgents(props: WorkspacePanelProps) {
         }}
         onChanged={changed}
         scope={scope}
+        personal={props.workspace.personal}
+        serverAdmin={mayEditAgents(props.me)}
       />
     );
   }

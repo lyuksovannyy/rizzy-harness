@@ -107,6 +107,8 @@ export default function Agents(props: {
         // An editor reads and writes the server's scope; everyone else
         // reads in the listed workspace.
         scope={writes ? "server" : (props.scope ?? null)}
+        serverAdmin={admin}
+        personal={props.me.workspace?.personal ?? false}
       />
     );
   }

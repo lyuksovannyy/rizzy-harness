@@ -11,10 +11,15 @@ import { Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { type Scope } from "../api";
 import { pageApi } from "../apiPages";
+import { chainPlace, NO_CHAIN, saveChain } from "../lib/agentModels";
 import { NEW_AGENT } from "../lib/agents";
+import { t } from "../lib/i18n";
+import "../lib/i18nPages";
 import { rawModel } from "../lib/models";
+import type { Chain } from "../lib/modelPlan";
 import type { Agent, AgentDetail, AgentFeatures, NewAgent } from "../types";
 import { AgentAvatar, AgentMark, agentAlert } from "./AgentAvatar";
+import { AgentModelEditor, NewAgentModels } from "./AgentModelEditor";
 import { AvatarEditor } from "./AvatarEditor";
 import { DelegatePicker } from "./DelegatePicker";
 
@@ -224,6 +229,14 @@ function draftOf(d: AgentDetail): Draft {
 
 const same = (a: Draft, b: Draft) => JSON.stringify(a) === JSON.stringify(b);
 
+/** What a viewer who may not change the chain is told about who does. */
+const READ_HINT = {
+  server: "agentModels.readServer",
+  workspace: "agentModels.readWorkspace",
+  personal: "agentModels.readPersonal",
+  personalOwn: "agentModels.personalOwn",
+} as const;
+
 /** The models the agent runs on, in order, the ones its provider dropped in red. */
 export function AgentModels({ agent: a }: { agent: Agent }) {
   const gone = a.unavailable;
@@ -262,6 +275,10 @@ export function AgentPage(props: {
   onChanged: () => void;
   /** Where the page reads and, when `editable`, writes: a workspace's agents or the server's ("server"). */
   scope?: Scope | null;
+  /** The scope is the viewer's Personal workspace: it has no settings, so no chains of its own. */
+  personal?: boolean;
+  /** The viewer is a server admin, who sets the server's chains (also from a Personal workspace). */
+  serverAdmin?: boolean;
 }) {
   const creating = props.id === NEW_AGENT;
   const [detail, setDetail] = useState<AgentDetail | null>(null);
@@ -283,6 +300,10 @@ export function AgentPage(props: {
     face.current?.focus();
   }, [looks]);
   const [busy, setBusy] = useState<"save" | "summary" | null>(null);
+  // A new agent's models: null until touched. `made` is set when the agent
+  // exists but its models were not saved: the page stays, with a retry.
+  const [chain, setChain] = useState<Chain | null>(null);
+  const [made, setMade] = useState<{ id: string; why: string } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const ids = useId();
@@ -341,7 +362,16 @@ export function AgentPage(props: {
     setMsg(null);
     setDraft({ ...draft, ...p });
   };
-  const handleError = creating ? handleProblem(draft.id, props.agents) : null;
+  const place = chainPlace({
+    scope: writeScope,
+    editable: canEdit,
+    serverAdmin: props.serverAdmin ?? false,
+    personal: props.personal ?? false,
+    own: creating ? inWorkspace : listed?.scope === "workspace",
+  });
+  const newChain = "edit" in place && creating && chain?.model ? chain : null;
+  // Once the agent exists its handle is taken: by itself.
+  const handleError = creating && !made ? handleProblem(draft.id, props.agents) : null;
   const nameError = canEdit && !locked && !draft.name.trim() ? "Give it a name." : null;
   const promptError = canEdit && !locked && !draft.prompt.trim() ? "Write its instructions." : null;
 
@@ -363,6 +393,17 @@ export function AgentPage(props: {
           writeScope,
         );
         props.onChanged();
+        if (newChain && "edit" in place) {
+          // The chain needs the agent's id: it is saved right after. If that
+          // fails the agent stays made and the page stays, with a retry.
+          try {
+            await saveChain(place.edit, d.id, newChain);
+            props.onChanged();
+          } catch (x) {
+            setMade({ id: d.id, why: x instanceof Error ? x.message : String(x) });
+            return;
+          }
+        }
         props.onOpen(d.id);
         return;
       }
@@ -387,6 +428,20 @@ export function AgentPage(props: {
       props.onChanged();
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const retryModels = async () => {
+    if (!made || !newChain || !("edit" in place)) return;
+    setBusy("save");
+    try {
+      await saveChain(place.edit, made.id, newChain);
+      props.onChanged();
+      props.onOpen(made.id);
+    } catch (x) {
+      setMade({ id: made.id, why: x instanceof Error ? x.message : String(x) });
     } finally {
       setBusy(null);
     }
@@ -627,12 +682,50 @@ export function AgentPage(props: {
               onChange={(delegate_to) => set({ delegate_to })}
             />
           ) : null}
+          {creating && "edit" in place && writeScope && (
+            <div className="field">
+              <span className="field-label">Models</span>
+              <NewAgentModels
+                agent={{ id: draft.id, name: draft.name || draft.id }}
+                target={place.edit}
+                scope={writeScope}
+                chain={chain ?? NO_CHAIN}
+                onChange={setChain}
+                disabled={!!made}
+              />
+            </div>
+          )}
+          {creating && "read" in place && place.read === "personalOwn" && (
+            <div className="field">
+              <span className="field-label">Models</span>
+              <p className="field-hint">{t("agentModels.personalOwn")}</p>
+            </div>
+          )}
           {listed && !creating && (
             <div className="field">
               <span className="field-label">Models</span>
-              <AgentModels agent={listed} />
-              {agentAlert(listed) && <span className="small error-text">{agentAlert(listed)}</span>}
-              <p className="field-hint">Chosen per agent in Settings → AI provider.</p>
+              {"edit" in place && writeScope ? (
+                <AgentModelEditor agent={listed} target={place.edit} scope={writeScope} onSaved={props.onChanged} />
+              ) : (
+                <>
+                  <AgentModels agent={listed} />
+                  {agentAlert(listed) && <span className="small error-text">{agentAlert(listed)}</span>}
+                  <p className="field-hint">{t(READ_HINT["read" in place ? place.read : "server"])}</p>
+                </>
+              )}
+            </div>
+          )}
+          {made && (
+            <div className="error-text" role="alert">
+              {t("agentModels.created", { id: made.id, why: made.why })}
+              <span className="row">
+                <button type="button" disabled={busy !== null} onClick={() => void retryModels()}>
+                  {t("agentModels.retry")}
+                </button>
+                <button type="button" onClick={() => props.onOpen(made.id)}>
+                  {t("agentModels.open")}
+                </button>
+              </span>
             </div>
           )}
 
@@ -645,13 +738,15 @@ export function AgentPage(props: {
                   {creating ? "Cancel" : "Revert"}
                 </button>
               )}
-              <button
-                type="submit"
-                className="primary"
-                disabled={busy !== null || (!dirty && !creating) || !!handleError || !!nameError || !!promptError}
-              >
-                {creating ? "Create agent" : "Save"}
-              </button>
+              {!made && (
+                <button
+                  type="submit"
+                  className="primary"
+                  disabled={busy !== null || (!dirty && !creating) || !!handleError || !!nameError || !!promptError}
+                >
+                  {creating ? "Create agent" : "Save"}
+                </button>
+              )}
             </div>
           )}
         </form>
