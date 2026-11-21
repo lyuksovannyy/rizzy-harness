@@ -245,6 +245,24 @@ describe("the choice, inline", () => {
     expect(rewind).toHaveBeenCalledTimes(2);
     expect(rewind).toHaveBeenLastCalledWith(SID, 3, true, true);
   });
+
+  test("Rewind anyway is a button of its own under a line of the UI's own, not part of the server's error text; no such line for another refusal", async () => {
+    const changed = [created, ...turn(2, "t1", "first"), ev(6, "checkpoint", { turn_id: "t1", phase: "after", git_ref: "r", files: ["a.rs"] }), ...turn(7, "t2", "second")];
+    rewind.mockRejectedValueOnce(new Error("these files changed after the turn; undo would overwrite that: `a.rs`"));
+    await show(changed);
+    await click(actions()[0]);
+    await wait();
+    await click(named("Rewind conversation and files"));
+    const anyway = named("Rewind anyway")!;
+    expect(anyway.closest("[role=alert]")).toBeNull();
+    expect(anyway.className).toBe("link");
+    const panel = host.querySelector(".rewind-panel")!;
+    expect(panel.querySelector("[role=alert]")!.textContent).toBe("these files changed after the turn; undo would overwrite that: `a.rs`");
+    expect(panel.textContent).toContain("Another chat changed these files since. Rewind the files anyway?");
+    rewind.mockRejectedValueOnce(new Error("This chat can't be rewound there: a turn is running"));
+    await click(named("Rewind conversation"));
+    expect(host.querySelector(".rewind-panel")!.textContent).not.toContain("Another chat changed");
+  });
 });
 
 describe("the message back in the box", () => {

@@ -14,6 +14,7 @@ export const pages = {
   "rewind.filesHelp": "Files go back to before this message, like \u201cRewind files to before this turn\u201d.",
   "rewind.notUndone": "Not undone: commands that ran, network calls, memory saved, board changes, published artifacts, sub-agent chats, tokens spent.",
   "rewind.anyway": "Rewind anyway",
+  "rewind.anywayHelp": "Another chat changed these files since. Rewind the files anyway?",
   "rewind.working": "Rewinding\u2026",
   "rewind.turns": "{n} turns rewound",
   "rewind.turn": "1 turn rewound",

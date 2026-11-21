@@ -123,14 +123,21 @@ export function RewindMessage(props: {
           )}
           <p className="small muted">{t("rewind.notUndone")}</p>
           {err && (
-            <div className="error-text" role="alert">
-              {err}{" "}
+            <>
+              <div className="error-text" role="alert">
+                {err}
+              </div>
               {forceable(err) && (
-                <button type="button" className="link" disabled={busy} onClick={() => void run(asked.current, true)}>
-                  {t("rewind.anyway")}
-                </button>
+                <>
+                  <p className="small muted">{t("rewind.anywayHelp")}</p>
+                  <div className="rewind-buttons row wrap">
+                    <button type="button" className="link" disabled={busy} onClick={() => void run(asked.current, true)}>
+                      {t("rewind.anyway")}
+                    </button>
+                  </div>
+                </>
               )}
-            </div>
+            </>
           )}
         </div>
       )}
