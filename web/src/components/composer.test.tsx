@@ -8,6 +8,8 @@ import { describe, expect, test, vi } from "vitest";
 import type { Mode } from "../lib/modes";
 import { api } from "../api";
 import { Composer, type Submission } from "./Composer";
+import type { Live } from "../live";
+import { LiveCtx } from "../lib/liveCtx";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -712,5 +714,70 @@ describe("calling several agents (X.37)", () => {
     await c.type("@general @coder @writer @editor @smol go");
     expect(c.host.querySelector('.chips [role="alert"]')?.textContent).toMatch(/at most 4/);
     c.done();
+  });
+});
+
+describe("the send error after the server went away", () => {
+  const OFFLINE = "The server is not reachable. Check that it is running, then try again.";
+  function chat(onSubmit: (s: Submission) => Promise<void>) {
+    const listeners = new Set<() => void>();
+    const link = {
+      state: "offline",
+      version: 0,
+      subscribe: (l: () => void) => (listeners.add(l), () => listeners.delete(l)),
+      set(s: string) {
+        link.state = s;
+        act(() => listeners.forEach((l) => l()));
+      },
+    };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() =>
+      root.render(
+        <LiveCtx.Provider value={link as unknown as Live}>
+          <Composer where="session" agents={[]} models={[]} workers={[]} agentId="" onAgentChange={() => {}} agenticBlocked={null} onSubmit={onSubmit} />
+        </LiveCtx.Provider>,
+      ),
+    );
+    const textarea = host.querySelector("textarea")!;
+    const send = async (value: string) => {
+      act(() => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, value);
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => {
+        textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      });
+    };
+    return { host, link, send, unmount: () => act(() => root.unmount()) };
+  }
+
+  test("goes when the live connection is back; the text stays in the box", async () => {
+    const c = chat(async () => {
+      throw new Error(OFFLINE);
+    });
+    await c.send("hello");
+    expect(c.host.querySelector(".error-text")?.textContent).toBe(OFFLINE);
+    c.link.set("connecting");
+    expect(c.host.querySelector(".error-text")).not.toBeNull();
+    c.link.set("live");
+    expect(c.host.querySelector(".error-text")).toBeNull();
+    expect(c.host.querySelector("textarea")!.value).toBe("hello");
+    c.unmount();
+  });
+
+  test("another error is not cleared by a reconnect, and a later send that works clears its own", async () => {
+    let fail = true;
+    const c = chat(async () => {
+      if (fail) throw new Error("This model is not offered.");
+    });
+    await c.send("one");
+    c.link.set("live");
+    expect(c.host.querySelector(".error-text")?.textContent).toBe("This model is not offered.");
+    fail = false;
+    await c.send("one");
+    expect(c.host.querySelector(".error-text")).toBeNull();
+    c.unmount();
   });
 });

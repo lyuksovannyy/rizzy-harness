@@ -1,5 +1,5 @@
 import { ArrowUp, AtSign, CornerDownRight, FileText, Globe, Image, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
-import { type Dispatch, lazy, type SetStateAction, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type Dispatch, lazy, type SetStateAction, Suspense, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { t } from "../lib/i18n";
 import { isTag, marked, mentionable, pickable } from "../lib/agents";
 import { activeMention, filterAgents, matchedAlias, insertMention, isPathToken, leadingMention } from "../lib/mentions";
@@ -7,6 +7,7 @@ import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
 import { modelLabel, offeredModels, resolveModel } from "../lib/models";
 import { radioKeys, radioTab } from "../lib/radios";
 import { api } from "../api";
+import { LiveCtx } from "../lib/liveCtx";
 import { readDraft, writeDraft } from "../lib/drafts";
 import { parseCompact } from "../lib/compactCommand";
 import type { Picture } from "../lib/downscale";
@@ -255,6 +256,16 @@ export function Composer(props: {
     }
   };
   const [err, setErr] = useState<string | null>(null);
+  // "The server is not reachable" is true only until the live connection is
+  // back (in a chat; the home screen has no connection to follow).
+  const live = useContext(LiveCtx);
+  const link = useSyncExternalStore(
+    (l) => (live ? live.subscribe(l) : () => {}),
+    () => live?.state,
+  );
+  useEffect(() => {
+    if (link === "live") setErr((e) => (e === t("error.unreachable") ? null : e));
+  }, [link]);
   const ta = useRef<HTMLTextAreaElement>(null);
   // Caret to restore right after React commits a programmatic text change,
   // before the next keystroke can land in the wrong place.
