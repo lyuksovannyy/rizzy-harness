@@ -1273,18 +1273,21 @@ async fn stops_and_a_delete_end_them_and_leave_nothing_running() {
         "{end:?}"
     );
     gone("sleep 977301", "the person's stop").await;
-    // The agent's own stop, in the same turn: its result says how, and the
-    // end reaches it at the next step.
+    // The agent's own stop: its result says how, and the end reaches it at
+    // the next step. The child is stopped once its command is seen running
+    // (the process table), not after a guessed second: on a loaded machine a
+    // child still starting is a different, slower thing to stop.
+    n.prompt(sid, &[bg_delegate("look", "run: sleep 977302")]);
+    n.turns_ended(sid, 2).await;
+    appears("sleep 977302").await;
     n.prompt(
         sid,
         &[
-            bg_delegate("look", "run: sleep 977302"),
-            bash("sleep 1"),
             json!({"tool": "bash_stop", "input": {"id": "bg-2"}}),
             bash("true"),
         ],
     );
-    n.turns_ended(sid, 2).await;
+    n.turns_ended(sid, 3).await;
     let stop = n.outputs(sid, "bash_stop");
     assert!(
         stop[0].contains("bg-2 was stopped by the agent"),
@@ -1296,7 +1299,7 @@ async fn stops_and_a_delete_end_them_and_leave_nothing_running() {
     gone("sleep 977302", "bash_stop").await;
     // The chat's deletion, with a writer that has its own folder.
     n.prompt(sid, &[bg_delegate("dev2", "run: sleep 977303")]);
-    n.turns_ended(sid, 3).await;
+    n.turns_ended(sid, 4).await;
     appears("sleep 977303").await;
     let child = n.child(sid, 2);
     assert_eq!(

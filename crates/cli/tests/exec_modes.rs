@@ -195,7 +195,8 @@ impl Node {
             .try_send(MasterToNode::Prompt(PromptMsg::test(sid, text)))
             .unwrap();
         self.ack().await.unwrap();
-        let by = std::time::Instant::now() + Duration::from_secs(30);
+        // Only so that a turn that never ends does not hang the suite.
+        let by = std::time::Instant::now() + Duration::from_secs(120);
         let mut answered = std::collections::HashSet::new();
         loop {
             let log = self.rt.store().events_after(sid, 0, 10_000).unwrap();
