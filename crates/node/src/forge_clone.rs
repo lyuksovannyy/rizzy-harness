@@ -569,7 +569,7 @@ fn too_big(bounds: &Bounds) -> String {
 
 /// Whether the files under `at` (not following links) hold more than `max`
 /// bytes.
-async fn over(at: &Path, max: u64) -> bool {
+pub(crate) async fn over(at: &Path, max: u64) -> bool {
     let at = at.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut n = 0u64;

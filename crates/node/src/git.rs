@@ -46,6 +46,7 @@ use tokio::process::Command;
 
 mod at;
 mod diff;
+mod fork_copy;
 mod init;
 mod merge;
 mod upkeep;
@@ -3931,6 +3932,12 @@ mod bounds_tests;
 #[cfg(test)]
 #[path = "git_child_tests.rs"]
 mod child_tests;
+
+/// A fork's own copy of the parent's repository, against hostile
+/// repositories (C.2 part 2, T92). Test-only; lives in its own file.
+#[cfg(test)]
+#[path = "git_fork_tests.rs"]
+mod fork_tests;
 
 #[cfg(test)]
 #[path = "git_restore_memory_tests.rs"]
