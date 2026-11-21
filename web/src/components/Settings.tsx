@@ -7,6 +7,7 @@ import { pageApi } from "../apiPages";
 import { errText } from "../lib/errorText";
 import { t } from "../lib/i18n";
 import { routeHash, settingsHash } from "../lib/routes";
+import { useRevealTab } from "../lib/revealTab";
 import { pickTab, type SectionId, type TabId, visibleSections } from "../lib/settings";
 import type { Agent, Me, ModelInfo, NodeInfo, Prefs } from "../types";
 import { ChangePassword } from "./ChangePassword";
@@ -153,6 +154,7 @@ export default function Settings(props: {
     if (location.hash.startsWith("#/settings") && location.hash !== h) history.replaceState(history.state, "", h);
   }, [section, tab, props.route]);
   const tabs = sections.find((s) => s.id === section)!.tabs;
+  const tabRow = useRevealTab(`${section}/${tab}`);
   const prefs = props.prefs;
   const ws = props.me.workspace;
   const wsChanged = props.onWorkspaceChanged ?? (() => {});
@@ -189,7 +191,7 @@ export default function Settings(props: {
             ))}
           </nav>
         )}
-        <div className="tabs" role="tablist">
+        <div className="tabs" role="tablist" ref={tabRow}>
           {tabs.map((x) => (
             <button key={x} role="tab" aria-selected={tab === x} className={tab === x ? "on" : ""} onClick={() => choose(section, x)}>
               {t(`settings.${x}`)}

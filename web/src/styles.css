@@ -2973,6 +2973,16 @@ table.users td {
 table.users select {
   width: auto;
 }
+/* A wide table scrolls inside its own card, not the page. */
+.usage-group {
+  min-width: 0;
+}
+.usage-scroll {
+  overflow-x: auto;
+}
+.usage-table {
+  min-width: 32rem;
+}
 .stack .row input:not([type="checkbox"]):not([type="radio"]) {
   width: auto;
   flex: 1;
