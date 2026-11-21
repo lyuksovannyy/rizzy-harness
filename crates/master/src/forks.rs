@@ -148,7 +148,15 @@ pub(crate) async fn fork_session(
             None => Ok(()),
         })
         .await?;
-    let title = fork::title(&parent.title);
+    // Numbered per original chat: "X (fork)", "X (fork 2)", ... (a fork of a
+    // fork is the next one of the same original).
+    let nth = m
+        .inner
+        .mirror
+        .call(move |s| s.forks_of_original(pid))
+        .await?
+        .saturating_add(1);
+    let title = fork::title_nth(&parent.title, nth);
     let sent = m
         .send_command(&node_id, |req_id| MasterToNode::Fork {
             req_id,

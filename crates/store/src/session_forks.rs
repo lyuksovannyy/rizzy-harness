@@ -146,6 +146,49 @@ impl Store {
         .transpose()
     }
 
+    /// How many chats (forks) descend from the original chat `sid` belongs
+    /// to: walk up the lineage to the oldest chat it names (a deleted parent
+    /// still names its own), count everything below it. What a new fork's
+    /// title number is counted from (`harness_core::fork::title_nth`). Both
+    /// walks are bounded (a node that lies in `forked` can make a cycle).
+    pub fn forks_of_original(&self, sid: SessionId) -> Result<u64> {
+        const WALK: usize = 10_000;
+        let conn = self.lock();
+        let parent_of = |id: &str| -> Result<Option<String>> {
+            Ok(conn
+                .query_row(
+                    "SELECT parent_id FROM session_forks WHERE session_id = ?1",
+                    params![id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?)
+        };
+        let mut root = sid.to_string();
+        let mut above = std::collections::HashSet::from([root.clone()]);
+        while above.len() < WALK {
+            match parent_of(&root)? {
+                // A parent seen before is a cycle: the walk ends there.
+                Some(p) if above.insert(p.clone()) => root = p,
+                _ => break,
+            }
+        }
+        let mut seen = std::collections::HashSet::from([root.clone()]);
+        let mut queue = vec![root];
+        let mut stmt = conn.prepare("SELECT session_id FROM session_forks WHERE parent_id = ?1")?;
+        while let Some(at) = queue.pop() {
+            let kids: Vec<String> = stmt
+                .query_map(params![at], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            for k in kids {
+                if seen.len() < WALK && seen.insert(k.clone()) {
+                    queue.push(k);
+                }
+            }
+        }
+        // The original itself is not a fork.
+        Ok(seen.len() as u64 - 1)
+    }
+
     /// Write a fork: all its `events` (`harness_core::fork::build`) and the
     /// `session_images` rows of `parent` that its copied events refer to,
     /// under the fork's id, in ONE transaction. Either the whole fork is
