@@ -71,6 +71,9 @@ pub enum ChatMsg {
     /// decides which ones a request shows; the rest are left out.
     ToolImage {
         call_id: String,
+        /// The tool that returned it (`read`, `history`): the wording of
+        /// the harness's line over it follows this, never the file's name.
+        tool: String,
         /// `name` is the path as the call named it. `data` is `None` in
         /// the loop's conversation: a request is given the bytes of the
         /// images it shows (`images::tool_fill`), so a turn holds no more

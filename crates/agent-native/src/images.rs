@@ -130,17 +130,17 @@ pub const TOOL_IMAGE_SENT: &str = "[harness] The image in this file is sent to y
      again if you need it once it is gone.";
 
 /// What an image of a `history` call is called in the conversation: the
-/// turn and the image number of the call (`image_name` in the loop). A
-/// `read` of a file with this very name gets these lines too, which only
-/// say where the image is from.
+/// turn and the image number of the call (`image_name` in the loop). It is
+/// only a name: which lines go over an image follows the tool that
+/// returned it ([`ChatMsg::ToolImage::tool`]).
 pub fn history_image_name(turn: u64, image: u64) -> String {
     format!("{HISTORY_NAME}{turn} image {image}")
 }
 
 const HISTORY_NAME: &str = "history turn ";
 
-fn from_history(name: &str) -> bool {
-    name.starts_with(HISTORY_NAME)
+fn from_history(tool: &str) -> bool {
+    tool == crate::history::NAME
 }
 
 /// The harness's line after a `history` result whose image was sent.
@@ -182,8 +182,8 @@ pub fn tool_image_capped(why: &str) -> String {
 
 /// The harness's line in front of an image a `read` returned, in the
 /// user-role message after the step's results.
-pub fn tool_image_line(path: &str, call_id: &str) -> String {
-    if from_history(path) {
+pub fn tool_image_line(tool: &str, path: &str, call_id: &str) -> String {
+    if from_history(tool) {
         return format!(
             "[harness] The image \"{}\" that `history` returned (call \"{}\"), from earlier in \
              this chat, not the person's words now:",
@@ -221,8 +221,8 @@ pub fn tool_withheld_line(paths: &[String]) -> String {
 
 /// The harness's line where an image stands whose bytes the chat's store
 /// no longer holds.
-pub fn tool_missing_line(path: &str) -> String {
-    if from_history(path) {
+pub fn tool_missing_line(tool: &str, path: &str) -> String {
+    if from_history(tool) {
         return format!(
             "[harness] The image \"{}\" that `history` returned could not be loaded from the \
              chat's store, so it is not shown.",

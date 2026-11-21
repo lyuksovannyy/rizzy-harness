@@ -1892,9 +1892,15 @@ fn image_name(tool: &str, input: &serde_json::Value) -> String {
 }
 
 /// The message after a `read` result that returned an image (X.23).
-fn tool_image_msg(call_id: String, name: String, i: &harness_core::event::ToolImage) -> ChatMsg {
+fn tool_image_msg(
+    call_id: String,
+    tool: String,
+    name: String,
+    i: &harness_core::event::ToolImage,
+) -> ChatMsg {
     ChatMsg::ToolImage {
         call_id,
+        tool,
         image: provider::ImagePart {
             sha256: i.sha256.clone(),
             mime: i.mime.clone(),
@@ -2006,7 +2012,7 @@ pub fn rebuild_spans(
     let mut out = Vec::new();
     let mut open: Vec<String> = Vec::new();
     // The path each open call named, for the line over its image.
-    let mut paths: std::collections::HashMap<String, String> = Default::default();
+    let mut paths: std::collections::HashMap<String, (String, String)> = Default::default();
     // Queued messages by seq: sent while a turn ran, read where their
     // `queued_delivered` stands (X.5).
     let mut queued: std::collections::HashMap<u64, UserMessage> = Default::default();
@@ -2099,7 +2105,12 @@ pub fn rebuild_spans(
                 paths = m
                     .tool_calls
                     .iter()
-                    .map(|c| (c.call_id.clone(), image_name(&c.tool, &c.input)))
+                    .map(|c| {
+                        (
+                            c.call_id.clone(),
+                            (c.tool.clone(), image_name(&c.tool, &c.input)),
+                        )
+                    })
                     .collect();
                 if !m.text.is_empty() || !m.tool_calls.is_empty() {
                     // Another agent's answer says whose it is (only in a
@@ -2134,7 +2145,7 @@ pub fn rebuild_spans(
             EventKind::ToolCallFinished(f) => {
                 if let Some(pos) = open.iter().position(|c| *c == f.call_id) {
                     open.remove(pos);
-                    let name = paths.get(&f.call_id).cloned().unwrap_or_default();
+                    let (tool, name) = paths.get(&f.call_id).cloned().unwrap_or_default();
                     out.push(ChatMsg::Tool {
                         call_id: f.call_id.clone(),
                         content: f.output,
@@ -2142,7 +2153,7 @@ pub fn rebuild_spans(
                     out.extend(f.note.map(ChatMsg::CallNote));
                     // Its image, by reference: the bytes come from the
                     // chat's store when a request shows it (X.23).
-                    out.extend(f.image.map(|i| tool_image_msg(f.call_id, name, &i)));
+                    out.extend(f.image.map(|i| tool_image_msg(f.call_id, tool, name, &i)));
                 }
             }
             // A step's instruction files (B.9), where the log has them:
@@ -5237,7 +5248,7 @@ impl NativeBackend {
         // Without its bytes: a request loads those of the images it shows
         // from the store, so the turn holds only its window's (review of
         // PR 130, item 1).
-        let msg = tool_image_msg(call.call_id.clone(), name, &r);
+        let msg = tool_image_msg(call.call_id.clone(), call.tool.clone(), name, &r);
         (
             Some(r),
             Some(
@@ -9990,6 +10001,7 @@ mod place_notes_tests {
     fn a_steps_images_follow_its_results_and_a_summary_is_told() {
         let img = |c: &str| ChatMsg::ToolImage {
             call_id: c.into(),
+            tool: "read".into(),
             image: provider::ImagePart {
                 sha256: "s".into(),
                 mime: "image/png".into(),

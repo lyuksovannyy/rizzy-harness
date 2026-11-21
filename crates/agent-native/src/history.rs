@@ -575,6 +575,7 @@ impl Chat {
                 image,
                 bytes,
                 state,
+                ..
             } = m
             {
                 // An image an earlier `history` call showed is a copy of one
@@ -697,6 +698,7 @@ impl Chat {
                     image,
                     bytes,
                     state,
+                    ..
                 } => {
                     if walk.is_history(call_id) {
                         continue;
