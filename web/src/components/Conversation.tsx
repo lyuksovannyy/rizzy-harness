@@ -509,7 +509,9 @@ export default function Conversation(props: {
     setReviewing(false);
     reviewOpener.current?.focus();
   };
-  const plans = useMemo(() => plansOf(items, meta?.approval_mode), [items, meta?.approval_mode]);
+  // Not memoised: the view's `items` array is mutated in place, so its identity
+  // says nothing; one pass over the log per render, like the signatures above.
+  const plans = plansOf(items, meta?.approval_mode);
   // Switch the mode, then send the person's message (plan bar and review pane).
   const carryOut = async (m: ApprovalMode, text: string) => {
     setCarryErr(null);

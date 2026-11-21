@@ -21,9 +21,12 @@ export function useCompact(sessionId: string, view: SessionView | null | undefin
   // The number of items when the request went out: the outcome comes after.
   const [from, setFrom] = useState<number | null>(null);
   useEffect(() => setFrom(null), [sessionId]);
+  // The view is mutated in place: its identity says nothing, so the effect
+  // keys on the answer itself, read on each render.
+  const ended = from != null && compactEnded(view, from);
   useEffect(() => {
-    if (from != null && compactEnded(view, from)) setFrom(null);
-  }, [view, from]);
+    if (ended) setFrom(null);
+  }, [ended]);
   useEffect(() => {
     if (from == null) return;
     const id = setTimeout(() => setFrom(null), WAIT_MS);
