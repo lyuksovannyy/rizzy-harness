@@ -268,6 +268,15 @@ describe("an agent's page", () => {
     expect(sw("Chat history").disabled).toBe(true);
   });
 
+  test("An agent with no tools shows Chat history off: it has none to read with", async () => {
+    // Smol: `tools: []`, so the server reports the switch off, and the page shows what it reports.
+    const smol = agent("smol", { features: { ...ALL, history: false, memory: false, project_memory: false } });
+    api.agent.mockResolvedValue(detail(smol));
+    await show(admin, "smol", [smol]);
+    expect(sw("Chat history").checked).toBe(false);
+    expect(sw("Chat history").disabled).toBe(true);
+  });
+
   test("Connectors is its own switch: off for a new agent, saved when turned on", async () => {
     expect(NEW_FEATURES.mcp).toBe(false);
     api.agent.mockResolvedValue(detail(coder));

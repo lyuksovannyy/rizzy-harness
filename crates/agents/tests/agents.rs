@@ -1051,6 +1051,7 @@ fn every_built_in_is_judged_by_the_shared_rule() {
 #[test]
 fn the_read_only_commands_switch_adds_a_shell_only_to_a_reader() {
     use harness_agents::{Features, custom};
+    use harness_core::agent::ToolSelection;
     let make = |f: Features| custom("x", "X", "", "Do.", f, vec![]).unwrap();
     let reader = Features {
         read_files: true,
@@ -1167,6 +1168,7 @@ fn background_sub_agents_are_their_own_switch() {
 #[test]
 fn the_board_switch() {
     use harness_agents::{Features, custom};
+    use harness_core::agent::ToolSelection;
     let all = builtins();
     for (id, on) in [
         ("general", true),
@@ -1408,9 +1410,12 @@ fn a_delegates_list_narrows_and_never_widens() {
 #[test]
 fn the_history_switch() {
     use harness_agents::{Features, custom};
+    use harness_core::agent::ToolSelection;
+    // Every built-in has it except the one that has no tools at all.
     for a in builtins() {
-        assert!(a.features.history, "{}", a.id);
-        assert!(a.spec.allows_tool("history"), "{}", a.id);
+        let tool_less = a.id == "smol";
+        assert_eq!(a.features.history, !tool_less, "{}", a.id);
+        assert_eq!(a.spec.allows_tool("history"), !tool_less, "{}", a.id);
     }
     let defined = |tools: &str, extra: &str| {
         parse(
@@ -1439,10 +1444,17 @@ fn the_history_switch() {
         ..features()
     });
     assert!(!off.features.history && !off.spec.allows_tool("history"));
+    // An agent whose list is empty before `history` stays tool-less: Smol's
+    // prompt says it has no tools.
+    let smol = builtins().into_iter().find(|a| a.id == "smol").unwrap();
+    assert!(matches!(&smol.spec.tools, ToolSelection::List(l) if l.is_empty()));
+    assert!(!smol.features.history);
+    let bare = defined("[]", "");
+    assert!(matches!(&bare.spec.tools, ToolSelection::List(l) if l.is_empty()));
+    assert!(!bare.features.history && !bare.spec.allows_tool("history"));
     // Reading its own chat changes nothing: the shared rule still calls an
     // agent with only read tools read-only, and Smol (no tools) too.
     assert!(!plain.spec.changes_things(|_| true));
-    let smol = builtins().into_iter().find(|a| a.id == "smol").unwrap();
     assert!(!smol.spec.changes_things(|_| true));
     // Stored switches from before it parse with it on.
     let mut v = serde_json::to_value(features()).unwrap();

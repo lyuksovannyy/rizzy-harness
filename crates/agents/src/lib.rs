@@ -492,12 +492,14 @@ fn build(id: &str, mut fm: Frontmatter, body: &str, origin: Origin) -> Result<Ag
         return Err(AgentError::Unavailable(id.into()));
     }
     // `history` is its own switch (PLAN.md T91): a list holds it exactly
-    // when the switch is on, whatever the list said; `tools: all` turns it
-    // off through `deny_tools`, which only ever grows afterwards.
+    // when the switch is on, whatever the list said, except that an agent
+    // whose list is empty has no tools and stays so (Smol's prompt says
+    // it); `tools: all` turns it off through `deny_tools`, which only ever
+    // grows afterwards.
     if let ToolSelection::List(tools) = &mut fm.tools {
         if !fm.history {
             tools.retain(|t| t != HISTORY_TOOL);
-        } else if !tools.iter().any(|t| t == HISTORY_TOOL) {
+        } else if !tools.is_empty() && !tools.iter().any(|t| t == HISTORY_TOOL) {
             tools.push(HISTORY_TOOL.into());
         }
     }
@@ -560,7 +562,9 @@ fn build(id: &str, mut fm: Frontmatter, body: &str, origin: Origin) -> Result<Ag
         memory: fm.memory,
         project_memory: fm.project_memory,
         personalisation: fm.personalisation,
-        history: fm.history,
+        // What the agent has, not what the definition asked for: an agent
+        // with no tools has no history tool either.
+        history: fm.history && fm.tools.allows(HISTORY_TOOL),
         recall: fm.tools.allows(RECALL_TOOL),
         board: fm.tools.allows(BOARD_TOOL),
         web: any(WEB_TOOLS),
