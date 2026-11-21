@@ -263,10 +263,41 @@ fn person_text(text: &str) -> &str {
     &t[..end]
 }
 
-/// A call id as a line shows it (it comes from a provider, and before
-/// that from a model).
+/// The longest id, tool name or title a label prints, in characters.
+const LABEL_CHARS: usize = 64;
+
+/// A call id or a tool name as a label shows it: it comes from a provider,
+/// and before that from a model, and stands outside the quote, so it is
+/// only letters, digits and `_ . : -` (anything else is `_`), at most
+/// [`LABEL_CHARS`] long.
 fn shown_id(id: &str) -> String {
-    clean_line(id, 80)
+    let out: String = id
+        .chars()
+        .take(LABEL_CHARS)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if out.is_empty() { "_".into() } else { out }
+}
+
+/// The chat's title as the header shows it (a model may have named it):
+/// one line, no quotation mark and no square bracket to make a label of,
+/// at most [`LABEL_CHARS`] long.
+fn shown_title(title: &str) -> String {
+    let one = shown_name(title)
+        .chars()
+        .map(|c| match c {
+            '[' => '(',
+            ']' => ')',
+            c => c,
+        })
+        .collect::<String>();
+    head(&one, LABEL_CHARS).trim_end().to_string()
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String {
@@ -488,7 +519,7 @@ impl Chat {
             };
         }
         Chat {
-            title: shown_name(&title),
+            title: shown_title(&title),
             msgs,
             turns,
             through,
@@ -634,7 +665,7 @@ impl Chat {
                         out.push(Block {
                             label: format!(
                                 "call {} (id {})",
-                                clean_line(&c.tool, 64),
+                                shown_id(&c.tool),
                                 shown_id(&c.call_id)
                             ),
                             // History's own calls say what they asked for in
@@ -707,12 +738,12 @@ impl Chat {
         let mut seen: HashMap<String, usize> = HashMap::new();
         for b in &out {
             if let Key::Call { id, .. } = &b.key {
-                *seen.entry(id.clone()).or_default() += 1;
+                *seen.entry(shown_id(id)).or_default() += 1;
             }
         }
         for (k, b) in out.iter_mut().enumerate() {
             if let Key::Call { id, sel } = &mut b.key {
-                *sel = if seen[id.as_str()] == 1 {
+                *sel = if seen[&shown_id(id)] == 1 {
                     shown_id(id)
                 } else {
                     format!("#{}", k + 1)
