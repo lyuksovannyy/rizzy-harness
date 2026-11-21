@@ -1089,6 +1089,10 @@ export function Composer(props: {
           )}
         </div>
         {props.figures && <div className="strip-figures">{props.figures}</div>}
+        {/* Room for the second line while another mode is on: the strip then
+            grows downward only, and the box does not move (the home screen
+            centres its column). The page's CSS gives it its height. */}
+        {home && mode !== "agentic" && enabled.includes("agentic") && <div className="agentic-slot" aria-hidden="true" />}
         {home && mode === "agentic" && (
           <div className="composer-row agentic-row">
             <label>

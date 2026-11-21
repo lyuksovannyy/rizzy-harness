@@ -255,4 +255,20 @@ describe("the home screen", () => {
     expect(c.host.querySelector(".composer-strip .agentic-row .approval-pick")).not.toBeNull();
     c.unmount();
   });
+
+  test("the second line's room is kept while another mode is on, so the box does not move when Agentic is picked", async () => {
+    const worker = { node_id: "n", hostname: "box", version: "0", connected: true, embedded: true, profile: "agentic", exec_modes: ["sandbox"], exec_gaps: [], max_approval: "auto", default_approval: "auto" } as never;
+    const c = home({ workers: [worker] });
+    expect(c.host.querySelector(".composer-strip .agentic-slot")).not.toBeNull();
+    mode(c.host, "Agentic");
+    await until(c.host, ".approval-pick .select-button");
+    expect(c.host.querySelector(".composer-strip .agentic-slot")).toBeNull();
+    expect(c.host.querySelector(".composer-strip .agentic-row")).not.toBeNull();
+    c.unmount();
+    // Agentic is blocked here: nothing to keep room for.
+    const none = home({ workers: [], agenticBlocked: "No node can run an agent" });
+    expect(none.host.querySelector(".agentic-slot")).toBeNull();
+    none.unmount();
+    await tick(); // lets the lazy pickers settle before the worker closes
+  });
 });

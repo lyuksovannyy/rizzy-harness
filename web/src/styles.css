@@ -3701,6 +3701,11 @@ button.swatch:hover:not(:disabled) {
   padding-top: 0;
   font-size: var(--text-xs);
 }
+/* Room kept for that line while another mode is on (the home screen centres
+   its column, so a line that appears would move the box). The project page
+   is top-anchored and needs none. */
+.agentic-slot { display: none; }
+.home .composer-strip .agentic-slot { display: block; order: 3; flex: 1 1 100%; height: 30px; }
 /* What answers in this chat: a read-only label after the agent picker. */
 .strip-model {
   padding: 0 var(--space-1-5);
