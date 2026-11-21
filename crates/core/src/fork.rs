@@ -163,9 +163,9 @@ pub fn check(log: &[RawEvent], turn_id: &str) -> Result<Cut, String> {
 ///    the parent's), `cwd` (the node decides it) and `forked`;
 /// 2. the parent's events `2..=through_seq`, as they are, under the new id;
 /// 3. `session_forked`;
-/// 3b. when the cut is inside a message that called several agents, a
+/// 4. when the cut is inside a message that called several agents, a
 ///    `peers_skipped` ([`PeersSkipReason::Forked`]) for those not yet asked;
-/// 4. a `background_ended` ([`BackgroundReason::Forked`]) for each command
+/// 5. a `background_ended` ([`BackgroundReason::Forked`]) for each command
 ///    or background agent started in the copy and not ended in it.
 ///
 /// A chat whose first event is not a `session_created`, or whose seqs are

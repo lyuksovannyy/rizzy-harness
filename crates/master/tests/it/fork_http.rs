@@ -1093,9 +1093,8 @@ async fn a_fork_whose_ack_is_late_still_gets_its_project_and_the_auto_model() {
     assert_ne!(st, StatusCode::OK, "the ack never came: {v}");
     let new = t.local.forks()[0].0;
     caught_up(&t, &t.alex, new, 5).await;
-    assert_eq!(
+    assert!(
         t.store.session(new).unwrap().unwrap().owner_id.is_some(),
-        true,
         "claimed for whoever asked"
     );
     assert_eq!(
