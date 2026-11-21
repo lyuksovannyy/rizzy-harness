@@ -5511,7 +5511,10 @@ impl TurnHost for Session {
         let queued = if queued.is_empty() {
             queued
         } else {
-            let log = match self.read_log().await {
+            // Only the kinds the rule reads: the whole log holds every
+            // command's output, and reading it here for each turn that has
+            // an end to hand over would cost a second copy of it.
+            let log = match self.read_rewind_kinds().await {
                 Ok(l) => l,
                 Err(e) => {
                     self.bg_queue

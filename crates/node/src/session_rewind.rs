@@ -215,6 +215,23 @@ impl Session {
             .map_err(|e| e.to_string())
     }
 
+    /// The log cut to what [`split_rewound_ends`] reads: the kinds of the
+    /// rewind rule ([`rewind::KINDS`]) and `background_started`, filtered
+    /// in SQL, so no tool output and no delta is read or parsed.
+    pub(super) async fn read_rewind_kinds(&self) -> Result<Vec<RawEvent>, String> {
+        let id = self.id;
+        self.node
+            .cfg
+            .store
+            .call(move |s| {
+                let mut kinds: Vec<&str> = rewind::KINDS.to_vec();
+                kinds.push("background_started");
+                s.events_since_turn_at(id, i64::MIN, &kinds)
+            })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     /// What the log says now that a rewind or its undo is in it: the
     /// messages sent during an earlier turn and not read yet are the
     /// visible ones'. (The file tools' table and the model's history are
