@@ -566,7 +566,7 @@ const FORK_DETAILS_KB = 0.2;
 // Fork a chat, part 2 (X.48, T92): the inline choice of where a fork's
 // files live ("in its own copy of the repository" or "in the same
 // folder"), the own-copy wording of the fork's note and of the delete
-// dialog. Measured 460.74 against the recorded 460.0, so +0.8; the first
+// dialog. Measured 460.71 against the recorded 460.0, so +0.8; the first
 // load is 102.1, under the 104 ceiling.
 const FORK_CHECKOUT_KB = 0.8;
 
