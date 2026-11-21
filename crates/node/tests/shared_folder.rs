@@ -434,3 +434,186 @@ async fn shared_follow_ups_work_in_the_folder_and_name_no_folder() {
         .await;
     assert!(outs[0].contains("leave `folder` out"), "{outs:#?}");
 }
+
+// ---- The guards between two writers, each in every direction ----------------
+
+/// A tag the way `read` prints it for `text` (the first six hex digits of
+/// its SHA-256, in capitals).
+fn tag_of(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(text.as_bytes());
+    d.iter()
+        .take(3)
+        .map(|b| format!("{b:02X}"))
+        .collect::<String>()
+}
+
+fn child_id(out: &str) -> String {
+    out.strip_prefix("session: ")
+        .and_then(|r| r.lines().next())
+        .unwrap()
+        .to_string()
+}
+
+const STALE: &str = "has changed on disk since you last read it";
+
+/// `write` over a file the agent read and another writer changed since:
+/// the lead after a shared child.
+#[tokio::test]
+async fn the_lead_cannot_write_over_a_file_a_shared_child_changed() {
+    let mut r = Rig::new().await;
+    r.write("a.txt", "one\n");
+    r.lead_tools = Some(vec!["bash", "write", "read", "edit"]);
+    let script = serde_json::json!([
+        {"tool": "read", "input": {"path": "a.txt"}},
+        {"tool": "delegate", "input": {"agent": "dev", "task": "run: echo changed > a.txt"}},
+        {"tool": "write", "input": {"path": "a.txt", "content": "blind\n"}},
+        {"tool": "read", "input": {"path": "a.txt"}},
+        {"tool": "write", "input": {"path": "a.txt", "content": "fresh\n"}},
+    ]);
+    r.lead_turn(&format!("script: {script}")).await;
+    let w = finished(&r, r.session_id(), "write");
+    assert_eq!(w.len(), 2, "{w:#?}");
+    assert!(!w[0].0 && w[0].1.contains(STALE), "{w:#?}");
+    assert!(w[1].0, "{w:#?}");
+    assert_eq!(r.read("a.txt").as_deref(), Some("fresh\n"));
+}
+
+/// A shared child after the lead, through a follow-up: the child read the
+/// file in its first run, the lead changed it, the follow-up's write is
+/// refused.
+#[tokio::test]
+async fn a_shared_child_cannot_write_over_what_the_lead_changed_since_its_last_read() {
+    let mut r = Rig::new().await;
+    r.write("a.txt", "one\n");
+    r.lead_tools = Some(vec!["bash", "write", "read", "edit"]);
+    r.delegates = vec![Rig::spec("wr", &["read", "write", "bash"], vec![])];
+    let first = serde_json::json!([{"tool": "read", "input": {"path": "a.txt"}}]);
+    let s1 = serde_json::json!([{"tool": "delegate", "input": {
+        "agent": "wr", "task": format!("script: {first}")}}]);
+    let (_, outs) = r.lead_turn(&format!("script: {s1}")).await;
+    let child = child_id(&outs[0]);
+    let again = serde_json::json!([{"tool": "write", "input": {"path": "a.txt", "content": "blind-child\n"}}]);
+    let s2 = serde_json::json!([
+        {"tool": "read", "input": {"path": "a.txt"}},
+        {"tool": "write", "input": {"path": "a.txt", "content": "lead\n"}},
+        {"tool": "delegate", "input": {"agent": "wr", "session": child, "task": format!("script: {again}")}},
+    ]);
+    r.lead_turn(&format!("script: {s2}")).await;
+    let id = children(&r)[0].0;
+    let w = finished(&r, id, "write");
+    assert_eq!(w.len(), 1, "{w:#?}");
+    assert!(!w[0].0 && w[0].1.contains(STALE), "{w:#?}");
+    assert_eq!(r.read("a.txt").as_deref(), Some("lead\n"));
+}
+
+/// A shared child after another shared child running at once.
+#[tokio::test]
+async fn a_shared_child_cannot_write_over_what_another_shared_child_changed_meanwhile() {
+    let mut r = Rig::new().await;
+    r.write("a.txt", "one\n");
+    r.delegates = vec![Rig::spec("wr", &["read", "write", "bash"], vec![])];
+    let script = serde_json::json!([
+        {"tool": "read", "input": {"path": "a.txt"}},
+        {"tool": "bash", "input": {"command": "sleep 2"}},
+        {"tool": "write", "input": {"path": "a.txt", "content": "blind\n"}},
+    ]);
+    r.lead_turn(&format!(
+        "delegate: wr=script: {script} | dev=run: sleep 1; echo changed > a.txt"
+    ))
+    .await;
+    let id = children(&r)
+        .into_iter()
+        .map(|(id, _)| id)
+        .find(|id| !finished(&r, *id, "write").is_empty())
+        .expect("the writing child");
+    let w = finished(&r, id, "write");
+    assert!(!w[0].0 && w[0].1.contains(STALE), "{w:#?}");
+    assert_eq!(r.read("a.txt").as_deref(), Some("changed\n"));
+}
+
+/// An edit by tag and row on rows the other writer changed is refused.
+#[tokio::test]
+async fn an_edit_by_tag_on_rows_a_shared_child_changed_is_refused() {
+    let mut r = Rig::new().await;
+    r.write("a.txt", "one\ntwo\nthree\n");
+    r.lead_tools = Some(vec!["bash", "write", "read", "edit"]);
+    let tag = tag_of("one\ntwo\nthree\n");
+    let script = serde_json::json!([
+        {"tool": "read", "input": {"path": "a.txt"}},
+        {"tool": "delegate", "input": {"agent": "dev", "task": "run: printf 'one\\ntwo\\nTHREE\\n' > a.txt"}},
+        {"tool": "edit", "input": {"path": "a.txt", "tag": tag, "lines": [{"from": 3, "to": 3, "text": "mine3"}]}},
+    ]);
+    r.lead_turn(&format!("script: {script}")).await;
+    let e = finished(&r, r.session_id(), "edit");
+    assert_eq!(e.len(), 1, "{e:#?}");
+    assert!(!e[0].0, "{e:#?}");
+    assert_eq!(r.read("a.txt").as_deref(), Some("one\ntwo\nTHREE\n"));
+}
+
+/// ... and on rows it did not change it lands, at the rows' numbers now.
+#[tokio::test]
+async fn an_edit_by_tag_on_rows_a_shared_child_did_not_change_lands_at_the_current_rows() {
+    let mut r = Rig::new().await;
+    r.write("a.txt", "one\ntwo\nthree\n");
+    r.lead_tools = Some(vec!["bash", "write", "read", "edit"]);
+    let tag = tag_of("one\ntwo\nthree\n");
+    let script = serde_json::json!([
+        {"tool": "read", "input": {"path": "a.txt"}},
+        {"tool": "delegate", "input": {"agent": "dev", "task": "run: printf 'zero\\none\\ntwo\\nthree\\n' > a.txt"}},
+        {"tool": "edit", "input": {"path": "a.txt", "tag": tag, "lines": [{"from": 3, "to": 3, "text": "mine3"}]}},
+    ]);
+    r.lead_turn(&format!("script: {script}")).await;
+    let e = finished(&r, r.session_id(), "edit");
+    assert_eq!(e.len(), 1, "{e:#?}");
+    assert!(e[0].0, "{e:#?}");
+    assert_eq!(r.read("a.txt").as_deref(), Some("zero\none\ntwo\nmine3\n"));
+}
+
+// ---- Follow-ups that are refused, and what they say -------------------------
+
+/// A sub-agent's own sub-agent never writes in the chat's folder, on a
+/// follow-up either: the follow-up of a grandchild whose agent can change
+/// files now is refused, and nothing is written.
+#[tokio::test]
+async fn a_sub_agents_writing_sub_agent_stays_refused_on_a_follow_up_too() {
+    let mut r = Rig::with_policy(|p| p.limits.max_delegation_depth = 2).await;
+    r.git(&["init", "-q"]);
+    r.write("keep.txt", "v1\n");
+    r.git(&["add", "."]);
+    r.git(&["commit", "-qm", "init"]);
+    r.delegates = vec![Rig::spec(
+        "mid",
+        &["bash", "write"],
+        vec![Rig::spec("coder", &["read"], vec![])],
+    )];
+    let (_, outs) = r
+        .lead_turn("delegate: mid=delegate: coder=read: keep.txt")
+        .await;
+    let mid = child_id(&outs[0]);
+    let grandchild = children(&r)
+        .into_iter()
+        .map(|(id, _)| id)
+        .find(|id| {
+            r.seen.iter().any(|e| {
+                e.session_id == *id
+                    && matches!(e.typed(), Ok(EventKind::SessionCreated(c))
+                        if c.agent_id.as_deref() == Some("coder"))
+            })
+        })
+        .expect("the coder");
+    r.delegates = vec![Rig::spec(
+        "mid",
+        &["bash", "write"],
+        vec![Rig::spec("coder", &["bash", "write"], vec![])],
+    )];
+    let before = r.files();
+    let (_, outs) = r
+        .lead_turn(&format!(
+            "delegate: mid@{mid}=delegate: coder@{grandchild}=run: echo nested > nested.txt"
+        ))
+        .await;
+    let out = &outs[0];
+    assert!(out.contains("cannot be given a follow-up"), "{out}");
+    assert_eq!(r.files(), before);
+}
