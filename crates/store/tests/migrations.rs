@@ -886,6 +886,82 @@ fn a_version_1_database_is_migrated_to_the_latest_and_keeps_its_rows() {
     }
 }
 
+/// A database exactly as version 2 is recorded (the schema before the
+/// forks' lineage table), with a row in it.
+fn version_2_database(path: &Path) {
+    let c = Connection::open(path).unwrap();
+    c.execute_batch(include_str!("../schema/2.sql")).unwrap();
+    c.execute_batch(
+        "INSERT INTO events (session_id, seq, ts_ms, kind, payload) VALUES ('s', 1, 5, 'k', '{}');
+         PRAGMA user_version = 2;",
+    )
+    .unwrap();
+}
+
+/// Migration 3 (ADOPTION_PLAN C.2): a version 2 database gets
+/// `session_forks` on its next open and keeps what it held; a version 1
+/// database gets it too, after `project_clones`.
+#[test]
+fn a_version_2_database_is_migrated_to_the_latest_and_keeps_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, d) in [
+        ("master.db", Durability::Normal),
+        ("node.db", Durability::Full),
+    ] {
+        let path = dir.path().join(name);
+        version_2_database(&path);
+        migrate::check_file(&path, &harness_store::DB_SCHEMA).unwrap();
+        {
+            let c = Connection::open(&path).unwrap();
+            let has: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = 'session_forks'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(has, 0, "version 2 has no session_forks");
+        }
+        drop(Store::open(&path, d).unwrap_or_else(|e| panic!("{name}: {e}")));
+        assert_eq!(version_of(&path), MIGRATIONS.len() as i64, "{name}");
+        assert_eq!(MIGRATIONS.len(), 3);
+        let c = Connection::open(&path).unwrap();
+        assert_eq!(count(&c, "events"), 1, "{name}: the row is kept");
+        assert_eq!(
+            count(&c, "session_forks"),
+            0,
+            "{name}: the new table is there"
+        );
+        drop(c);
+        drop(Store::open(&path, d).unwrap());
+    }
+    // From version 1 both later tables arrive.
+    let path = dir.path().join("old.db");
+    version_1_database(&path);
+    drop(Store::open(&path, Durability::Full).unwrap());
+    let c = Connection::open(&path).unwrap();
+    assert_eq!(count(&c, "project_clones"), 0);
+    assert_eq!(count(&c, "session_forks"), 0);
+    assert_eq!(count(&c, "events"), 1);
+}
+
+/// Version 2 is as recorded when migration 2 shipped: a copy of its own
+/// text, so editing or re-recording it fails here.
+#[test]
+fn the_recorded_version_2_is_the_frozen_one() {
+    let recorded = include_str!("../schema/2.sql");
+    assert!(
+        !recorded.contains("session_forks"),
+        "version 2 was recorded before session_forks; that table is migration 3"
+    );
+    assert_eq!(recorded.len(), FROZEN_V2_BYTES, "schema/2.sql was changed");
+    assert_eq!(
+        fnv1a(recorded.as_bytes()),
+        FROZEN_V2_FNV1A,
+        "schema/2.sql was changed"
+    );
+}
+
 /// Version 1 is what was recorded when the schema was frozen: the file is
 /// compared with a copy of its own text, so editing or re-recording it
 /// fails here and not on someone's data directory.
@@ -906,6 +982,8 @@ fn the_recorded_version_1_is_the_frozen_one() {
 
 const FROZEN_V1_BYTES: usize = 23440;
 const FROZEN_V1_FNV1A: u64 = 0x1c7e_eb5b_77db_b503;
+const FROZEN_V2_BYTES: usize = 24338;
+const FROZEN_V2_FNV1A: u64 = 0x542a_4855_6139_4e4c;
 
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {

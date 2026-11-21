@@ -313,8 +313,12 @@ impl Store {
             }
             let sum = {
                 let conn = self.lock();
+                // What a fork copied from its parent cost the parent, which
+                // holds it (ADOPTION_PLAN C.2): the fork's sums start at its
+                // own first turn.
+                let through = crate::session_forks::through(&conn, &row.sid)?;
                 let mut st = conn.prepare_cached(&format!(
-                    "SELECT ts_ms, kind, payload FROM events
+                    "SELECT ts_ms, kind, payload, seq FROM events
                      WHERE session_id = ?1 AND ts_ms >= ?2 AND ts_ms < ?3 AND kind IN ({KINDS})
                      ORDER BY seq"
                 ))?;
@@ -324,9 +328,13 @@ impl Store {
                         r.get::<_, i64>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
                     ))
                 })? {
-                    let (ts, kind, payload) = r?;
+                    let (ts, kind, payload, seq) = r?;
+                    if harness_core::fork::inherited(through, seq.max(0) as u64) {
+                        continue;
+                    }
                     let Ok(v) = serde_json::from_str(&payload) else {
                         continue;
                     };

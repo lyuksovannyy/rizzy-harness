@@ -1,0 +1,636 @@
+-- table artifact_fts on artifact_fts
+CREATE VIRTUAL TABLE artifact_fts USING fts5(artifact_id UNINDEXED, name, filenames, notes,
+    tokenize = 'unicode61 remove_diacritics 2');
+
+-- table artifact_projects on artifact_projects
+CREATE TABLE artifact_projects (
+    artifact_id TEXT PRIMARY KEY REFERENCES artifacts(artifact_id) ON DELETE CASCADE,
+    project_id  TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE);
+
+-- table artifact_versions on artifact_versions
+CREATE TABLE artifact_versions (
+    version_id  TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,
+    status      TEXT NOT NULL,
+    error       TEXT,
+    blob_id     TEXT REFERENCES blobs(blob_id) ON DELETE CASCADE,
+    size        INTEGER NOT NULL,
+    sha256      TEXT NOT NULL,
+    filename    TEXT NOT NULL,
+    packed      TEXT,
+    by_user     INTEGER NOT NULL DEFAULT 0,
+    session_id  TEXT, call_id TEXT,
+    stage_id    TEXT NOT NULL,
+    node_id     TEXT NOT NULL,
+    meta        TEXT NOT NULL DEFAULT '{}',
+    notes       TEXT NOT NULL DEFAULT '',
+    pinned      INTEGER NOT NULL DEFAULT 0,
+    created_ms  INTEGER NOT NULL,
+    ended_ms    INTEGER,
+    UNIQUE (artifact_id, seq), UNIQUE (node_id, stage_id)
+);
+
+-- index artifact_versions_blob on artifact_versions
+CREATE INDEX artifact_versions_blob ON artifact_versions(blob_id);
+
+-- index artifact_versions_pending on artifact_versions
+CREATE INDEX artifact_versions_pending ON artifact_versions(status) WHERE status = 'pending';
+
+-- index artifact_versions_session on artifact_versions
+CREATE INDEX artifact_versions_session ON artifact_versions(session_id);
+
+-- table artifacts on artifacts
+CREATE TABLE artifacts (
+    artifact_id  TEXT PRIMARY KEY,
+    workspace_id TEXT REFERENCES workspaces(workspace_id) ON DELETE SET NULL,
+    owner_id     TEXT REFERENCES users(user_id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    visibility   TEXT NOT NULL DEFAULT 'private',
+    created_ms   INTEGER NOT NULL,
+    updated_ms   INTEGER NOT NULL
+);
+
+-- index artifacts_owner on artifacts
+CREATE INDEX artifacts_owner ON artifacts(owner_id, workspace_id);
+
+-- index artifacts_ws on artifacts
+CREATE INDEX artifacts_ws ON artifacts(workspace_id, updated_ms DESC);
+
+-- table attachments on attachments
+CREATE TABLE attachments (
+    attachment_id TEXT PRIMARY KEY,
+    owner_id      TEXT,
+    name          TEXT NOT NULL,
+    mime          TEXT NOT NULL,
+    text          TEXT NOT NULL,
+    truncated     INTEGER NOT NULL,
+    created_ms    INTEGER NOT NULL
+);
+
+-- table audit on audit
+CREATE TABLE audit (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms  INTEGER NOT NULL,
+    kind   TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
+
+-- table blob_previews on blob_previews
+CREATE TABLE blob_previews (
+    blob_id     TEXT PRIMARY KEY REFERENCES blobs(blob_id) ON DELETE CASCADE,
+    width       INTEGER, height INTEGER,
+    duration_ms INTEGER,
+    thumb_mime  TEXT,
+    thumb       BLOB,
+    no_thumb    INTEGER NOT NULL DEFAULT 0,
+    updated_ms  INTEGER NOT NULL
+);
+
+-- table blobs on blobs
+CREATE TABLE blobs (
+    blob_id    TEXT PRIMARY KEY,
+    owner_id   TEXT REFERENCES users(user_id) ON DELETE CASCADE,
+    sha256     TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    format     TEXT NOT NULL,
+    mime       TEXT NOT NULL,
+    display    TEXT NOT NULL,
+    key        BLOB NOT NULL,
+    created_ms INTEGER NOT NULL
+);
+
+-- index blobs_owner on blobs
+CREATE INDEX blobs_owner ON blobs(owner_id);
+
+-- index blobs_owner_sha on blobs
+CREATE UNIQUE INDEX blobs_owner_sha ON blobs(COALESCE(owner_id, ''), sha256);
+
+-- table board_cards on board_cards
+CREATE TABLE board_cards (
+    card_id    TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+    column_id  TEXT NOT NULL REFERENCES board_columns(column_id) ON DELETE CASCADE,
+    title      TEXT NOT NULL,
+    notes      TEXT NOT NULL DEFAULT '',
+    position   INTEGER NOT NULL,
+    session_id TEXT,
+    created_by TEXT,
+    -- The agent that made the card (its name), for a card made by the
+    -- `board_edit` tool (PLAN.md T78); NULL for a person's.
+    agent      TEXT,
+    created_ms INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+
+-- index board_cards_column on board_cards
+CREATE INDEX board_cards_column ON board_cards(column_id);
+
+-- table board_columns on board_columns
+CREATE TABLE board_columns (
+    column_id  TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    position   INTEGER NOT NULL,
+    -- Cards here are finished: left out of the model's context.
+    done       INTEGER NOT NULL DEFAULT 0
+);
+
+-- index board_columns_project on board_columns
+CREATE INDEX board_columns_project ON board_columns(project_id);
+
+-- table board_templates on board_templates
+CREATE TABLE board_templates (
+    template_id  TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    -- JSON array of {"name", "done"}.
+    columns      TEXT NOT NULL,
+    created_by   TEXT,
+    created_ms   INTEGER NOT NULL
+);
+
+-- index board_templates_ws on board_templates
+CREATE INDEX board_templates_ws ON board_templates(workspace_id);
+
+-- table chat_fts on chat_fts
+CREATE VIRTUAL TABLE chat_fts USING fts5(
+    session_id UNINDEXED,
+    title,
+    body,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+-- table connector_accounts on connector_accounts
+CREATE TABLE connector_accounts (
+    user_id      TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    connector_id TEXT NOT NULL,
+    sealed_token BLOB NOT NULL CHECK (length(sealed_token) <= 4096),
+    created_ms   INTEGER NOT NULL,
+    updated_ms   INTEGER NOT NULL,
+    PRIMARY KEY (user_id, connector_id),
+    FOREIGN KEY (workspace_id, user_id)
+        REFERENCES workspace_members(workspace_id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, connector_id)
+        REFERENCES workspace_connectors(workspace_id, connector_id) ON DELETE CASCADE
+);
+
+-- index connector_accounts_connector on connector_accounts
+CREATE INDEX connector_accounts_connector ON connector_accounts(connector_id);
+
+-- table deleted_sessions on deleted_sessions
+CREATE TABLE deleted_sessions (
+    session_id TEXT PRIMARY KEY,
+    ts_ms      INTEGER NOT NULL,
+    -- The node that owned it, so only that node is told it was deleted
+    -- (NULL when the mirror never had a row for it).
+    node_id    TEXT
+);
+
+-- table events on events
+CREATE TABLE events (
+    session_id TEXT NOT NULL,
+    seq        INTEGER NOT NULL,
+    ts_ms      INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    payload    TEXT NOT NULL,
+    PRIMARY KEY (session_id, seq)
+) WITHOUT ROWID;
+
+-- table foreign_chats on foreign_chats
+CREATE TABLE foreign_chats (
+    session_id TEXT PRIMARY KEY,
+    marked_ms  INTEGER NOT NULL
+);
+
+-- table join_tokens on join_tokens
+CREATE TABLE join_tokens (
+    token_hash TEXT PRIMARY KEY,
+    expires_ms INTEGER NOT NULL,
+    created_by TEXT
+);
+
+-- table kv on kv
+CREATE TABLE kv (
+    k TEXT PRIMARY KEY,
+    v TEXT NOT NULL
+);
+
+-- table media_fts on media_fts
+CREATE VIRTUAL TABLE media_fts USING fts5(media_id UNINDEXED, name,
+    tokenize = 'unicode61 remove_diacritics 2');
+
+-- table media_items on media_items
+CREATE TABLE media_items (
+    media_id     TEXT PRIMARY KEY,
+    blob_id      TEXT NOT NULL REFERENCES blobs(blob_id) ON DELETE CASCADE,
+    owner_id     TEXT REFERENCES users(user_id) ON DELETE CASCADE,
+    workspace_id TEXT REFERENCES workspaces(workspace_id) ON DELETE SET NULL,
+    name         TEXT NOT NULL,
+    origin       TEXT NOT NULL,
+    session_id   TEXT,
+    artifact_id  TEXT,
+    version_id   TEXT,
+    created_ms   INTEGER NOT NULL,
+    updated_ms   INTEGER NOT NULL
+);
+
+-- index media_items_artifact on media_items
+CREATE UNIQUE INDEX media_items_artifact ON media_items(artifact_id) WHERE artifact_id IS NOT NULL;
+
+-- index media_items_owner on media_items
+CREATE INDEX media_items_owner ON media_items(owner_id, created_ms DESC);
+
+-- index media_items_session on media_items
+CREATE INDEX media_items_session ON media_items(session_id);
+
+-- table media_uses on media_uses
+CREATE TABLE media_uses (
+    media_id   TEXT NOT NULL REFERENCES media_items(media_id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    PRIMARY KEY (media_id, session_id)
+);
+
+-- index media_uses_session on media_uses
+CREATE INDEX media_uses_session ON media_uses(session_id);
+
+-- table nodes on nodes
+CREATE TABLE nodes (
+    node_id    TEXT PRIMARY KEY,
+    public_key TEXT NOT NULL UNIQUE,
+    hostname   TEXT NOT NULL,
+    created_ms INTEGER NOT NULL,
+    revoked_ms INTEGER
+);
+
+-- table plugin_access on plugin_access
+CREATE TABLE plugin_access (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL CHECK (kind IN ('skill', 'mcp')),
+    name         TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 64),
+    -- The agent ids it is assigned to: a JSON array, at most 16 KiB.
+    agents       TEXT NOT NULL CHECK (length(CAST(agents AS BLOB)) <= 16384),
+    updated_ms   INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, kind, name)
+);
+
+-- table profile_images on profile_images
+CREATE TABLE profile_images (
+    user_id    TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    slot       TEXT NOT NULL CHECK (slot IN ('avatar', 'banner')),
+    blob_id    TEXT NOT NULL REFERENCES blobs(blob_id) ON DELETE CASCADE,
+    updated_ms INTEGER NOT NULL,
+    PRIMARY KEY (user_id, slot)
+);
+
+-- index profile_images_blob on profile_images
+CREATE INDEX profile_images_blob ON profile_images(blob_id);
+
+-- table project_clones on project_clones
+CREATE TABLE project_clones (
+    project_id   TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    node_id      TEXT NOT NULL,
+    host         TEXT NOT NULL,
+    full_name    TEXT NOT NULL,
+    created_by   TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    started_ms   INTEGER NOT NULL,
+    state        TEXT NOT NULL CHECK (state IN ('cloning', 'failed')),
+    reason       TEXT,
+    ended_ms     INTEGER,
+    CHECK ((state = 'failed') = (reason IS NOT NULL))
+);
+
+-- index project_clones_one on project_clones
+CREATE UNIQUE INDEX project_clones_one
+    ON project_clones(created_by, node_id, host, lower(full_name)) WHERE state = 'cloning';
+
+-- index project_clones_ws on project_clones
+CREATE INDEX project_clones_ws ON project_clones(workspace_id);
+
+-- table projects on projects
+CREATE TABLE projects (
+    project_id   TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    icon         TEXT NOT NULL,
+    accent       TEXT NOT NULL,
+    instructions TEXT NOT NULL DEFAULT '',
+    -- JSON object; ProjectSettings in the master.
+    settings     TEXT NOT NULL DEFAULT '{}',
+    created_by   TEXT,
+    created_ms   INTEGER NOT NULL,
+    updated_ms   INTEGER NOT NULL,
+    -- The forge repository the project's folder was cloned from (X.27 step
+    -- 3, PLAN.md T86): its host and owner/name, both or neither. Set once,
+    -- at the create; no route changes it.
+    source_host  TEXT,
+    source_name  TEXT,
+    CHECK ((source_host IS NULL) = (source_name IS NULL))
+);
+
+-- index projects_ws on projects
+CREATE INDEX projects_ws ON projects(workspace_id);
+
+-- table routine_dedupe on routine_dedupe
+CREATE TABLE routine_dedupe (
+    routine_id TEXT NOT NULL REFERENCES routines(routine_id) ON DELETE CASCADE,
+    key        TEXT NOT NULL,                 -- SHA-256 hex of the header value
+    run_id     TEXT NOT NULL,
+    expires_ms INTEGER NOT NULL,
+    PRIMARY KEY (routine_id, key)
+);
+
+-- table routine_runs on routine_runs
+CREATE TABLE routine_runs (
+    run_id       TEXT PRIMARY KEY,            -- new_id()
+    routine_id   TEXT NOT NULL REFERENCES routines(routine_id) ON DELETE CASCADE,
+    trigger_id   TEXT,
+    trigger_kind TEXT NOT NULL,               -- schedule | webhook | manual
+    scheduled_ms INTEGER,
+    started_ms   INTEGER NOT NULL,
+    ended_ms     INTEGER,
+    status       TEXT NOT NULL,   -- pending|running|waiting|completed|error|cancelled|interrupted|timed_out|failed|skipped|blocked|missed
+    reason       TEXT,
+    session_id   TEXT UNIQUE,                 -- no FK: the mirror may lag; cleared by delete_session
+    chat_deleted INTEGER NOT NULL DEFAULT 0,  -- 1: its chat was deleted (by the owner or by retention)
+    turn_id      TEXT,
+    waiting_since_ms INTEGER,
+    prompt       TEXT,                        -- rendered, <= 32 KiB; cleared when the chat is deleted
+    event        TEXT,                        -- JSON, <= 16 KiB; cleared when the chat is deleted
+    untrusted    INTEGER NOT NULL DEFAULT 0,
+    warnings     TEXT,                        -- cleared when the chat is deleted
+    usage        TEXT,
+    attempt      INTEGER NOT NULL DEFAULT 1,
+    repeats      INTEGER NOT NULL DEFAULT 1,  -- coalesced skipped/missed
+    seen         INTEGER NOT NULL DEFAULT 0,  -- the owner viewed the run's chat or its attention row
+    promoted     INTEGER NOT NULL DEFAULT 0   -- the owner prompted in the run's chat
+);
+
+-- index routine_runs_active on routine_runs
+CREATE INDEX routine_runs_active ON routine_runs(status)
+    WHERE status IN ('pending','running','waiting');
+
+-- index routine_runs_routine on routine_runs
+CREATE INDEX routine_runs_routine ON routine_runs(routine_id, started_ms DESC);
+
+-- table routine_triggers on routine_triggers
+CREATE TABLE routine_triggers (
+    trigger_id  TEXT PRIMARY KEY,             -- random_hex(16); also a webhook's public id
+    routine_id  TEXT NOT NULL REFERENCES routines(routine_id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,                -- schedule | webhook (later sources add names, §15.2)
+    config      TEXT NOT NULL,                -- JSON (8.3)
+    next_run_ms INTEGER,                      -- schedules only; NULL = nothing due
+    secret_hash TEXT,                         -- webhook: SHA-256 hex of the bearer secret
+    last_fired_ms INTEGER
+);
+
+-- index routine_triggers_due on routine_triggers
+CREATE INDEX routine_triggers_due ON routine_triggers(next_run_ms) WHERE next_run_ms IS NOT NULL;
+
+-- index routine_triggers_routine on routine_triggers
+CREATE INDEX routine_triggers_routine ON routine_triggers(routine_id);
+
+-- table routine_untrusted_chats on routine_untrusted_chats
+CREATE TABLE routine_untrusted_chats (
+    session_id TEXT PRIMARY KEY
+) WITHOUT ROWID;
+
+-- table routines on routines
+CREATE TABLE routines (
+    routine_id   TEXT PRIMARY KEY,                                                     -- new_id()
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    owner_id     TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    paused_reason TEXT,                       -- set by the master: blocked | failures | cap
+    spec         TEXT NOT NULL,               -- JSON RoutineSpec (8.3)
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    created_ms   INTEGER NOT NULL,
+    updated_ms   INTEGER NOT NULL
+);
+
+-- index routines_owner on routines
+CREATE INDEX routines_owner ON routines(owner_id, workspace_id);
+
+-- table seen on seen
+CREATE TABLE seen (
+    user_id    TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    seq        INTEGER NOT NULL,
+    PRIMARY KEY (user_id, session_id)
+);
+
+-- table session_forks on session_forks
+CREATE TABLE session_forks (
+    session_id  TEXT PRIMARY KEY,
+    parent_id   TEXT NOT NULL,
+    through_seq INTEGER NOT NULL,
+    created_ms  INTEGER NOT NULL
+);
+
+-- table session_images on session_images
+CREATE TABLE session_images (
+    session_id TEXT NOT NULL, sha256 TEXT NOT NULL, mime TEXT NOT NULL, name TEXT NOT NULL,
+    bytes BLOB NOT NULL, PRIMARY KEY (session_id, sha256));
+
+-- table session_projects on session_projects
+CREATE TABLE session_projects (
+    session_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+    added_ms   INTEGER NOT NULL
+);
+
+-- index session_projects_project on session_projects
+CREATE INDEX session_projects_project ON session_projects(project_id);
+
+-- table session_workspaces on session_workspaces
+CREATE TABLE session_workspaces (
+    session_id   TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+-- index session_workspaces_ws on session_workspaces
+CREATE INDEX session_workspaces_ws ON session_workspaces(workspace_id);
+
+-- table sessions on sessions
+CREATE TABLE sessions (
+    session_id TEXT PRIMARY KEY,
+    node_id    TEXT NOT NULL,
+    title      TEXT NOT NULL DEFAULT '',
+    cwd        TEXT NOT NULL DEFAULT '',
+    model      TEXT NOT NULL DEFAULT '',
+    created_ms INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL,
+    head_seq   INTEGER NOT NULL,
+    running    INTEGER NOT NULL DEFAULT 0,
+    incognito  INTEGER NOT NULL DEFAULT 0,
+    owner_id   TEXT,
+    agent_id   TEXT,
+    profile    TEXT,
+    parent_id  TEXT,
+    -- The execution mode `session_created` recorded (N.10a): the master
+    -- re-checks who may drive a `host` chat on every action.
+    exec_mode  TEXT,
+    -- Attention: approvals waiting, or the last turn ended with a question.
+    pending_approvals INTEGER NOT NULL DEFAULT 0,
+    last_asks  INTEGER NOT NULL DEFAULT 0,
+    asks_user  INTEGER NOT NULL DEFAULT 0,
+    attention_seq INTEGER NOT NULL DEFAULT 0,
+    -- The running turn was started by the harness (a callback, T.8d): its
+    -- end is signalled by the callback's own attention row instead.
+    turn_callback INTEGER NOT NULL DEFAULT 0,
+    -- The seq of the last turn end worth telling the owner about (a
+    -- top-level chat's turn that completed or failed, did not end with a
+    -- question and was not a callback): "finished, unread" until seen.
+    finished_seq INTEGER NOT NULL DEFAULT 0,
+    -- Set when a second writer sent other content under this seq (PLAN.md
+    -- §3): every later append is refused until the session is deleted.
+    diverged_seq INTEGER
+);
+
+-- index sessions_owner on sessions
+CREATE INDEX sessions_owner ON sessions(owner_id, updated_ms);
+
+-- table stored_skills on stored_skills
+CREATE TABLE stored_skills (
+    -- NULL: the server's own skill; else the workspace's.
+    workspace_id TEXT REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    name         TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 64),
+    description  TEXT NOT NULL CHECK (length(description) BETWEEN 1 AND 1024),
+    -- At most 24 KiB (the skill tool's body cap); the master refuses more first.
+    body         TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) BETWEEN 1 AND 24576),
+    updated_ms   INTEGER NOT NULL
+);
+
+-- index stored_skills_name on stored_skills
+CREATE UNIQUE INDEX stored_skills_name
+    ON stored_skills(coalesce(workspace_id, ''), name);
+
+-- table ui_sessions on ui_sessions
+CREATE TABLE ui_sessions (
+    token_hash   TEXT PRIMARY KEY,
+    bind_hash    TEXT NOT NULL,
+    user_id      TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    created_ms   INTEGER NOT NULL,
+    last_seen_ms INTEGER NOT NULL,
+    expires_ms   INTEGER NOT NULL
+);
+
+-- index ui_sessions_expires on ui_sessions
+CREATE INDEX ui_sessions_expires ON ui_sessions(expires_ms);
+
+-- index ui_sessions_user on ui_sessions
+CREATE INDEX ui_sessions_user ON ui_sessions(user_id);
+
+-- table user_connections on user_connections
+CREATE TABLE user_connections (
+    connection_id TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    host          TEXT NOT NULL CHECK (length(host) BETWEEN 1 AND 253),
+    account_id    TEXT NOT NULL CHECK (length(account_id) BETWEEN 1 AND 32),
+    login         TEXT NOT NULL CHECK (length(login) BETWEEN 1 AND 255),
+    display_name  TEXT CHECK (length(display_name) <= 1024),
+    -- The e-mail the forge links to the account, when it gives one.
+    commit_email  TEXT CHECK (length(commit_email) <= 1024),
+    -- The token's scopes as the forge reported them (a JSON array), NULL
+    -- when the forge does not report them.
+    scopes        TEXT CHECK (length(scopes) <= 4096),
+    -- Scopes the forge reported beyond those kept (the list is capped).
+    scopes_more   INTEGER NOT NULL DEFAULT 0 CHECK (scopes_more >= 0),
+    sealed_token  BLOB NOT NULL CHECK (length(sealed_token) <= 4096),
+    created_ms    INTEGER NOT NULL,
+    updated_ms    INTEGER NOT NULL,
+    UNIQUE (user_id, host, account_id)
+);
+
+-- table users on users
+CREATE TABLE users (
+    user_id       TEXT PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL,
+    created_ms    INTEGER NOT NULL,
+    disabled      INTEGER NOT NULL DEFAULT 0,
+    -- The account's ceiling (O13, N.10a part 2): the most a member's level in
+    -- any workspace can give them, and their level in their Personal one.
+    exec_ceiling  TEXT NOT NULL DEFAULT 'none'
+                  CHECK (exec_ceiling IN ('none', 'container', 'sandbox', 'host')),
+    must_change_password INTEGER NOT NULL DEFAULT 0
+);
+
+-- table workspace_agents on workspace_agents
+CREATE TABLE workspace_agents (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    agent_id     TEXT NOT NULL,
+    kind         TEXT NOT NULL CHECK (kind IN ('custom', 'overlay')),
+    -- At most 64 KiB (MAX_DOC_BYTES); the master refuses more first.
+    doc          TEXT NOT NULL CHECK (length(CAST(doc AS BLOB)) <= 65536),
+    updated_ms   INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, agent_id)
+);
+
+-- index workspace_agents_agent on workspace_agents
+CREATE INDEX workspace_agents_agent ON workspace_agents(agent_id);
+
+-- table workspace_connectors on workspace_connectors
+CREATE TABLE workspace_connectors (
+    connector_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    name         TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 32),
+    url          TEXT NOT NULL CHECK (length(url) BETWEEN 9 AND 512),
+    -- How a person signs in: none, or a token they paste.
+    auth         TEXT NOT NULL CHECK (auth IN ('none', 'token')),
+    -- The header the token goes in; NULL: Authorization (Bearer).
+    header       TEXT CHECK (header IS NULL OR length(header) BETWEEN 1 AND 64),
+    created_ms   INTEGER NOT NULL,
+    updated_ms   INTEGER NOT NULL,
+    UNIQUE (workspace_id, name),
+    UNIQUE (workspace_id, connector_id)
+);
+
+-- table workspace_members on workspace_members
+CREATE TABLE workspace_members (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    user_id      TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    role_id      TEXT NOT NULL,          -- owner | admin | member | guest
+    joined_ms    INTEGER NOT NULL,
+    -- The member's own choice to share their facts (personal memory) with this
+    -- workspace's chats: recall and proposals. 1 in Personal; NULL for a new
+    -- team member until they answer the join question (shares nothing, like
+    -- 0), then 0 or 1.
+    use_memory   INTEGER CHECK (use_memory IN (0, 1)),
+    -- The member's level here, set by the workspace's admins; every new
+    -- member starts at none. An owner's counts as host (the master).
+    exec_level   TEXT NOT NULL DEFAULT 'none'
+                 CHECK (exec_level IN ('none', 'container', 'sandbox', 'host')),
+    PRIMARY KEY (workspace_id, user_id)
+);
+
+-- index workspace_members_user on workspace_members
+CREATE INDEX workspace_members_user ON workspace_members(user_id);
+
+-- table workspaces on workspaces
+CREATE TABLE workspaces (
+    workspace_id   TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    personal_owner TEXT UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
+    created_ms     INTEGER NOT NULL,
+    -- Workspace-tier settings (JSON object; WorkspaceSettings in the master).
+    settings       TEXT NOT NULL DEFAULT '{}'
+);
+
+-- table write_tombstones on write_tombstones
+CREATE TABLE write_tombstones (
+    folder  TEXT NOT NULL,
+    from_ms INTEGER NOT NULL,
+    to_ms   INTEGER NOT NULL
+);
+
+-- index write_tombstones_folder on write_tombstones
+CREATE INDEX write_tombstones_folder ON write_tombstones(folder);
+
