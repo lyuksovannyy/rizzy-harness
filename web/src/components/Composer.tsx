@@ -74,6 +74,9 @@ export interface ComposerHandle {
   setPictures: Dispatch<SetStateAction<Picture[]>>;
   /** Nothing typed, attached or picked (as of the last render). */
   empty: () => boolean;
+  /** What the box holds now (as of the last render): its text, the keys of
+   * its pictures, and how many attachments. */
+  content: () => { text: string; pictures: string[]; files: number };
   focus: () => void;
 }
 
@@ -109,6 +112,9 @@ export function Composer(props: {
    * the draft keeps them ahead of the box's text. */
   held?: string;
   handle?: { current: ComposerHandle | null };
+  /** The box's text changed (and once when it opens): the chat decides what
+   * to offer from it (a rewound message already in the box). */
+  onText?: (text: string) => void;
   onSubmit: (s: Submission) => Promise<void>;
   onStop?: () => void;
   /** Home: the classifier's guess for this text (null = no opinion). */
@@ -230,7 +236,9 @@ export function Composer(props: {
   const [uploading, setUploading] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const [pictures, setPictures] = useState<Picture[]>([]);
-  if (props.handle) props.handle.current = { setText, setFiles, setPictures, empty: () => !text.trim() && !files.length && !pictures.length, focus: () => ta.current?.focus() };
+  if (props.handle) props.handle.current = { setText, setFiles, setPictures, empty: () => !text.trim() && !files.length && !pictures.length, content: () => ({ text, pictures: pictures.map((p) => p.key), files: files.length }), focus: () => ta.current?.focus() };
+  const onText = props.onText;
+  useEffect(() => onText?.(text), [text]);
   const [rec, setRec] = useState<"idle" | "recording" | "transcribing">("idle");
   const recorder = useRef<MediaRecorder | null>(null);
 

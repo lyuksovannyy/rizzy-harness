@@ -5,7 +5,7 @@ import { seqAt } from "../fold";
 import "../lib/i18nPages";
 import { errText } from "../lib/errorText";
 import { AtSign, Download, FileText, Image as ImageIcon, Package, Square, Trash2 } from "lucide-react";
-import { isValidElement, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { isValidElement, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../api";
 import { plansOf } from "../lib/planReview";
 import { pageApi } from "../apiPages";
@@ -393,7 +393,7 @@ export default function Conversation(props: {
         filesBack={filesBack}
         running={running}
         lost={said?.lost ?? []}
-        putBack={said && info && !refilled.includes(info.message_seq) ? () => putRewound(info.message_seq, said) : undefined}
+        putBack={said && (!said.text || !boxText.current.includes(said.text)) ? () => putRewound(said) : undefined}
       >
         {heldRun.splice(0)}
       </RewoundBlock>
@@ -503,14 +503,24 @@ export default function Conversation(props: {
   // A rewind's message goes back into the box (X.46): by itself only into an
   // empty one (never over what is typed); on request, merged as a refused
   // message is. The messages (by seq) whose box already has them.
-  const [refilled, setRefilled] = useState<number[]>([]);
-  const putRewound = (seq: number, m: Resend) => {
+  // What the box holds, by its own report; the chat redraws on a change only
+  // while a rewind could still offer the message ("Put the message back in
+  // the box" is offered only when the box does not hold its text).
+  const boxText = useRef("");
+  const watchBox = useRef(false);
+  const [, redraw] = useReducer((n: number) => n + 1, 0);
+  const onBoxText = (x: string) => {
+    if (boxText.current === x) return;
+    boxText.current = x;
+    if (watchBox.current) redraw();
+  };
+  watchBox.current = !!view?.rewinds?.some((r) => r.can_undo);
+  const putRewound = (m: Resend) => {
     fill(m.text, [], m.pictures, false);
-    setRefilled((r) => [...r, seq]);
     box.current?.focus();
   };
-  const afterRewind = (seq: number, m: Resend | null) => {
-    if (m && box.current?.empty()) putRewound(seq, m);
+  const afterRewind = (m: Resend | null) => {
+    if (m && box.current?.empty()) putRewound(m);
     else box.current?.focus();
   };
   // One send: shown at once; the log's message replaces it (lib/outbox).
@@ -834,7 +844,7 @@ export default function Conversation(props: {
                             sessionId={sessionId}
                             seq={seqAt(view, i)!}
                             files={changesFiles(view, i)}
-                            onDone={() => afterRewind(seqAt(view, i)!, resend(it))}
+                            onDone={() => afterRewind(resend(it))}
                           />
                         )}
                         {it.queued && !it.queued.read && (
@@ -1297,6 +1307,7 @@ export default function Conversation(props: {
             compact={summarise.start}
             images={features?.media.vision_images ? { workspace: workspaceId, left: CHAT_IMAGES - imagesUsed } : null}
             handle={box}
+            onText={onBoxText}
             held={held.map((o) => o.text).join("\n")}
             onSubmit={(s) => send(s)}
           />

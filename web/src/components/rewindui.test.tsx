@@ -311,6 +311,21 @@ describe("the message back in the box", () => {
   });
 });
 
+describe("the box and a rewind that is on screen already", () => {
+  test("after a reload the box holds the message already (the draft): the block does not offer to put it there", async () => {
+    await show(two);
+    await type("second");
+    act(() => root.unmount());
+    root = createRoot(host);
+    await show([...two, rewound(10, 7, "t2")]);
+    expect(textarea().value).toBe("second");
+    expect(named("Put the message back in the box")).toBeUndefined();
+    // Cleared by hand: the link is there again.
+    await type("");
+    expect(named("Put the message back in the box")).toBeDefined();
+  });
+});
+
 describe("the rewound block", () => {
   const three = [...two, ...turn(10, "t3", "third")];
 
