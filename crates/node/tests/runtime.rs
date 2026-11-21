@@ -806,6 +806,36 @@ async fn sub_task_sessions_ask_no_questions() {
         payload,
     };
     store.append("local", &created).unwrap();
+    // The delegation's own first turn, already over: a sub-agent's chat in
+    // whose log no turn ever started takes no message (T32, T57).
+    for (seq, kind) in [
+        EventKind::TurnStarted(TurnStarted {
+            cause: None,
+            agent: None,
+            turn_id: "t0".into(),
+            environment: None,
+            continued_by: None,
+            retry: None,
+        }),
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "t0".into(),
+            reason: TurnEndReason::Completed,
+            usage: None,
+        }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (kind, payload) = kind.into_parts();
+        let event = RawEvent {
+            session_id: sid,
+            seq: seq as u64 + 2,
+            ts_ms: 0,
+            kind,
+            payload,
+        };
+        store.append("local", &event).unwrap();
+    }
     let policy = NodePolicy {
         max_approval_mode: harness_core::policy::ApprovalMode::Ask,
         workspace_roots: vec![dir.path().into()],
