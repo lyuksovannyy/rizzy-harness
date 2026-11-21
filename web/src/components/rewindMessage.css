@@ -1,0 +1,41 @@
+/* "Rewind to here" under the person's message (X.46): shown on hover and
+   on focus, always on a touch screen (as the copy action under an answer);
+   the panel opens inline below it, never over the chat. */
+.msg.user:has(> .rewind-slot) { flex-wrap: wrap; }
+.rewind-slot {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  margin-top: 4px;
+}
+.rewind-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-standard);
+}
+.msg.user:hover .rewind-action,
+.rewind-slot:focus-within .rewind-action,
+.rewind-action[aria-expanded="true"] {
+  opacity: 1;
+}
+@media (hover: none) {
+  .rewind-action { opacity: 1; }
+}
+.rewind-panel {
+  margin-top: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  max-width: min(32rem, 100%);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  text-align: left;
+}
+.rewind-panel p { margin: 0; }
+.rewind-panel:focus-visible { outline: 2px solid var(--accent, var(--line)); outline-offset: 2px; }
+.rewind-buttons.guarded button { opacity: 0.55; }

@@ -24,7 +24,6 @@
 .approval-choice .chat-allow-said { flex: none; }
 .approval-choice .approval-actions { flex: none; }
 .approval-pending-note { align-self: center; max-width: 24rem; }
-.approval-count { text-align: end; }
 .approval-actions.guarded button { opacity: 0.55; cursor: progress; }
 /* The text field is hidden, not removed: its draft and caret wait for the answer. */
 .composer.choosing .chips,

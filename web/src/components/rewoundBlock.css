@@ -1,0 +1,20 @@
+/* Turns a rewind took out of the conversation (X.46): one calm line, the
+   turns readable underneath, muted. */
+.rewound-block { display: flex; flex-direction: column; gap: var(--space-1); }
+.rewound-head { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; }
+.rewound-toggle { display: inline-flex; align-items: center; gap: var(--space-1); }
+.rewound-toggle svg { transition: transform var(--dur-2) var(--ease-standard); }
+.rewound-toggle svg.open { transform: rotate(90deg); }
+.rewound-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-top: var(--space-2);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--line);
+  opacity: 0.6;
+}
+/* The block's own actions are buttons that look like buttons (a browser
+   run found the muted link style read as part of the sentence). */
+.rewound-btn { font-size: inherit; padding: 2px 10px; }
+.rewound-files { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }

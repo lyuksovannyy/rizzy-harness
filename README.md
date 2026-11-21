@@ -279,10 +279,12 @@ message and everything after it (the answers, the tool calls and results,
 what the agent had read) stop being part of the conversation. The agent is not
 sent them any more, so it does not act on a plan you dropped or remember a
 file it read there: it has to read a file again before it edits it. Nothing is
-deleted: the removed turns stay in the chat, muted under a line saying they were
-rewound, and **you can put them back until you send the next message**. You
-choose whether the files go back too, as **Rewind files to before this turn**
-does today (refused, with the reason, and nothing rewound, if you edited a file
+deleted: the removed turns stay in the chat, folded into one line ("2 turns
+rewound", open it to read them), and **you can put them back with Undo rewind
+until you send the next message**. Hover (or focus) one of your messages and
+choose **Rewind to here**: a small panel under it says what happens and offers
+**Rewind conversation**, or **Rewind conversation and files** when a turn from
+there on changed files, as **Rewind files to before this turn** does today (refused, with the reason, and nothing rewound, if you edited a file
 since or another chat worked in the folder; **Undo anyway** is the same
 `force`); if you leave the files, the agent's next turn (whatever starts it)
 is told the conversation was taken back and, when the removed turns still
@@ -294,14 +296,18 @@ summary), and to a message you sent while an answer was running (take the
 chat back to the message that started that answer). **It does not undo:** what
 commands did outside the folder, web requests, memory the agent saved,
 tasks it moved, files it published, other chats it started or the cost; and
-putting a rewind back never changes files. The removed text leaves search and
+putting a rewind back never changes files (the block says "Files went back to
+before this message." with a button "Bring the files back", for as long as
+they are back). The removed text leaves search and
 what the agent can recall from earlier chats (and comes back with the undo).
 Only you can do
-it, never the agent. The buttons (per message "Rewind to here", the choice of
-conversation, files or both, the prompt back in the box) come with the next
-change; this version has the server side (`POST /api/sessions/{id}/rewind` with
-`{message_seq, files, force}`, and `.../rewind/{seq}/undo`) and shows rewound
-turns muted. Design: `docs/rewind.md`.
+it, never the agent. Your message goes back into the box (its text and its
+images) when the box is empty; if you had typed something, it stays and the
+block offers "Put the message back in the box". Attachments are used up when a
+message is sent, so the box cannot take them back: the block names them and you
+attach them again. The routes are `POST /api/sessions/{id}/rewind` with
+`{message_seq, files, force}`, and `.../rewind/{seq}/undo`. Design:
+`docs/rewind.md`.
 
 When a turn completes or fails in a chat you are not looking at (another chat
 is open, or the tab is hidden), the chat gets a dot in the sidebar until you
