@@ -81,6 +81,7 @@ fn fake(id: &str, caps: &[&str], answer: Arc<Mutex<ProjectMcpList>>) -> (NodeLin
             {
                 use harness_core::event::{EventKind, Profile, SessionCreated};
                 let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+                    forked: None,
                     exec_mode: *exec_mode,
                     no_callbacks: false,
                     title: "t".into(),

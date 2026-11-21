@@ -85,6 +85,10 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
     let s = || w.to_string();
     vec![
         EventKind::SessionCreated(SessionCreated {
+            forked: Some(ForkedFrom {
+                parent: sid(),
+                through_seq: 5,
+            }),
             title: s(),
             cwd: s(),
             model: s(),
@@ -472,6 +476,11 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             files: true,
         }),
         EventKind::ConversationRewindUndone(ConversationRewindUndone { rewind_seq: 3 }),
+        EventKind::SessionForked(SessionForked {
+            parent: sid(),
+            through_seq: 5,
+            turn_id: s(),
+        }),
     ]
 }
 
@@ -545,6 +554,7 @@ pub fn slot(k: &EventKind) -> usize {
         EventKind::TurnUsage(_) => 37,
         EventKind::ConversationRewound(_) => 38,
         EventKind::ConversationRewindUndone(_) => 39,
+        EventKind::SessionForked(_) => 40,
     }
 }
-pub const KINDS: usize = 40;
+pub const KINDS: usize = 41;

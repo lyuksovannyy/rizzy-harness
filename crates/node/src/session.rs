@@ -597,6 +597,7 @@ impl Session {
         });
         Self::record_ends(&s, ends);
         s.append(EventKind::SessionCreated(SessionCreated {
+            forked: None,
             no_callbacks,
             profile,
             agent_id,

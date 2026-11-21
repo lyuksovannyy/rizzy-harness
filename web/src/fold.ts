@@ -188,7 +188,7 @@ const ENUMS: Record<string, string> = {
   decision: "allow deny allow_session allow_chat",
   resolvedBy: "user policy cancelled interrupted",
   phase: "before after restored before_restore",
-  bgReason: "exited timed_out stopped_by_agent stopped_by_user access_revoked session_deleted node_stopping node_restarted finished",
+  bgReason: "exited timed_out stopped_by_agent stopped_by_user access_revoked session_deleted node_stopping node_restarted forked finished",
   confirmed: "ended still_alive unconfirmed unknown",
   retryReason: "rate_limit overloaded server_error network no_answer",
   stagedBy: "agent user",
@@ -224,12 +224,13 @@ const STRUCTS: Record<string, string> = {
   todo: "content status:=todoStatus",
   headAt: "?branch commit",
   headMoved: "from:@headAt to:@headAt",
+  forkedFrom: "parent through_seq:n",
 };
 
 // Every kind the fold handles.
 const KINDS: Record<string, string> = {
   session_created:
-    "title cwd model backend node_id approval_mode:=approvalMode profile:=profile ?agent_id ?incognito:b ?parent_session ?no_callbacks:b ?exec_mode:=execMode",
+    "title cwd model backend node_id approval_mode:=approvalMode profile:=profile ?agent_id ?incognito:b ?parent_session ?no_callbacks:b ?exec_mode:=execMode ?forked:@forkedFrom",
   turn_started: "turn_id ?agent:@agent ?cause:@cause ?continued_by ?retry:@retry",
   user_message: "turn_id text ?attachments:[@attachment ?files:[@mention ?reply:@reply ?images:[@image ?queued:b ?triggers:[s ?tags:[s",
   assistant_delta: "turn_id message_id text ?author ?variant:@variant",
@@ -271,6 +272,7 @@ const KINDS: Record<string, string> = {
   peers_skipped: "message_seq:n agents:[s reason:=peersReason",
   conversation_rewound: "message_seq:n turn_id ?files:b",
   conversation_rewind_undone: "rewind_seq:n",
+  session_forked: "parent through_seq:n turn_id",
 };
 
 /** The guard's tables, for the test that compares them with Rust's schema. */
@@ -516,6 +518,9 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
   // Anything the turn shows next means the wait is over (as the Rust view).
   if (CLEARS_RETRY.has(e.kind)) delete v.retry;
   if (ENDS_UNDO.has(e.kind)) for (const r of v.rewinds ?? []) r.can_undo = false;
+  // A copy of the parent's event (C.2, `fork::inherited`; the first event is
+  // the fork's own creation): it costs this chat nothing and grants nothing.
+  const inh = !!v.meta?.forked && e.seq > 1 && e.seq <= v.meta.forked.through_seq;
   switch (e.kind) {
     case "session_created": {
       // Match serde: optional fields are omitted when absent.
@@ -533,6 +538,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (p.parent_session != null) meta!.parent_session = p.parent_session;
       if (p.no_callbacks) meta!.no_callbacks = true;
       if (p.exec_mode != null) meta!.exec_mode = p.exec_mode;
+      if (p.forked != null) meta!.forked = p.forked;
       v.meta = meta;
       break;
     }
@@ -605,9 +611,12 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
     case "peers_skipped":
       pushItem(v, e.seq, { type: "peers_skipped", agents: p.agents, reason: p.reason });
       break;
+    case "session_forked":
+      pushItem(v, e.seq, { type: "forked", parent: p.parent, through_seq: p.through_seq, turn_id: p.turn_id });
+      break;
     case "handoff_written": {
       // Its cost is the chat's, like a turn's (the sums only).
-      if (p.usage) settle(v, p.usage);
+      if (p.usage && !inh) settle(v, p.usage);
       const it: Extract<Item, { type: "handoff" }> = { type: "handoff", through_seq: p.through_seq };
       if (p.text != null) it.text = p.text;
       if (p.model != null) it.model = p.model;
@@ -735,6 +744,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
     }
     case "checkpoint": {
       const c = own(v.checkpoints, p.turn_id) ?? put(v.checkpoints, p.turn_id, { before: null, after: null, files: [], restored: false });
+      if (inh) c.inherited = true;
       if (p.phase === "before") c.before = p.git_ref;
       else if (p.phase === "before_restore") {
         // A restore's own checkpoint is undone like a turn's.
@@ -786,7 +796,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
         delete s.turn;
       }
       if (p.usage) {
-        addUsage(s.settled, p.usage);
+        if (!inh) addUsage(s.settled, p.usage);
         v.context_tokens = p.usage.context_tokens;
         if (p.usage.window != null) v.context_window = p.usage.window;
         else delete v.context_window;
@@ -794,7 +804,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
         else delete v.summary_at;
         if (p.usage.model != null) v.context_model = p.usage.model;
         else delete v.context_model;
-      } else if (running) addUsage(s.settled, running);
+      } else if (running && !inh) addUsage(s.settled, running);
       showUsage(v, s);
       // The turn that ended, also when it reported none (an interrupted
       // one): never an older turn's as the last.
@@ -813,8 +823,10 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (v.running_turn !== p.turn_id) break;
       const s = spentOf(v);
       if (s.turn === p.turn_id && s.live && sumTokens(p.usage) < sumTokens(s.live)) break;
-      s.turn = p.turn_id;
-      s.live = cappedUsage(p.usage);
+      if (!inh) {
+        s.turn = p.turn_id;
+        s.live = cappedUsage(p.usage);
+      }
       // A summary call's usage has no context size of its own (0): the
       // meter keeps the last one. The turn's limits are applied as
       // `turn_ended` does.
@@ -858,7 +870,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
     case "history_summarized": {
       // A person's /compact (X.20): its cost is the chat's, and the meter
       // shows the shorter context until the next turn reports its own.
-      if (p.usage) settle(v, p.usage);
+      if (p.usage && !inh) settle(v, p.usage);
       if (p.tokens_after != null) v.context_tokens = p.tokens_after;
       const it: Extract<Item, { type: "summary" }> = { type: "summary", through_seq: p.through_seq, text: p.text };
       if (p.manual === true) it.manual = true;
@@ -867,7 +879,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       break;
     }
     case "compact_failed":
-      if (p.usage) settle(v, p.usage);
+      if (p.usage && !inh) settle(v, p.usage);
       pushItem(v, e.seq, { type: "error", message: p.reason });
       break;
     case "context_shortened": {
@@ -911,7 +923,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (b) b.ended = true;
       const c = p.child;
       // Its cost is the chat's, as a foreground sub-agent's is its turn's.
-      if (c?.usage) settle(v, c.usage);
+      if (c?.usage && !inh) settle(v, c.usage);
       const it: Extract<Item, { type: "background_ended" }> = {
         type: "background_ended",
         bg_id: p.bg_id,
@@ -925,8 +937,9 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       pushItem(v, e.seq, it);
       break;
     }
+    // Grants are bound to the parent's folder: none is inherited.
     case "chat_allow_added":
-      put((v.chat_allows ??= {}), p.grant_id, { tool: p.tool, input: p.input });
+      if (!inh) put((v.chat_allows ??= {}), p.grant_id, { tool: p.tool, input: p.input });
       break;
     case "chat_allow_removed":
       if (v.chat_allows) {

@@ -41,6 +41,8 @@ export interface SessionCreated {
   no_callbacks?: boolean;
   /** How its commands run; absent for a chat (no commands). */
   exec_mode?: ExecMode;
+  /** Set on a fork (C.2): events 2 through `through_seq` are the parent's, copied at the same seqs. */
+  forked?: { parent: string; through_seq: number };
 }
 
 export interface AgentRef {
@@ -317,6 +319,8 @@ export type ItemKind =
       /** Set for a background sub-agent: its agent's id. */
       agent?: string;
     }
+  /** A fork's divider (`session_forked`, C.2): the items before it are the parent's, copied. */
+  | { type: "forked"; parent: string; through_seq: number; turn_id: string }
   /** A turn the harness started because these background commands ended while the chat was idle. */
   | { type: "callback"; turn_id: string; bg_ids: string[] }
   /** The turn of an agent the person's message called after the first (`turn_started.cause.mention`, X.37). */
@@ -438,6 +442,8 @@ export interface CheckpointState {
   /** While `restored`: the checkpoint the folder was saved as just before
    * the undo; restoring that id puts back what the undo replaced. */
   saved?: string;
+  /** Copied from the chat this one was forked from (C.2): its refs are that chat's, so it cannot be restored here. */
+  inherited?: boolean;
 }
 
 export interface HeadAt {

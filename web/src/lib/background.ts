@@ -96,6 +96,7 @@ export function reasonText(reason: string, exit_code: number | null): string {
     access_revoked: "stopped: the owner lost access",
     node_stopping: "stopped with its node",
     node_restarted: "ended with its node",
+    forked: "belongs to the chat this one was forked from",
     finished: "finished",
   };
   const w = own(words, reason) ?? reason.replace(/_/g, " ");

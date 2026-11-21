@@ -678,6 +678,7 @@ async fn recovers_interrupted_turn_on_start() {
         let store = Store::open(&path, Durability::Full).unwrap();
         let kinds = vec![
             EventKind::SessionCreated(SessionCreated {
+                forked: None,
                 exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
                 no_callbacks: false,
                 profile: harness_core::event::Profile::Agentic,
@@ -780,6 +781,7 @@ async fn sub_task_sessions_ask_no_questions() {
     let store = Store::open(&dir.path().join("node.db"), Durability::Full).unwrap();
     let sid = SessionId::new();
     let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+        forked: None,
         exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
         no_callbacks: false,
         profile: harness_core::event::Profile::Agentic,
@@ -1877,6 +1879,7 @@ async fn ack_time_on_a_long_session() {
         {
             let store = Store::open(&path, Durability::Normal).unwrap();
             let created = EventKind::SessionCreated(SessionCreated {
+                forked: None,
                 exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
                 no_callbacks: false,
                 profile: harness_core::event::Profile::Agentic,

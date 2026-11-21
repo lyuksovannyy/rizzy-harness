@@ -96,60 +96,61 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                msg = commands.recv() => {
-                    let Some(msg) = msg else { return };
-                    keep.lock().unwrap().push(msg.clone());
-                    match &msg {
-                        MasterToNode::Create { session_id, exec_mode, cwd, .. } => {
-                            let (kind, payload) = EventKind::SessionCreated(SessionCreated {
-                                exec_mode: *exec_mode,
-                                no_callbacks: false,
-                                title: "t".into(),
-                                cwd: cwd.clone(),
-                                model: "demo::mock".into(),
-                                backend: "native".into(),
-                                node_id: node.clone(),
-                                approval_mode: ApprovalMode::Ask,
-                                profile: Profile::Agentic,
-                                agent_id: None,
-                                incognito: false,
-                                parent_session: None,
-                            })
-                            .into_parts();
-                            let _ = tx.try_send(NodeToMaster::Event {
-                                event: RawEvent {
-                                    session_id: *session_id,
-                                    seq: 1,
-                                    ts_ms: harness_core::now_ms(),
-                                    kind,
-                                    payload,
-                                },
-                            });
-                        }
-                        MasterToNode::ProjectCreate { .. } if quiet.load(Ordering::SeqCst) => {}
-                        MasterToNode::ProjectCreate { req_id, name } => {
-                            let _ = tx.try_send(if no.load(Ordering::SeqCst) {
-                                NodeToMaster::ProjectCreated {
-                                    req_id: req_id.clone(),
-                                    path: None,
-                                    error: Some("this node has made 20 project folders in the last hour".into()),
-                                }
-                            } else {
-                                NodeToMaster::ProjectCreated {
-                                    req_id: req_id.clone(),
-                                    path: Some(folder_of(&node, name)),
-                                    error: None,
-                                }
-                            });
-                        }
-                        _ => {}
-                    }
-                    if let Some(req_id) = msg.req_id() {
-                        let _ = tx.try_send(NodeToMaster::Ack { req_id: req_id.into(), ok: true, error: None });
-                    }
-                }
-                _ = left.recv() => return,
-            }
+                           msg = commands.recv() => {
+                               let Some(msg) = msg else { return };
+                               keep.lock().unwrap().push(msg.clone());
+                               match &msg {
+                                   MasterToNode::Create { session_id, exec_mode, cwd, .. } => {
+                                       let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+            forked: None,
+                                           exec_mode: *exec_mode,
+                                           no_callbacks: false,
+                                           title: "t".into(),
+                                           cwd: cwd.clone(),
+                                           model: "demo::mock".into(),
+                                           backend: "native".into(),
+                                           node_id: node.clone(),
+                                           approval_mode: ApprovalMode::Ask,
+                                           profile: Profile::Agentic,
+                                           agent_id: None,
+                                           incognito: false,
+                                           parent_session: None,
+                                       })
+                                       .into_parts();
+                                       let _ = tx.try_send(NodeToMaster::Event {
+                                           event: RawEvent {
+                                               session_id: *session_id,
+                                               seq: 1,
+                                               ts_ms: harness_core::now_ms(),
+                                               kind,
+                                               payload,
+                                           },
+                                       });
+                                   }
+                                   MasterToNode::ProjectCreate { .. } if quiet.load(Ordering::SeqCst) => {}
+                                   MasterToNode::ProjectCreate { req_id, name } => {
+                                       let _ = tx.try_send(if no.load(Ordering::SeqCst) {
+                                           NodeToMaster::ProjectCreated {
+                                               req_id: req_id.clone(),
+                                               path: None,
+                                               error: Some("this node has made 20 project folders in the last hour".into()),
+                                           }
+                                       } else {
+                                           NodeToMaster::ProjectCreated {
+                                               req_id: req_id.clone(),
+                                               path: Some(folder_of(&node, name)),
+                                               error: None,
+                                           }
+                                       });
+                                   }
+                                   _ => {}
+                               }
+                               if let Some(req_id) = msg.req_id() {
+                                   let _ = tx.try_send(NodeToMaster::Ack { req_id: req_id.into(), ok: true, error: None });
+                               }
+                           }
+                           _ = left.recv() => return,
+                       }
         }
     });
     (

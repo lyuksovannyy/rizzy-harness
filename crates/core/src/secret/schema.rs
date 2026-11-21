@@ -192,6 +192,8 @@ pub const KEPT: &[(&str, &[&str])] = &[
     // part (`session_rewind.rs`) and shown in the chat's words.
     ("conversation_rewound", &["turn_id"]),
     ("conversation_rewind_undone", &[]),
+    // `turn_id`: the turn the copy ends with, shown in the divider.
+    ("session_forked", &["turn_id"]),
 ];
 
 /// The keys of the harness's own context sections (`agent-native`'s

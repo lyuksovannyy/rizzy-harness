@@ -638,6 +638,7 @@ fn fake(caps: &[&str]) -> (NodeLink, Seen, mpsc::Sender<NodeToMaster>) {
             } = &msg
             {
                 let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+                    forked: None,
                     exec_mode: *exec_mode,
                     no_callbacks: false,
                     title: "t".into(),
@@ -1008,6 +1009,7 @@ async fn every_term_of_the_gate_keeps_a_message_to_its_first_mention() {
     // A sub-agent's chat: a node-made chat whose parent is this one.
     let child = harness_core::SessionId::new();
     let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+        forked: None,
         exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
         no_callbacks: false,
         title: "c".into(),

@@ -682,6 +682,7 @@
           "session_deleted",
           "node_stopping",
           "node_restarted",
+          "forked",
           "finished"
         ]
       },
@@ -1549,6 +1550,22 @@
         ]
       },
       {
+        "path": "forked",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "forked.parent",
+        "required": true,
+        "restricted": true,
+        "type": "string"
+      },
+      {
+        "path": "forked.through_seq",
+        "required": true,
+        "type": "number"
+      },
+      {
         "path": "incognito",
         "required": false,
         "type": "boolean"
@@ -1586,6 +1603,24 @@
       },
       {
         "path": "title",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "session_forked": [
+      {
+        "path": "parent",
+        "required": true,
+        "restricted": true,
+        "type": "string"
+      },
+      {
+        "path": "through_seq",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "turn_id",
         "required": true,
         "type": "string"
       }

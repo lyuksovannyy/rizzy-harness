@@ -117,41 +117,42 @@ fn fake_with(id: &str, silent: bool) -> (NodeLink, Fake) {
         };
         loop {
             tokio::select! {
-                msg = commands.recv() => {
-                    let Some(msg) = msg else { return };
-                    keep.lock().unwrap().push(msg.clone());
-                    let now = harness_core::now_ms();
-                    if let MasterToNode::Create { session_id, agent, .. } = &msg {
-                        send(&mut seqs, *session_id, EventKind::SessionCreated(SessionCreated {
-                            exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
-                            title: "t".into(),
-                            cwd: "/w".into(),
-                            model: "demo::mock".into(),
-                            backend: "native".into(),
-                            node_id: node.clone(),
-                            approval_mode: ApprovalMode::Auto,
-                            profile: Profile::Agentic,
-                            agent_id: agent.as_ref().map(|a| a.agent_id.clone()),
-                            incognito: false,
-                            parent_session: None,
-                            no_callbacks: false,
-                        }), now);
-                    }
-                    if let MasterToNode::Prompt(PromptMsg { session_id, text, .. }) = &msg {
-                        for k in turn("p", text, now) {
-                            send(&mut seqs, *session_id, k, now);
-                        }
-                    }
-                    let quiet = silent && matches!(msg, MasterToNode::Handoff { .. });
-                    if let Some(req_id) = msg.req_id().filter(|_| !quiet) {
-                        let _ = tx.try_send(NodeToMaster::Ack { req_id: req_id.into(), ok: true, error: None });
-                    }
-                }
-                d = do_rx.recv() => match d {
-                    Some((sid, k, ts)) => send(&mut seqs, sid, k, ts),
-                    None => return,
-                },
-            }
+                           msg = commands.recv() => {
+                               let Some(msg) = msg else { return };
+                               keep.lock().unwrap().push(msg.clone());
+                               let now = harness_core::now_ms();
+                               if let MasterToNode::Create { session_id, agent, .. } = &msg {
+                                   send(&mut seqs, *session_id, EventKind::SessionCreated(SessionCreated {
+            forked: None,
+                                       exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
+                                       title: "t".into(),
+                                       cwd: "/w".into(),
+                                       model: "demo::mock".into(),
+                                       backend: "native".into(),
+                                       node_id: node.clone(),
+                                       approval_mode: ApprovalMode::Auto,
+                                       profile: Profile::Agentic,
+                                       agent_id: agent.as_ref().map(|a| a.agent_id.clone()),
+                                       incognito: false,
+                                       parent_session: None,
+                                       no_callbacks: false,
+                                   }), now);
+                               }
+                               if let MasterToNode::Prompt(PromptMsg { session_id, text, .. }) = &msg {
+                                   for k in turn("p", text, now) {
+                                       send(&mut seqs, *session_id, k, now);
+                                   }
+                               }
+                               let quiet = silent && matches!(msg, MasterToNode::Handoff { .. });
+                               if let Some(req_id) = msg.req_id().filter(|_| !quiet) {
+                                   let _ = tx.try_send(NodeToMaster::Ack { req_id: req_id.into(), ok: true, error: None });
+                               }
+                           }
+                           d = do_rx.recv() => match d {
+                               Some((sid, k, ts)) => send(&mut seqs, sid, k, ts),
+                               None => return,
+                           },
+                       }
         }
     });
     (NodeLink { to_node, from_node }, Fake { seen, tx: do_tx })

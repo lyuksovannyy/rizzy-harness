@@ -61,6 +61,7 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Seen) {
                 let seq = seqs.entry(*session_id).or_insert(0);
                 *seq += 1;
                 let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+                    forked: None,
                     exec_mode: *exec_mode,
                     no_callbacks: false,
                     title: "t".into(),

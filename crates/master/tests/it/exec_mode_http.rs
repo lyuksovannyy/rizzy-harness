@@ -67,6 +67,7 @@ fn careless_node(id: &str) -> (harness_node::NodeLink, Arc<std::sync::Mutex<usiz
                 *seen.lock().unwrap() += 1;
                 let (kind, payload) = harness_core::event::EventKind::SessionCreated(
                     harness_core::event::SessionCreated {
+                        forked: None,
                         title: "t".into(),
                         cwd: "/w".into(),
                         model: "m".into(),

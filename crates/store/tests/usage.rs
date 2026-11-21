@@ -48,6 +48,7 @@ impl Chat {
             log: vec![],
         };
         let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+            forked: None,
             exec_mode: None,
             no_callbacks: false,
             profile: Profile::Agentic,

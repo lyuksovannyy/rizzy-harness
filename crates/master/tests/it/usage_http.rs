@@ -141,6 +141,7 @@ fn chat(t: &T, owner: &str, parent: Option<SessionId>, ts: i64, u: Value) -> Ses
             .unwrap();
     };
     let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+        forked: None,
         exec_mode: None,
         no_callbacks: false,
         profile: Profile::Agentic,

@@ -65,6 +65,7 @@ impl Fake {
         exec_mode: Option<harness_core::policy::ExecMode>,
     ) {
         let k = EventKind::SessionCreated(SessionCreated {
+            forked: None,
             exec_mode,
             no_callbacks: false,
             title: "t".into(),

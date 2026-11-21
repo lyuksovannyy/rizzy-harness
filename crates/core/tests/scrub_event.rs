@@ -173,6 +173,7 @@ const FREE: &[(&str, &[&str])] = &[
     ("peers_skipped", &[]),
     ("conversation_rewound", &[]),
     ("conversation_rewind_undone", &[]),
+    ("session_forked", &[]),
 ];
 
 /// `path` (segments; an array index is `*`) is free in `kind`. `deeper`:
@@ -268,6 +269,7 @@ const ENUM_WORDS: &[&str] = &[
     "cancelled",
     "completed",
     "finished",
+    "forked",
     "in_progress",
     "interrupted",
     "network",
@@ -423,6 +425,7 @@ fn a_notice_is_scrubbed_like_an_error() {
 fn a_schema_word_secret_leaves_the_schema_and_not_the_text() {
     let set = set_of(&["approval_mode".into(), "accept_edits".into()]);
     let (kind, mut p) = EventKind::SessionCreated(SessionCreated {
+        forked: None,
         title: "set approval_mode to accept_edits".into(),
         cwd: "/w".into(),
         model: "mock".into(),
@@ -449,6 +452,7 @@ fn a_schema_word_secret_leaves_the_schema_and_not_the_text() {
 fn harness_written_values_are_kept() {
     let set = set_of(&["/home/bob/proj".into(), "deepseek-chat".into()]);
     let (kind, mut p) = EventKind::SessionCreated(SessionCreated {
+        forked: None,
         title: "work in /home/bob/proj/src".into(),
         cwd: "/home/bob/proj".into(),
         model: "deepseek-chat".into(),

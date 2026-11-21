@@ -155,101 +155,102 @@ fn fake_with(
         };
         loop {
             tokio::select! {
-                msg = commands.recv() => {
-                    let Some(msg) = msg else { return };
-                    keep.lock().unwrap().push(msg.clone());
-                    let now = harness_core::now_ms();
-                    if let MasterToNode::Create { session_id, agent, .. } = &msg {
-                        let created = EventKind::SessionCreated(SessionCreated {
-                            exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
-                            title: "t".into(),
-                            cwd: "/w".into(),
-                            model: "demo::mock".into(),
-                            backend: "native".into(),
-                            node_id: node.clone(),
-                            approval_mode: ApprovalMode::Auto,
-                            profile: Profile::Agentic,
-                            agent_id: agent.as_ref().map(|a| a.agent_id.clone()),
-                            incognito: false,
-                            parent_session: None,
-                            no_callbacks: false,
-                        });
-                        send(&mut seqs, *session_id, created, now);
-                    }
-                    let mut error = None;
-                    if let MasterToNode::Callback(CallbackMsg { session_id, bg_ids, .. }) = &msg {
-                        error = no.lock().unwrap().clone();
-                        if error.is_none() {
-                            send(&mut seqs, *session_id, EventKind::TurnStarted(TurnStarted {
-                                turn_id: "cb".into(),
-                                agent: None,
-                                cause: Some(TurnCause::Callback(bg_ids.clone())),
-                                environment: None, continued_by: None,
-                                retry: None,
-                            }), now);
-                            if !*held.lock().unwrap() {
-                                send(&mut seqs, *session_id, EventKind::TurnEnded(TurnEnded {
-                                    turn_id: "cb".into(),
-                                    reason: TurnEndReason::Completed,
-                                    usage: None,
-                                }), now);
-                            }
-                        }
-                    }
-                    if let MasterToNode::Prompt(PromptMsg { session_id, text, .. }) = &msg {
-                        error = no_prompt.lock().unwrap().clone();
-                        if error.is_none() {
-                            send(&mut seqs, *session_id, EventKind::TurnStarted(TurnStarted {
-                                turn_id: "p".into(),
-                                agent: None,
-                                cause: None,
-                                environment: None, continued_by: None,
-                                retry: None,
-                            }), now);
-                            send(&mut seqs, *session_id, EventKind::UserMessage(harness_core::event::UserMessage {
-                                turn_id: "p".into(),
-                                text: text.clone(),
-                                attachments: vec![],
-                                reply: None,
-                                images: vec![],
-                                queued: false,
-                                triggers: vec![],
-                                tags: vec![],
-                                files: vec![],
-                            }), now);
-                            if !*held.lock().unwrap() {
-                                send(&mut seqs, *session_id, EventKind::TurnEnded(TurnEnded {
-                                    turn_id: "p".into(),
-                                    reason: TurnEndReason::Completed,
-                                    usage: None,
-                                }), now);
-                            }
-                        }
-                    }
-                    if let Some(req_id) = msg.req_id() {
-                        let _ = tx.try_send(NodeToMaster::Ack {
-                            req_id: req_id.into(),
-                            ok: error.is_none(),
-                            error,
-                        });
-                    }
-                }
-                d = do_rx.recv() => match d {
-                    Some(Do::Append(sid, k, ts)) => send(&mut seqs, sid, *k, ts),
-                    Some(Do::AppendThenLeave(sid, k)) => {
-                        send(&mut seqs, sid, *k, harness_core::now_ms());
-                        return;
-                    }
-                    Some(Do::Raw(sid, kind, payload)) => {
-                        let seq = seqs.entry(sid).or_insert(0);
-                        *seq += 1;
-                        let _ = tx.try_send(NodeToMaster::Event {
-                            event: RawEvent { session_id: sid, seq: *seq, ts_ms: harness_core::now_ms(), kind, payload },
-                        });
-                    }
-                    None => return,
-                },
-            }
+                           msg = commands.recv() => {
+                               let Some(msg) = msg else { return };
+                               keep.lock().unwrap().push(msg.clone());
+                               let now = harness_core::now_ms();
+                               if let MasterToNode::Create { session_id, agent, .. } = &msg {
+                                   let created = EventKind::SessionCreated(SessionCreated {
+            forked: None,
+                                       exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
+                                       title: "t".into(),
+                                       cwd: "/w".into(),
+                                       model: "demo::mock".into(),
+                                       backend: "native".into(),
+                                       node_id: node.clone(),
+                                       approval_mode: ApprovalMode::Auto,
+                                       profile: Profile::Agentic,
+                                       agent_id: agent.as_ref().map(|a| a.agent_id.clone()),
+                                       incognito: false,
+                                       parent_session: None,
+                                       no_callbacks: false,
+                                   });
+                                   send(&mut seqs, *session_id, created, now);
+                               }
+                               let mut error = None;
+                               if let MasterToNode::Callback(CallbackMsg { session_id, bg_ids, .. }) = &msg {
+                                   error = no.lock().unwrap().clone();
+                                   if error.is_none() {
+                                       send(&mut seqs, *session_id, EventKind::TurnStarted(TurnStarted {
+                                           turn_id: "cb".into(),
+                                           agent: None,
+                                           cause: Some(TurnCause::Callback(bg_ids.clone())),
+                                           environment: None, continued_by: None,
+                                           retry: None,
+                                       }), now);
+                                       if !*held.lock().unwrap() {
+                                           send(&mut seqs, *session_id, EventKind::TurnEnded(TurnEnded {
+                                               turn_id: "cb".into(),
+                                               reason: TurnEndReason::Completed,
+                                               usage: None,
+                                           }), now);
+                                       }
+                                   }
+                               }
+                               if let MasterToNode::Prompt(PromptMsg { session_id, text, .. }) = &msg {
+                                   error = no_prompt.lock().unwrap().clone();
+                                   if error.is_none() {
+                                       send(&mut seqs, *session_id, EventKind::TurnStarted(TurnStarted {
+                                           turn_id: "p".into(),
+                                           agent: None,
+                                           cause: None,
+                                           environment: None, continued_by: None,
+                                           retry: None,
+                                       }), now);
+                                       send(&mut seqs, *session_id, EventKind::UserMessage(harness_core::event::UserMessage {
+                                           turn_id: "p".into(),
+                                           text: text.clone(),
+                                           attachments: vec![],
+                                           reply: None,
+                                           images: vec![],
+                                           queued: false,
+                                           triggers: vec![],
+                                           tags: vec![],
+                                           files: vec![],
+                                       }), now);
+                                       if !*held.lock().unwrap() {
+                                           send(&mut seqs, *session_id, EventKind::TurnEnded(TurnEnded {
+                                               turn_id: "p".into(),
+                                               reason: TurnEndReason::Completed,
+                                               usage: None,
+                                           }), now);
+                                       }
+                                   }
+                               }
+                               if let Some(req_id) = msg.req_id() {
+                                   let _ = tx.try_send(NodeToMaster::Ack {
+                                       req_id: req_id.into(),
+                                       ok: error.is_none(),
+                                       error,
+                                   });
+                               }
+                           }
+                           d = do_rx.recv() => match d {
+                               Some(Do::Append(sid, k, ts)) => send(&mut seqs, sid, *k, ts),
+                               Some(Do::AppendThenLeave(sid, k)) => {
+                                   send(&mut seqs, sid, *k, harness_core::now_ms());
+                                   return;
+                               }
+                               Some(Do::Raw(sid, kind, payload)) => {
+                                   let seq = seqs.entry(sid).or_insert(0);
+                                   *seq += 1;
+                                   let _ = tx.try_send(NodeToMaster::Event {
+                                       event: RawEvent { session_id: sid, seq: *seq, ts_ms: harness_core::now_ms(), kind, payload },
+                                   });
+                               }
+                               None => return,
+                           },
+                       }
         }
     });
     (
