@@ -3711,6 +3711,20 @@ impl Session {
                 ids.join(", ")
             ));
         }
+        self.restore_checked(turn_id, force, rewind).await
+    }
+
+    /// [`Self::restore`] after the caller made sure nothing of this chat
+    /// runs: no turn, no background command. A caller that holds the turn
+    /// slot itself (a conversation rewind that also puts the files back,
+    /// `session_rewind.rs`) cannot go through `restore`, which would see
+    /// its own claim as a running turn.
+    pub(crate) async fn restore_checked(
+        &self,
+        turn_id: &str,
+        force: bool,
+        rewind: bool,
+    ) -> Result<(), String> {
         self.check_cwd_still_allowed()?;
         let id = self.id;
         let events = self
@@ -6079,6 +6093,11 @@ mod diff;
 mod peers;
 #[path = "session_retry.rs"]
 mod retry;
+
+/// A person's rewind of the conversation to an earlier message (X.45); its
+/// own file.
+#[path = "session_rewind.rs"]
+mod rewind_op;
 
 /// The chat's agent switch: refused while it works, recorded at the next
 /// turn; its own file.

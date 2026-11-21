@@ -63,6 +63,12 @@ pub const CAP_COMPACT: &str = "compact";
 /// chats on nodes whose hello listed it.
 pub const CAP_RETRY: &str = "retry";
 
+/// The node capability that announces `session.rewind` and
+/// `session.rewind_undo` (X.45): a person's rewind of the conversation to
+/// an earlier message, and putting it back. The master offers them only for
+/// chats on nodes whose hello listed it.
+pub const CAP_REWIND: &str = "rewind";
+
 /// The node capability that announces `session.diff` (X.12, PLAN.md T53).
 /// The master asks for a turn's changes only on nodes whose hello listed it.
 pub const CAP_DIFF: &str = "diff";
@@ -744,6 +750,10 @@ pub const COMPACTING: &str = "This chat is being summarised: send your message w
 /// a turn the person did not start): the master answers 409 with it.
 pub const RETRY_REFUSED: &str = "This turn can't be retried";
 
+/// How a node's refusal of a `session.rewind` or `session.rewind_undo`
+/// begins (X.45): the master answers 409 with it.
+pub const REWIND_REFUSED: &str = "This chat can't be rewound there";
+
 /// The most background ids one `session.callback` may name.
 pub const MAX_CALLBACK_IDS: usize = 64;
 
@@ -1236,6 +1246,36 @@ pub enum MasterToNode {
     /// `/compact` runs ([`RETRY_REFUSED`], `TURN_RUNNING`, [`COMPACTING`]).
     #[serde(rename = "session.retry")]
     Retry(RetryMsg),
+    /// Take the chat back to an earlier message of the person's (a rewind,
+    /// X.45, docs/rewind.md; only to nodes with [`CAP_REWIND`]). Sent only
+    /// for the chat's owner, on their click: nothing a model, a tool or a
+    /// routine does sends one. A request only: the node writes
+    /// `conversation_rewound` only if `message_seq` is a message
+    /// `harness_core::rewind::check` allows in its own log, and no turn,
+    /// `/compact` or background work of the chat runs ([`REWIND_REFUSED`],
+    /// `TURN_RUNNING`, [`COMPACTING`]). With `files` it first puts the
+    /// folder back to before the rewound turns, as `session.restore` with
+    /// `rewind` does (`force` as there); if that is refused nothing is
+    /// written. Every field is named by every sender.
+    #[serde(rename = "session.rewind")]
+    Rewind {
+        req_id: String,
+        session_id: SessionId,
+        message_seq: u64,
+        files: bool,
+        force: bool,
+    },
+    /// Put back what the rewind at `rewind_seq` took out (only to nodes with
+    /// [`CAP_REWIND`], for the chat's owner): the node writes
+    /// `conversation_rewind_undone` only if `harness_core::rewind::check_undo`
+    /// allows it in its own log (no message, turn or summary after the
+    /// rewind). Files are never touched.
+    #[serde(rename = "session.rewind_undo")]
+    RewindUndo {
+        req_id: String,
+        session_id: SessionId,
+        rewind_seq: u64,
+    },
     /// Write the chat's hand-off note now if one is due (X.16,
     /// docs/handoff-notes.md; only to nodes with [`CAP_HANDOFF`]). A
     /// request only: the node writes it only for a chat of its own that
@@ -1541,6 +1581,8 @@ impl MasterToNode {
             | MasterToNode::Prompt(PromptMsg { req_id, .. })
             | MasterToNode::Callback(CallbackMsg { req_id, .. })
             | MasterToNode::Retry(RetryMsg { req_id, .. })
+            | MasterToNode::Rewind { req_id, .. }
+            | MasterToNode::RewindUndo { req_id, .. }
             | MasterToNode::Handoff { req_id, .. }
             | MasterToNode::Compact { req_id, .. }
             | MasterToNode::SetAgent { req_id, .. }
