@@ -1051,7 +1051,6 @@ fn every_built_in_is_judged_by_the_shared_rule() {
 #[test]
 fn the_read_only_commands_switch_adds_a_shell_only_to_a_reader() {
     use harness_agents::{Features, custom};
-    use harness_core::agent::ToolSelection;
     let make = |f: Features| custom("x", "X", "", "Do.", f, vec![]).unwrap();
     let reader = Features {
         read_files: true,
@@ -1168,7 +1167,6 @@ fn background_sub_agents_are_their_own_switch() {
 #[test]
 fn the_board_switch() {
     use harness_agents::{Features, custom};
-    use harness_core::agent::ToolSelection;
     let all = builtins();
     for (id, on) in [
         ("general", true),
