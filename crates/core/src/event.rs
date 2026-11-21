@@ -110,6 +110,7 @@ pub enum EventKind {
     ConversationRewound(ConversationRewound),
     ConversationRewindUndone(ConversationRewindUndone),
     SessionForked(SessionForked),
+    MessagePinned(MessagePinned),
 }
 
 impl EventKind {
@@ -174,6 +175,7 @@ impl EventKind {
             EventKind::ConversationRewound(_) => "conversation_rewound",
             EventKind::ConversationRewindUndone(_) => "conversation_rewind_undone",
             EventKind::SessionForked(_) => "session_forked",
+            EventKind::MessagePinned(_) => "message_pinned",
         }
     }
 }
@@ -950,6 +952,18 @@ pub struct ConversationRewound {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationRewindUndone {
     pub rewind_seq: u64,
+}
+
+/// The owner bookmarked a message of the chat, or took the mark off
+/// (`message_pinned`, docs/pins.md). A pin is for the person: the model is
+/// sent nothing about it and no reader of the conversation looks at it. The
+/// latest event for a `message_seq` wins. Written by the node only, for the
+/// chat's owner (`session.pin`), after `pins::check`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessagePinned {
+    /// The seq of the `user_message` or `assistant_message` it marks.
+    pub message_seq: u64,
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

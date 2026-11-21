@@ -273,6 +273,7 @@ const KINDS: Record<string, string> = {
   peers_skipped: "message_seq:n agents:[s reason:=peersReason",
   conversation_rewound: "message_seq:n turn_id ?files:b",
   conversation_rewind_undone: "rewind_seq:n",
+  message_pinned: "message_seq:n pinned:b",
   session_forked: "parent through_seq:n turn_id",
 };
 
@@ -427,11 +428,15 @@ interface Rewinding {
   todos: [seq: number, items: TodoItem[]][];
   /** The person's messages that opened a turn (not queued ones), by seq: a rewind counts only when it names one of its turn. */
   messages: Map<number, string>;
+  /** Messages a pin can name (crates/core/src/pins.rs `Book`), by seq. */
+  texts: Map<number, { who: "user" | "assistant"; text: string; turn_id: string; at: number }>;
+  /** The messages that are pinned. */
+  marked: Set<number>;
 }
 const rewinding = new WeakMap<SessionView, Rewinding>();
 const rw = (v: SessionView): Rewinding => {
   let r = rewinding.get(v);
-  if (!r) rewinding.set(v, (r = { born: [], ranges: [], starts: [], todos: [], messages: new Map() }));
+  if (!r) rewinding.set(v, (r = { born: [], ranges: [], starts: [], todos: [], messages: new Map(), texts: new Map(), marked: new Set() }));
   return r;
 };
 
@@ -484,6 +489,45 @@ function retodo(v: SessionView): void {
     return;
   }
   delete v.todo;
+}
+
+const WHITE = /[\t-\r \u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]/u;
+const CONTROL = /\p{Cc}/u;
+/** `pins::preview`: the first 120 characters of a message on one line. */
+export function pinPreview(text: string): string {
+  let out = "";
+  let n = 0;
+  let gap = false;
+  for (const c of text) {
+    if (WHITE.test(c)) {
+      gap = out !== "";
+      continue;
+    }
+    if (CONTROL.test(c)) continue;
+    if (gap) {
+      out += " ";
+      n++;
+      gap = false;
+      if (n >= 120) break;
+    }
+    out += c;
+    n++;
+    if (n >= 120) break;
+  }
+  return out;
+}
+
+/** The pins that are listed: marked, in log order, none a rewind hides (`SessionView::repin`). Replaces the list only when it changed, so what renders it by identity sees the change. */
+function repin(v: SessionView): void {
+  const r = rw(v);
+  const list = [...r.marked]
+    .sort((a, b) => a - b)
+    .filter((seq) => r.texts.has(seq) && hiddenBy(r, seq) === undefined)
+    .map((seq) => ({ seq, ...r.texts.get(seq)! }));
+  const same = list.length === (v.pins?.length ?? 0) && list.every((p, i) => p.seq === v.pins![i]!.seq);
+  if (same) return;
+  if (list.length) v.pins = list;
+  else delete v.pins;
 }
 
 /** A message, a turn or a summary after a rewind: it can no longer be put back. */
@@ -600,6 +644,16 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       });
       remark(v);
       retodo(v);
+      repin(v);
+      break;
+    }
+    case "message_pinned": {
+      const r = rw(v);
+      if (p.message_seq < e.seq && r.texts.has(p.message_seq)) {
+        if (p.pinned) r.marked.add(p.message_seq);
+        else r.marked.delete(p.message_seq);
+        repin(v);
+      }
       break;
     }
     case "conversation_rewind_undone": {
@@ -612,6 +666,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       r.ranges = r.ranges.filter((a) => a.rewind !== p.rewind_seq);
       remark(v);
       retodo(v);
+      repin(v);
       break;
     }
     case "peers_skipped":
@@ -640,6 +695,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (p.images?.length) item.images = p.images;
       if (p.queued) item.queued = { seq: e.seq, read: false };
       else rw(v).messages.set(e.seq, p.turn_id);
+      rw(v).texts.set(e.seq, { who: "user", text: pinPreview(p.text), turn_id: p.turn_id, at: e.ts_ms });
       if (p.triggers?.length) item.triggers = p.triggers;
       if (p.tags?.length) item.tags = p.tags;
       pushItem(v, e.seq, item);
@@ -669,9 +725,11 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       // Its thinking, a row before what the step said (X.25), as the Rust view.
       // Each block's kind and text (`for_browser` sent no more; the guard keeps no more).
       if (p.thinking) insertItem(v, e.seq, a ? v.items.indexOf(a) : v.items.length, { type: "thinking", message_id: p.message_id, blocks: p.thinking.blocks });
+      if (p.text !== "") rw(v).texts.set(e.seq, { who: "assistant", text: pinPreview(p.text), turn_id: p.turn_id, at: e.ts_ms });
       if (a) {
         a.text = p.text;
         a.done = true;
+        a.seq = e.seq;
         if (p.author != null) a.author = p.author;
         if (p.variant != null) a.variant = p.variant;
         if (p.blocks?.length) a.blocks = p.blocks;
@@ -684,6 +742,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
           done: true,
           author: p.author ?? null,
           variant: p.variant ?? null,
+          seq: e.seq,
         };
         if (p.blocks?.length) item.blocks = p.blocks;
         pushItem(v, e.seq, item);
@@ -819,7 +878,9 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       else delete v.turn_usage;
       v.running_turn = null;
       v.running_agent = null;
-      pushItem(v, e.seq, { type: "turn_end", turn_id: p.turn_id, reason: p.reason });
+      const ended: Extract<Item, { type: "turn_end" }> = { type: "turn_end", turn_id: p.turn_id, reason: p.reason, at: e.ts_ms };
+      if (last) ended.usage = cappedUsage(last);
+      pushItem(v, e.seq, ended);
       break;
     }
     case "turn_usage": {

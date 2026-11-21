@@ -1850,15 +1850,65 @@
       "ts_ms": 1700000000120
     },
     {
+      "kind": "message_pinned",
+      "payload": {
+        "message_seq": 115,
+        "pinned": true
+      },
+      "seq": 122,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000121
+    },
+    {
+      "kind": "message_pinned",
+      "payload": {
+        "message_seq": 114,
+        "pinned": true
+      },
+      "seq": 123,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000122
+    },
+    {
+      "kind": "message_pinned",
+      "payload": {
+        "message_seq": 114,
+        "pinned": false
+      },
+      "seq": 124,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000123
+    },
+    {
+      "kind": "message_pinned",
+      "payload": {
+        "message_seq": 119,
+        "pinned": true
+      },
+      "seq": 125,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000124
+    },
+    {
+      "kind": "message_pinned",
+      "payload": {
+        "message_seq": 9999,
+        "pinned": true
+      },
+      "seq": 126,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000125
+    },
+    {
       "kind": "conversation_rewound",
       "payload": {
         "files": true,
         "message_seq": 118,
         "turn_id": "t92"
       },
-      "seq": 122,
+      "seq": 127,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000121
+      "ts_ms": 1700000000126
     },
     {
       "kind": "model_retry",
@@ -1871,16 +1921,16 @@
         "turn_id": "t6",
         "wait_ms": 4000
       },
-      "seq": 123,
+      "seq": 128,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000122
+      "ts_ms": 1700000000127
     },
     {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 124,
+      "seq": 129,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -1970,7 +2020,7 @@
     "follow_ups": [
       "t6"
     ],
-    "head_seq": 124,
+    "head_seq": 129,
     "items": [
       {
         "text": "fix the bug",
@@ -1998,6 +2048,7 @@
         ],
         "done": true,
         "message_id": "m1",
+        "seq": 6,
         "text": "Let me look.\n\n```ui:progress\n{\"id\": \"look\", \"title\": \"Looking\", \"steps\": [{\"label\": \"Test\", \"status\": \"active\"}]}\n```\n",
         "type": "assistant",
         "variant": null
@@ -2090,6 +2141,7 @@
         ],
         "done": true,
         "message_id": "m2",
+        "seq": 16,
         "text": "Found it.\n\n```ui:progress\n{\"id\": \"fix\", \"title\": \"Fixing\", \"steps\": [{\"label\": \"Find\", \"status\": \"done\"}]}\n```\n\n```ui:choices\n{\"id\": \"next\"}\n```\n",
         "type": "assistant",
         "variant": null
@@ -2119,9 +2171,15 @@
         "type": "error"
       },
       {
+        "at": 1700000000020,
         "reason": "interrupted",
         "turn_id": "t1",
-        "type": "turn_end"
+        "type": "turn_end",
+        "usage": {
+          "context_tokens": 1,
+          "input_tokens": 1,
+          "output_tokens": 2
+        }
       },
       {
         "agent": {
@@ -2176,6 +2234,7 @@
         "author": "writer",
         "done": true,
         "message_id": "m3",
+        "seq": 29,
         "text": "Draft A.",
         "type": "assistant",
         "variant": {
@@ -2187,6 +2246,7 @@
         "author": "writer",
         "done": true,
         "message_id": "m4",
+        "seq": 30,
         "text": "Draft B.",
         "type": "assistant",
         "variant": {
@@ -2230,6 +2290,7 @@
         "type": "step_limit_changed"
       },
       {
+        "at": 1700000000036,
         "reason": "limit",
         "turn_id": "t2",
         "type": "turn_end"
@@ -2334,11 +2395,13 @@
         "author": null,
         "done": true,
         "message_id": "m5",
+        "seq": 48,
         "text": "The build failed.",
         "type": "assistant",
         "variant": null
       },
       {
+        "at": 1700000000048,
         "reason": "completed",
         "turn_id": "t4",
         "type": "turn_end"
@@ -2367,11 +2430,13 @@
         "author": null,
         "done": true,
         "message_id": "m70",
+        "seq": 53,
         "text": "Coder here.",
         "type": "assistant",
         "variant": null
       },
       {
+        "at": 1700000000053,
         "reason": "completed",
         "turn_id": "t70",
         "type": "turn_end"
@@ -2390,11 +2455,13 @@
         "author": null,
         "done": true,
         "message_id": "m71",
+        "seq": 56,
         "text": "Writer here.",
         "type": "assistant",
         "variant": null
       },
       {
+        "at": 1700000000056,
         "reason": "cancelled",
         "turn_id": "t71",
         "type": "turn_end"
@@ -2480,24 +2547,128 @@
         "author": null,
         "done": true,
         "message_id": "m6",
+        "seq": 85,
         "text": "Back.",
         "type": "assistant",
         "variant": null
       },
       {
+        "at": 1700000000085,
         "reason": "completed",
         "turn_id": "forged-1",
-        "type": "turn_end"
+        "type": "turn_end",
+        "usage": {
+          "by_model": {
+            "__proto__": {
+              "input_tokens": 7,
+              "output_tokens": 0
+            },
+            "openai::gpt-4o": {
+              "input_tokens": 7,
+              "output_tokens": 0
+            },
+            "p::f00": {
+              "input_tokens": 7,
+              "output_tokens": 0
+            },
+            "p::f01": {
+              "input_tokens": 7,
+              "output_tokens": 0
+            },
+            "p::f02": {
+              "input_tokens": 7,
+              "output_tokens": 0
+            },
+            "p::f03": {
+              "input_tokens": 7,
+              "output_tokens": 0
+            },
+            "p::f04": {
+              "input_tokens": 7,
+              "output_tokens": 0
+            },
+            "p::f05": {
+              "input_tokens": 7,
+              "output_tokens": 0
+            },
+            "p::f06": {
+              "input_tokens": 7,
+              "output_tokens": 0
+            },
+            "p::f07": {
+              "input_tokens": 7,
+              "output_tokens": 0
+            },
+            "p::f08": {
+              "input_tokens": 7,
+              "output_tokens": 0
+            },
+            "p::f09": {
+              "input_tokens": 7,
+              "output_tokens": 0
+            },
+            "toString": {
+              "input_tokens": 7,
+              "output_tokens": 0
+            }
+          },
+          "context_tokens": 0,
+          "input_tokens": 91,
+          "output_tokens": 0
+        }
       },
       {
+        "at": 1700000000086,
         "reason": "completed",
         "turn_id": "forged-2",
-        "type": "turn_end"
+        "type": "turn_end",
+        "usage": {
+          "by_model": {
+            "10": {
+              "input_tokens": 3,
+              "output_tokens": 0
+            },
+            "11": {
+              "input_tokens": 3,
+              "output_tokens": 0
+            },
+            "9": {
+              "input_tokens": 3,
+              "output_tokens": 0
+            }
+          },
+          "context_tokens": 0,
+          "input_tokens": 9,
+          "output_tokens": 0
+        }
       },
       {
+        "at": 1700000000087,
         "reason": "completed",
         "turn_id": "t5",
-        "type": "turn_end"
+        "type": "turn_end",
+        "usage": {
+          "by_model": {
+            "demo::small": {
+              "input_tokens": 200,
+              "output_tokens": 2
+            },
+            "openai::gpt-4o": {
+              "cache_read_tokens": 300,
+              "cache_write_tokens": 100,
+              "input_tokens": 600,
+              "output_tokens": 8
+            }
+          },
+          "cache_read_tokens": 300,
+          "cache_write_tokens": 100,
+          "context_tokens": 800,
+          "input_tokens": 900,
+          "model": "openai::gpt-4o",
+          "output_tokens": 10,
+          "summary_at": 102400,
+          "window": 128000
+        }
       },
       {
         "text": "Migrate the schema.",
@@ -2509,6 +2680,7 @@
         "type": "error"
       },
       {
+        "at": 1700000000091,
         "reason": "error",
         "turn_id": "t7",
         "type": "turn_end"
@@ -2525,11 +2697,13 @@
         "author": null,
         "done": true,
         "message_id": "m8",
+        "seq": 94,
         "text": "Migrated.",
         "type": "assistant",
         "variant": null
       },
       {
+        "at": 1700000000094,
         "reason": "completed",
         "turn_id": "t8",
         "type": "turn_end"
@@ -2564,6 +2738,7 @@
         "author": null,
         "done": true,
         "message_id": "m-th1",
+        "seq": 99,
         "text": "Checking <b>now</b>.",
         "type": "assistant",
         "variant": null
@@ -2592,6 +2767,7 @@
         "author": null,
         "done": true,
         "message_id": "m-th3",
+        "seq": 101,
         "text": "Done.",
         "type": "assistant",
         "variant": null
@@ -2613,11 +2789,13 @@
         "author": null,
         "done": true,
         "message_id": "m-t90",
+        "seq": 109,
         "text": "Taken.",
         "type": "assistant",
         "variant": null
       },
       {
+        "at": 1700000000109,
         "reason": "completed",
         "turn_id": "t90",
         "type": "turn_end"
@@ -2631,17 +2809,19 @@
         "author": null,
         "done": true,
         "message_id": "m-t91",
+        "seq": 115,
         "text": "Kept.",
         "type": "assistant",
         "variant": null
       },
       {
+        "at": 1700000000115,
         "reason": "completed",
         "turn_id": "t91",
         "type": "turn_end"
       },
       {
-        "rewound": 122,
+        "rewound": 127,
         "text": "Then lose this",
         "turn_id": "t92",
         "type": "user"
@@ -2650,14 +2830,16 @@
         "author": null,
         "done": true,
         "message_id": "m-t92",
-        "rewound": 122,
+        "rewound": 127,
+        "seq": 119,
         "text": "Lost.",
         "type": "assistant",
         "variant": null
       },
       {
+        "at": 1700000000120,
         "reason": "completed",
-        "rewound": 122,
+        "rewound": 127,
         "turn_id": "t92",
         "type": "turn_end"
       }
@@ -2676,6 +2858,15 @@
     },
     "pending_approvals": [
       "a2"
+    ],
+    "pins": [
+      {
+        "at": 1700000000114,
+        "seq": 115,
+        "text": "Kept.",
+        "turn_id": "t91",
+        "who": "assistant"
+      }
     ],
     "retry": {
       "at_ms": 1700000004000,
@@ -2700,7 +2891,7 @@
         "can_undo": true,
         "files": true,
         "message_seq": 118,
-        "seq": 122,
+        "seq": 127,
         "turn_id": "t92",
         "turns": 1,
         "undone": false

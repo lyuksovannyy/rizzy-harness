@@ -1,0 +1,87 @@
+/* The row under a finished turn's final answer (MessageActions.tsx). The row
+   itself is `.msg-actions` (styles.css): hover or focus, always on touch. */
+.answer-actions {
+  position: relative;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-3);
+  row-gap: var(--space-0-5);
+  color: var(--fg-2);
+}
+.answer-actions .msg-time,
+.answer-actions .tok-btn {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.msg-actions-err {
+  flex-basis: 100%;
+}
+.tok {
+  position: relative;
+  display: inline-flex;
+}
+.tok-pop {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  bottom: calc(100% + 6px);
+  width: max-content;
+  max-width: min(36rem, calc(100vw - 2rem));
+  max-height: 60vh;
+  overflow: auto;
+  padding: var(--space-3);
+  background: var(--surface-pop);
+  -webkit-backdrop-filter: var(--blur-thick);
+  backdrop-filter: var(--blur-thick);
+  color: var(--fg);
+  border-radius: var(--r-md);
+  box-shadow: var(--edge), var(--shadow-2);
+}
+.tok-pop p {
+  margin: 0 0 var(--space-2);
+}
+.tok-title,
+.tok-sub {
+  font-weight: 600;
+}
+.tok-table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: var(--space-2);
+}
+.tok-table th,
+.tok-table td {
+  padding: 2px var(--space-2);
+  text-align: right;
+  white-space: nowrap;
+  font-weight: normal;
+}
+.tok-table thead th {
+  color: var(--fg-2);
+}
+.tok-table th:first-child {
+  text-align: left;
+}
+.tok-table tbody th {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.tok-children {
+  margin: 0 0 var(--space-2);
+  padding-left: var(--space-4);
+}
+.tok-total {
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-2);
+}
+@media (max-width: 480px) {
+  /* Anchor to the row's left edge on a phone, the whole width of the column. */
+  .tok {
+    position: static;
+  }
+  .tok-pop {
+    left: 0;
+    right: 0;
+    max-width: none;
+  }
+}

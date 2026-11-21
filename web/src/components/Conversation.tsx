@@ -32,6 +32,9 @@ import {
 import type { Live } from "../live";
 import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
+import { AnswerActions } from "./MessageActions";
+import { PinMark, PinnedList } from "./PinnedList";
+import { answerEnds, turnFigures } from "../lib/turnTokens";
 import { rt } from "../md/strings";
 import { showHidden, shownName } from "../md/hidden";
 import type { History } from "../bg/topics";
@@ -416,6 +419,10 @@ export default function Conversation(props: {
   const items = view?.items ?? [];
   // Where each run of rewound items ends: one pass per render (the items are mutated in place).
   const rewoundEnds = new Map(runs(items).map((r) => [r.end, r]));
+  // The row under each finished turn's final answer: which message, and the end it belongs to. One pass per render, like the line above.
+  const answerAt = answerEnds(items);
+  const rowEnds = new Set(answerAt.values());
+  const pinnedSeqs = new Set((view?.pins ?? []).map((p) => p.seq));
   // The view is mutated in place, so memoise on what the result depends on.
   const provSig = provenanceSignature(items);
   const firstSeen = useMemo(() => provenanceIndex(items), [view, provSig]);
@@ -600,6 +607,38 @@ export default function Conversation(props: {
       routine: !!routine,
       compacting: summarise.compacting,
     }) === null;
+  // "Fork from here" for the turn that ends at `items[end]`: where the server would offer it.
+  const forkLink = (end: number, inline: boolean) => {
+    const e = view?.items[end];
+    return view &&
+      e?.type === "turn_end" &&
+      canFork(view, end, {
+        row: props.row,
+        node,
+        blocked: blocked ?? null,
+        routine: !!routine,
+        subAgent: !!props.row?.parent_id || !!meta?.parent_session,
+      }) ? (
+      <ForkChat sessionId={sessionId} turnId={e.turn_id} inline={inline} />
+    ) : null;
+  };
+  // The row under the final answer at item `i`, whose turn ended at `end`: Copy, Fork from here, Pin, when it ended, what it used.
+  const answerRow = (it: Extract<Item, { type: "assistant" }>, end: number) => {
+    const fig = view ? turnFigures(view, end) : null;
+    return (
+      <AnswerActions
+        sessionId={sessionId}
+        text={it.text}
+        rewound={it.rewound !== undefined}
+        fork={forkLink(end, true)}
+        pin={props.row && !blocked && it.seq !== undefined ? { seq: it.seq, pinned: pinnedSeqs.has(it.seq) } : null}
+        fig={fig}
+        inherited={!!view && meta?.forked != null && (seqAt(view, end) ?? Infinity) <= meta.forked.through_seq}
+        models={props.models}
+        name={agentName}
+      />
+    );
+  };
   // What the server offers here: "Save as artifact" in agentic chats, images in any.
   const workspaceId = props.row?.workspace_id ?? null;
   const features = useFeatures(workspaceId, !!props.row && !blocked && !incognito);
@@ -710,6 +749,7 @@ export default function Conversation(props: {
             <Package size={18} />
           </button>
         )}
+        {view?.pins && <PinnedList sessionId={sessionId} pins={view.pins} canUnpin={!!props.row && !blocked} />}
         <button
           type="button"
           className="icon"
@@ -853,7 +893,7 @@ export default function Conversation(props: {
                 switch (it.type) {
                   case "user":
                     return (
-                      <div key={i} className={it.queued && !it.queued.read ? "msg user waiting" : "msg user"}>
+                      <div key={i} className={it.queued && !it.queued.read ? "msg user waiting" : "msg user"} data-msg-seq={seqAt(view, i)}>
                         {it.reply ? (
                           <ReplyBubble text={it.text} reply={it.reply} block={repliedBlock(view.items, it.reply)} />
                         ) : (
@@ -895,7 +935,8 @@ export default function Conversation(props: {
                   case "assistant": {
                     const final = it.done || i < liveFrom;
                     return (
-                      <div key={i} className={`msg assistant ${!it.done && running ? "streaming" : ""}`}>
+                      <div key={i} className={`msg assistant ${!it.done && running ? "streaming" : ""}${it.seq !== undefined && pinnedSeqs.has(it.seq) ? " msg-pinned" : ""}`} data-msg-seq={it.seq}>
+                        {it.seq !== undefined && pinnedSeqs.has(it.seq) && <PinMark />}
                         {it.author && it.author !== activeAgent && (
                           <div className="author">
                             {props.agents.some((a) => a.id === it.author) && (
@@ -915,7 +956,8 @@ export default function Conversation(props: {
                           />
                         </MessageCtx.Provider>
                         {notes.byReply.has(i) && <FallbackNote note={notes.byReply.get(i)!} />}
-                        {final && it.rewound === undefined && <CopyMessage text={it.text} />}
+                        {final &&
+                          (answerAt.has(i) ? answerRow(it, answerAt.get(i)!) : it.rewound === undefined && <CopyMessage text={it.text} />)}
                       </div>
                     );
                   }
@@ -1124,15 +1166,8 @@ export default function Conversation(props: {
                       !meta?.parent_session &&
                       !(routine && items.findIndex((x) => x.type === "turn_end") === i) &&
                       canRetry(items, i);
-                    const fork = canFork(view, i, {
-                      row: props.row,
-                      node,
-                      blocked: blocked ?? null,
-                      routine: !!routine,
-                      subAgent: !!props.row?.parent_id || !!meta?.parent_session,
-                    }) ? (
-                      <ForkChat sessionId={sessionId} turnId={it.turn_id} />
-                    ) : null;
+                    // Under the final answer's row when the turn has one.
+                    const fork = rowEnds.has(i) ? null : forkLink(i, false);
                     return it.reason === "completed" ? (
                       undo || fork ? (
                         <div key={i} className="turn-end">

@@ -69,6 +69,11 @@ pub const CAP_RETRY: &str = "retry";
 /// chats on nodes whose hello listed it.
 pub const CAP_REWIND: &str = "rewind";
 
+/// The node capability that announces `session.pin` (docs/pins.md): the
+/// owner's bookmark on a message. The master offers it only for chats on
+/// nodes whose hello listed it; an older node is told to update.
+pub const CAP_PIN: &str = "pin";
+
 /// The node capability that announces `session.fork` (ADOPTION_PLAN C.2,
 /// docs/fork.md): a person's fork of a chat at the end of a completed turn.
 /// The master offers it only for chats on nodes whose hello listed it.
@@ -1285,6 +1290,20 @@ pub enum MasterToNode {
         session_id: SessionId,
         rewind_seq: u64,
     },
+    /// Bookmark a message of the chat, or take the bookmark off (docs/pins.md;
+    /// only to nodes with [`CAP_PIN`]). Sent only for the chat's owner, on
+    /// their click: nothing a model, a tool or a routine does sends one. A
+    /// request only: the node writes `message_pinned` only if
+    /// `harness_core::pins::check` allows it in its own log. Unlike a
+    /// rewind it is also accepted while a turn runs: it changes nothing the
+    /// model reads. Every field is named by every sender.
+    #[serde(rename = "session.pin")]
+    Pin {
+        req_id: String,
+        session_id: SessionId,
+        message_seq: u64,
+        pinned: bool,
+    },
     /// Fork a chat (ADOPTION_PLAN C.2, docs/fork.md; only to nodes with
     /// [`CAP_FORK`]): a new chat `session_id` (minted by the master, like a
     /// create's) on the same node, whose log is `parent`'s events up to the
@@ -1612,6 +1631,7 @@ impl MasterToNode {
             | MasterToNode::Retry(RetryMsg { req_id, .. })
             | MasterToNode::Rewind { req_id, .. }
             | MasterToNode::RewindUndo { req_id, .. }
+            | MasterToNode::Pin { req_id, .. }
             | MasterToNode::Handoff { req_id, .. }
             | MasterToNode::Compact { req_id, .. }
             | MasterToNode::SetAgent { req_id, .. }

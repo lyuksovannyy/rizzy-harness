@@ -309,8 +309,10 @@ attach them again. The routes are `POST /api/sessions/{id}/rewind` with
 `{message_seq, files, force}`, and `.../rewind/{seq}/undo`. Design:
 `docs/rewind.md`.
 
-**Fork a chat.** On the end line of a finished turn, **Fork from here** (shown
-when you hover the end line or tab to it, always on touch) starts a new chat
+**Fork a chat.** In the row under a finished turn's final answer (see **The
+row under an answer** below; on the end line for a turn that said nothing),
+**Fork from here** (shown when you hover the answer or tab to it, always on
+touch) starts a new chat
 that begins with this conversation up to there, every message, answer, tool
 call and result as it was, and goes its own way; this chat stays as it is,
 whatever it is doing. The new chat is yours alone (nobody else can fork your
@@ -337,6 +339,36 @@ fork of a fork works; deleting the original leaves the fork as it is, with its
 divider saying the original is gone. A copy of the original's memory, files it
 published or sub-agent chats is not made. Files in a checkout of their own come
 with the next change. Design: `docs/fork.md`.
+
+**The row under an answer.** Under the final answer of each finished turn one
+small row reads **Copy · Fork from here · Pin ·** when the turn ended **·** the
+tokens it used. It shows as Copy always did: when you hover the answer or tab
+into it, always on touch. The time is relative ("just now", "5 min ago", "2 h
+ago", "yesterday 14:02", then a date); hover it for the complete date, time and
+zone. The tokens read like "12.3k in · 1.2k out": the turn's input (cache reads
+and writes included, as providers count it) and output, **sub-agents it called
+included**. Hover the figure, click it or tab to it (Escape or a click outside
+closes it) for the detail: each model's input, output and cache tokens and the
+cost where your admin set prices, then each sub-agent of that turn with its
+agent, its models and its tokens (a share of the total, not added to it), then
+the total. A sub-agent you cannot open is named with "its chat cannot be read
+here". A background sub-agent's cost arrives when it ends, not in a turn, so it
+is not listed. A turn copied into a fork shows what the chat it came from
+spent, marked "before the fork", and counts as zero in the fork's totals; a
+rewound turn shows its figures and nothing to click.
+
+**Pinned messages.** **Pin** bookmarks an answer: it is marked in the chat and
+**Pinned (n)** in the chat's header opens a list (each pin's first words, who
+wrote it, when) where choosing one scrolls to the message and marks it for a
+moment, and **Unpin** takes the mark off. A pin is for you: **the agent is told
+nothing about it** and it changes nothing the agent reads. Only you can pin in
+your chats (nobody else can, admins included, and the agent cannot), also in a
+sub-agent's chat or a routine's chat of yours, also while an answer is running;
+at most 50 per chat ("this chat has 50 pinned messages; unpin one first"); a
+rewound message cannot be pinned and its pin is not listed until the rewind is
+undone. A fork keeps the pins of the turns it copied. The route is
+`POST /api/sessions/{id}/pins` with `{message_seq, pinned}`. Design:
+`docs/pins.md`.
 
 When a turn completes or fails in a chat you are not looking at (another chat
 is open, or the tab is hidden), the chat gets a dot in the sidebar until you

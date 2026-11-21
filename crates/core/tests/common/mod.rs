@@ -477,6 +477,10 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             files: true,
         }),
         EventKind::ConversationRewindUndone(ConversationRewindUndone { rewind_seq: 3 }),
+        EventKind::MessagePinned(MessagePinned {
+            message_seq: 2,
+            pinned: true,
+        }),
         EventKind::SessionForked(SessionForked {
             parent: sid(),
             through_seq: 5,
@@ -556,6 +560,7 @@ pub fn slot(k: &EventKind) -> usize {
         EventKind::ConversationRewound(_) => 38,
         EventKind::ConversationRewindUndone(_) => 39,
         EventKind::SessionForked(_) => 40,
+        EventKind::MessagePinned(_) => 41,
     }
 }
-pub const KINDS: usize = 41;
+pub const KINDS: usize = 42;

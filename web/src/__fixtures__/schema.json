@@ -1386,6 +1386,18 @@
         "type": "string"
       }
     ],
+    "message_pinned": [
+      {
+        "path": "message_seq",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "pinned",
+        "required": true,
+        "type": "boolean"
+      }
+    ],
     "model_fallback": [
       {
         "path": "from",
