@@ -434,6 +434,10 @@ const rw = (v: SessionView): Rewinding => {
   return r;
 };
 
+/** The seq of the event item `i` was made from: what a rewind to that
+ * message names. Undefined for an item this fold did not make. */
+export const seqAt = (v: SessionView, i: number): number | undefined => rewinding.get(v)?.born[i];
+
 function pushItem(v: SessionView, seq: number, item: Item): void {
   v.items.push(item);
   rw(v).born[v.items.length - 1] = seq;

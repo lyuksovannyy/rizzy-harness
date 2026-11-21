@@ -9,6 +9,7 @@ mod environment;
 pub mod exec;
 mod forge_clone;
 mod git;
+mod history;
 mod images;
 mod instructions;
 mod others;

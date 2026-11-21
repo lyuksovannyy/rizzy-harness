@@ -13,6 +13,9 @@ pub mod context;
 mod delegate_availability_tests;
 #[cfg(test)]
 mod edit_guard_tests;
+pub mod history;
+#[cfg(test)]
+mod history_tests;
 pub mod images;
 pub mod live_usage;
 pub mod llm;
@@ -364,6 +367,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
 
     fn recall(&self) -> Option<Arc<dyn harness_core::recall::RecallSource>> {
         self.host.recall()
+    }
+
+    fn history(&self) -> Option<Arc<dyn harness_core::history::HistorySource>> {
+        self.host.history()
     }
 
     fn board(&self) -> Option<Arc<dyn harness_core::board::BoardSource>> {
@@ -1327,16 +1334,19 @@ impl NativeBackend {
         let harness_core::agent::ToolSelection::List(declared) = &d.tools else {
             return None;
         };
-        if declared.is_empty() {
+        if declared.iter().all(|n| n == history::NAME) {
             return None;
         }
         // Proposing a memory does none of a task's work: `remember` alone
         // leaves a delegate with nothing to work with (A.11, on nodes that
         // register it).
         // Nor does searching earlier chats (`recall`).
+        // Nor does reading the chat's own history (`history`, which every
+        // agent has unless switched off).
         let usable = |name: &str| {
             name != "remember"
                 && name != "recall"
+                && name != history::NAME
                 && d.allows_tool(name)
                 && !host.tool_denied(name)
                 && self
@@ -1347,8 +1357,10 @@ impl NativeBackend {
         if declared.iter().any(|n| usable(n)) {
             return None;
         }
+        // `history` is every agent's own chat: not worth naming.
         let names: Vec<String> = declared
             .iter()
+            .filter(|n| *n != history::NAME)
             .map(|n| match n.as_str() {
                 "remember" => "memory".to_string(),
                 "recall" => "earlier chats search".to_string(),
@@ -1833,6 +1845,14 @@ pub struct Rebuild<'a> {
     /// says (results whole, a fold's note on its own), not as requests
     /// send it.
     pub transcript: bool,
+    /// The log's shortening is not applied: no `context_shortened` stub,
+    /// fold or dropped thinking. What `history` reads (PLAN.md T91): the
+    /// conversation as the log holds it, every other rule of the rebuild
+    /// kept (rewound ranges, the chosen variant, withheld images, where a
+    /// queued message was read). A summary (`history_summarized`) is not
+    /// applied by [`rebuild`] either: [`split_summary`] does that for the
+    /// loop, and a caller that does not call it holds the whole log.
+    pub unshortened: bool,
 }
 
 /// The harness's line in front of an earlier answer of another agent of
@@ -1858,7 +1878,12 @@ fn unanswered_note(reason: TurnEndReason) -> String {
 }
 
 /// The path a call named (`path`), as the line over its image shows it.
-fn image_name(input: &serde_json::Value) -> String {
+fn image_name(tool: &str, input: &serde_json::Value) -> String {
+    // A `history` image has no path: it is named by where it is from.
+    if tool == history::NAME {
+        let n = |k: &str| input.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        return images::history_image_name(n("turn"), n("image"));
+    }
     input
         .get("path")
         .and_then(|v| v.as_str())
@@ -1867,9 +1892,15 @@ fn image_name(input: &serde_json::Value) -> String {
 }
 
 /// The message after a `read` result that returned an image (X.23).
-fn tool_image_msg(call_id: String, name: String, i: &harness_core::event::ToolImage) -> ChatMsg {
+fn tool_image_msg(
+    call_id: String,
+    tool: String,
+    name: String,
+    i: &harness_core::event::ToolImage,
+) -> ChatMsg {
     ChatMsg::ToolImage {
         call_id,
+        tool,
         image: provider::ImagePart {
             sha256: i.sha256.clone(),
             mime: i.mime.clone(),
@@ -1885,6 +1916,9 @@ fn tool_image_msg(call_id: String, name: String, i: &harness_core::event::ToolIm
 /// the log shortened (`context_shortened`, X.15) applied.
 pub fn rebuild(history: &[RawEvent], how: &Rebuild<'_>) -> Vec<ChatMsg> {
     let (msgs, spans) = rebuild_spans(history, how);
+    if how.unshortened {
+        return msgs;
+    }
     let how = if how.transcript {
         shorten::How::TRANSCRIPT
     } else {
@@ -1978,7 +2012,7 @@ pub fn rebuild_spans(
     let mut out = Vec::new();
     let mut open: Vec<String> = Vec::new();
     // The path each open call named, for the line over its image.
-    let mut paths: std::collections::HashMap<String, String> = Default::default();
+    let mut paths: std::collections::HashMap<String, (String, String)> = Default::default();
     // Queued messages by seq: sent while a turn ran, read where their
     // `queued_delivered` stands (X.5).
     let mut queued: std::collections::HashMap<u64, UserMessage> = Default::default();
@@ -2074,7 +2108,12 @@ pub fn rebuild_spans(
                 paths = m
                     .tool_calls
                     .iter()
-                    .map(|c| (c.call_id.clone(), image_name(&c.input)))
+                    .map(|c| {
+                        (
+                            c.call_id.clone(),
+                            (c.tool.clone(), image_name(&c.tool, &c.input)),
+                        )
+                    })
                     .collect();
                 if !m.text.is_empty() || !m.tool_calls.is_empty() {
                     // Another agent's answer says whose it is (only in a
@@ -2109,7 +2148,7 @@ pub fn rebuild_spans(
             EventKind::ToolCallFinished(f) => {
                 if let Some(pos) = open.iter().position(|c| *c == f.call_id) {
                     open.remove(pos);
-                    let name = paths.get(&f.call_id).cloned().unwrap_or_default();
+                    let (tool, name) = paths.get(&f.call_id).cloned().unwrap_or_default();
                     out.push(ChatMsg::Tool {
                         call_id: f.call_id.clone(),
                         content: f.output,
@@ -2117,7 +2156,7 @@ pub fn rebuild_spans(
                     out.extend(f.note.map(ChatMsg::CallNote));
                     // Its image, by reference: the bytes come from the
                     // chat's store when a request shows it (X.23).
-                    out.extend(f.image.map(|i| tool_image_msg(f.call_id, name, &i)));
+                    out.extend(f.image.map(|i| tool_image_msg(f.call_id, tool, name, &i)));
                 }
             }
             // A step's instruction files (B.9), where the log has them:
@@ -2900,6 +2939,15 @@ impl NativeBackend {
                 .tools
                 .iter()
                 .any(|t| t.name() == TODO_TOOL && t.enabled(sv));
+        // Likewise `history` (T91): the summary's line sends the model there
+        // only while this turn can call it (the tool is registered here,
+        // the agent has it and the node does not deny it).
+        let offers_history = agent.is_none_or(|a| a.allows_tool(history::NAME))
+            && !host.tool_denied(history::NAME)
+            && self
+                .tools
+                .iter()
+                .any(|t| t.name() == history::NAME && t.enabled(sv));
         // A callback turn (T.8d step 3) opens with the harness's frame and
         // the ended commands' notes, from the log alone: no person's text,
         // no master's context, no images; its block (instruction files and
@@ -3123,8 +3171,14 @@ impl NativeBackend {
             |summary: Option<&str>, recent: &[RawEvent], plan: Option<&context::Plan>| {
                 let system = match summary {
                     Some(t) => {
-                        let mut s =
-                            format!("{base_system}\n\nSummary of the earlier conversation:\n{t}");
+                        let mut s = format!(
+                            "{base_system}\n\nSummary of the earlier conversation{}:\n{t}",
+                            if offers_history {
+                                history::SUMMARY_NOTE
+                            } else {
+                                ""
+                            }
+                        );
                         let through = recent.first().map_or(u64::MAX, |e| e.seq.saturating_sub(1));
                         if let Some(items) =
                             harness_core::todo::as_of(full, through).filter(|_| offers_todo)
@@ -5154,8 +5208,21 @@ impl NativeBackend {
         Option<ChatMsg>,
     ) {
         let sees = agent.is_some_and(|a| a.vision.iter().any(|m| m == model));
+        let history = call.tool == history::NAME;
+        let capped_line = |why: &str| {
+            if history {
+                images::history_image_capped(why)
+            } else {
+                images::tool_image_capped(why)
+            }
+        };
         if !sees {
-            return (None, Some(images::tool_image_unseen(model)), None);
+            let line = if history {
+                images::history_image_unseen(model)
+            } else {
+                images::tool_image_unseen(model)
+            };
+            return (None, Some(line), None);
         }
         let len = img.bytes.len() as u64;
         let capped = if *turn >= images::TURN_IMAGES {
@@ -5172,9 +5239,9 @@ impl NativeBackend {
             None
         };
         if let Some(why) = capped {
-            return (None, Some(images::tool_image_capped(&why)), None);
+            return (None, Some(capped_line(&why)), None);
         }
-        let name = image_name(&call.input);
+        let name = image_name(&call.tool, &call.input);
         let r = harness_core::event::ToolImage {
             sha256: img.sha256.clone(),
             mime: img.mime.to_string(),
@@ -5195,7 +5262,7 @@ impl NativeBackend {
                 "the chat could not keep it ({}).",
                 self.config.secrets.scrub(&e)
             );
-            return (None, Some(images::tool_image_capped(&why)), None);
+            return (None, Some(capped_line(&why)), None);
         }
         *turn += 1;
         step.0 += 1;
@@ -5203,10 +5270,17 @@ impl NativeBackend {
         // Without its bytes: a request loads those of the images it shows
         // from the store, so the turn holds only its window's (review of
         // PR 130, item 1).
-        let msg = tool_image_msg(call.call_id.clone(), name, &r);
+        let msg = tool_image_msg(call.call_id.clone(), call.tool.clone(), name, &r);
         (
             Some(r),
-            Some(images::TOOL_IMAGE_SENT.to_string()),
+            Some(
+                if history {
+                    images::HISTORY_IMAGE_SENT
+                } else {
+                    images::TOOL_IMAGE_SENT
+                }
+                .to_string(),
+            ),
             Some(msg),
         )
     }
@@ -6027,6 +6101,7 @@ impl NativeBackend {
             skills: ctx.extra.skills.clone(),
             seen: self.seen.session(ctx.session_id),
             recall: host.recall(),
+            history: host.history(),
             board: host.board(),
             stored_skills: host.stored_skills(),
             read_offered: self.read_offered(ctx, host),
@@ -9948,6 +10023,7 @@ mod place_notes_tests {
     fn a_steps_images_follow_its_results_and_a_summary_is_told() {
         let img = |c: &str| ChatMsg::ToolImage {
             call_id: c.into(),
+            tool: "read".into(),
             image: provider::ImagePart {
                 sha256: "s".into(),
                 mime: "image/png".into(),

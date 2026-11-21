@@ -39,8 +39,7 @@ export function useShown(item: Tool) {
   }, [item.tool, item.input, preview]);
 }
 
-/** `place`: this is the composer's choice ("n of of" pending in this chat,
- * answers ignored for GUARD_MS). `lead`: what comes before the fields (a web
+/** `place`: this is the composer's choice (answers ignored for GUARD_MS). `lead`: what comes before the fields (a web
  * call's address). `blocked`: the viewer may only deny. */
 export function ApprovalChoice({
   sessionId,
@@ -56,7 +55,7 @@ export function ApprovalChoice({
   blocked?: boolean;
   cwd?: string;
   lead?: React.ReactNode;
-  place?: { n: number; of: number };
+  place?: boolean;
   /** The choice's own container, which takes focus when it appears (the composer hands it over). */
   boxRef?: RefObject<HTMLDivElement | null>;
 }) {
@@ -126,7 +125,7 @@ export function ApprovalChoice({
   }, [!place, measure, shown, openFields]);
   // The announcement is put in an empty live region after it is there.
   const [said, setSaid] = useState("");
-  const words = place ? `${t("approval.waits", { tool: shownName(item.tool) })}${place.of > 1 ? ` (${t("approval.count", { n: String(place.n), of: String(place.of) })})` : ""}` : "";
+  const words = place ? t("approval.waits", { tool: shownName(item.tool) }) : "";
   useEffect(() => setSaid(words), [words]);
 
   const decide = async (d: Decision) => {
@@ -178,11 +177,6 @@ export function ApprovalChoice({
         <span className="sr-only" role="status">
           {said}
         </span>
-      )}
-      {place && place.of > 1 && (
-        <div className="approval-count small muted" aria-hidden="true">
-          {t("approval.count", { n: String(place.n), of: String(place.of) })}
-        </div>
       )}
       <div
         className="approval-scroll"

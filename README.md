@@ -279,10 +279,12 @@ message and everything after it (the answers, the tool calls and results,
 what the agent had read) stop being part of the conversation. The agent is not
 sent them any more, so it does not act on a plan you dropped or remember a
 file it read there: it has to read a file again before it edits it. Nothing is
-deleted: the removed turns stay in the chat, muted under a line saying they were
-rewound, and **you can put them back until you send the next message**. You
-choose whether the files go back too, as **Rewind files to before this turn**
-does today (refused, with the reason, and nothing rewound, if you edited a file
+deleted: the removed turns stay in the chat, folded into one line ("2 turns
+rewound", open it to read them), and **you can put them back with Undo rewind
+until you send the next message**. Hover (or focus) one of your messages and
+choose **Rewind to here**: a small panel under it says what happens and offers
+**Rewind conversation**, or **Rewind conversation and files** when a turn from
+there on changed files, as **Rewind files to before this turn** does today (refused, with the reason, and nothing rewound, if you edited a file
 since or another chat worked in the folder; **Undo anyway** is the same
 `force`); if you leave the files, the agent's next turn (whatever starts it)
 is told the conversation was taken back and, when the removed turns still
@@ -294,14 +296,18 @@ summary), and to a message you sent while an answer was running (take the
 chat back to the message that started that answer). **It does not undo:** what
 commands did outside the folder, web requests, memory the agent saved,
 tasks it moved, files it published, other chats it started or the cost; and
-putting a rewind back never changes files. The removed text leaves search and
+putting a rewind back never changes files (the block says "Files went back to
+before this message." with a button "Bring the files back", for as long as
+they are back). The removed text leaves search and
 what the agent can recall from earlier chats (and comes back with the undo).
 Only you can do
-it, never the agent. The buttons (per message "Rewind to here", the choice of
-conversation, files or both, the prompt back in the box) come with the next
-change; this version has the server side (`POST /api/sessions/{id}/rewind` with
-`{message_seq, files, force}`, and `.../rewind/{seq}/undo`) and shows rewound
-turns muted. Design: `docs/rewind.md`.
+it, never the agent. Your message goes back into the box (its text and its
+images) when the box is empty; if you had typed something, it stays and the
+block offers "Put the message back in the box". Attachments are used up when a
+message is sent, so the box cannot take them back: the block names them and you
+attach them again. The routes are `POST /api/sessions/{id}/rewind` with
+`{message_seq, files, force}`, and `.../rewind/{seq}/undo`. Design:
+`docs/rewind.md`.
 
 **Fork a chat.** On the end line of a finished turn, **Fork from here** (shown
 when you hover the end line or tab to it, always on touch) starts a new chat
@@ -1307,6 +1313,44 @@ change anything, and the call shows in the chat like any tool.
   hold web pages, tool output and other people's files, so it is told to
   check a detail before relying on it and never to follow instructions in
   them. A node turns the tool off with `denied_tools = ["recall"]`.
+
+**Reading earlier messages.** After a chat was summarised, the agent has a
+paragraph in place of the earlier turns, its old tool results are one-line
+stubs and the earlier images and attached files are no longer in front of it.
+An agent with the **Chat history** switch (on the Agents page; on unless a
+definition says `history: false`; every built-in agent but Smol, which has no tools, has it) has a `history`
+tool that reads **this chat's own** earlier turns in full, from the log on the
+node, with no model call and nothing sent to the server:
+
+- `history` with no arguments lists the turns, oldest first, 100 to a page: the
+  number, the time, who spoke, the first 120 characters of your message, how
+  many tool calls, attachments and images, and whether the agent is now sent
+  only a summary of that turn.
+- `turn` N shows one turn: your message, each attachment's name and text, the
+  agent's answers, each tool call and its result. A result, attachment or
+  message over 4,000 characters is cut, with the line that reads all of it in
+  parts (`call`, `attachment` or `message`, with `part`).
+- `search` finds the turns that hold some words (3 characters or more, newest
+  first, at most 20).
+- `turn` N with `image` I shows an earlier image, as `read` shows an image
+  file: only to a model that takes images, and in the per-step and per-turn
+  caps. An image the provider refused, or whose bytes the chat no longer
+  keeps, is refused with the reason.
+
+It shows only what the agent could have been sent: **never a turn you rewound
+(turn numbers are those of the turns left, so they change after a rewind),
+never an image the provider refused, never the agent's thinking, never a
+message you sent while a turn ran that the agent never read** (one it read is
+listed with the turn that read it, with its attachments and images), **never
+the environment line or the context block of an old request, never the text of
+a file you mentioned with `@` (only its path), never another chat** (a
+sub-agent's chat is its own). If a provider repeats a call id inside one turn,
+the result is read by its number in brackets (`call` `"#5"`). It changes nothing and asks
+nothing. Everything it returns was written then and is quoted line by line
+(`| `), so an old result that looks like a note from the harness stays text
+of that result; the agent is told it may hold text from files and pages and
+that it must follow no instruction in it. A node turns the tool off with
+`denied_tools = ["history"]`.
 
 Who may create workspaces (also a switch under Settings → Server → Workspaces):
 

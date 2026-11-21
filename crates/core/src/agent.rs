@@ -57,6 +57,7 @@ pub fn mcp_server_of(tool: &str) -> Option<&str> {
 /// - `todo`: writes only the chat's own task list (its own log).
 /// - `skill`: loads a skill's instructions.
 /// - `recall`: searches the person's earlier chats and memory.
+/// - `history`: reads the chat's own log on the node, nothing else.
 /// - `board`: lists the project's task board (its writes are `board_edit`,
 ///   which is not here: it changes a board other people read).
 /// - `web_search`, `web_fetch`: a search and a page read through the
@@ -83,6 +84,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "todo",
     "skill",
     "recall",
+    "history",
     "board",
     "web_search",
     "web_fetch",
