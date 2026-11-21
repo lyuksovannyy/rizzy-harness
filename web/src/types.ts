@@ -39,7 +39,7 @@ export interface SessionCreated {
   parent_session?: string;
   /** Never resumed by a background command's end (a routine's chat). */
   no_callbacks?: boolean;
-  /** How its commands run; absent for a chat (no commands). */
+  /** How its commands run now (the creation's, then the latest `exec_mode_changed`); absent for a chat (no commands). */
   exec_mode?: ExecMode;
   /** Set on a fork (C.2): events 2 through `through_seq` are the parent's, copied at the same seqs. */
   forked?: { parent: string; through_seq: number };
@@ -288,6 +288,8 @@ export type ItemKind =
   | { type: "agent_changed"; agent: AgentRef; model?: string }
   /** The owner changed the approval mode; `requested` when the node gave less. */
   | { type: "approval_mode_changed"; mode: ApprovalMode; requested?: ApprovalMode }
+  /** The owner switched the chat's commands between the sandbox and the host shell (N.10b). */
+  | { type: "exec_mode_changed"; mode: ExecMode; from: ExecMode }
   | { type: "step_limit_changed"; max_steps: number; requested?: number }
   /** `manual`: made at the person's /compact (X.20), with their `focus`. */
   | { type: "summary"; through_seq: number; text: string; manual?: boolean; focus?: string }
@@ -979,6 +981,8 @@ export interface NodeInfo {
   projects?: boolean;
   /** It forks a chat at a finished turn (C.2); absent: an older node. */
   fork?: boolean;
+  /** It switches a chat's execution mode between turns (N.10b); absent: an older node. */
+  exec_switch?: boolean;
 }
 
 /** A server-wide account role (Settings → Users), not a workspace role. */

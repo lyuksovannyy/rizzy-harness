@@ -30,6 +30,7 @@ const ExecChoice = lazy(() => import("./ExecChoice"));
 const ApprovalModePick = lazy(() => import("./ApprovalModePick"));
 // The chat's step limit (X.14), beside the approval mode: same chats.
 const StepLimitPick = lazy(() => import("./StepLimitPick"));
+const ExecSwitch = lazy(() => import("./ExecSwitch"));
 // Where a new agentic chat works (X.26): the Project button and its popup.
 const ProjectPicker = lazy(() => import("./ProjectPicker"));
 
@@ -144,6 +145,16 @@ export function Composer(props: {
   /** Session: the chat's approval mode and how to change it (T50); absent:
    * not changeable here (a chat, a sub-agent's, a routine's, an old node). */
   approval?: { value: ApprovalMode; max: ApprovalMode; host: boolean; onChange: (m: ApprovalMode) => Promise<unknown> };
+  /** Session: the chat's execution mode and how to switch it (N.10b); absent:
+   * not switchable here (a chat, a sub-agent's, a routine's, an old node). */
+  exec?: {
+    value: ExecMode;
+    offered: ExecMode[];
+    mayHost: boolean;
+    node: string;
+    busy: string | null;
+    onChange: (m: ExecMode) => Promise<unknown>;
+  };
   /** Session: the chat's step limit and the node's maximum (X.14); absent:
    * not changeable here. */
   steps?: { value: number; max: number; onChange: (n: number) => Promise<unknown> };
@@ -941,6 +952,22 @@ export function Composer(props: {
               />
             </Suspense>
           )}
+          {!home && props.exec && !props.readOnly && (
+            <Suspense fallback={null}>
+              <ExecSwitch
+                value={props.exec.value}
+                offered={props.exec.offered}
+                mayHost={props.exec.mayHost}
+                node={props.exec.node}
+                approval={props.approval?.value ?? ""}
+                busy={props.exec.busy}
+                onChange={(m) => {
+                  setErr(null);
+                  props.exec!.onChange(m).catch((x) => setErr(x instanceof Error ? x.message : String(x)));
+                }}
+              />
+            </Suspense>
+          )}
           {!home && props.steps && !props.readOnly && (
             <Suspense fallback={null}>
               <StepLimitPick
@@ -1133,6 +1160,7 @@ export function Composer(props: {
               <Suspense fallback={null}>
               <ExecChoice
                 pickable={hostPickable}
+                hostOff={props.hostRight?.level === "host" && !worker.exec_modes?.includes("host")}
                 // A choice is for one node: another starts at the sandbox.
                 key={worker.node_id}
                 node={worker.embedded ? "local" : shownName(worker.hostname)}

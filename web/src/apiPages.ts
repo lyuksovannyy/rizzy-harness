@@ -6,6 +6,7 @@ import { call, httpError, keyed, reach, type Scope, scoped, seen } from "./api";
 import type {
   ApprovalMode,
   ExecLevel,
+  ExecMode,
   Agent,
   AgentAvatar,
   AgentChain,
@@ -98,6 +99,8 @@ export const pageApi = {
   /** The node clamps it and records it; the chat shows the result (T50). */
   setApprovalMode: (id: string, mode: ApprovalMode) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/approval-mode`, { mode }),
+  /** The owner switches the chat's commands between the sandbox and the host shell while nothing of it runs (N.10b); the chat shows the mode its log records. */
+  setExecMode: (id: string, mode: ExecMode) => call<{ ok: boolean }>("POST", `/api/sessions/${id}/exec-mode`, { mode }),
   /** The node clamps it to 1..its limit and records it; the chat shows the result (X.14). */
   setStepLimit: (id: string, max_steps: number) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/step-limit`, { max_steps }),

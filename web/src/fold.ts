@@ -261,6 +261,7 @@ const KINDS: Record<string, string> = {
   queued_delivered: "turn_id seqs:[n",
   todo_updated: "turn_id call_id ?items:[@todo",
   approval_mode_changed: "mode:=approvalMode ?requested:=approvalMode",
+  exec_mode_changed: "mode:=execMode from:=execMode",
   context_sent: "turn_id frame:=frame",
   chat_allow_added: "grant_id approval_id tool input:j",
   chat_allow_removed: "grant_id",
@@ -920,6 +921,14 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       const it: Extract<Item, { type: "approval_mode_changed" }> = { type: "approval_mode_changed", mode: p.mode };
       if (p.requested != null) it.requested = p.requested;
       pushItem(v, e.seq, it);
+      break;
+    }
+    case "exec_mode_changed": {
+      // The mode in force (N.10b), as the approval mode is: the latest
+      // change, else the creation's. State, not conversation: a rewind
+      // hides the divider, never moves this.
+      if (v.meta) v.meta.exec_mode = p.mode;
+      pushItem(v, e.seq, { type: "exec_mode_changed", mode: p.mode, from: p.from });
       break;
     }
     case "step_limit_changed": {

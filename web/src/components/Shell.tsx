@@ -628,6 +628,7 @@ export function Shell(props: {
               voice={voice}
               gutter={gutter}
               projects={projects}
+              hostRight={hostRightOf(me)}
             />
           ) : route.kind === "project" ? (
             <Project

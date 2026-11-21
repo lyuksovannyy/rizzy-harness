@@ -60,6 +60,8 @@ import { SessionFigures } from "./SessionFigures";
 import { RetryNote } from "./RetryNote";
 import { ForkChat, ForkDivider, ForkNote, InheritedChanges } from "./ForkChat";
 import { canFork } from "../lib/fork";
+import { whyNotSwitchable } from "../lib/execSwitch";
+import type { HostRight } from "../lib/execModes";
 import { RewindMessage } from "./RewindMessage";
 import { RewoundBlock } from "./RewoundBlock";
 import { TurnStatus, turnState } from "./TurnStatus";
@@ -322,6 +324,8 @@ export default function Conversation(props: {
   gutter?: History | null;
   /** The workspace's projects, for the header's project picker. */
   projects?: ProjectSummary[];
+  /** Who is looking: their level, for the strip's switch to the host shell (N.10b). */
+  hostRight?: HostRight;
 }) {
   const { live, sessionId } = props;
   useEffect(() => {
@@ -1018,6 +1022,12 @@ export default function Conversation(props: {
                         {it.requested ? ` (asked for ${own(MODE_NAMES, it.requested)}; this node allows no more)` : ""}
                       </div>
                     );
+                  case "exec_mode_changed":
+                    return (
+                      <div key={i} className="divider" data-testid="exec-mode-divider">
+                        {it.mode === "host" ? t("conv.execHost") : t("conv.execSandbox")}
+                      </div>
+                    );
                   case "step_limit_changed":
                     return (
                       <div key={i} className="divider">
@@ -1349,6 +1359,20 @@ export default function Conversation(props: {
                     max: node.max_approval,
                     host: meta.exec_mode === "host",
                     onChange: (m) => pageApi.setApprovalMode(sessionId, m),
+                  }
+                : undefined
+            }
+            exec={
+              // The owner's own agentic chat on a node that switches it
+              // (N.10b): a person's chat only, as for the approval mode.
+              meta?.profile === "agentic" && meta.exec_mode && !meta.parent_session && !meta.no_callbacks && !routine && node?.exec_switch
+                ? {
+                    value: meta.exec_mode,
+                    offered: node.exec_modes ?? [],
+                    mayHost: props.hostRight?.level === "host",
+                    node: node.embedded ? "local" : shownName(node.hostname),
+                    busy: whyNotSwitchable(view, { running, compacting: summarise.compacting, waiting: !!holding[0] }),
+                    onChange: (m) => pageApi.setExecMode(sessionId, m),
                   }
                 : undefined
             }

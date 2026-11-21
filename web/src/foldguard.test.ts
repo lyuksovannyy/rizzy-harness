@@ -137,6 +137,7 @@ const ITEM: Record<string, Check> = {
   turn_end: rec({ type: S, turn_id: S, reason: S, at: N, "?usage": usage }),
   agent_changed: rec({ type: S, agent: agentRef, "?model": nul(S) }),
   approval_mode_changed: rec({ type: S, mode: S, "?requested": S }),
+  exec_mode_changed: rec({ type: S, mode: S, from: S }),
   step_limit_changed: rec({ type: S, max_steps: N, "?requested": N }),
   summary: rec({ type: S, through_seq: N, text: S, "?manual": TRUE, "?focus": S }),
   shortened: rec({
