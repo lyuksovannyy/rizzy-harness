@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use harness_core::backend::ENVIRONMENT_LEAD;
 use harness_core::event::shown_name;
+use harness_core::policy::ExecMode;
 
 /// What the working folder's repository says about itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,7 +130,17 @@ fn os_name() -> &'static str {
 
 /// The line, for a turn starting at `now` in a folder whose repository
 /// was looked at as `repo`.
-pub(crate) fn line(now: &jiff::Zoned, repo: &Looked) -> String {
+///
+/// `mode`: how the chat's commands run (N.10a); named when known. `was`: the
+/// mode they ran in when the chat's last turn began, when it is another one
+/// (N.10b: the owner switched since): the line then says so, so the model
+/// is told in the turn's own opening, which the log keeps byte for byte.
+pub(crate) fn line(
+    now: &jiff::Zoned,
+    repo: &Looked,
+    mode: Option<ExecMode>,
+    was: Option<ExecMode>,
+) -> String {
     let zone = now.time_zone().iana_name().unwrap_or("local time");
     let clock = format!(
         "{} ({zone}, UTC{})",
@@ -160,12 +171,33 @@ pub(crate) fn line(now: &jiff::Zoned, repo: &Looked) -> String {
         }
         Looked::Failed => "whether the working folder is in a git repository is not known".into(),
     };
+    let where_ = match mode {
+        None => String::new(),
+        Some(m) => format!(" {}", in_words(m)),
+    };
+    let moved = match (mode, was) {
+        (Some(m), Some(w)) if m != w => format!(
+            " The chat's commands ran {} until this turn and now run {}: what a command there \
+             set up outside the working folder is not here.",
+            in_words(w),
+            in_words(m)
+        ),
+        _ => String::new(),
+    };
     format!(
         "{ENVIRONMENT_LEAD}: the node's clock reads {clock}; OS: {}; the `bash` tool runs \
-         commands with bash, already in the working folder (no `cd` to it needed; `workdir` \
-         runs one elsewhere); {git}.",
+         commands with bash{where_}, already in the working folder (no `cd` to it needed; \
+         `workdir` runs one elsewhere); {git}.{moved}",
         os_name()
     )
+}
+
+/// Where a mode's commands run, for the line.
+fn in_words(m: ExecMode) -> &'static str {
+    match m {
+        ExecMode::Sandbox => "in the sandbox",
+        ExecMode::Host => "in the host shell, with no sandbox",
+    }
 }
 
 #[cfg(test)]
@@ -251,11 +283,47 @@ mod tests {
         let now = jiff::Timestamp::from_second(0)
             .unwrap()
             .to_zoned(jiff::tz::TimeZone::UTC);
-        let l = line(&now, &Looked::Read(r));
+        let l = line(&now, &Looked::Read(r), None, None);
         assert_eq!(l.lines().count(), 1, "{l}");
         assert!(l.starts_with(ENVIRONMENT_LEAD), "{l}");
         assert!(!l.contains("x\";"), "the quote closed: {l}");
         assert!(l.len() < 600, "unbounded: {l}");
+    }
+
+    /// N.10b: the line names where the chat's commands run, and when the
+    /// owner switched since the chat's last turn it says what changed.
+    #[test]
+    fn the_line_names_the_mode_and_a_switch() {
+        let now = jiff::civil::date(2026, 11, 14)
+            .at(10, 32, 0, 0)
+            .in_tz("Europe/Riga")
+            .unwrap();
+        let r = Looked::Read(Repo::None);
+        let sandbox = line(&now, &r, Some(ExecMode::Sandbox), Some(ExecMode::Sandbox));
+        assert!(
+            sandbox.contains("runs commands with bash in the sandbox, already in"),
+            "{sandbox}"
+        );
+        assert!(!sandbox.contains("until this turn"), "no change: {sandbox}");
+        let first = line(&now, &r, Some(ExecMode::Host), None);
+        assert!(
+            first.contains("with bash in the host shell, with no sandbox,"),
+            "{first}"
+        );
+        assert!(
+            !first.contains("until this turn"),
+            "no earlier turn: {first}"
+        );
+        let moved = line(&now, &r, Some(ExecMode::Host), Some(ExecMode::Sandbox));
+        assert!(
+            moved.ends_with(
+                "The chat's commands ran in the sandbox until this turn and now run in the host \
+                 shell, with no sandbox: what a command there set up outside the working folder \
+                 is not here."
+            ),
+            "{moved}"
+        );
+        assert_eq!(moved.lines().count(), 1, "{moved}");
     }
 
     #[test]
@@ -264,7 +332,7 @@ mod tests {
             .at(10, 32, 0, 0)
             .in_tz("Europe/Riga")
             .unwrap();
-        let l = line(&now, &Looked::Read(Repo::Branch("main".into())));
+        let l = line(&now, &Looked::Read(Repo::Branch("main".into())), None, None);
         assert!(
             l.starts_with(
                 "[harness] Environment of this turn: the node's clock reads Saturday 2026-11-14 \
@@ -282,7 +350,7 @@ mod tests {
             "{l}"
         );
         // The search stops at the granted folder (review L1).
-        let l = line(&now, &Looked::Read(Repo::None));
+        let l = line(&now, &Looked::Read(Repo::None), None, None);
         assert!(
             l.ends_with(
                 "no git repository was found from the working folder up to the folder \
@@ -291,11 +359,11 @@ mod tests {
             "{l}"
         );
         // A failed read is not reported as a slow one.
-        assert!(line(&now, &Looked::Failed).ends_with("is not known."));
-        assert!(line(&now, &Looked::TimedOut).ends_with("was not read in time."));
+        assert!(line(&now, &Looked::Failed, None, None).ends_with("is not known."));
+        assert!(line(&now, &Looked::TimedOut, None, None).ends_with("was not read in time."));
         // Outside the session's folders: no reason every turn (L3).
         assert!(
-            line(&now, &Looked::Read(Repo::Unread(None)))
+            line(&now, &Looked::Read(Repo::Unread(None)), None, None)
                 .ends_with("the working folder is in a git repository.")
         );
     }

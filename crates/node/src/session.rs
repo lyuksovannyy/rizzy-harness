@@ -209,10 +209,18 @@ pub(crate) struct Session {
     /// folder. Not kept across a restart (the folder is removed when the
     /// sub-agent ends); set again with `pin_cell` when it is continued.
     owned_cell: Mutex<Option<harness_core::folder::OwnedFolder>>,
-    /// How its commands run (N.10a): from its `session_created`, never
-    /// changed; `None` for a chat session. Checked against what the node
-    /// offers before every turn, callback, restore and delegation.
-    exec_mode: Option<harness_core::policy::ExecMode>,
+    /// How its commands run (N.10a): from its `session_created`, then the
+    /// latest `exec_mode_changed` (N.10b: [`Self::set_exec_mode`], the
+    /// owner's switch while nothing of the chat runs; the rule is
+    /// `harness_core::exec_mode`); `None` for a chat session, and for a log
+    /// whose mode cannot be read (it runs nothing). Read through
+    /// [`Self::exec_mode_now`]. Checked against what the node offers
+    /// before every turn, callback, restore and delegation.
+    exec_mode: Mutex<Option<harness_core::policy::ExecMode>>,
+    /// The mode this chat's commands ran in when its last turn started, for
+    /// the line that tells the model the mode changed since
+    /// ([`Self::environment_line`]); `None` before any turn.
+    last_turn_mode: Mutex<Option<harness_core::policy::ExecMode>>,
     /// This session's background commands (T.8d): an agentic session that
     /// is not a sub-agent's. Dropping it stops every one.
     bg: Option<Arc<harness_tools::background::SessionBg>>,
@@ -590,7 +598,8 @@ impl Session {
             last_state: Mutex::new(None),
             pin_cell: Mutex::new(pin_of(profile, &cwd)),
             owned_cell: Mutex::new(owned),
-            exec_mode,
+            exec_mode: Mutex::new(exec_mode),
+            last_turn_mode: Mutex::new(None),
             owner: Mutex::new(None),
             identity: Mutex::new(None),
             looked: AtomicBool::new(false),
@@ -680,6 +689,18 @@ impl Session {
                 _ => {}
             }
         }
+        // The mode the chat's commands were in when its last turn began.
+        let last_turn_mode = {
+            let mut now = harness_core::exec_mode::InForce::Unset;
+            let mut at_turn = None;
+            for e in &events {
+                if e.kind == "turn_started" {
+                    at_turn = now.mode();
+                }
+                now = harness_core::exec_mode::step(now, e);
+            }
+            at_turn
+        };
         let (bg, ends) = background_table(&node, meta.profile, meta.parent_session, next);
         let s = Arc::new(Self {
             bg,
@@ -736,9 +757,14 @@ impl Session {
             last_state: Mutex::new(last_state),
             pin_cell: Mutex::new(pin),
             owned_cell: Mutex::new(None),
-            // As recorded, never re-chosen: one the node no longer offers
-            // runs nothing (`checked_folder`).
-            exec_mode: meta.exec_mode,
+            // As the log says now, never re-chosen: one the node no longer
+            // offers runs nothing (`checked_folder`), and one the log
+            // names but this build cannot read is `None` (fails closed).
+            exec_mode: Mutex::new(match view.exec_mode {
+                harness_core::exec_mode::InForce::Mode(m) => Some(m),
+                _ => None,
+            }),
+            last_turn_mode: Mutex::new(last_turn_mode),
             owner: Mutex::new(None),
             identity: Mutex::new(None),
             looked: AtomicBool::new(false),
@@ -1267,6 +1293,14 @@ impl Session {
             )));
         }
         *head = ev.seq;
+        // The mode this turn's commands run in (it cannot change while the
+        // turn holds the slot): what the next turn's line compares with.
+        if ev.kind == "turn_started" {
+            *self
+                .last_turn_mode
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = self.exec_mode_now();
+        }
         // Still under `head`, so this session's events reach the link in
         // seq order. A full link pauses the session here until the master
         // reads (or the link drops; the event is in the store either way).
@@ -1347,7 +1381,7 @@ impl Session {
             return Ok(self.cwd.clone());
         }
         // Its mode is still one this node offers (N.10a).
-        self.node.cfg.policy.check_exec(self.exec_mode)?;
+        self.node.cfg.policy.check_exec(self.exec_mode_now())?;
         let dir = match self.pin() {
             Some(pin) => pin.check()?,
             None => {
@@ -3014,7 +3048,12 @@ impl Session {
             Bounded::TimedOut => crate::environment::Looked::TimedOut,
             Bounded::Cancelled | Bounded::Failed(_) => crate::environment::Looked::Failed,
         };
-        let line = crate::environment::line(&now, &repo);
+        let mode = self.exec_mode_now();
+        let was = *self
+            .last_turn_mode
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let line = crate::environment::line(&now, &repo, mode, was);
         *self.turn_env.lock().unwrap_or_else(|p| p.into_inner()) =
             Some((turn_id.to_string(), line.clone()));
         Some(line)
@@ -4370,8 +4409,8 @@ impl Session {
                 parent_session: Some(self.id),
                 // A sub-agent's chat has no background table at all.
                 no_callbacks: true,
-                // Its parent's, always (N.10a).
-                exec_mode: self.exec_mode,
+                // Its parent's, always (N.10a), as it is now (N.10b).
+                exec_mode: self.exec_mode_now(),
                 // A read-only grandchild works in its parent's node-owned folder.
                 owned: iso
                     .as_ref()
@@ -5301,6 +5340,20 @@ impl Session {
         Ok(())
     }
 
+    /// How this session's commands run now: its own mode from the log, or
+    /// for a sub-agent's chat the chat's above it (N.10b: the mode its
+    /// parent has now, so a sub-agent continued after a switch never runs
+    /// in a mode its chat has left). `None` runs nothing.
+    pub(crate) fn exec_mode_now(&self) -> Option<harness_core::policy::ExecMode> {
+        if let Some(parent) = self.parent_session
+            && let Some(p) = self.node.session(parent)
+            && p.id != self.id
+        {
+            return p.exec_mode_now();
+        }
+        *self.exec_mode.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     fn current_cancel(&self) -> Option<CancellationToken> {
         self.turn
             .lock()
@@ -5622,7 +5675,7 @@ impl TurnHost for Session {
     }
 
     fn exec_mode(&self) -> Option<harness_core::policy::ExecMode> {
-        self.exec_mode
+        self.exec_mode_now()
     }
 
     /// The identity of the chat at the top of this session's parents (a
@@ -5743,7 +5796,13 @@ impl TurnHost for Session {
             && self.parent_session.is_none()
             && !self.no_callbacks;
         let approval_id = new_id();
-        let mut reason = approval_reason(tool, risk, input, &self.node.cfg.policy, self.exec_mode);
+        let mut reason = approval_reason(
+            tool,
+            risk,
+            input,
+            &self.node.cfg.policy,
+            self.exec_mode_now(),
+        );
         // A custom connector's tool (X.35 step 2): its own reason, never the
         // node server's (review of PR 157, M4).
         let connector = origin
@@ -6149,6 +6208,10 @@ mod retry;
 /// own file.
 #[path = "session_rewind.rs"]
 mod rewind_op;
+
+/// The owner's switch of a chat's execution mode (N.10b); its own file.
+#[path = "session_exec.rs"]
+mod exec_op;
 
 /// The owner's bookmark on a message (docs/pins.md); its own file.
 #[path = "session_pin.rs"]

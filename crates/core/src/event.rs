@@ -98,6 +98,7 @@ pub enum EventKind {
     QueuedDelivered(QueuedDelivered),
     TodoUpdated(TodoUpdated),
     ApprovalModeChanged(ApprovalModeChanged),
+    ExecModeChanged(ExecModeChanged),
     ContextSent(ContextSent),
     ChatAllowAdded(ChatAllowAdded),
     ChatAllowRemoved(ChatAllowRemoved),
@@ -163,6 +164,7 @@ impl EventKind {
             EventKind::QueuedDelivered(_) => "queued_delivered",
             EventKind::TodoUpdated(_) => "todo_updated",
             EventKind::ApprovalModeChanged(_) => "approval_mode_changed",
+            EventKind::ExecModeChanged(_) => "exec_mode_changed",
             EventKind::ContextSent(_) => "context_sent",
             EventKind::ChatAllowAdded(_) => "chat_allow_added",
             EventKind::ChatAllowRemoved(_) => "chat_allow_removed",
@@ -533,9 +535,11 @@ pub struct SessionCreated {
     #[serde(default, skip_serializing_if = "is_false")]
     pub no_callbacks: bool,
     /// How this session's commands run (N.10a): chosen by the node at
-    /// create from what it offers, never changed. `None` for a chat
-    /// session, which runs no commands; an agentic session without one
-    /// runs nothing.
+    /// create from what it offers. Its owner may switch it later while
+    /// nothing of the chat runs (`exec_mode_changed`, N.10b): the chat's
+    /// mode now is [`crate::exec_mode::in_force`], not this. `None` for a
+    /// chat session, which runs no commands; an agentic session without
+    /// one runs nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_mode: Option<crate::policy::ExecMode>,
     /// Set when this chat is a fork: its first `through_seq` events are
@@ -2288,6 +2292,22 @@ pub struct ApprovalModeChanged {
     pub requested: Option<crate::policy::ApprovalMode>,
 }
 
+/// The chat's execution mode changed (N.10b): its owner switched it
+/// between `sandbox` and `host` while nothing of the chat ran. Appended by
+/// the session actor only, on a command from the master that the node
+/// decided again (it offers the mode, nothing of the chat runs); nothing
+/// the model writes, no tool and no sub-agent records one. The chat's mode
+/// is this event's `mode` from here on, else `session_created.exec_mode`
+/// ([`crate::exec_mode`] is the one rule). It is state, not conversation:
+/// a rewind does not move it back. Carries no account id (no event does).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecModeChanged {
+    /// The mode the chat's commands run in from here on.
+    pub mode: crate::policy::ExecMode,
+    /// The mode they ran in until here.
+    pub from: crate::policy::ExecMode,
+}
+
 /// The chat's step limit changed (X.14): the owner's change, as the node
 /// clamped it to `1..=` its own `[limits] max_steps`. Appended by the
 /// session actor only, on a command from the master; nothing the model
@@ -2667,6 +2687,10 @@ mod tests {
             EventKind::ApprovalModeChanged(ApprovalModeChanged {
                 mode: crate::policy::ApprovalMode::AcceptEdits,
                 requested: Some(crate::policy::ApprovalMode::Auto),
+            }),
+            EventKind::ExecModeChanged(ExecModeChanged {
+                mode: crate::policy::ExecMode::Host,
+                from: crate::policy::ExecMode::Sandbox,
             }),
             EventKind::ChatAllowAdded(ChatAllowAdded {
                 grant_id: "g".into(),

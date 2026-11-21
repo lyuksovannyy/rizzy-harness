@@ -171,8 +171,10 @@ pub struct SessionRow {
     /// The effective workspace (see `EFFECTIVE_WS`); `None` only for a chat
     /// without an owner and without a mapping. Master only.
     pub workspace_id: Option<String>,
-    /// The execution mode `session_created` recorded (`sandbox`, `host`);
-    /// `None` for a chat, and until it has been mirrored.
+    /// The execution mode in force (`sandbox`, `host`): `session_created`'s,
+    /// then the latest `exec_mode_changed` (N.10b), as written: text this
+    /// build cannot read stays unreadable. `None` for a chat, and until it
+    /// has been mirrored.
     pub exec_mode: Option<String>,
 }
 
@@ -1014,6 +1016,18 @@ impl Store {
                         params![sid, parent],
                     )?;
                 }
+            }
+            // The chat's commands moved between the sandbox and the host
+            // shell (N.10b): the latest wins, as `harness_core::exec_mode`
+            // reads a log. Kept as written: a mode this build cannot read
+            // stays unreadable here, so the master's checks fail closed.
+            // A fork's copied change counts too (state, not conversation).
+            harness_core::exec_mode::CHANGED => {
+                let mode = harness_core::exec_mode::recorded(&e.kind, &e.payload).flatten();
+                tx.execute(
+                    "UPDATE sessions SET exec_mode = ?2 WHERE session_id = ?1",
+                    params![sid, mode],
+                )?;
             }
             // A switch that ran: the agent the master sent for that turn.
             // A mirror rebuilt from the node's log ends on the last one.

@@ -434,6 +434,11 @@ fn events() -> Vec<RawEvent> {
             max_steps: 1000,
             requested: Some(5000),
         }),
+        // The owner switched the chat's commands to the host shell (N.10b).
+        EventKind::ExecModeChanged(ExecModeChanged {
+            mode: harness_core::policy::ExecMode::Host,
+            from: harness_core::policy::ExecMode::Sandbox,
+        }),
         // A turn that used its step budget ends at a limit, not an error.
         EventKind::TurnEnded(TurnEnded {
             turn_id: "t2".into(),

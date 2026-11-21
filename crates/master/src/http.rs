@@ -22,6 +22,7 @@ mod connection_repos;
 mod connections;
 mod custom_connectors;
 mod diff;
+mod exec_mode;
 mod files;
 mod fork;
 mod hooks;
@@ -245,6 +246,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(diff::routes())
         .merge(files::routes())
         .merge(approval_mode::routes())
+        .merge(exec_mode::routes())
         .merge(chat_allows::routes())
         .merge(step_limit::routes())
         .merge(compact::routes())
@@ -570,6 +572,7 @@ async fn nodes(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<se
         .map(|mut n| {
             if who.exec_ceiling < harness_core::policy::ExecLevel::Sandbox {
                 (n.exec_modes, n.exec_gaps) = Default::default();
+                n.exec_switch = false;
             }
             n
         })

@@ -1140,6 +1140,28 @@
         "type": "string"
       }
     ],
+    "exec_mode_changed": [
+      {
+        "path": "from",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "sandbox",
+          "host"
+        ]
+      },
+      {
+        "path": "mode",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "sandbox",
+          "host"
+        ]
+      }
+    ],
     "handoff_written": [
       {
         "path": "failed",

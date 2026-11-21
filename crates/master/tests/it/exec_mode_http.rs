@@ -24,22 +24,22 @@ use harness_store::Store;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
-const TOKEN: &str = "api-secret";
+pub(super) const TOKEN: &str = "api-secret";
 /// Offers `sandbox` and `host`.
-const BOTH: &str = "node-both1";
+pub(super) const BOTH: &str = "node-both1";
 /// Offers only `host` (no bubblewrap there).
-const HOST_ONLY: &str = "node-hostonly1";
+pub(super) const HOST_ONLY: &str = "node-hostonly1";
 /// Announces no mode at all (as a node from before modes would).
 const SILENT: &str = "node-silent1";
 
-struct Server {
-    base: String,
-    ws: std::path::PathBuf,
-    admin: String,
-    mirror: Store,
-    master: Master,
+pub(super) struct Server {
+    pub(super) base: String,
+    pub(super) ws: std::path::PathBuf,
+    pub(super) admin: String,
+    pub(super) mirror: Store,
+    pub(super) master: Master,
     /// The creates the careless node was sent.
-    creates: Arc<std::sync::Mutex<usize>>,
+    pub(super) creates: Arc<std::sync::Mutex<usize>>,
     _dir: tempfile::TempDir,
 }
 
@@ -141,7 +141,7 @@ async fn node(root: &std::path::Path, id: &str, profile: Profile, exec: ExecOffe
 /// `local` (sandbox only: `host` is off on it), the chat runtime, the two
 /// remote workers, and a claimed admin. Every account with the grant may
 /// use `local` here, so the `host` rule for it is what is tested.
-async fn start() -> Server {
+pub(super) async fn start() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
@@ -197,7 +197,7 @@ async fn start() -> Server {
     s
 }
 
-async fn send(
+pub(super) async fn send(
     s: &Server,
     method: Method,
     path: &str,
@@ -226,7 +226,7 @@ async fn send(
     (status, cookie, body)
 }
 
-async fn call(
+pub(super) async fn call(
     s: &Server,
     method: Method,
     path: &str,
@@ -238,12 +238,12 @@ async fn call(
 }
 
 /// A non-admin account whose ceiling is `sandbox`, logged in.
-async fn account(s: &Server, name: &str) -> String {
+pub(super) async fn account(s: &Server, name: &str) -> String {
     account_with(s, name, true).await.0
 }
 
 /// A non-admin account, logged in: (cookie, user id).
-async fn account_with(s: &Server, name: &str, agentic: bool) -> (String, String) {
+pub(super) async fn account_with(s: &Server, name: &str, agentic: bool) -> (String, String) {
     let (st, v) = call(
         s,
         Method::POST,
@@ -275,7 +275,7 @@ async fn account_with(s: &Server, name: &str, agentic: bool) -> (String, String)
     (cookie.unwrap(), id)
 }
 
-async fn create(
+pub(super) async fn create(
     s: &Server,
     who: &str,
     ws: &str,
@@ -286,7 +286,7 @@ async fn create(
 }
 
 /// `ws`: `None` for the caller's active workspace (their Personal one).
-async fn create_in(
+pub(super) async fn create_in(
     s: &Server,
     who: &str,
     ws: Option<&str>,
@@ -325,7 +325,7 @@ async fn recorded(s: &Server, who: &str, sid: &str) -> Value {
     panic!("no session_created for {sid}");
 }
 
-async fn personal(s: &Server, who: &str) -> String {
+pub(super) async fn personal(s: &Server, who: &str) -> String {
     let (_, v) = call(s, Method::GET, "/api/workspaces", None, who).await;
     let first = &v["workspaces"][0];
     assert_eq!(first["personal"], true, "{v}");

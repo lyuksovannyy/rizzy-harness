@@ -167,6 +167,12 @@ pub enum Item {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         requested: Option<crate::policy::ApprovalMode>,
     },
+    /// The owner switched the chat's commands between the sandbox and the
+    /// host shell (`exec_mode_changed`, N.10b).
+    ExecModeChanged {
+        mode: crate::policy::ExecMode,
+        from: crate::policy::ExecMode,
+    },
     /// The owner changed the chat's step limit (`step_limit_changed`).
     StepLimitChanged {
         max_steps: u64,
@@ -458,6 +464,11 @@ pub struct SessionView {
     /// the node's `[limits] max_steps`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps: Option<u64>,
+    /// The chat's execution mode as its log says it now
+    /// ([`crate::exec_mode`], the one rule; written to no one: the browser
+    /// folds its own).
+    #[serde(skip)]
+    pub exec_mode: crate::exec_mode::InForce,
     /// A model call waits to be sent again (`model_retry`); gone once
     /// output resumes, another model answers or the turn ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -610,6 +621,10 @@ impl SessionView {
         self.session_id = Some(e.session_id);
         self.head_seq = e.seq;
         self.items.at(e.seq, e.ts_ms);
+        // Before the typed read: an `exec_mode_changed` that names no mode
+        // this build knows does not parse, and must still make the mode
+        // unreadable (fail closed), never leave the previous one.
+        self.exec_mode = crate::exec_mode::step(self.exec_mode, e);
         match e.typed() {
             Ok(k) => self.apply_kind(k, e.seq),
             Err(_) => self.unknown_events += 1,
@@ -1180,6 +1195,18 @@ impl SessionView {
                     requested: c.requested,
                 });
             }
+            EventKind::ExecModeChanged(c) => {
+                // The mode in force for the browser, as the approval mode is
+                // (`self.exec_mode` is the fail-closed one the node reads: an
+                // event that names an unknown mode does not reach here).
+                if let Some(m) = &mut self.meta {
+                    m.exec_mode = Some(c.mode);
+                }
+                self.items.push(Item::ExecModeChanged {
+                    mode: c.mode,
+                    from: c.from,
+                });
+            }
             EventKind::StepLimitChanged(c) => {
                 self.max_steps = Some(c.max_steps);
                 self.items.push(Item::StepLimitChanged {
@@ -1449,6 +1476,56 @@ mod tests {
                 }
             ]
         );
+    }
+
+    /// N.10b: the chat's mode is the latest `exec_mode_changed`, else the
+    /// creation's, and a change that names a mode this build does not know
+    /// makes it unreadable (the previous mode is not kept).
+    #[test]
+    fn the_latest_exec_mode_change_is_the_chats_mode() {
+        use crate::exec_mode::InForce;
+        use crate::policy::ExecMode;
+        let sid = SessionId::new();
+        let created = SessionCreated {
+            forked: None,
+            title: "t".into(),
+            cwd: "/w".into(),
+            model: "m".into(),
+            backend: "native".into(),
+            node_id: "n".into(),
+            approval_mode: crate::policy::ApprovalMode::Ask,
+            profile: Profile::Agentic,
+            agent_id: None,
+            incognito: false,
+            parent_session: None,
+            no_callbacks: false,
+            exec_mode: Some(ExecMode::Sandbox),
+        };
+        let change = |mode, from| EventKind::ExecModeChanged(ExecModeChanged { mode, from });
+        let mut evs = vec![
+            ev(sid, 1, EventKind::SessionCreated(created)),
+            ev(sid, 2, change(ExecMode::Host, ExecMode::Sandbox)),
+        ];
+        let v = SessionView::fold(&evs).unwrap();
+        assert_eq!(v.exec_mode, InForce::Mode(ExecMode::Host));
+        assert_eq!(v.meta.as_ref().unwrap().exec_mode, Some(ExecMode::Host));
+        assert_eq!(
+            v.items,
+            [Item::ExecModeChanged {
+                mode: ExecMode::Host,
+                from: ExecMode::Sandbox
+            }]
+        );
+        evs.push(RawEvent {
+            session_id: sid,
+            seq: 3,
+            ts_ms: 0,
+            kind: "exec_mode_changed".into(),
+            payload: serde_json::json!({"mode": "quantum", "from": "host"}),
+        });
+        let v = SessionView::fold(&evs).unwrap();
+        assert_eq!(v.exec_mode, InForce::Unreadable);
+        assert_eq!(v.unknown_events, 1);
     }
 
     #[test]

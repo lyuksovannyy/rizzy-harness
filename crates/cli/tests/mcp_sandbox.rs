@@ -294,6 +294,64 @@ async fn host_and_sandbox_chats_servers_end_with_the_nodes_stop() {
     assert!(n.none_marked().await, "left: {:?}", n.marked());
 }
 
+/// N.10b: a switch stops the chat's servers before it is acked (a server
+/// started under the sandbox must not serve a host turn, nor the reverse)
+/// and the next turn starts one under the new mode: contained in the
+/// sandbox (its own PID namespace), beside the node in the host shell.
+#[tokio::test]
+async fn a_switch_stops_the_servers_and_they_start_under_the_new_mode() {
+    let Some(mut n) = node().await else { return };
+    let ours = own_pid_ns();
+    let sid = n.create(ExecMode::Sandbox).await;
+    let out = n.run(sid, SCRIPT).await;
+    assert!(
+        out[1].0 && !out[1].1.contains(&ours),
+        "not contained: {out:?}"
+    );
+    assert!(!n.marked().is_empty(), "no server process found");
+    let switch = |n: &mut Node, mode| {
+        n.link
+            .to_node
+            .try_send(MasterToNode::SetExecMode {
+                req_id: format!("x-{}", harness_core::new_id()),
+                session_id: sid,
+                mode,
+            })
+            .unwrap();
+    };
+    switch(&mut n, ExecMode::Host);
+    n.ack().await.unwrap();
+    assert!(
+        n.none_marked().await,
+        "a sandbox server survived: {:?}",
+        n.marked()
+    );
+    let out = n.run(sid, SCRIPT).await;
+    // (`run` returns every output of the log: this turn's `pid` is the
+    // second of its three, the last but one.)
+    let pid = out[out.len() - 2].clone();
+    assert!(
+        pid.0 && pid.1.contains(&ours),
+        "not in the node's namespace: {out:?}"
+    );
+    assert!(!n.marked().is_empty(), "no server for the host turn");
+    switch(&mut n, ExecMode::Sandbox);
+    n.ack().await.unwrap();
+    assert!(
+        n.none_marked().await,
+        "a host server survived: {:?}",
+        n.marked()
+    );
+    let out = n.run(sid, SCRIPT).await;
+    let pid = out[out.len() - 2].clone();
+    assert!(
+        pid.0 && !pid.1.contains(&ours),
+        "not contained again: {out:?}"
+    );
+    n.delete(sid).await;
+    assert!(n.none_marked().await, "left: {:?}", n.marked());
+}
+
 /// Review of PR 149, L6: `doctor` does not start a server that node.toml's
 /// `denied_tools` denies whole (no chat would), and says why; another
 /// server is still probed.

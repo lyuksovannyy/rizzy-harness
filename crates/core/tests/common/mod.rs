@@ -417,6 +417,10 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             mode: ApprovalMode::AcceptEdits,
             requested: Some(ApprovalMode::Auto),
         }),
+        EventKind::ExecModeChanged(ExecModeChanged {
+            mode: ExecMode::Host,
+            from: ExecMode::Sandbox,
+        }),
         EventKind::ContextSent(ContextSent {
             turn_id: s(),
             frame: ContextFrame::Callback,
@@ -560,6 +564,7 @@ pub fn slot(k: &EventKind) -> usize {
         EventKind::ConversationRewindUndone(_) => 39,
         EventKind::SessionForked(_) => 40,
         EventKind::MessagePinned(_) => 41,
+        EventKind::ExecModeChanged(_) => 42,
     }
 }
-pub const KINDS: usize = 42;
+pub const KINDS: usize = 43;

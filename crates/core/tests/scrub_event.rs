@@ -154,6 +154,7 @@ const FREE: &[(&str, &[&str])] = &[
     ("queued_delivered", &[]),
     ("todo_updated", &["call_id", "items.*.content"]),
     ("approval_mode_changed", &[]),
+    ("exec_mode_changed", &[]),
     // `sections.*.key` holds `approval_mode` here, not one of the
     // harness's own keys: scrubbed.
     (

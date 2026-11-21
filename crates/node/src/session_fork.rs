@@ -34,7 +34,11 @@ impl Session {
     /// create (inside `workspace_roots`, not protected, a directory). The
     /// one place that decides it; a fork with a checkout of its own would
     /// decide it here (ADOPTION_PLAN C.2, part 2).
-    fn fork_folder(&self) -> Result<PathBuf, String> {
+    ///
+    /// `mode`: the chat's mode at the cut (N.10b), which the copied events
+    /// carry into the fork (`exec_mode_changed` is state); not the parent's
+    /// mode now, which a later switch may have changed.
+    fn fork_folder(&self, mode: harness_core::exec_mode::InForce) -> Result<PathBuf, String> {
         match self.profile {
             // A chat session has no folder and runs no tools.
             Profile::Chat => Ok(self.cwd.clone()),
@@ -42,7 +46,7 @@ impl Session {
                 let policy = &self.node.cfg.policy;
                 // A mode the node no longer offers runs nothing, in a fork
                 // as in the chat it came from (never re-chosen).
-                policy.exec.choose(self.exec_mode)?;
+                policy.exec.choose(mode.mode())?;
                 policy.check_cwd(&self.cwd.display().to_string())
             }
         }
@@ -71,7 +75,6 @@ impl Session {
             .map_err(|e| e.to_string())?;
         let cut = fork::check(&log, turn_id).map_err(refused)?;
         drop(log);
-        let cwd = self.fork_folder().map_err(refused)?;
         let through = cut.through_seq as usize;
         let events = node
             .cfg
@@ -79,6 +82,9 @@ impl Session {
             .call(move |s| s.events_after(parent, 0, through))
             .await
             .map_err(|e| e.to_string())?;
+        let cwd = self
+            .fork_folder(harness_core::exec_mode::in_force(&events))
+            .map_err(refused)?;
         let title: String = title.chars().take(MAX_TITLE_CHARS).collect();
         let mut built = fork::build(
             &events,
