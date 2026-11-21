@@ -1542,4 +1542,119 @@ mod round3 {
             .unwrap_err();
         assert!(e.contains("took longer"), "{e}");
     }
+
+    /// A log writer the test can read back.
+    #[derive(Clone, Default)]
+    struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Logs {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    const MARKER: &str = "STAGED-FILE-MARKER-7f3a";
+
+    /// Run the whole operation with every log line at TRACE captured; the
+    /// error (if any) and the log text.
+    async fn run_logged(
+        r: &Rig,
+        head: Option<&str>,
+    ) -> (Result<fork_copy::Filled, String>, String) {
+        let logs = Logs::default();
+        let sink = logs.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+        let res = run(r, head).await;
+        let text = String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned();
+        (res, text)
+    }
+
+    /// Git's complaint can quote bytes of the staged files (`bad shallow
+    /// line: <line>`, `unexpected line in ./packed-refs: <line>`): none of
+    /// it reaches the person or the log, whichever step fails.
+    #[tokio::test]
+    async fn no_byte_of_a_staged_file_is_in_an_error_or_a_log_line() {
+        for (file, body) in [
+            (
+                "packed-refs",
+                format!("# pack-refs with: peeled \n{MARKER}\n"),
+            ),
+            ("shallow", format!("{MARKER}\n")),
+        ] {
+            let r = rig(true).await;
+            std::fs::write(r.h.repo.join(".git").join(file), body).unwrap();
+            let (res, logs) = run_logged(&r, Some(&r.head)).await;
+            let e = res.err().unwrap_or_else(|| panic!("{file}: was copied"));
+            assert!(
+                !e.contains(MARKER),
+                "{file}: the error quotes the file: {e}"
+            );
+            assert!(
+                !logs.contains(MARKER),
+                "{file}: a log line quotes it: {logs}"
+            );
+            assert_eq!(std::fs::read_dir(&r.dest).unwrap().count(), 0, "{file}");
+        }
+    }
+
+    /// Whatever git says at any step after stage 1 (here a stand-in that
+    /// fails the step with the marker on stderr), the error is a fixed
+    /// sentence naming the step and the log keeps no git text.
+    #[tokio::test]
+    async fn git_text_is_never_shown_for_stage_two_and_after() {
+        for with_snapshot in [true, false] {
+            for step in [
+                "clone",
+                "remote.origin.url",
+                "update-ref",
+                "symbolic-ref",
+                "read-tree",
+                "checkout-index",
+                "rev-parse",
+            ] {
+                let r = rig(with_snapshot).await;
+                let real = String::from_utf8(
+                    std::process::Command::new("sh")
+                        .args(["-c", "command -v git"])
+                        .output()
+                        .unwrap()
+                        .stdout,
+                )
+                .unwrap();
+                let script = r.top.join("fake-git/git");
+                std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+                crate::test_script::script(
+                    &script,
+                    &format!(
+                        "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = '{step}' ]; then\n    echo '{MARKER} quoted by git' >&2; exit 3\n  fi\ndone\nexec {} \"$@\"\n",
+                        real.trim()
+                    ),
+                );
+                crate::git::use_test_git(Some(script));
+                let head = (step != "rev-parse").then_some(r.head.as_str());
+                let (res, logs) = run_logged(&r, head).await;
+                crate::git::use_test_git(None);
+                let e = res
+                    .err()
+                    .unwrap_or_else(|| panic!("{step}: was not refused"));
+                assert!(!e.is_empty());
+                assert!(
+                    !e.contains(MARKER),
+                    "{step} (snapshot {with_snapshot}): the error quotes git: {e}"
+                );
+                assert!(
+                    !logs.contains(MARKER),
+                    "{step} (snapshot {with_snapshot}): a log line quotes git: {logs}"
+                );
+            }
+        }
+    }
 }

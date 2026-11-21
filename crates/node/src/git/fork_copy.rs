@@ -366,28 +366,23 @@ async fn exec_capped(mut cmd: Command, timeout: Duration) -> Result<Captured, St
     })
 }
 
+/// A git call after stage 1 whose output is wanted. A failure is a fixed
+/// sentence naming the step; git's own text is never shown or logged (it can
+/// quote bytes of the files staged from the parent: a ref, a shallow line, a
+/// path), only the step and the exit code reach the node's log.
 async fn run_out(c: Command, what: &str) -> Result<String, String> {
     let out = exec_capped(c, GIT_TIMEOUT).await?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
-        Err(format!(
-            "{what}: {}",
-            clean(&String::from_utf8_lossy(&out.stderr))
-        ))
+        Err(step_failed(what, out.status.code()))
     }
 }
 
-/// The last lines of git's complaint, control characters out.
-fn clean(stderr: &str) -> String {
-    let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
-    let tail = lines[lines.len().saturating_sub(3)..].join(" / ");
-    let out: String = tail.chars().filter(|c| !c.is_control()).take(300).collect();
-    if out.is_empty() {
-        "git said nothing".into()
-    } else {
-        out
-    }
+/// The sentence for a failed step of the copy, and the one log line.
+fn step_failed(what: &str, code: Option<i32>) -> String {
+    tracing::warn!(step = what, exit = ?code, "git failed in a fork's copy");
+    format!("the copy could not be finished: git failed while {what}")
 }
 
 /// The sanitised copy's folder in the staging folder, removed when this is
@@ -564,7 +559,9 @@ pub(crate) async fn fill(p: &Plan<'_>) -> Result<Filled, String> {
     copy_exclude(data.exclude.as_deref(), p.dest).await;
     match p.snapshot {
         Some(snap) => {
-            write_snapshot(p, snap).await?;
+            write_snapshot(p, snap)
+                .await
+                .map_err(|_| step_failed("writing the copy's files from the checkpoint", None))?;
             let mut c = dest_cmd(p, fmt_empty)?;
             c.args(["read-tree", &commit]);
             run_out(c, "setting the copy's index").await?;
@@ -737,11 +734,15 @@ async fn clone(p: &Plan<'_>, work: &Scratch) -> Result<(), String> {
         Some(t) => t.await.unwrap_or_default(),
         None => Vec::new(),
     };
+    // What git said is not shown: it can quote the staged files.
+    drop(stderr);
     if !status.success() {
-        return Err(format!(
-            "git could not copy the repository: {}",
-            clean(&String::from_utf8_lossy(&stderr))
-        ));
+        tracing::warn!(step = "clone", exit = ?status.code(), "git failed in a fork's copy");
+        return Err(
+            "the copy of the repository could not be read by git: its refs or \
+                    objects are damaged (or the disk is full)"
+                .into(),
+        );
     }
     if crate::forge_clone::over(p.dest, p.max_bytes).await {
         return Err(too_big(p.max_bytes));
@@ -935,14 +936,9 @@ pub(crate) async fn tree_bytes(shadow: &Repo, snap: &str) -> Result<u64, String>
     let status = child.wait().await.map_err(|e| format!("git: {e}"))?;
     group.0 = None;
     if !status.success() {
-        let stderr = match err {
-            Some(t) => t.await.unwrap_or_default(),
-            None => Vec::new(),
-        };
-        return Err(format!(
-            "the checkpoint's file list could not be read: {}",
-            clean(&String::from_utf8_lossy(&stderr))
-        ));
+        drop(err);
+        tracing::warn!(step = "ls-tree", exit = ?status.code(), "git failed in a fork's copy");
+        return Err("the checkpoint's file list could not be read".into());
     }
     Ok(total)
 }

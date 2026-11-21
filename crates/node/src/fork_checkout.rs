@@ -578,7 +578,7 @@ mod tests {
         let e = r.make().await.unwrap_err();
         crate::git::use_test_git(None);
         assert!(
-            e.contains("could not copy") && e.contains("No space left"),
+            e.contains("could not be read by git") && !e.contains("No space left"),
             "{e}"
         );
         assert_eq!(r.staging(), Vec::<String>::new());
