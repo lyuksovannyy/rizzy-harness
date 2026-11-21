@@ -101,7 +101,7 @@ Not copied: files git ignores, nested repositories and submodule contents, stash
 The parent's `info/exclude` is copied (patterns), so the same files stay ignored.
 
 **Refused, with a sentence that says which and that "the same folder" is possible:** a chat with no folder, a folder that is no git repository (or a `.git` the node does not copy: a file, a link anywhere in what is copied, a `commondir`, borrowed objects, sha256 objects, reftable refs), no projects folder, no checkpoint store, a pruned checkpoint, a git below the minimum, no room on the disk, a copy over `clone_max_mb` or `clone_timeout_s`, more folders than `projects_per_hour`.
-Nothing is written before the checks; a failure or a cancelled copy removes the build folder and the sanitised copy at once, and a kill before the chat leaves a marker that the next start uses to remove the unused folder; the chat is written only after the folder exists, and a copy whose chat could not be written is removed.
+Nothing is written before the checks; a failure or a cancelled copy removes the build folder and the sanitised copy at once, and a kill (or a cancelled request) between the move and the chat leaves a marker, and the next start removes the unused folder only when no chat in the node's store works in it and nothing in it is newer than the copy (otherwise it keeps it and logs its name); the chat is written only after the folder exists, and a copy whose chat could not be written is removed.
 
 **Running.**
 The copy runs in the new chat's lane (nothing else uses it yet), off every other chat's, behind a small limit on copies at once (two; the rest wait).

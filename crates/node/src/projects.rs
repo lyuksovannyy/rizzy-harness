@@ -30,6 +30,7 @@
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -549,14 +550,112 @@ impl Build {
     }
 }
 
-/// At node start, before the staging folder is emptied: remove the folder a
-/// leftover marker names, if it is still a folder in the projects folder
-/// `projects` (its direct children, compared by device and inode, a link
-/// never matches), and the marker. A fork's copy whose chat was never
-/// written is complete but unused; the chat's own folder is never this: its
-/// marker is removed as soon as its chat is stored. Returns how many folders
-/// were removed.
-pub(crate) fn sweep_pending(staging: &Path, projects: &Path) -> usize {
+/// How much later than the marker a file's modification time must be to
+/// count as written after the copy (the move's own timestamps are within it).
+const SWEEP_MARGIN: Duration = Duration::from_secs(2);
+
+/// The most entries and the most time the sweep spends looking at one folder.
+const SWEEP_ENTRIES: u64 = 200_000;
+const SWEEP_DEPTH: usize = 64;
+const SWEEP_TIME: Duration = Duration::from_secs(30);
+
+/// The working folders of every session in the node's own store: what the
+/// sweep at start keeps a fork's folder for.
+pub fn chat_folders(store: &harness_store::Store) -> Result<Vec<PathBuf>, String> {
+    store
+        .sessions()
+        .map(|rows| rows.into_iter().map(|r| PathBuf::from(r.cwd)).collect())
+        .map_err(|e| format!("reading the node's chats: {e}"))
+}
+
+/// Whether `dir` itself or anything under it, to any depth, was modified
+/// after `limit` (seconds, nanoseconds since the epoch), by `fstat` on
+/// descriptors opened with `O_NOFOLLOW` from the folder that holds each entry
+/// (a link is looked at itself, never followed). `Err` when a bound is hit or
+/// anything cannot be read: the caller then keeps the folder.
+fn changed_since(dir: &Path, limit: (i64, i64)) -> Result<bool, ()> {
+    struct Look {
+        limit: (i64, i64),
+        entries: u64,
+        deadline: Instant,
+    }
+    fn newer(st: &nix::sys::stat::FileStat, limit: (i64, i64)) -> bool {
+        (st.st_mtime, st.st_mtime_nsec) > limit
+    }
+    fn look(fd: OwnedFd, depth: usize, l: &mut Look) -> Result<bool, ()> {
+        if depth > SWEEP_DEPTH {
+            return Err(());
+        }
+        let st = nix::sys::stat::fstat(&fd).map_err(|_| ())?;
+        if newer(&st, l.limit) {
+            return Ok(true);
+        }
+        let lister = nix::fcntl::openat(&fd, ".", dir_flags(), Mode::empty()).map_err(|_| ())?;
+        let mut list = nix::dir::Dir::from_fd(lister).map_err(|_| ())?;
+        let mut names = Vec::new();
+        for e in list.iter() {
+            let e = e.map_err(|_| ())?;
+            let n = e.file_name().to_bytes();
+            if n == b"." || n == b".." {
+                continue;
+            }
+            names.push(std::ffi::OsString::from(OsStr::from_bytes(n)));
+            l.entries += 1;
+            if l.entries > SWEEP_ENTRIES || Instant::now() > l.deadline {
+                return Err(());
+            }
+        }
+        for name in names {
+            let st = match nix::sys::stat::fstatat(
+                &fd,
+                name.as_os_str(),
+                AtFlags::AT_SYMLINK_NOFOLLOW,
+            ) {
+                Ok(st) => st,
+                // Gone since the listing: someone is working in it.
+                Err(_) => return Ok(true),
+            };
+            if newer(&st, l.limit) {
+                return Ok(true);
+            }
+            if SFlag::from_bits_truncate(st.st_mode) & SFlag::S_IFMT == SFlag::S_IFDIR {
+                let sub = nix::fcntl::openat(&fd, name.as_os_str(), dir_flags(), Mode::empty())
+                    .map_err(|_| ())?;
+                if id_of(&nix::sys::stat::fstat(&sub).map_err(|_| ())?) != id_of(&st) {
+                    return Ok(true);
+                }
+                if look(sub, depth + 1, l)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+    let top = nix::fcntl::open(dir, dir_flags(), Mode::empty()).map_err(|_| ())?;
+    look(
+        top,
+        0,
+        &mut Look {
+            limit,
+            entries: 0,
+            deadline: Instant::now() + SWEEP_TIME,
+        },
+    )
+}
+
+/// At node start, before the staging folder is emptied: decide about the
+/// folder each leftover marker names, and remove the marker. The folder is
+/// found among the direct children of the projects folder `projects` by
+/// device and inode (a link never matches). A fork's copy whose chat was
+/// never written is complete but unused, but a marker alone does not prove
+/// it (a kill between the chat's write and the marker's removal leaves one
+/// for a chat that exists, and an inode can be reused), so the folder is
+/// removed only when no session in the node's store (`chats`: their working
+/// folders) works in it or under it AND nothing in it, checked with
+/// descriptors and no link followed within bounds, was modified later than
+/// the marker plus a small margin. Otherwise it is kept, and one log line
+/// names it for the person to decide. Returns how many folders were removed.
+pub(crate) fn sweep_pending(staging: &Path, projects: &Path, chats: &[PathBuf]) -> usize {
     use std::os::unix::fs::MetadataExt;
     let Ok(entries) = std::fs::read_dir(staging) else {
         return 0;
@@ -578,26 +677,48 @@ pub(crate) fn sweep_pending(staging: &Path, projects: &Path) -> usize {
                 t
             })
             .unwrap_or_default();
+        let marked = std::fs::metadata(e.path())
+            .ok()
+            .map(|m| (m.mtime(), m.mtime_nsec()));
         let _ = std::fs::remove_file(e.path());
         let mut it = text.split_whitespace().map(|n| n.parse::<u64>().ok());
-        let (Some(Some(dev)), Some(Some(ino))) = (it.next(), it.next()) else {
+        let (Some(Some(dev)), Some(Some(ino)), Some((sec, nsec))) = (it.next(), it.next(), marked)
+        else {
             continue;
         };
         let Ok(children) = std::fs::read_dir(projects) else {
             continue;
         };
+        let margin = SWEEP_MARGIN.as_secs() as i64;
         for c in children.flatten() {
             let Ok(md) = std::fs::symlink_metadata(c.path()) else {
                 continue;
             };
-            if md.is_dir() && (md.dev(), md.ino()) == (dev, ino) {
+            if !(md.is_dir() && (md.dev(), md.ino()) == (dev, ino)) {
+                continue;
+            }
+            let folder = c.path();
+            if chats.iter().any(|w| w.starts_with(&folder)) {
+                tracing::info!(
+                    folder = ?folder,
+                    "a fork's folder has a chat: kept (its marker was left by a stop)"
+                );
+                continue;
+            }
+            if changed_since(&folder, (sec + margin, nsec)) == Ok(false) {
                 tracing::warn!(
-                    folder = ?c.path(),
+                    folder = ?folder,
                     "removing a fork's copy whose chat was never written (the node was stopped)"
                 );
-                if std::fs::remove_dir_all(c.path()).is_ok() {
+                if std::fs::remove_dir_all(&folder).is_ok() {
                     removed += 1;
                 }
+            } else {
+                tracing::warn!(
+                    folder = ?folder,
+                    "a fork's copy with no chat was kept: files in it are newer than the copy, \
+                     or it could not be checked; remove it by hand if it is not wanted"
+                );
             }
         }
     }
@@ -682,7 +803,7 @@ mod tests {
         std::fs::write(staging.join("pending-fork-2"), "garbage").unwrap();
         std::fs::write(staging.join("pending-fork-3"), "1 2\n").unwrap();
         std::fs::write(staging.join("other"), id(&projects.join("b"))).unwrap();
-        assert_eq!(sweep_pending(&staging, &projects), 1);
+        assert_eq!(sweep_pending(&staging, &projects, &[]), 1);
         assert!(!projects.join("a").exists());
         assert!(projects.join("b").is_dir() && projects.join("link-to-b").exists());
         assert!(
@@ -691,6 +812,176 @@ mod tests {
         );
         assert!(!staging.join("pending-fork-1").exists());
         assert!(!staging.join("pending-fork-2").exists());
+    }
+
+    /// A projects folder with the folders `names`, a staging folder, and a
+    /// marker for the first of them (written after it was filled).
+    fn sweep_rig(names: &[&str]) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let (staging, projects) = (top.join("staging"), top.join("projects"));
+        std::fs::create_dir_all(&staging).unwrap();
+        for n in names {
+            std::fs::create_dir_all(projects.join(n).join("sub")).unwrap();
+            std::fs::write(projects.join(n).join("sub/f"), "x").unwrap();
+        }
+        let m = std::fs::symlink_metadata(projects.join(names[0])).unwrap();
+        let marker = staging.join("pending-fork-build-1");
+        std::fs::write(&marker, format!("{} {}\n", m.dev(), m.ino())).unwrap();
+        (d, staging, projects, marker)
+    }
+
+    /// Set the modification time of `p` to `by` seconds after the marker's.
+    fn touch_after(p: &Path, marker: &Path, by: u64) {
+        let t = std::fs::metadata(marker).unwrap().modified().unwrap() + Duration::from_secs(by);
+        std::fs::File::open(p).unwrap().set_modified(t).unwrap();
+    }
+
+    /// A chat in the store that works in the folder (or under it) keeps the
+    /// folder: a kill between the chat's write and the marker's removal must
+    /// not delete the folder of a chat that exists.
+    #[test]
+    fn the_sweep_keeps_the_folder_of_a_chat_that_exists() {
+        for cwd in ["a", "a/sub"] {
+            let (_d, staging, projects, marker) = sweep_rig(&["a", "b"]);
+            let chats = [projects.join(cwd), projects.join("elsewhere")];
+            assert_eq!(sweep_pending(&staging, &projects, &chats), 0, "{cwd}");
+            assert!(
+                projects.join("a/sub/f").is_file(),
+                "{cwd}: the folder was removed"
+            );
+            assert!(!marker.exists(), "{cwd}: the marker was left");
+        }
+        // A chat in a folder that only shares the name's start is not a chat in it.
+        let (_d, staging, projects, _m) = sweep_rig(&["a", "ab"]);
+        let chats = [projects.join("ab")];
+        assert_eq!(sweep_pending(&staging, &projects, &chats), 1);
+        assert!(!projects.join("a").exists() && projects.join("ab").is_dir());
+    }
+
+    /// A file written in the folder after the copy was made means someone
+    /// works in it: kept, and the marker goes.
+    #[test]
+    fn the_sweep_keeps_a_folder_with_a_file_newer_than_the_copy() {
+        for rel in ["a/sub/f", "a/sub", "a"] {
+            let (_d, staging, projects, marker) = sweep_rig(&["a"]);
+            touch_after(&projects.join(rel), &marker, 3600);
+            assert_eq!(sweep_pending(&staging, &projects, &[]), 0, "{rel}");
+            assert!(
+                projects.join("a/sub/f").is_file(),
+                "{rel}: the folder was removed"
+            );
+            assert!(!marker.exists(), "{rel}");
+        }
+        // A file only a little newer (the move's own timestamps) is within the margin.
+        let (_d, staging, projects, marker) = sweep_rig(&["a"]);
+        touch_after(&projects.join("a/sub/f"), &marker, 1);
+        assert_eq!(sweep_pending(&staging, &projects, &[]), 1);
+    }
+
+    /// An inode reused by an unrelated folder (made long after the marker)
+    /// matches by device and inode and is still not removed.
+    #[test]
+    fn the_sweep_keeps_an_unrelated_folder_that_reused_the_inode() {
+        let (_d, staging, projects, marker) = sweep_rig(&["a"]);
+        // The unrelated folder's files were written well after the marker.
+        touch_after(&projects.join("a/sub/f"), &marker, 86_400);
+        touch_after(&projects.join("a/sub"), &marker, 86_400);
+        assert_eq!(sweep_pending(&staging, &projects, &[]), 0);
+        assert!(projects.join("a/sub/f").is_file());
+    }
+
+    /// Only a direct child of the projects folder, never a link, never a
+    /// deeper folder with the identity.
+    #[test]
+    fn the_sweep_removes_only_a_direct_child() {
+        use std::os::unix::fs::MetadataExt;
+        let (_d, staging, projects, marker) = sweep_rig(&["a"]);
+        // The marker names a folder one level down: not a child.
+        let inner = projects.join("a/sub");
+        let m = std::fs::symlink_metadata(&inner).unwrap();
+        std::fs::write(&marker, format!("{} {}\n", m.dev(), m.ino())).unwrap();
+        assert_eq!(sweep_pending(&staging, &projects, &[]), 0);
+        assert!(inner.join("f").is_file());
+        assert!(!marker.exists());
+        // A link to the folder is not the folder.
+        let (_d, staging, projects, marker) = sweep_rig(&["a"]);
+        let m = std::fs::symlink_metadata(projects.join("a")).unwrap();
+        std::fs::rename(projects.join("a"), projects.join("moved")).unwrap();
+        std::os::unix::fs::symlink(projects.join("moved"), projects.join("a")).unwrap();
+        std::fs::write(&marker, format!("{} {}\n", m.dev(), m.ino())).unwrap();
+        // The moved folder is a direct child with that identity and qualifies;
+        // the link does not match and is untouched.
+        assert_eq!(sweep_pending(&staging, &projects, &[]), 1);
+        assert!(!projects.join("moved").exists());
+        assert!(
+            std::fs::symlink_metadata(projects.join("a"))
+                .unwrap()
+                .is_symlink()
+        );
+    }
+
+    /// A folder that is a link inside is not followed by the check: a link to
+    /// a newer file elsewhere is the link's own time, not the target's.
+    #[test]
+    fn the_sweep_follows_no_link_when_it_looks_for_newer_files() {
+        let (_d, staging, projects, marker) = sweep_rig(&["a"]);
+        let elsewhere = projects.parent().unwrap().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("new"), "x").unwrap();
+        touch_after(&elsewhere.join("new"), &marker, 86_400);
+        std::os::unix::fs::symlink(&elsewhere, projects.join("a/link")).unwrap();
+        assert_eq!(sweep_pending(&staging, &projects, &[]), 1);
+        assert!(
+            elsewhere.join("new").is_file(),
+            "the link was followed and removed"
+        );
+    }
+
+    /// The folders the sweep is told about are the working folders of the
+    /// sessions in the node's store.
+    #[test]
+    fn the_chats_folders_come_from_the_nodes_store() {
+        use harness_core::event::{EventKind, Profile, SessionCreated};
+        let d = tempfile::tempdir().unwrap();
+        let store =
+            harness_store::Store::open(&d.path().join("node.db"), harness_store::Durability::Full)
+                .unwrap();
+        assert_eq!(chat_folders(&store).unwrap(), Vec::<PathBuf>::new());
+        let sid = harness_core::SessionId::new();
+        let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+            forked: None,
+            exec_mode: None,
+            no_callbacks: false,
+            profile: Profile::Agentic,
+            agent_id: None,
+            incognito: false,
+            parent_session: None,
+            title: "t".into(),
+            cwd: "/w/projects/a-fork-1".into(),
+            model: "m".into(),
+            backend: "native".into(),
+            node_id: "local".into(),
+            approval_mode: Default::default(),
+        })
+        .into_parts();
+        store
+            .append(
+                "local",
+                &harness_core::RawEvent {
+                    session_id: sid,
+                    seq: 1,
+                    ts_ms: 1,
+                    kind,
+                    payload,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            chat_folders(&store).unwrap(),
+            vec![PathBuf::from("/w/projects/a-fork-1")]
+        );
     }
 
     /// A build folder that is dropped (a failed or cancelled request) is

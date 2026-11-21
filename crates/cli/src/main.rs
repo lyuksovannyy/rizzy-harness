@@ -793,8 +793,13 @@ async fn agentic_node(
     // Where new projects' folders are made (X.26, PLAN.md T77): checked
     // once here, after the data directory is protected; one node.toml
     // names that breaks a rule stops the node.
+    // The node's own store is opened first: the start-up sweep of a fork's
+    // leftover folder keeps every folder some chat in it works in.
+    let node_store = Store::open(&dir.join("node.db"), Durability::Full)?;
+    let chats =
+        harness_node::projects::chat_folders(&node_store).map_err(|e| anyhow::anyhow!("{e}"))?;
     match policy
-        .locate_projects(dir)
+        .locate_projects_with(dir, &chats)
         .map_err(|e| anyhow::anyhow!("node.toml: {e}"))?
     {
         Some(why) => tracing::warn!("{why}"),
@@ -855,7 +860,7 @@ async fn agentic_node(
         node_id: node_id.into(),
         hostname: hostname(),
         policy,
-        store: Store::open(&dir.join("node.db"), Durability::Full)?,
+        store: node_store,
         backend: Arc::new(backend),
         default_model: fallback_model(cfg),
         secrets: secrets.clone(),

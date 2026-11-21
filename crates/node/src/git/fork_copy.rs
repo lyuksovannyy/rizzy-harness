@@ -348,6 +348,9 @@ fn dest_cmd(p: &Plan<'_>, empty_tree: &str) -> Result<Command, String> {
 struct Captured {
     status: std::process::ExitStatus,
     stdout: Vec<u8>,
+    /// Drained and capped so git never blocks on a full pipe; never shown
+    /// or logged (it can quote the staged files).
+    #[cfg_attr(not(test), allow(dead_code))]
     stderr: Vec<u8>,
 }
 

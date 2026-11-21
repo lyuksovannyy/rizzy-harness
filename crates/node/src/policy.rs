@@ -557,6 +557,18 @@ impl NodePolicy {
     /// staging folder `<data>/projects-staging` is made (0700), emptied (a
     /// project half-made when the node was killed goes) and protected.
     pub fn locate_projects(&mut self, data_dir: &Path) -> Result<Option<String>, String> {
+        self.locate_projects_with(data_dir, &[])
+    }
+
+    /// [`Self::locate_projects`] for a node that has a store: `chats` are the
+    /// working folders of every session in it, which a fork's leftover marker
+    /// is checked against (a folder some chat works in is never removed by
+    /// the sweep; see `projects::sweep_pending`).
+    pub fn locate_projects_with(
+        &mut self,
+        data_dir: &Path,
+        chats: &[PathBuf],
+    ) -> Result<Option<String>, String> {
         self.projects.located = None;
         self.projects.parent_id = None;
         self.projects.dir_id = None;
@@ -565,7 +577,7 @@ impl NodePolicy {
         let Some(dir) = self.projects.configured()? else {
             return Ok(None);
         };
-        match self.locate_at(&dir, data_dir) {
+        match self.locate_at(&dir, data_dir, chats) {
             Ok(l) => {
                 self.protect(&l.staging);
                 self.projects.located = Some(l.dir);
@@ -583,7 +595,7 @@ impl NodePolicy {
         }
     }
 
-    fn locate_at(&self, dir: &Path, data_dir: &Path) -> Result<Located, String> {
+    fn locate_at(&self, dir: &Path, data_dir: &Path, chats: &[PathBuf]) -> Result<Located, String> {
         use harness_core::folder::Identity;
         use std::os::unix::fs::{DirBuilderExt, MetadataExt};
         let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
@@ -613,7 +625,7 @@ impl NodePolicy {
         let staging = data.join(ProjectsPolicy::STAGING);
         // A fork's copy moved in whose chat was never written (a kill
         // between the two) goes first, while its marker is still there.
-        crate::projects::sweep_pending(&staging, &real);
+        crate::projects::sweep_pending(&staging, &real, chats);
         match std::fs::symlink_metadata(&staging) {
             Ok(m) if m.is_dir() => std::fs::remove_dir_all(&staging),
             Ok(_) => std::fs::remove_file(&staging),
