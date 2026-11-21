@@ -72,6 +72,7 @@ pub trait TurnHost: Send + Sync {
     /// `folder`: where a sub-agent that can change files works, as the call
     /// asked (`None`: it left the field out); the node decides
     /// (`[limits] sub_agent_folder`, PLAN.md T32) and a reader ignores it.
+    #[allow(clippy::too_many_arguments)]
     async fn delegate(
         &self,
         _agent: crate::agent::AgentSpec,

@@ -100,7 +100,17 @@ impl Rig {
 
     /// A rig whose node keeps `keep` checkpoints.
     pub async fn with_keep(keep: usize) -> Self {
-        Self::build(keep, NativeConfig::default()).await
+        Self::build(keep, NativeConfig::default(), |_| {}).await
+    }
+
+    /// A rig whose node's policy is changed by `f` (after the rig's own).
+    pub async fn with_policy(f: impl FnOnce(&mut NodePolicy)) -> Self {
+        Self::build(
+            NodePolicy::default().checkpoints_keep,
+            NativeConfig::default(),
+            f,
+        )
+        .await
     }
 
     /// A rig whose agents summarise their history past `tokens`.
@@ -111,31 +121,34 @@ impl Rig {
                 summarize_after_tokens: Some(tokens),
                 ..Default::default()
             },
+            |_| {},
         )
         .await
     }
 
-    async fn build(keep: usize, native: NativeConfig) -> Self {
+    async fn build(keep: usize, native: NativeConfig, tweak: impl FnOnce(&mut NodePolicy)) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("ws");
         std::fs::create_dir(&ws).unwrap();
         let store = Store::open(&dir.path().join("node.db"), Durability::Full).unwrap();
         let requests: Requests = Arc::default();
+        let mut policy = NodePolicy {
+            workspace_roots: vec![dir.path().into()],
+            max_approval_mode: harness_core::policy::ApprovalMode::Auto,
+            checkpoints_keep: keep,
+            // Never the developer's own skills (`~/.agents/skills`):
+            // they would be in every turn's context.
+            skills: harness_node::SkillsPolicy {
+                roots: vec![],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        tweak(&mut policy);
         let cfg = NodeConfig {
             node_id: "local".into(),
             hostname: "test".into(),
-            policy: NodePolicy {
-                workspace_roots: vec![dir.path().into()],
-                max_approval_mode: harness_core::policy::ApprovalMode::Auto,
-                checkpoints_keep: keep,
-                // Never the developer's own skills (`~/.agents/skills`):
-                // they would be in every turn's context.
-                skills: harness_node::SkillsPolicy {
-                    roots: vec![],
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
+            policy,
             store,
             backend: Arc::new(NativeBackend::new(
                 Arc::new(Recording {

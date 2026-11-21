@@ -31,6 +31,7 @@ pub(super) enum ChildEnd {
 pub(super) struct RanChild {
     child: Arc<Session>,
     iso: Option<Isolation>,
+    shared: bool,
     turn_id: String,
     reason: TurnEndReason,
     usage: Option<Usage>,
@@ -88,6 +89,7 @@ impl Session {
 
     /// Start `task` (or, with `follow_up`, the next message to that
     /// sub-agent of this chat) in the background and return at once.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn start_background(
         &self,
         agent: AgentSpec,
@@ -96,6 +98,7 @@ impl Session {
         call_id: String,
         observed: Arc<Vec<String>>,
         max_tokens: u64,
+        folder: Option<harness_core::subagent::SubFolder>,
     ) -> Result<BackgroundDelegated, String> {
         self.may_start_background()?;
         let bg = self.bg.clone().ok_or("this chat has no background table")?;
@@ -121,6 +124,7 @@ impl Session {
                     cancel,
                     started,
                     ChildRun::Background { max_tokens },
+                    folder,
                 )
                 .await?
             }
@@ -193,7 +197,7 @@ impl Session {
             Some(ChildEnd::Ran(r)) => {
                 let r = *r;
                 let o = self
-                    .child_outcome(&r.child, r.iso, &r.turn_id, r.reason, r.usage)
+                    .child_outcome(&r.child, r.iso, r.shared, &r.turn_id, r.reason, r.usage)
                     .await;
                 use harness_core::subagent::{ChildResult, ChildStatus, render, status_of};
                 let status = status_of(o.finish.as_ref(), o.reason);
@@ -282,6 +286,7 @@ async fn run_in_background(
     let Prepared {
         child,
         iso,
+        shared,
         msg,
         history,
         agent,
@@ -346,6 +351,7 @@ async fn run_in_background(
             ChildEnd::Ran(Box::new(RanChild {
                 child,
                 iso,
+                shared,
                 turn_id,
                 reason,
                 usage,

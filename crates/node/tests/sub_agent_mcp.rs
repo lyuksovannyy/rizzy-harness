@@ -449,7 +449,7 @@ async fn a_sub_agent_with_its_switch_on_uses_the_chats_server_in_the_chats_folde
     ]));
     n.turn(
         sid,
-        &format!("delegate: helper={task}"),
+        &format!("delegate: helper#own={task}"),
         lead(&["read"], vec![helper(&["mcp"], json!({}))]),
     )
     .await;
@@ -542,7 +542,7 @@ async fn a_server_denied_to_the_sub_agent_is_not_started_nor_callable() {
     let task = script(json!([call("mcp__fake__echo", json!({"text": "x"}))]));
     n.turn(
         sid,
-        &format!("delegate: helper={task}"),
+        &format!("delegate: helper#own={task}"),
         lead(
             &["read"],
             vec![helper(&["mcp"], json!({"deny_mcp_servers": ["fake"]}))],
@@ -558,7 +558,7 @@ async fn a_server_denied_to_the_sub_agent_is_not_started_nor_callable() {
     // Its own `deny_tools` takes the tool too.
     n.turn(
         sid,
-        &format!("delegate: helper={task}"),
+        &format!("delegate: helper#own={task}"),
         lead(
             &["read"],
             vec![helper(&["mcp"], json!({"deny_tools": ["mcp__fake__echo"]}))],
@@ -580,7 +580,7 @@ async fn the_nodes_denied_tools_hold_for_sub_agents() {
         let task = script(json!([call("mcp__fake__echo", json!({"text": "x"}))]));
         n.turn(
             sid,
-            &format!("delegate: helper={task}"),
+            &format!("delegate: helper#own={task}"),
             lead(&["read"], vec![helper(&["mcp"], json!({}))]),
         )
         .await;
@@ -639,7 +639,7 @@ async fn plan_mode_holds_for_a_sub_agents_server_calls() {
     let task = script(json!([call("mcp__fake__echo", json!({"text": "x"}))]));
     n.turn(
         sid,
-        &format!("delegate: helper={task}"),
+        &format!("delegate: helper#own={task}"),
         lead(&["read"], vec![helper(&["mcp"], json!({}))]),
     )
     .await;
@@ -661,7 +661,7 @@ async fn plan_mode_holds_for_a_sub_agents_server_calls() {
     ]));
     n.prompt(
         sid,
-        &format!("delegate: helper={task}"),
+        &format!("delegate: helper#own={task}"),
         lead(&["read"], vec![helper(&["mcp"], json!({}))]),
     );
     n.until(|e| {
@@ -696,7 +696,7 @@ async fn a_stop_and_a_deletion_leave_no_sub_agent_call_nor_server() {
     let task = script(json!([call("mcp__fake__hang", json!({}))]));
     n.prompt(
         sid,
-        &format!("delegate: helper={task}"),
+        &format!("delegate: helper#own={task}"),
         lead(&["read"], vec![helper(&["mcp"], json!({}))]),
     );
     n.until(|e| {
@@ -805,7 +805,7 @@ async fn a_sub_agent_gets_the_chats_caps() {
     ]));
     n.turn(
         sid,
-        &format!("delegate: helper={task}"),
+        &format!("delegate: helper#own={task}"),
         lead(&["read"], vec![helper(&["mcp"], json!({}))]),
     )
     .await;
@@ -839,7 +839,7 @@ fn bg_lead(tools: &[&str], delegates: Vec<AgentSpec>) -> AgentSpec {
 fn bg_delegate(agent: &str, task: &str) -> Value {
     call(
         "delegate",
-        json!({"agent": agent, "task": task, "background": true}),
+        json!({"agent": agent, "task": task, "background": true, "folder": "own"}),
     )
 }
 
@@ -1072,7 +1072,7 @@ async fn a_background_sub_agents_call_is_asked_about_as_a_foreground_ones() {
         let sid = n.create(mode).await;
         n.turn(
             sid,
-            &format!("delegate: helper={task}"),
+            &format!("delegate: helper#own={task}"),
             bg_lead(&["read"], vec![helper(&["mcp"], json!({}))]),
         )
         .await;
@@ -1623,7 +1623,7 @@ async fn a_person_prompting_an_idle_sub_agent_gets_no_server() {
         let task = script(json!([call("mcp__fake__echo", json!({"text": "first"}))]));
         n.turn(
             sid,
-            &format!("delegate: helper={task}"),
+            &format!("delegate: helper#own={task}"),
             lead(&["read"], vec![h.clone()]),
         )
         .await;
@@ -1696,7 +1696,7 @@ async fn a_person_turn_in_a_sub_agents_chat_beside_the_chats_turn_gets_no_server
     let task = script(json!([call("mcp__fake__echo", json!({"text": "first"}))]));
     n.turn(
         sid,
-        &format!("delegate: helper={task}"),
+        &format!("delegate: helper#own={task}"),
         lead(&["read"], vec![h.clone()]),
     )
     .await;
@@ -1903,7 +1903,7 @@ async fn a_tool_the_node_denies_is_not_offered_and_its_refusal_names_the_node() 
     ]));
     n.turn(
         sid,
-        &format!("delegate: helper={task}"),
+        &format!("delegate: helper#own={task}"),
         lead(
             &["read"],
             vec![spec("helper", &["read", "mcp"], vec![], json!({}))],

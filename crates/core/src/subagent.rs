@@ -277,6 +277,81 @@ pub fn follow_up_writes(landed: Landed) -> String {
     )
 }
 
+/// How many file names the line about a shared sub-agent's changes names.
+pub const SHARED_FILES_SHOWN: usize = 20;
+
+/// The harness's line after the result of a sub-agent that worked in the
+/// delegating chat's folder (`folder: "shared"`, PLAN.md T32): where it
+/// worked, and the files that changed there while it worked, so the parent
+/// knows what it read earlier is out of date. `files`: the files its turn's
+/// checkpoints name (`None`: they could not be taken); at most
+/// [`SHARED_FILES_SHOWN`] are named, then "and N more", every name with
+/// control characters and backticks made harmless. `record_incomplete`:
+/// its session log could not be written (finding A8's case): nothing
+/// un-writes what it changed.
+pub fn shared_note(files: Option<&[String]>, record_incomplete: bool) -> String {
+    // A name never reads as two, or as another: control characters, line
+    // and paragraph separators, zero-width and bidirectional controls and
+    // the backticks that mark names show as U+FFFD.
+    let named = |f: &str| {
+        let shown: String = f
+            .chars()
+            .map(|c| {
+                if c.is_control()
+                    || c == '`'
+                    || matches!(
+                        c,
+                        '\u{2028}'
+                            | '\u{2029}'
+                            | '\u{200B}'..='\u{200F}'
+                            | '\u{202A}'..='\u{202E}'
+                            | '\u{2066}'..='\u{2069}'
+                            | '\u{FEFF}'
+                    )
+                {
+                    '\u{FFFD}'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        format!("`{shown}`")
+    };
+    let changed = match files {
+        _ if record_incomplete => String::from(
+            "its record is incomplete (its session log could not be written): whatever it \
+             changed is in the folder now, nothing un-writes it, and the files cannot be \
+             listed; this turn's Undo restores them",
+        ),
+        None => String::from(
+            "the files it changed could not be listed (no checkpoint of its turn); this \
+             turn's Undo, if it has a checkpoint, restores them",
+        ),
+        Some([]) => String::from("no file in the folder changed while it worked"),
+        Some(files) => {
+            let shown: Vec<String> = files
+                .iter()
+                .take(SHARED_FILES_SHOWN)
+                .map(|f| named(f))
+                .collect();
+            let more = files.len().saturating_sub(SHARED_FILES_SHOWN);
+            let mut s = format!(
+                "files that changed in the folder while it worked: {}",
+                shown.join(", ")
+            );
+            if more > 0 {
+                s.push_str(&format!(" and {more} more"));
+            }
+            s
+        }
+    };
+    format!(
+        "it worked in this chat's folder, not in a copy of its own, so its changes are already \
+         there; {changed}. What you read of those files before is out of date: read them \
+         again before you edit them"
+    )
+}
+
 /// The status the parent sees: `failed` for a turn that did not complete,
 /// whatever it reported; else the child's own, when it called `finish`, or
 /// `done`.
@@ -775,7 +850,33 @@ mod follow_up_tests {
 
 #[cfg(test)]
 mod sub_folder_tests {
-    use super::SubFolder;
+    use super::{SubFolder, shared_note};
+
+    /// The line a shared sub-agent's result ends with: where it worked,
+    /// the files (at most 20, then "and N more", names made harmless), and
+    /// the A8 case's own words.
+    #[test]
+    fn the_shared_line_names_at_most_twenty_files_and_escapes_them() {
+        let files: Vec<String> = (0..23).map(|i| format!("f{i:02}.txt")).collect();
+        let n = shared_note(Some(&files), false);
+        assert!(n.starts_with("it worked in this chat's folder"), "{n}");
+        assert!(n.contains("`f00.txt`") && n.contains("`f19.txt`"), "{n}");
+        assert!(!n.contains("f20.txt") && n.contains("and 3 more"), "{n}");
+        assert!(n.contains("read them again before you edit them"), "{n}");
+        let nasty = ["a`, `b".to_string(), "x\ny\u{202e}z".to_string()];
+        let n = shared_note(Some(&nasty), false);
+        assert!(!n.contains('\n') && !n.contains('\u{202e}'), "{n:?}");
+        assert!(n.contains("`a\u{FFFD}, \u{FFFD}b`"), "{n}");
+        assert!(shared_note(Some(&[]), false).contains("no file in the folder changed"));
+        assert!(shared_note(None, false).contains("could not be listed"));
+        let a8 = shared_note(None, true);
+        assert!(
+            a8.contains("record is incomplete")
+                && a8.contains("is in the folder now")
+                && a8.contains("this turn's Undo restores them"),
+            "{a8}"
+        );
+    }
 
     /// Two words, exactly: the tool's `folder` and node.toml's
     /// `sub_agent_folder` share them, and `shared` is the default.

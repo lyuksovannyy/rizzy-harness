@@ -1352,7 +1352,7 @@ async fn a_sub_agent_whose_log_failed_changes_nothing_in_the_folder() {
         agent: Some(agent("lead", vec![agent("dev", vec![])])),
         ..PromptMsg::test(
             sid,
-            "delegate: dev=run: echo v2 > keep.txt; echo new > made.txt",
+            "delegate: dev#own=run: echo v2 > keep.txt; echo new > made.txt",
         )
     }));
     let EventKind::ToolCallFinished(result) = h
@@ -1493,7 +1493,7 @@ async fn a_writing_sub_agent_is_refused_outside_a_repository() {
             &mut h,
             sid,
             vec![agent_with("dev", tools, vec![])],
-            "delegate: dev=run: echo v2 > keep.txt; echo new > made.txt",
+            "delegate: dev#own=run: echo v2 > keep.txt; echo new > made.txt",
         )
         .await;
         let out = out.last().expect("a delegate call");
@@ -1522,7 +1522,7 @@ async fn a_writing_sub_agent_is_refused_when_its_folder_cannot_be_made() {
         &mut h,
         sid,
         vec![agent("dev", vec![])],
-        "delegate: dev=run: echo v2 > keep.txt; echo new > made.txt",
+        "delegate: dev#own=run: echo v2 > keep.txt; echo new > made.txt",
     )
     .await;
     let out = out.last().expect("a delegate call");
@@ -1733,7 +1733,7 @@ async fn a_writing_sub_agent_changes_are_applied_from_its_worktree() {
         &mut h,
         sid,
         vec![agent("dev", vec![])],
-        "delegate: dev=run: pwd; echo v2 > keep.txt; echo new > made.txt",
+        "delegate: dev#own=run: pwd; echo v2 > keep.txt; echo new > made.txt",
     )
     .await;
     let out = out.last().expect("a delegate call");
@@ -1769,7 +1769,7 @@ async fn parallel_writing_sub_agents_do_not_see_each_other() {
     let sid = h.create().await;
     let task = |me: &str, other: &str| {
         format!(
-            "{me}=run: echo {me} > {me}.txt; sleep 1; \
+            "{me}#own=run: echo {me} > {me}.txt; sleep 1; \
              if test -e {other}.txt; then echo SAW-{other}; else echo ALONE-{me}; fi"
         )
     };
@@ -2636,7 +2636,7 @@ async fn a_writing_sub_agent_runs_beside_a_nested_repository_without_a_commit() 
         &mut h,
         sid,
         vec![agent("dev", vec![])],
-        "delegate: dev=run: echo v2 > keep.txt",
+        "delegate: dev#own=run: echo v2 > keep.txt",
     )
     .await;
     let out = out.last().expect("a delegate call");
@@ -2878,7 +2878,7 @@ async fn a_filter_a_sub_agent_defines_never_runs_in_the_nodes_git() {
         &mut h,
         sid,
         vec![agent("dev", vec![])],
-        &format!("delegate: dev=run: {cmd}"),
+        &format!("delegate: dev#own=run: {cmd}"),
     )
     .await;
     let out = out.last().expect("a delegate call");
@@ -2973,7 +2973,7 @@ async fn hostile_config_in_the_main_repository_never_runs_in_the_nodes_git() {
         &mut h,
         sid,
         vec![agent("dev", vec![])],
-        "delegate: dev=run: echo '* filter=evil' > .gitattributes; echo child > child.txt; \
+        "delegate: dev#own=run: echo '* filter=evil' > .gitattributes; echo child > child.txt; \
          echo m > b.md",
     )
     .await;
@@ -3164,7 +3164,7 @@ async fn a_writing_sub_agent_works_in_its_own_folder_and_nowhere_else() {
         ["read", {"path": h.ws.join("parent.txt").display().to_string()}],
     ]);
     let dev = agent_with("dev", &["write", "bash", "read"], vec![]);
-    let task = serde_json::json!(["delegate", {"agent": "dev", "task": child_calls.to_string()}]);
+    let task = serde_json::json!(["delegate", {"agent": "dev", "folder": "own", "task": child_calls.to_string()}]);
     turn_of(
         &mut h,
         sid,
@@ -3299,7 +3299,7 @@ async fn redirects_in_the_sessions_git_never_reach_another_repository() {
             &mut h,
             sid,
             vec![agent("dev", vec![])],
-            "delegate: dev=run: git log --all --oneline; git show HEAD:s.txt; \
+            "delegate: dev#own=run: git log --all --oneline; git show HEAD:s.txt; \
              git cat-file --batch-all-objects --batch | grep -a SECRET; echo c > c.txt",
         )
         .await;
@@ -3572,7 +3572,7 @@ async fn a_nested_delegation_reads_in_the_childs_folder_and_never_writes() {
         &mut h,
         sid,
         agent("lead", vec![dev(agent_with("scout", &["read"], vec![]))]),
-        "delegate: dev=delegate: scout=read: keep.txt",
+        "delegate: dev#own=delegate: scout=read: keep.txt",
     )
     .await;
     let out = outs.last().expect("a delegate call");
@@ -3586,7 +3586,7 @@ async fn a_nested_delegation_reads_in_the_childs_folder_and_never_writes() {
         &mut h,
         sid,
         agent("lead", vec![dev(agent("coder", vec![]))]),
-        "delegate: dev=delegate: coder=run: echo nested > nested.txt",
+        "delegate: dev#own=delegate: coder=run: echo nested > nested.txt",
     )
     .await;
     let out = outs.last().expect("a delegate call");
