@@ -236,6 +236,11 @@ pub(crate) struct Session {
     /// The chat's folder's `.mcp.json` was read once for this chat (when
     /// its owner was first learned, X.36): never again for it.
     looked: AtomicBool,
+    /// The id of the first turn the delegation that created this sub-agent's
+    /// chat may start in it (set by `start_child`, in memory only). A
+    /// sub-agent's chat in whose log no turn has ever started takes a first
+    /// turn only with this id: see [`Self::guard_first_turn`].
+    delegation_turn: Mutex<Option<String>>,
     /// Ends that came while a turn ran: recorded at its next step boundary
     /// (`delivered`), or after its end.
     bg_queue: Mutex<Vec<harness_tools::background::Ended>>,
@@ -504,6 +509,10 @@ pub(crate) const MODE_CHAT: &str = "a chat without tools has no approval mode to
 pub(crate) const STEPS_SUB_AGENT: &str =
     "a sub-agent's steps follow the chat that started it; change that chat's step limit";
 pub(crate) const STEPS_ROUTINE: &str = "a routine's chat keeps the node's step limit";
+/// A sub-agent's chat whose delegation never started its task (the first
+/// turn's start failed) takes no turn from anyone else.
+pub(crate) const NEVER_STARTED: &str = "this sub-agent never started its task: delegate again \
+     from the chat that started it";
 pub(crate) const STEPS_CHAT: &str = "a chat without tools has no step limit to change";
 
 /// Everything needed to start a session, already validated by the runtime.
@@ -601,6 +610,7 @@ impl Session {
             owner: Mutex::new(None),
             identity: Mutex::new(None),
             looked: AtomicBool::new(false),
+            delegation_turn: Mutex::new(None),
         });
         Self::record_ends(&s, ends);
         s.append(EventKind::SessionCreated(SessionCreated {
@@ -750,6 +760,7 @@ impl Session {
             owner: Mutex::new(None),
             identity: Mutex::new(None),
             looked: AtomicBool::new(false),
+            delegation_turn: Mutex::new(None),
         });
         Self::record_ends(&s, ends);
         Ok(s)
@@ -1222,7 +1233,46 @@ impl Session {
         self.append_at(&mut head, kind.into()).await.map(Some)
     }
 
+    /// The one place a `turn_started` is written (`append_at`) asks this
+    /// before it writes one in a sub-agent's chat: a sub-agent's chat in
+    /// whose log no turn has ever started takes a first turn only from the
+    /// delegation that created it (`delegation_turn`). Otherwise a chat
+    /// whose first start failed (the log, a claim, a stop) would take a
+    /// person's message as its "first" turn, and T32/T57 read a sub-agent's
+    /// first turn as the lead's own work (`delegated_spans`). Every path
+    /// that starts a turn goes through `append_at`, so none can forget it.
+    async fn guard_first_turn(&self, turn_id: &str) -> Result<(), StoreError> {
+        if self.parent_session.is_none() {
+            return Ok(());
+        }
+        if self
+            .delegation_turn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_deref()
+            == Some(turn_id)
+        {
+            return Ok(());
+        }
+        let id = self.id;
+        let started = self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_since_turn_at(id, i64::MAX, &["turn_started"]))
+            .await?;
+        if started.is_empty() {
+            return Err(StoreError::Refused(NEVER_STARTED.into()));
+        }
+        Ok(())
+    }
+
     async fn append_at(&self, head: &mut u64, kind: Append) -> Result<RawEvent, StoreError> {
+        if let Append::Raw(EventKind::TurnStarted(t))
+        | Append::Scrubbed(EventKind::TurnStarted(t)) = &kind
+        {
+            self.guard_first_turn(&t.turn_id).await?;
+        }
         let (kind, payload) = match kind {
             Append::Raw(k) => {
                 let (kind, mut payload) = k.into_parts();
@@ -4216,8 +4266,10 @@ impl Session {
 
     /// The time spans of the turns of the sub-agent chat `child` that its
     /// parent's `delegate` call started: its first turn (nothing marks it
-    /// but its place in the log: a fork's turns before the fork are
-    /// another chat's copy, so a fork has none) and each follow-up
+    /// but its place in the log, which `guard_first_turn` guarantees: a
+    /// sub-agent's chat takes a first turn only from the delegation that
+    /// created it; a fork's turns before the fork are another chat's copy,
+    /// so a fork has none) and each follow-up
     /// (`turn_started.continued_by` names the call). Every other turn in
     /// that chat was started by someone else.
     async fn delegated_spans(&self, child: SessionId) -> Vec<(i64, i64)> {
@@ -4541,6 +4593,11 @@ impl Session {
             .insert(child_id, child.clone());
         started(child_id);
         let turn_id = new_id();
+        // The only first turn this chat takes (`guard_first_turn`).
+        *child
+            .delegation_turn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(turn_id.clone());
         // The parent turn's token-saving methods and its context from the
         // master; never the parent's history.
         let (savings, context, standing, began, parent_turn) = self

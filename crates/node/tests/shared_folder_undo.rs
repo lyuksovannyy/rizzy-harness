@@ -535,3 +535,131 @@ async fn an_undo_while_a_different_chat_runs_keeps_the_old_sentence() {
     );
     turns_end(&mut r, 1).await;
 }
+
+// ---- A sub-agent whose task never started takes no turn from anyone else ----
+
+/// The ack of request `req`, other events kept.
+async fn ack_of(r: &mut Rig, req: &str) -> (bool, String) {
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(10), r.recv())
+            .await
+            .expect("an ack")
+        {
+            harness_protocol::NodeToMaster::Ack {
+                req_id, ok, error, ..
+            } if req_id == req => return (ok, error.unwrap_or_default()),
+            harness_protocol::NodeToMaster::Event { event } => r.seen.push(event),
+            _ => {}
+        }
+    }
+}
+
+/// A lead turn whose delegation's first `turn_started` fails to be written
+/// (the failure hook of the A8 case): the child's chat exists with a
+/// `session_created` and no turn. Returns its id.
+async fn never_started_child(r: &mut Rig) -> SessionId {
+    let db = rusqlite::Connection::open(r.dir.path().join("node.db")).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    db.execute_batch(&format!(
+        "CREATE TRIGGER break_start BEFORE INSERT ON events
+         WHEN NEW.kind = 'turn_started' AND NEW.session_id <> '{}'
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+        r.session_id()
+    ))
+    .unwrap();
+    r.lead_turn("delegate: dev=run: echo v2 > keep.txt").await;
+    db.execute_batch("DROP TRIGGER break_start").unwrap();
+    let child = children(r)[0];
+    assert!(
+        !r.seen
+            .iter()
+            .any(|e| e.session_id == child && matches!(e.typed(), Ok(EventKind::TurnStarted(_)))),
+        "the child's first start was meant to fail"
+    );
+    child
+}
+
+fn events_of(r: &Rig, sid: SessionId) -> usize {
+    r.seen.iter().filter(|e| e.session_id == sid).count()
+}
+
+/// (a) A person's message to such a chat is refused with a plain sentence
+/// and nothing is appended to its log: it would otherwise be the chat's
+/// "first" turn, which the lead's Undo reads as the lead's own work.
+#[tokio::test]
+async fn a_persons_message_to_a_sub_agent_that_never_started_is_refused() {
+    let mut r = repo_rig().await;
+    let child = never_started_child(&mut r).await;
+    let before = events_of(&r, child);
+    prompt(&mut r, child, "run: echo direct > direct.txt".into());
+    let (ok, err) = {
+        let req = format!("p{}", r.n);
+        ack_of(&mut r, &req).await
+    };
+    assert!(!ok, "accepted");
+    assert!(err.contains("never started its task"), "{err}");
+    assert_eq!(events_of(&r, child), before, "something was appended");
+    assert!(r.read("direct.txt").is_none());
+    // Nor does the log of the store hold a turn for it.
+    let id = child;
+    let n = r
+        .seen
+        .iter()
+        .filter(|e| e.session_id == id && matches!(e.typed(), Ok(EventKind::TurnStarted(_))))
+        .count();
+    assert_eq!(n, 0);
+}
+
+/// (b) The other paths that start a turn go through the same write: a
+/// retry and a callback for such a chat are refused too, nothing appended.
+/// (Both are refused earlier for their own reasons as well; the refusal at
+/// the write is what no new path can forget.)
+#[tokio::test]
+async fn a_retry_or_a_callback_for_a_sub_agent_that_never_started_starts_nothing() {
+    let mut r = repo_rig().await;
+    let child = never_started_child(&mut r).await;
+    let before = events_of(&r, child);
+    r.n += 1;
+    let req = format!("x{}", r.n);
+    r.send(MasterToNode::Retry(harness_protocol::RetryMsg {
+        req_id: req.clone(),
+        agent: Some(r.lead()),
+        ..harness_protocol::RetryMsg::test(child, "t-none")
+    }));
+    let (ok, _) = ack_of(&mut r, &req).await;
+    assert!(!ok);
+    r.n += 1;
+    let req = format!("y{}", r.n);
+    r.send(MasterToNode::Callback(harness_protocol::CallbackMsg {
+        req_id: req.clone(),
+        agent: Some(r.lead()),
+        ..harness_protocol::CallbackMsg::test(child, vec!["bg1".into()])
+    }));
+    let (ok, _) = ack_of(&mut r, &req).await;
+    assert!(!ok);
+    assert_eq!(events_of(&r, child), before);
+}
+
+/// (c) The consequence: a person's message to such a chat while the lead's
+/// next turn runs would write a file the lead's Undo deletes silently.
+/// The message never runs, so there is nothing to revert.
+#[tokio::test]
+async fn a_never_started_sub_agents_chat_cannot_be_used_to_write_during_a_lead_turn() {
+    let mut r = repo_rig().await;
+    let child = never_started_child(&mut r).await;
+    let lead = r.session_id();
+    prompt(&mut r, lead, slow_lead_turn());
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    prompt(&mut r, child, "run: echo direct > direct.txt".into());
+    let (ok, _) = {
+        let req = format!("p{}", r.n);
+        ack_of(&mut r, &req).await
+    };
+    assert!(!ok, "the message was accepted");
+    turns_end(&mut r, 1).await;
+    assert!(r.read("direct.txt").is_none(), "the file was written");
+    let turn = last_turn(&r, lead);
+    let undo = r.restore(&turn, false).await;
+    assert_eq!(undo.result, Ok(()));
+    assert!(r.read("lead.txt").is_none());
+}
