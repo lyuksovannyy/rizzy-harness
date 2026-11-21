@@ -185,6 +185,9 @@ enum Tree {
 /// The most `shallow` may hold.
 const SHALLOW_MAX: u64 = 16 << 20;
 
+/// A line-list parser: the bytes it writes again, or the first bad line.
+type Parser = fn(&[u8]) -> Result<Vec<u8>, usize>;
+
 /// A commit id as git writes it: 40 hex digits (64 for sha256, which is
 /// refused later by name, with its own sentence).
 fn hex_id(b: &[u8]) -> bool {
@@ -534,7 +537,7 @@ impl Walk<'_> {
         name: &str,
     ) -> Result<(), String> {
         self.entry()?;
-        let (cap, parse): (u64, fn(&[u8]) -> Result<Vec<u8>, usize>) = if name == "shallow" {
+        let (cap, parse): (u64, Parser) = if name == "shallow" {
             (SHALLOW_MAX, parse_shallow)
         } else {
             (PACKED_REFS_MAX, parse_packed)
