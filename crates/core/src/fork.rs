@@ -202,6 +202,7 @@ pub fn build(
     created.forked = Some(ForkedFrom {
         parent,
         through_seq: cut.through_seq,
+        own_folder: false,
     });
     let mut out: Vec<RawEvent> = Vec::with_capacity(n + 2);
     for e in copy {
@@ -503,7 +504,8 @@ mod tests {
             c.forked,
             Some(ForkedFrom {
                 parent: l.sid,
-                through_seq: t2
+                through_seq: t2,
+                own_folder: false
             })
         );
         assert_eq!(c.parent_session, None, "a fork is not a sub-agent");
@@ -702,7 +704,8 @@ mod tests {
             c.forked,
             Some(ForkedFrom {
                 parent: f1_id,
-                through_seq: cut2.through_seq
+                through_seq: cut2.through_seq,
+                own_folder: false
             })
         );
         // The first fork's divider is part of the copy, as it was.

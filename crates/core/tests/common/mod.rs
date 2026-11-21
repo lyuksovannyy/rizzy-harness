@@ -88,6 +88,7 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             forked: Some(ForkedFrom {
                 parent: sid(),
                 through_seq: 5,
+                own_folder: true,
             }),
             title: s(),
             cwd: s(),

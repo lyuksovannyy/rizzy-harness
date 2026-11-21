@@ -439,7 +439,11 @@ async fn an_own_fork_has_the_files_of_the_cut_in_a_folder_of_its_own() {
         h.repo.display().to_string()
     );
     // The log says where it works and the divider follows the copy.
-    assert!(matches!(log[0].typed(), Ok(EventKind::SessionCreated(c)) if c.forked.is_some()));
+    assert!(
+        matches!(log[0].typed(), Ok(EventKind::SessionCreated(c))
+            if c.forked.is_some_and(|f| f.own_folder)),
+        "the creation says the folder is the fork's own"
+    );
     assert!(log.iter().any(|e| e.kind == "session_forked"));
     // HEAD at the cut is known from the log: no note about it.
     assert!(
@@ -576,6 +580,14 @@ async fn an_own_fork_is_refused_where_it_cannot_be_made_and_nothing_is_left() {
     let (shared, res) = h.fork(&t, ForkCheckout::Shared).await;
     res.unwrap();
     assert!(!h.log_of(shared).is_empty());
+    let created = |sid| match h.log_of(sid)[0].typed() {
+        Ok(EventKind::SessionCreated(c)) => c,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        !created(shared).forked.unwrap().own_folder,
+        "a shared fork says so"
+    );
 
     // No projects folder.
     let mut h = H::new(Opts {
@@ -681,4 +693,44 @@ async fn a_chat_in_a_subfolder_forks_into_the_same_subfolder() {
     assert!(at.ends_with("pkg/inner"), "{at:?}");
     assert_eq!(std::fs::read_to_string(at.join("g.txt")).unwrap(), "x\n");
     let _ = &h.dir;
+}
+
+/// Deleting the fork's chat never deletes its folder: the files are the
+/// person's.
+#[tokio::test]
+async fn deleting_a_fork_keeps_its_folder() {
+    let mut h = H::new(Opts {
+        projects: true,
+        repo: true,
+    })
+    .await;
+    let (turns, _) = parent_work(&mut h).await;
+    let (fork, res) = h.fork(&turns[1], ForkCheckout::Own).await;
+    res.unwrap();
+    let cwd = h.cwd_of(fork);
+    h.n += 1;
+    let req = format!("d{}", h.n);
+    h.link
+        .to_node
+        .try_send(MasterToNode::Delete {
+            req_id: req.clone(),
+            session_id: fork,
+        })
+        .unwrap();
+    loop {
+        if let NodeToMaster::Ack {
+            req_id, ok, error, ..
+        } = h.recv().await
+            && req_id == req
+        {
+            assert!(ok, "{error:?}");
+            break;
+        }
+    }
+    assert!(h.log_of(fork).is_empty(), "the chat is gone");
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("tracked.txt")).unwrap(),
+        "changed\n"
+    );
+    assert!(cwd.join(".git").is_dir());
 }

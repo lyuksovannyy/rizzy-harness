@@ -1556,6 +1556,11 @@
         "type": "object"
       },
       {
+        "path": "forked.own_folder",
+        "required": false,
+        "type": "boolean"
+      },
+      {
         "path": "forked.parent",
         "required": true,
         "restricted": true,

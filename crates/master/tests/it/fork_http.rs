@@ -926,6 +926,7 @@ fn forked_created(parent: SessionId, through: u64) -> (String, Value) {
         forked: Some(ForkedFrom {
             parent,
             through_seq: through,
+            own_folder: false,
         }),
         exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
         no_callbacks: false,

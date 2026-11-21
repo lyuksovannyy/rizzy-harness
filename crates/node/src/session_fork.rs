@@ -117,6 +117,11 @@ impl Session {
             }
         };
         drop(events);
+        if copy.is_some() {
+            // The creation says the folder is the fork's own (the page's
+            // note and the delete dialog read it).
+            built[0].payload["forked"]["own_folder"] = true.into();
+        }
         // What the person should know about its folder, said in the chat.
         if let Some(c) = &copy {
             for note in &c.notes {

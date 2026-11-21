@@ -550,6 +550,12 @@ pub struct ForkedFrom {
     /// The seq, in the parent and in this chat, of the `turn_ended` the
     /// copy stops at: events `2..=through_seq` are the parent's.
     pub through_seq: u64,
+    /// The fork works in a folder of its own, a copy of the parent's
+    /// repository (C.2 part 2), not in the parent's: what the page says in
+    /// the chat and when it is deleted. Written by the node that made the
+    /// folder; a lying node can only mislabel its own chat.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own_folder: bool,
 }
 
 /// The divider of a fork (`session_forked`, right after the copied events):
