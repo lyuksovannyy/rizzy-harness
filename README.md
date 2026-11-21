@@ -1546,15 +1546,23 @@ not a git repository); the default is `"shared"`. In the shared folder two
 writers can overwrite each other's files through commands (`bash`);
 `edit` and `write` refuse a file that changed since that agent read it, so
 the lead that read a file a sub-agent then changed has to read it again,
-and its `delegate` result ends with a line naming the files that changed
-meanwhile. **Undo:** the turn's Undo and "Show changes" cover what a
-sub-agent the agent waited for changed in that turn, as the agent's own
-work. A sub-agent started in the background (`background: true`) was not
-waited for: its changes during the turn count as another chat's work (Undo
-asks first and names them; "Undo anyway" puts them back), and what it
-changes after the turn ended is undone in its own chat (its Undo), not in
-the agent's. If its record could not be written, nothing un-writes its
-changes; the result says so and the turn's Undo restores them. With
+and its `delegate` result ends with a line saying so and the names of the
+files that changed meanwhile (quoted, one per line, at most 20). **Undo:**
+the turn's Undo and "Show changes" cover what a sub-agent changed in a turn
+when the agent's own `delegate` call started that sub-agent's work: its
+first run, or a follow-up sent through `delegate`. That is the agent's own
+work, undone without asking, and it holds for a sub-agent started in the
+background too while the agent's turn runs. Anything else a sub-agent's
+chat does is another chat's work: a message you send to a sub-agent's chat
+yourself, and what a background sub-agent writes between the agent's turns
+or after its last one. Undo (and a rewind that puts files back) asks first
+and names those files; "Undo anyway" puts them back, and what a background
+sub-agent wrote after the turn ended is undone in its own chat (its Undo),
+not in the agent's. While a background sub-agent still works in the folder
+Undo is refused, naming it ("its background sub-agent @name is still working
+in this folder: stop it or wait for it, then undo"). If its record could not
+be written, nothing un-writes its changes; the result says so and the turn's
+Undo restores them. With
 `folder: "own"`, or on a node that says so, a sub-agent that can change
 files gets a folder of its own, a copy of yours that the node keeps in its
 data directory (`sessions/<id>/files`), so your folder must be a git

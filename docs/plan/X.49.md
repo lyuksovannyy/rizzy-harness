@@ -8,9 +8,11 @@ No per-agent switch: this is how delegation works, not a new power of an agent (
 
 ## Safeguards and abuse tests
 
-The lead's turn checkpoint covers what a sub-agent it waited for wrote, so Undo and "Show changes" are complete and exact; a sub-agent started in the background counts as another chat for T57 and is undone in its own chat after the turn.
+The lead's turn checkpoint covers what a sub-agent wrote in a turn the lead's `delegate` call started (its first run or a follow-up), so Undo and "Show changes" are complete and exact for that work, and a background sub-agent's writes during the lead's turn are the turn's too.
+Any other turn in a sub-agent's chat (a person's message to it) and a background sub-agent's writes between the lead's turns or after the last are another chat's work for T57: Undo asks first, naming the files, and "Undo anyway" is the person's choice.
+An Undo while a background sub-agent still works in the folder is refused, naming the sub-agent and saying to stop it or wait.
 The staleness guard of `edit` and `write` is what stops a blind overwrite between two writers; `bash` is not covered, and the docs say so.
-The result of a shared sub-agent names the files that changed while it worked, and says plainly when its record failed after it changed files.
+The result of a shared sub-agent names the files that changed while it worked (quoted lines, each name cut, at most 20), and says plainly when its record failed after it changed files.
 Tests: `node/tests/shared_folder.rs`, `node/tests/shared_folder_undo.rs`, `cli/tests/sub_agent_sandbox.rs`, `agent-native/src/delegate_availability_tests.rs`, `core/src/subagent.rs`, `node/src/policy.rs`; the web card and banner in `web/src/components/delegateresult.test.tsx` and `conversation.test.tsx`.
 
 ## Invariants
