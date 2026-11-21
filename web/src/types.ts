@@ -42,7 +42,7 @@ export interface SessionCreated {
   /** How its commands run; absent for a chat (no commands). */
   exec_mode?: ExecMode;
   /** Set on a fork (C.2): events 2 through `through_seq` are the parent's, copied at the same seqs. */
-  forked?: { parent: string; through_seq: number };
+  forked?: { parent: string; through_seq: number; /** Its folder is a copy of the parent's repository made for it (C.2 part 2), not the parent's. */ own_folder?: boolean };
 }
 
 export interface AgentRef {
@@ -962,6 +962,8 @@ export interface NodeInfo {
   projects?: boolean;
   /** It forks a chat at a finished turn (C.2); absent: an older node. */
   fork?: boolean;
+  /** A fork there may get a folder of its own, a clone of the chat's repository (C.2 part 2). */
+  fork_own?: boolean;
 }
 
 /** A server-wide account role (Settings → Users), not a workspace role. */

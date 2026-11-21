@@ -224,7 +224,7 @@ const STRUCTS: Record<string, string> = {
   todo: "content status:=todoStatus",
   headAt: "?branch commit",
   headMoved: "from:@headAt to:@headAt",
-  forkedFrom: "parent through_seq:n",
+  forkedFrom: "parent through_seq:n ?own_folder:b",
 };
 
 // Every kind the fold handles.

@@ -1,0 +1,19 @@
+/* The choice "Fork from here" opens where a fork can get a folder of its
+   own (C.2 part 2): inline under the turn's end line, never over the chat. */
+.fork-panel {
+  margin-top: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  max-width: min(32rem, 100%);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  text-align: left;
+}
+.fork-panel p { margin: 0; }
+.fork-panel:focus-visible { outline: 2px solid var(--accent, var(--line)); outline-offset: 2px; }
+.fork-choices { display: flex; flex-direction: column; gap: var(--space-1); align-items: flex-start; }
+.fork-choices.guarded button { opacity: 0.55; }
+.fork-choices p { margin-bottom: var(--space-2); }

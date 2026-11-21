@@ -19,6 +19,8 @@ export function DeleteChat(props: {
   workspaceId: string | null;
   /** An incognito chat has no Media of its own: nothing to offer. */
   incognito: boolean;
+  /** The chat is a fork with a copy of the repository of its own: where it is. */
+  ownFolder?: string;
   onClose: () => void;
 }) {
   const { sessionId, workspaceId, incognito } = props;
@@ -79,6 +81,11 @@ export function DeleteChat(props: {
         <p>{t("conv.deleteConfirm")}</p>
         {/* No number: the sidebar's list leaves some out (a routine's runs, another workspace). */}
         <p>{t("conv.deleteSubs")}</p>
+        {props.ownFolder && (
+          <p data-testid="delete-keeps-folder">
+            This chat has its own copy of the repository in <span className="mono">{props.ownFolder}</span>. Deleting the chat keeps that folder on disk; remove it yourself when you no longer need it.
+          </p>
+        )}
         {!!files?.n && (
           <label className="row">
             <input type="checkbox" checked={withMedia} onChange={(e) => setWithMedia(e.target.checked)} />

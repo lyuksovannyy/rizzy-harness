@@ -722,7 +722,7 @@ export default function Conversation(props: {
           <Trash2 size={18} />
         </button>
       </header>
-      {deleting && <DeleteChat sessionId={sessionId} workspaceId={workspaceId} incognito={incognito} onClose={() => setDeleting(false)} />}
+      {deleting && <DeleteChat sessionId={sessionId} workspaceId={workspaceId} incognito={incognito} ownFolder={meta?.forked?.own_folder ? meta.cwd : undefined} onClose={() => setDeleting(false)} />}
       {exporting && view && (
         <Suspense fallback={null}>
           <ExportChat
@@ -738,7 +738,7 @@ export default function Conversation(props: {
           <SaveAsArtifact autoFocus />
         </div>
       )}
-      {agentic && meta?.forked && <ForkNote parent={meta.forked.parent} />}
+      {agentic && meta?.forked && <ForkNote parent={meta.forked.parent} own={meta.forked.own_folder} cwd={meta.cwd} />}
       {routine?.untrusted && (
         <div className="incognito-banner untrusted-banner" role="note">
           <span>Contains data from an external event, so memory and web tools stay off in this chat.</span>
@@ -1117,7 +1117,7 @@ export default function Conversation(props: {
                       routine: !!routine,
                       subAgent: !!props.row?.parent_id || !!meta?.parent_session,
                     }) ? (
-                      <ForkChat sessionId={sessionId} turnId={it.turn_id} />
+                      <ForkChat sessionId={sessionId} turnId={it.turn_id} own={agentic && node?.fork_own === true} />
                     ) : null;
                     return it.reason === "completed" ? (
                       undo || fork ? (

@@ -7,11 +7,19 @@ import { api, HttpError } from "../api";
 import { pageApi } from "../apiPages";
 import { errText } from "../lib/errorText";
 import { routeHash } from "../lib/routes";
+import { ForkChoice } from "./ForkChoice";
 
-/** "Fork from here" on a turn's end line: a new chat that begins with this
- * conversation up to here and goes its own way; the parent is not changed.
- * The new chat opens at once. The route refuses what this misses. */
-export function ForkChat(props: { sessionId: string; turnId: string }) {
+/** "Fork from here" on a turn's end line. Where the node can give the fork a
+ * folder of its own (`own`) the link opens a small choice of where its files
+ * live; otherwise it forks at once into the chat's folder. */
+export function ForkChat(props: { sessionId: string; turnId: string; own?: boolean }) {
+  return props.own ? <ForkChoice sessionId={props.sessionId} turnId={props.turnId} /> : <ForkNow sessionId={props.sessionId} turnId={props.turnId} />;
+}
+
+/** A new chat that begins with this conversation up to here and goes its
+ * own way; the parent is not changed. The new chat opens at once. The route
+ * refuses what this misses. */
+function ForkNow(props: { sessionId: string; turnId: string }) {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const run = async () => {
@@ -82,10 +90,21 @@ export function ForkDivider(props: { parent: string }) {
   );
 }
 
-/** Under the header of a fork that works in a folder: it is the parent's
- * folder, so each chat's changes are in the other's files. */
-export function ForkNote(props: { parent: string }) {
+/** Under the header of a fork that works in a folder: the parent's, so each
+ * chat's changes are in the other's files; or its own copy of the
+ * repository (`own`), which has what the parent had at the fork and
+ * nothing git ignores. */
+export function ForkNote(props: { parent: string; own?: boolean; cwd?: string }) {
   const p = useParent(props.parent);
+  if (props.own) {
+    return (
+      <div className="incognito-banner fork-note" role="note" data-testid="fork-note">
+        <span>
+          This chat works in its own copy of the repository{props.cwd ? <>, <span className="mono">{props.cwd}</span></> : null}, on a branch of its own. Files git ignores (build output, <span className="mono">.env</span>) were not copied. Deleting the chat keeps the folder.
+        </span>
+      </div>
+    );
+  }
   return (
     <div className="incognito-banner fork-note" role="note" data-testid="fork-note">
       <span>
