@@ -106,6 +106,9 @@ export const pageApi = {
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/turns/${encodeURIComponent(turn)}/retry`),
   /** A person's fork of a chat at the end of a finished turn (C.2): the new chat's id. */
   forkChat: (id: string, turn: string) => call<{ session_id: string }>("POST", `/api/sessions/${id}/fork`, { turn_id: turn }),
+  /** Bookmark a message of the chat, or take the mark off (docs/pins.md); the chat's owner only. */
+  pinMessage: (id: string, message_seq: number, pinned: boolean) =>
+    call<{ ok: boolean }>("POST", `/api/sessions/${id}/pins`, { message_seq, pinned }),
   /** A person's /compact (X.20): the node summarises the chat now and records the outcome in its log. */
   compact: (id: string, focus: string) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/compact`, focus ? { focus } : {}),

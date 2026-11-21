@@ -89,14 +89,19 @@ const plain = (extra: RawEvent[] = []): RawEvent[] => [
   ev(5, "turn_ended", { turn_id: "t1", reason: "completed" }),
   ...extra,
 ];
-const links = () => [...host.querySelectorAll(".fork-line button")].map((b) => b.textContent);
+// "Fork from here" lives in the row under the turn's final answer; on the end line only when the turn has no answer text.
+const forks = () => [...host.querySelectorAll<HTMLButtonElement>(".answer-actions button, .fork-line button")].filter((b) => b.textContent === "Fork from here");
+const links = () => forks().map((b) => b.textContent);
+// A turn that said nothing: no row, so the end line carries the link.
+const silent = (): RawEvent[] => plain().filter((e) => e.kind !== "assistant_message").map((e, i) => ({ ...e, seq: i + 1 }));
 
 describe("Fork from here", () => {
-  test("is on a finished turn's end line, calls the route and opens the new chat", async () => {
+  test("is in the row under the final answer, calls the route and opens the new chat", async () => {
     forkChat.mockResolvedValue({ session_id: "22222222-2222-2222-2222-222222222222" });
     await render(plain());
     expect(links()).toEqual(["Fork from here"]);
-    await act(async () => (host.querySelector(".fork-line button") as HTMLButtonElement).click());
+    expect(host.querySelectorAll(".fork-line").length).toBe(0);
+    await act(async () => forks()[0]!.click());
     expect(forkChat).toHaveBeenCalledWith(SID, "t1");
     expect(location.hash).toBe("#/s/22222222-2222-2222-2222-222222222222");
   });
@@ -110,8 +115,8 @@ describe("Fork from here", () => {
   test("says why when the route refuses, and stays", async () => {
     forkChat.mockRejectedValue(new Error("This chat can't be forked there: that turn is still running"));
     await render(plain());
-    await act(async () => (host.querySelector(".fork-line button") as HTMLButtonElement).click());
-    expect(host.querySelector(".fork-line .error-text")?.textContent).toContain("still running");
+    await act(async () => forks()[0]!.click());
+    expect(host.querySelector(".answer-actions .error-text")?.textContent).toContain("still running");
     expect(location.hash).toBe("");
   });
 
@@ -137,7 +142,7 @@ describe("Fork from here", () => {
     ];
     await render(log);
     expect(links()).toEqual(["Fork from here"]);
-    expect(host.querySelectorAll(".fork-line").length).toBe(1);
+    expect(host.querySelectorAll(".answer-actions").length).toBe(1);
   });
 });
 
@@ -159,10 +164,10 @@ describe("Fork from here is quiet", () => {
   });
 
   test("sits in the end line the rule hovers, right after the answer, and stays reachable", async () => {
-    await render(plain());
+    await render(silent());
     const line = host.querySelector(".turn-end");
     expect(line?.querySelector(".fork-line button")?.textContent).toBe("Fork from here");
-    expect(host.querySelector(".msg.assistant + .turn-end")).toBe(line);
+    expect(line?.previousElementSibling?.classList.contains("msg")).toBe(true);
     const button = line?.querySelector("button") as HTMLButtonElement;
     expect(button.disabled).toBe(false);
     expect(button.tabIndex).toBe(0);
@@ -170,7 +175,7 @@ describe("Fork from here is quiet", () => {
 
   test("shows itself when it has something to say", async () => {
     forkChat.mockRejectedValue(new Error("This chat can't be forked there: nope"));
-    await render(plain());
+    await render(silent());
     await act(async () => (host.querySelector(".fork-line button") as HTMLButtonElement).click());
     expect(host.querySelector(".fork-line")?.classList.contains("shown")).toBe(true);
   });

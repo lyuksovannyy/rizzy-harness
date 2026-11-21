@@ -67,7 +67,9 @@ The caller still gets the timeout error and finds the fork in the list.
 
 ## The page
 
-"Fork from here" is as quiet as the copy action under an answer: hidden until the turn's end line (or the answer above it) is hovered or the link has keyboard focus, always shown on touch and while it has an error to show (`.fork-line`, `.turn-end` in `styles.css`).
+"Fork from here" is in the row under the turn's final answer, next to Copy and Pin ([pins.md](pins.md), "The page"), and shown as Copy is: when the answer is hovered or the row has focus, always on touch.
+On the turn's end line it stays only for a turn that has no answer text, where it is hidden until the end line is hovered or the link has keyboard focus, always shown on touch and while it has an error to show (`.fork-line`, `.turn-end` in `styles.css`).
+It is never shown twice for one turn.
 
 ## Files
 
