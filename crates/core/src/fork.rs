@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(title_nth("X (fork)", 3), "X (fork 3)");
         assert_eq!(title_nth("X (fork 2)", 4), "X (fork 4)");
         assert_eq!(title_nth("X (fork 12)", 13), "X (fork 13)");
-        assert_eq!(title(&"X (fork)".to_string()), "X (fork)");
+        assert_eq!(title("X (fork)"), "X (fork)");
         // Only one trailing suffix is the harness's; the rest is the title.
         assert_eq!(title_nth("X (fork) (fork)", 2), "X (fork) (fork 2)");
         // Not a suffix of ours: kept.
@@ -745,7 +745,7 @@ mod tests {
             &f1,
             &cut2,
             SessionId::new(),
-            &title("Parent (fork)"),
+            &title_nth("Parent (fork)", 2),
             "/w",
             6,
         )
@@ -753,7 +753,7 @@ mod tests {
         let Ok(EventKind::SessionCreated(c)) = f2[0].typed() else {
             panic!()
         };
-        assert_eq!(c.title, "Parent (fork) (fork)");
+        assert_eq!(c.title, "Parent (fork 2)");
         assert_eq!(
             c.forked,
             Some(ForkedFrom {
