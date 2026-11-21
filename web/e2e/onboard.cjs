@@ -60,9 +60,9 @@ async function keyed(target) {
  * default Assistant has no file or command tools, so an agentic chat that
  * runs a command or publishes must name the Software Developer. */
 async function pickAgent(p, name = 'Software Developer') {
-  await p.click('.composer button.select-button[aria-label^="agent:"]');
+  await p.click('.composer-strip button.select-button[aria-label^="agent:"]');
   await p.click(`[role=listbox][aria-label=agent] [role=option]:has-text("${name}")`);
-  await p.waitForSelector(`.composer button.select-button[aria-label="agent: ${name}"]`);
+  await p.waitForSelector(`.composer-strip button.select-button[aria-label="agent: ${name}"]`);
 }
 
 /** The start screen's agentic row (X.26): choose `folder` as an existing

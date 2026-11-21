@@ -99,10 +99,12 @@ const SELECT = 'select[aria-label="How this chat\'s commands run"]';
     await p.fill('.composer textarea', 'hello from the host shell');
     await p.keyboard.press('Enter');
     await p.waitForSelector('.conversation .exec-mode');
-    const head = (await p.innerText('.conv-meta')).replace(/\s+/g, ' ');
-    log('host chat header:', head);
+    // The header's suffix ("project · node · state"): the warning is the state's hover text.
+    const head = (await p.innerText('.chat-suffix')).replace(/\s+/g, ' ');
+    const hover = await p.getAttribute('.chat-suffix .exec-mode', 'title');
+    log('host chat header:', head, '|', hover);
     check(head.includes('host shell'), 'the header names the host shell');
-    check(head.includes('not contained'), 'the header says it is not contained');
+    check(hover.includes('not contained'), 'the header says it is not contained');
     await p.screenshot({ path: `${S}/x-2-host-chat-light.png` });
     const hostHash = await p.evaluate(() => location.hash);
     const sid = hostHash.split('/').pop();
@@ -118,9 +120,10 @@ const SELECT = 'select[aria-label="How this chat\'s commands run"]';
       await p.fill('.composer textarea', 'hello from the sandbox');
       await p.keyboard.press('Enter');
       await p.waitForSelector('.conversation .exec-mode');
-      const head = (await p.innerText('.conv-meta')).replace(/\s+/g, ' ');
-      log('sandbox chat header:', head);
-      check(head.includes('sandbox') && !head.includes('not contained'), 'the header names the sandbox');
+      const head = (await p.innerText('.chat-suffix')).replace(/\s+/g, ' ');
+      const hover = await p.getAttribute('.chat-suffix .exec-mode', 'title');
+      log('sandbox chat header:', head, '|', hover);
+      check(head.includes('sandbox') && !hover.includes('not contained'), 'the header names the sandbox');
     } else {
       log('SKIPPED the sandbox chat: bubblewrap does not work here');
     }

@@ -172,7 +172,7 @@ describe("a message in an open chat", () => {
 });
 
 describe("the agent picker while a message is on its way (PR 135)", () => {
-  const picker = () => host.querySelector<HTMLButtonElement>('.composer button.select-button[aria-label^="agent:"]')!;
+  const picker = () => host.querySelector<HTMLButtonElement>('.composer-strip button.select-button[aria-label^="agent:"]')!;
   const hover = () => picker().closest(".agent-pick")?.getAttribute("title");
 
   test("held from the click on Send until the logged row, with the running turn's hover text", async () => {

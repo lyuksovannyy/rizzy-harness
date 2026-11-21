@@ -510,7 +510,7 @@ describe("the Undo block of a turn", () => {
 });
 
 describe("a rewind arriving after the chat is on screen", () => {
-  test("its events change the screen in place: the block appears, the actions go, the undo brings it back; the header and the task list do not double count", async () => {
+  test("its events change the screen in place: the block appears, the actions go, the undo brings it back; the strip's figures and the task list do not double count", async () => {
     const usage = { input_tokens: 1000, output_tokens: 500, context_tokens: 900 };
     const log = [
       created,
@@ -522,9 +522,9 @@ describe("a rewind arriving after the chat is on screen", () => {
       ev(10, "turn_ended", { turn_id: "t2", reason: "completed", usage }),
     ];
     await show(log);
-    const header = () => host.querySelector(".conv-meta .meter")?.textContent;
+    const header = () => host.querySelector(".composer-strip .session-figures")?.textContent;
     const before = header();
-    expect(before).toContain("3.0k");
+    expect(before).toContain("2.0k in");
     expect(actions()).toHaveLength(2);
     await wait(20);
     expect(host.querySelector(".todo-panel")!.textContent).toContain("0 of 1 done");

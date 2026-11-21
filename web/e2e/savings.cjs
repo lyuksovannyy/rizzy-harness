@@ -48,6 +48,8 @@ const check = (c, m) => { if (!c) throw new Error(m); };
     await p.click('.tabs button:has-text("Token savings")');
     await p.waitForSelector('text=Prompt caching');
     check(!(await p.isChecked('input[aria-label="Hide old tool outputs"]')), 'toggle persisted');
+    // The page shows the saved value once its settings are fetched: wait for it.
+    await p.waitForFunction(() => document.querySelector('select[aria-label="Agentic style"]')?.value === 'full', null, { timeout: 15000 }).catch(() => {});
     check((await p.inputValue('select[aria-label="Agentic style"]')) === 'full', 'style persisted');
     const toml = fs.readFileSync(`${S}/data/config.toml`, 'utf8');
     check(/\[savings\][\s\S]*mask_old_outputs = false/.test(toml) && /agentic_style = "full"/.test(toml), 'config.toml:\n' + toml);
