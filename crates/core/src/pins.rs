@@ -255,7 +255,8 @@ mod tests {
             seq
         }
         fn user(&mut self, turn: &str, text: &str) -> u64 {
-            let m: UserMessage = serde_json::from_value(json!({"turn_id": turn, "text": text})).unwrap();
+            let m: UserMessage =
+                serde_json::from_value(json!({"turn_id": turn, "text": text})).unwrap();
             self.push(EventKind::UserMessage(m))
         }
         fn answer(&mut self, turn: &str, text: &str) -> u64 {
@@ -309,7 +310,10 @@ mod tests {
         assert!(p.starts_with("first line xxx"));
         assert_eq!(p.chars().count(), PREVIEW_CHARS);
         assert!(!p.contains(['\n', '\t', '\u{7}']));
-        assert_eq!(preview("é".repeat(200).as_str()).chars().count(), PREVIEW_CHARS);
+        assert_eq!(
+            preview("é".repeat(200).as_str()).chars().count(),
+            PREVIEW_CHARS
+        );
         assert_eq!(preview(" \n "), "");
     }
 
@@ -319,7 +323,11 @@ mod tests {
         let u = l.user("t", "q");
         l.pin(u, true);
         let pin_seq = 2;
-        assert!(check(&l.0, 99, true).unwrap_err().contains("message of this chat"));
+        assert!(
+            check(&l.0, 99, true)
+                .unwrap_err()
+                .contains("message of this chat")
+        );
         assert!(check(&l.0, 0, true).is_err());
         // The pin event itself, and the session's other events, are no message.
         assert!(check(&l.0, pin_seq, true).is_err());
@@ -345,7 +353,9 @@ mod tests {
     #[test]
     fn the_fifty_first_pin_is_refused_and_unpinning_makes_room() {
         let mut l = Log::new();
-        let seqs: Vec<u64> = (0..=MAX_PINS).map(|i| l.user("t", &format!("m{i}"))).collect();
+        let seqs: Vec<u64> = (0..=MAX_PINS)
+            .map(|i| l.user("t", &format!("m{i}")))
+            .collect();
         for s in &seqs[..MAX_PINS] {
             assert!(check(&l.0, *s, true).is_ok());
             l.pin(*s, true);
@@ -383,7 +393,9 @@ mod tests {
         assert!(check(&l.0, u2, true).unwrap_err().contains("rewound"));
         assert!(check(&l.0, u1, true).is_ok());
         // Its pin still counts toward the limit and comes back with the undo.
-        l.push(EventKind::ConversationRewindUndone(ConversationRewindUndone { rewind_seq: r }));
+        l.push(EventKind::ConversationRewindUndone(
+            ConversationRewindUndone { rewind_seq: r },
+        ));
         let p = pins(&l.0);
         assert_eq!(p.iter().map(|p| p.seq).collect::<Vec<_>>(), vec![a1, a2]);
         assert!(check(&l.0, a2, false).is_ok());
@@ -414,7 +426,10 @@ mod tests {
         let cut = l.0.len();
         l.pin(a, true);
         let copy: Vec<RawEvent> = l.0[..cut].to_vec();
-        assert_eq!(pins(&copy).iter().map(|p| p.seq).collect::<Vec<_>>(), vec![u]);
+        assert_eq!(
+            pins(&copy).iter().map(|p| p.seq).collect::<Vec<_>>(),
+            vec![u]
+        );
         assert_eq!(pins(&l.0).len(), 2);
     }
 
@@ -428,7 +443,11 @@ mod tests {
             notice: false,
         }));
         l.pin(u, true);
-        let cut: Vec<RawEvent> = l.0.iter().filter(|e| KINDS.contains(&e.kind.as_str())).cloned().collect();
+        let cut: Vec<RawEvent> =
+            l.0.iter()
+                .filter(|e| KINDS.contains(&e.kind.as_str()))
+                .cloned()
+                .collect();
         // The cut renumbers nothing: seqs are the event's own.
         assert_eq!(pins(&cut), pins(&l.0));
     }

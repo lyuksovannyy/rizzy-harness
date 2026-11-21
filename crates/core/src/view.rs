@@ -795,7 +795,8 @@ impl SessionView {
                         ..
                     }) => {
                         if !m.text.is_empty() {
-                            self.book.message(seq, Who::Assistant, &m.text, &m.turn_id, ts);
+                            self.book
+                                .message(seq, Who::Assistant, &m.text, &m.turn_id, ts);
                         }
                         *at_seq = seq;
                         *text = m.text;
@@ -810,7 +811,8 @@ impl SessionView {
                     }
                     _ => {
                         if !m.text.is_empty() {
-                            self.book.message(seq, Who::Assistant, &m.text, &m.turn_id, ts);
+                            self.book
+                                .message(seq, Who::Assistant, &m.text, &m.turn_id, ts);
                             self.items.push(Item::Assistant {
                                 message_id: m.message_id,
                                 text: m.text,

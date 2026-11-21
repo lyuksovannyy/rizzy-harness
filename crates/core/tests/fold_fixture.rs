@@ -1681,7 +1681,10 @@ fn the_view_lists_pins_and_a_rewind_hides_them() {
         .iter()
         .find(|i| i["message_id"] == "m-t91")
         .unwrap();
-    assert_eq!(pins[0]["seq"], kept["seq"], "the item carries the seq a pin names");
+    assert_eq!(
+        pins[0]["seq"], kept["seq"],
+        "the item carries the seq a pin names"
+    );
     // Without the last rewind the lost answer is listed too.
     let last = evs
         .iter()

@@ -690,6 +690,7 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Retry(RetryMsg { session_id, .. })
         | MasterToNode::Rewind { session_id, .. }
         | MasterToNode::RewindUndo { session_id, .. }
+        | MasterToNode::Pin { session_id, .. }
         | MasterToNode::Handoff { session_id, .. }
         | MasterToNode::Compact { session_id, .. }
         | MasterToNode::SelectVariant { session_id, .. }
@@ -3117,6 +3118,24 @@ impl Master {
             message_seq,
             files,
             force,
+        })
+        .await
+    }
+
+    /// Bookmark a message of the chat, or take the mark off, on its owning
+    /// node (docs/pins.md); the node decides again.
+    pub async fn pin(
+        &self,
+        sid: SessionId,
+        message_seq: u64,
+        pinned: bool,
+    ) -> Result<(), CommandError> {
+        let node = self.owner(sid).await?;
+        self.send_command(&node, |req_id| MasterToNode::Pin {
+            req_id,
+            session_id: sid,
+            message_seq,
+            pinned,
         })
         .await
     }
