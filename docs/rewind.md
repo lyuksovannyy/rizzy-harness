@@ -63,6 +63,12 @@ Capability `rewind`; `session.rewind {session_id, message_seq, files, force}` an
 `POST /api/sessions/{id}/rewind` with `{message_seq, files, force}` and `POST /api/sessions/{id}/rewind/{rewind_seq}/undo` (`crates/master/src/http/rewind.rs`): the chat's owner only (the API token only for a chat nobody owns), 404 for anyone else, admins included; the master checks its mirror with the same rule, the node decides again.
 The model has no tool for this and nothing a model writes can trigger it.
 
+## Sub-agents after a rewind
+
+A delegation hands the child its task (the parent model's text from the visible turn), the turn's master context, the savings and the parent's `observed` strings: the person's own words and the trusted search or fetch results of the request the parent is sent, which only say what the child's web tools may follow.
+That request is built from the visible history, so nothing of a rewound turn reaches the child; the parent's history itself is never handed over (`Session::start_child` begins the child on its own empty log).
+Pinned by `crates/agent-native/tests/rewind_live.rs`.
+
 ## Not changed, on purpose
 
 Search, recall and the "earlier chats" context do not read the rewound text: `Store::append` rebuilds that one chat's `chat_fts` rows from its visible log (`rewind::rewound`) in the transaction that appends a `conversation_rewound` or `conversation_rewind_undone`, and `earlier_chats` skips rewound events (note, summary, reply) by the same rule; the undo brings the text back. Usage is not reduced; memory facts saved, board changes, published artifacts, commands run, network calls, files outside the folder and sub-agent chats started by rewound turns are not undone; `others.rs` (T57) still reads rewound turns to say who changed a file; the browser still receives every event of its owner's chat.

@@ -308,3 +308,153 @@ async fn an_undone_rewind_leaves_no_line() {
         assert!(lines(&live).is_empty(), "{start:?}: {live:?}");
     }
 }
+
+// ---- a sub-agent after a rewind ------------------------------------------
+
+/// Takes `delegate` as the node does and keeps what it is handed.
+struct Delegating {
+    inner: Host,
+    handed: Mutex<Option<(String, Vec<String>)>>,
+}
+
+#[async_trait::async_trait]
+impl TurnHost for Delegating {
+    async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+        self.inner.emit(kind).await
+    }
+    async fn approve(&self, _: &str, _: &str, _: &Value, _: ToolRisk) -> Decision {
+        Decision::Allow
+    }
+    async fn delegate(
+        &self,
+        _agent: AgentSpec,
+        task: String,
+        _refs: harness_core::refs::SharedRefs,
+        observed: Arc<Vec<String>>,
+        _cancel: tokio_util::sync::CancellationToken,
+        started: Box<dyn FnOnce(SessionId) + Send>,
+    ) -> Result<harness_core::backend::DelegateOutcome, String> {
+        let child = SessionId::new();
+        started(child);
+        *self.handed.lock().unwrap() = Some((task, observed.to_vec()));
+        Ok(harness_core::backend::DelegateOutcome {
+            child,
+            text: "looked".into(),
+            reason: TurnEndReason::Completed,
+            usage: None,
+            sources: vec![],
+            finish: None,
+            error: None,
+            note: None,
+            unapplied: None,
+            applied: true,
+        })
+    }
+}
+
+/// Plays the lead: delegates once, then answers.
+struct Lead(Mutex<Vec<Vec<ChatMsg>>>);
+
+#[async_trait::async_trait]
+impl Provider for Lead {
+    fn name(&self) -> &'static str {
+        "lead"
+    }
+    async fn complete(
+        &self,
+        req: &ChatRequest,
+        _deltas: mpsc::UnboundedSender<String>,
+    ) -> Result<Completion, ProviderError> {
+        self.0.lock().unwrap().push(req.messages.clone());
+        if req
+            .messages
+            .iter()
+            .any(|m| matches!(m, ChatMsg::Tool { .. }))
+        {
+            return Ok(Completion {
+                text: "done".into(),
+                ..Default::default()
+            });
+        }
+        Ok(Completion {
+            tool_calls: vec![ToolCallRef {
+                call_id: "d1".into(),
+                tool: "delegate".into(),
+                input: json!({"agent": "reader", "task": "look at the visible thing"}),
+            }],
+            ..Default::default()
+        })
+    }
+}
+
+/// Question 7 of the review: a delegation hands the child its task, the
+/// turn's master context and the parent's `observed` strings (what the web
+/// tools may follow: the person's own words and trusted results of the
+/// request the parent is sent). Never the parent's history, and, since that
+/// request is the visible history, nothing of a rewound turn: the person's
+/// words of a rewound message are not in what the child may follow.
+#[tokio::test]
+async fn a_sub_agent_after_a_rewind_is_handed_nothing_of_the_rewound_turns() {
+    let sid = SessionId::new();
+    let inner = Host {
+        sid,
+        log: Mutex::default(),
+    };
+    inner.push(started("t1", None));
+    inner.push(said("t1", "visible words https://visible.example/a"));
+    inner.push(reply("t1", "m1", "first answer"));
+    inner.push(ended("t1"));
+    inner.push(started("t2", None));
+    let m2 = inner.push(said("t2", "REWOUND-WORDS https://rewound.example/b"));
+    inner.push(reply("t2", "m2", "REWOUND-ANSWER"));
+    inner.push(ended("t2"));
+    inner.push(EventKind::ConversationRewound(ConversationRewound {
+        message_seq: m2,
+        turn_id: "t2".into(),
+        files: false,
+    }));
+    let history = inner.log();
+    inner.push(started("t3", None));
+    inner.push(said("t3", "now delegate"));
+    let host = Delegating {
+        inner,
+        handed: Mutex::default(),
+    };
+    let lead = Arc::new(Lead(Mutex::default()));
+    let b = NativeBackend::new(lead.clone(), vec![], NativeConfig::default());
+    let mut spec = agent();
+    spec.delegates = vec![{
+        let mut r = agent();
+        r.agent_id = "reader".into();
+        r.name = "reader".into();
+        r
+    }];
+    let out = b
+        .run_turn(TurnCtx {
+            session_id: sid,
+            turn_id: "t3".into(),
+            history,
+            user_text: "now delegate".into(),
+            cwd: Default::default(),
+            model: "m".into(),
+            agent: Some(spec),
+            compare: vec![],
+            parent_session: None,
+            extra: TurnExtra::default(),
+            cancel: Default::default(),
+            host: &host,
+        })
+        .await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    let (task, observed) = host.handed.lock().unwrap().clone().expect("delegated");
+    assert_eq!(task, "look at the visible thing");
+    let seen = observed.join("\n");
+    assert!(seen.contains("visible.example"), "{seen}");
+    assert!(
+        !seen.contains("REWOUND") && !seen.contains("rewound.example"),
+        "the child may follow what a rewound message held: {seen}"
+    );
+    // And the parent's own requests never held it.
+    let all = format!("{:?}", lead.0.lock().unwrap());
+    assert!(!all.contains("REWOUND"), "{all}");
+}
