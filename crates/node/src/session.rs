@@ -2392,7 +2392,10 @@ impl Session {
                 return Err(e.to_string());
             }
         };
-        if !harness_core::handoff::due(&history) {
+        // What a fork copied is its parent's, which has its own note: due
+        // only for turns of the fork's own (the model still reads it all).
+        let own = harness_core::fork::own(&history, harness_core::fork::through_of(&history));
+        if !harness_core::handoff::due(&own) {
             self.end_note(&cancel);
             return Err(HANDOFF_NOTHING.into());
         }

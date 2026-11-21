@@ -9,7 +9,7 @@ use harness_core::fork;
 use harness_core::policy::ApprovalMode;
 use harness_core::{RawEvent, SessionId};
 use harness_store::session_images::SessionImage;
-use harness_store::{AppendOutcome, NewUser, Role, Store};
+use harness_store::{AppendOutcome, NewColumn, NewProject, NewUser, Role, Store};
 use serde_json::json;
 
 const NODE: &str = "n1";
@@ -429,4 +429,269 @@ fn a_forks_events_and_images_are_written_in_one_transaction() {
     // Writing the same fork twice is refused and changes nothing.
     assert!(s.write_fork(NODE, p.sid, &f2).is_err());
     assert_eq!(s.head_seq(f2[0].session_id).unwrap(), f2.len() as u64);
+}
+
+/// A store with the account, a workspace and one project `p`.
+fn with_project() -> (Store, String) {
+    let s = store();
+    let w = s.create_workspace("Team", "u1").unwrap().workspace_id;
+    s.create_project(
+        &NewProject {
+            project_id: "p".into(),
+            workspace_id: w.clone(),
+            name: "P".into(),
+            description: String::new(),
+            icon: "folder".into(),
+            accent: "blue".into(),
+            instructions: String::new(),
+            settings: "{}".into(),
+            created_by: Some("u1".into()),
+            columns: vec![NewColumn {
+                name: "To do".into(),
+                done: false,
+            }],
+            source: None,
+        },
+        10,
+    )
+    .unwrap();
+    (s, w)
+}
+
+/// A new empty chat in the project, the one that asks for "earlier chats".
+fn asker(s: &Store, w: &str) -> SessionId {
+    let q = SessionId::new();
+    s.append(
+        NODE,
+        &RawEvent {
+            session_id: q,
+            seq: 1,
+            ts_ms: 1,
+            kind: "session_created".into(),
+            payload: json!({"title": "new", "cwd": "/w", "model": "m"}),
+        },
+    )
+    .unwrap();
+    s.claim_session(q, Some("u1"), Some(w)).unwrap();
+    s.set_session_project(q, Some("p")).unwrap();
+    q
+}
+
+/// A parent in the project whose first turn changed `a.txt`, with a note of
+/// its own after it, and a fork of it at that turn; both are the account's.
+fn parent_and_fork(s: &Store, w: &str) -> (Log, SessionId) {
+    let mut p = parent_log();
+    p.raw(
+        "checkpoint",
+        json!({"turn_id": "t1", "phase": "after", "git_ref": "r1", "files": ["a.txt"]}),
+    );
+    // The checkpoint came after the turn's end: move the end last, as the
+    // node writes it (the checkpoint is part of the turn).
+    let end = p.events.remove(p.events.len() - 2);
+    p.events.push(end);
+    for (i, e) in p.events.iter_mut().enumerate() {
+        e.seq = i as u64 + 1;
+    }
+    p.raw(
+        "handoff_written",
+        json!({"through_seq": p.events.len(), "text": "PARENT-NOTE"}),
+    );
+    append_all(s, &p.events);
+    s.claim_session(p.sid, Some("u1"), Some(w)).unwrap();
+    s.set_session_project(p.sid, Some("p")).unwrap();
+    let cut = fork::check(&p.events, "t1").unwrap();
+    let f = SessionId::new();
+    let built = fork::build(&p.events, &cut, f, "Parent chat (fork)", "/w", 9_000).unwrap();
+    append_all(s, &built);
+    s.claim_session(f, Some("u1"), Some(w)).unwrap();
+    s.link_new_session(f, "p").unwrap();
+    (p, f)
+}
+
+/// The reviewer's finding: the parent's last reply was the "earlier chats"
+/// text of both chats. A fork with no turn of its own says nothing yet.
+#[test]
+fn a_fork_with_no_turn_of_its_own_is_not_an_earlier_chat() {
+    let (s, w) = with_project();
+    let (p, f) = parent_and_fork(&s, &w);
+    let q = asker(&s, &w);
+    let got = s.earlier_chats("p", "u1", q, 10).unwrap();
+    let ids: Vec<SessionId> = got.iter().map(|c| c.session_id).collect();
+    assert_eq!(ids, vec![p.sid], "{got:?}");
+    assert_ne!(ids[0], f);
+}
+
+/// Once the fork has a turn of its own, its entry is that turn's: its own
+/// reply, not the parent's note, and none of the files the parent changed.
+#[test]
+fn a_forks_earlier_chat_entry_is_made_of_its_own_events_only() {
+    let (s, w) = with_project();
+    let (_p, f) = parent_and_fork(&s, &w);
+    let head = s.session(f).unwrap().unwrap().head_seq;
+    for (i, (kind, payload)) in [
+        ("turn_started", json!({"turn_id": "f1"})),
+        ("user_message", json!({"turn_id": "f1", "text": "and then"})),
+        (
+            "assistant_message",
+            json!({"turn_id": "f1", "message_id": "mf", "text": "FORK-OWN-REPLY"}),
+        ),
+        (
+            "turn_ended",
+            json!({"turn_id": "f1", "reason": "completed"}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        s.append(
+            NODE,
+            &RawEvent {
+                session_id: f,
+                seq: head + 1 + i as u64,
+                ts_ms: 20_000,
+                kind: kind.into(),
+                payload,
+            },
+        )
+        .unwrap();
+    }
+    let q = asker(&s, &w);
+    let got = s.earlier_chats("p", "u1", q, 10).unwrap();
+    let mine = got.iter().find(|c| c.session_id == f).expect("listed");
+    assert_eq!(mine.text.as_deref(), Some("FORK-OWN-REPLY"), "{mine:?}");
+    assert!(
+        !mine.facts.iter().any(|l| l.contains("a.txt")),
+        "the parent's changes are the parent's: {:?}",
+        mine.facts
+    );
+    assert!(!mine.stale);
+    // The parent keeps its own note.
+    let parent = got.iter().find(|c| c.session_id != f).unwrap();
+    assert_eq!(parent.text.as_deref(), Some("PARENT-NOTE"));
+}
+
+/// A hand-off note is due for what a chat did itself: the fork's copied
+/// turn changed files and had no note of the fork's, and still it is not
+/// due until the fork has a turn of its own that changed something.
+#[test]
+fn a_fork_gets_a_handoff_note_only_for_turns_of_its_own() {
+    let (s, w) = with_project();
+    // A parent whose first turn changed a file (the checkpoint is part of
+    // the turn, before its end).
+    let mut p = parent_log();
+    let end = p.events.pop().unwrap();
+    p.raw(
+        "checkpoint",
+        json!({"turn_id": "t1", "phase": "after", "git_ref": "r1", "files": ["a.txt"]}),
+    );
+    p.events.push(RawEvent {
+        seq: p.events.len() as u64 + 1,
+        ..end
+    });
+    append_all(&s, &p.events);
+    s.claim_session(p.sid, Some("u1"), Some(&w)).unwrap();
+    assert!(
+        harness_core::handoff::due(&s.handoff_log(p.sid).unwrap()),
+        "sanity: a chat whose turn changed files is due"
+    );
+    let cut = fork::check(&p.events, "t1").unwrap();
+    let f = SessionId::new();
+    let built = fork::build(&p.events, &cut, f, "x (fork)", "/w", 9_000).unwrap();
+    append_all(&s, &built);
+    s.claim_session(f, Some("u1"), Some(&w)).unwrap();
+    s.set_session_project(f, Some("p")).unwrap();
+    let log = s.handoff_log(f).unwrap();
+    assert!(
+        log.iter().all(|e| e.kind != "user_message"),
+        "no copied message is read: {:?}",
+        log.iter().map(|e| (e.seq, &e.kind)).collect::<Vec<_>>()
+    );
+    assert!(
+        !harness_core::handoff::due(&log),
+        "nothing of its own happened yet"
+    );
+    // Its own turn changes a file: now one is due, naming only that turn.
+    let head = s.session(f).unwrap().unwrap().head_seq;
+    for (i, (kind, payload)) in [
+        ("turn_started", json!({"turn_id": "f1"})),
+        (
+            "user_message",
+            json!({"turn_id": "f1", "text": "OWN-FIRST"}),
+        ),
+        (
+            "checkpoint",
+            json!({"turn_id": "f1", "phase": "after", "git_ref": "r2", "files": ["b.txt"]}),
+        ),
+        (
+            "turn_ended",
+            json!({"turn_id": "f1", "reason": "completed"}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        s.append(
+            NODE,
+            &RawEvent {
+                session_id: f,
+                seq: head + 1 + i as u64,
+                ts_ms: 20_000,
+                kind: kind.into(),
+                payload,
+            },
+        )
+        .unwrap();
+    }
+    let log = s.handoff_log(f).unwrap();
+    assert!(harness_core::handoff::due(&log));
+    let facts = harness_core::handoff::Facts::from_log(&log);
+    assert_eq!(facts.files, vec!["b.txt".to_string()], "{facts:?}");
+    assert_eq!(facts.asked.as_deref(), Some("OWN-FIRST"));
+    assert_eq!(facts.turns, 1);
+}
+
+/// A fork of an incognito chat is as unsearchable as its parent: not
+/// indexed (its copied text, its title), not in "earlier chats".
+#[test]
+fn an_incognito_fork_is_not_indexed_nor_listed() {
+    let (s, w) = with_project();
+    let mut p = Log {
+        sid: SessionId::new(),
+        events: vec![],
+    };
+    p.raw(
+        "session_created",
+        json!({"title": "Secretparent", "cwd": "", "model": "m", "backend": "native",
+            "node_id": NODE, "approval_mode": "ask", "profile": "chat", "incognito": true}),
+    );
+    p.turn("t1", "zzsecretneedle", "zzsecretanswer", 10);
+    append_all(&s, &p.events);
+    s.claim_session(p.sid, Some("u1"), Some(&w)).unwrap();
+    let cut = fork::check(&p.events, "t1").unwrap();
+    let f = SessionId::new();
+    let built = fork::build(&p.events, &cut, f, "Secretparent (fork)", "", 9_000).unwrap();
+    append_all(&s, &built);
+    s.claim_session(f, Some("u1"), Some(&w)).unwrap();
+    s.link_new_session(f, "p").unwrap();
+    assert!(
+        s.session(f).unwrap().unwrap().incognito,
+        "the fork stays incognito"
+    );
+    for q in ["zzsecretneedle", "zzsecretanswer", "Secretparent", "fork"] {
+        let hits: Vec<_> = s
+            .search(q, Some("u1"), None, 10)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.session_id)
+            .collect();
+        assert!(hits.is_empty(), "{q}: {hits:?}");
+    }
+    s.rebuild_search_index().unwrap();
+    assert!(
+        s.search("zzsecretneedle", Some("u1"), None, 10)
+            .unwrap()
+            .is_empty()
+    );
+    let q = asker(&s, &w);
+    assert!(s.earlier_chats("p", "u1", q, 10).unwrap().is_empty());
 }

@@ -973,3 +973,49 @@ async fn an_inherited_image_is_the_forks_own_and_survives_the_parents_deletion()
         "the model sees the inherited image with its bytes"
     );
 }
+
+/// A hand-off note is due for what a chat did itself: the fork's copied
+/// turn changed a file, yet the node answers "nothing due" for the fork
+/// until a turn of its own changed something.
+#[tokio::test]
+async fn a_fork_is_due_a_handoff_note_only_for_turns_of_its_own() {
+    let mut h = H::new().await;
+    h.turn("run: echo one > a.txt").await;
+    let turns = H::ended(&h.log());
+    let f = h.fork(h.sid, &turns[0]).await;
+    f.result.clone().unwrap();
+    let handoff = |h: &mut H, id: &str, sid: SessionId| {
+        h.link
+            .to_node
+            .try_send(MasterToNode::Handoff {
+                req_id: id.into(),
+                session_id: sid,
+                small_model: None,
+                windows: Default::default(),
+                low_effort: vec![],
+            })
+            .unwrap();
+        id.to_string()
+    };
+    let ack = async |h: &mut H, id: String| loop {
+        if let NodeToMaster::Ack { req_id, ok, error } = h.recv().await
+            && req_id == id
+        {
+            return if ok {
+                Ok(())
+            } else {
+                Err(error.unwrap_or_default())
+            };
+        }
+    };
+    let id = handoff(&mut h, "h1", f.sid);
+    let got = ack(&mut h, id).await;
+    assert_eq!(
+        got,
+        Err(harness_protocol::HANDOFF_NOTHING.to_string()),
+        "the copied turn is the parent's to be noted"
+    );
+    h.turn_of(f.sid, "run: echo two > b.txt").await;
+    let id = handoff(&mut h, "h2", f.sid);
+    assert_eq!(ack(&mut h, id).await, Ok(()), "its own turn changed a file");
+}

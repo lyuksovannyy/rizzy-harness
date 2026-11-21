@@ -66,6 +66,46 @@ pub fn through(created: &crate::event::SessionCreated) -> u64 {
     created.forked.map_or(0, |f| f.through_seq)
 }
 
+/// `log` as what a chat's OWN turns say, for the readers that speak for
+/// the chat as it is now (the "earlier chats" list, hand-off notes and
+/// whether one is due): the copies of a fork are the parent's and are
+/// already spoken for there. `through` is [`through`] of the chat (0: no
+/// fork, the log as it is, borrowed). What stays of a copy are the rewind
+/// events and the messages they went back to, so a rewind of the fork's own
+/// that went back to a copied message still counts (`rewind::rewound`).
+pub fn own(log: &[RawEvent], through: u64) -> std::borrow::Cow<'_, [RawEvent]> {
+    if through < 2 {
+        return std::borrow::Cow::Borrowed(log);
+    }
+    let targets: std::collections::HashSet<u64> = log
+        .iter()
+        .filter(|e| e.kind == "conversation_rewound")
+        .filter_map(|e| e.payload.get("message_seq")?.as_u64())
+        .collect();
+    std::borrow::Cow::Owned(
+        log.iter()
+            .filter(|e| {
+                !inherited(through, e.seq)
+                    || matches!(
+                        e.kind.as_str(),
+                        "conversation_rewound" | "conversation_rewind_undone"
+                    )
+                    || (e.kind == "user_message" && targets.contains(&e.seq))
+            })
+            .cloned()
+            .collect(),
+    )
+}
+
+/// [`through`] of the chat whose log (from its first event) is `log`; 0 when
+/// the log does not begin with a creation, or the chat is no fork.
+pub fn through_of(log: &[RawEvent]) -> u64 {
+    match log.first().map(|e| e.typed()) {
+        Some(Ok(EventKind::SessionCreated(c))) => through(&c),
+        _ => 0,
+    }
+}
+
 /// The fork's title from its parent's.
 pub fn title(parent: &str) -> String {
     format!("{parent}{TITLE_SUFFIX}")
@@ -320,6 +360,28 @@ mod tests {
                 child: None,
             }))
         }
+    }
+
+    /// What a fork's own readers see: nothing of the copy but the first
+    /// event, the rewind events and the messages they name.
+    #[test]
+    fn own_drops_the_copy_and_keeps_what_a_rewind_names() {
+        let mut l = Log::new();
+        l.turn("t1"); // seqs 2..=4, the message is 3
+        l.turn("t2"); // 5..=7
+        let rewind = l.push(EventKind::ConversationRewound(ConversationRewound {
+            message_seq: 3,
+            turn_id: "t1".into(),
+            files: false,
+        })); // 8
+        let through = l.turn("t3"); // 9..=11
+        l.turn("own"); // 12..=14
+        let got = own(&l.events, through);
+        let seqs: Vec<u64> = got.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![1, 3, rewind, 12, 13, 14]);
+        // No fork: the log itself.
+        assert!(matches!(own(&l.events, 0), std::borrow::Cow::Borrowed(_)));
+        assert_eq!(through_of(&l.events), 0);
     }
 
     #[test]
