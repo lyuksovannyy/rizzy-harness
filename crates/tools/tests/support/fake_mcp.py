@@ -11,6 +11,12 @@ other request with "method not found". Flags:
   --hang-init      never answer `initialize`
   --slow-init MS   answer `initialize` after MS milliseconds
   --started PATH   append "started <pid>" to PATH when it starts
+  --detach         leave its process group and session at once (`setsid`), so
+                   that a stop of the group the harness started does not
+                   reach it: it keeps answering until its input closes
+  --die-init MS    exit 1 after MS milliseconds, during `initialize`
+  --calls PATH     append "call <tool>" to PATH for every `tools/call` it
+                   receives (before it answers)
   --marker WORD    ignored (lets a test find the process in /proc)
   --say-env NAME   print "token <value of NAME>" to stderr and exit 1 at once
   --tool-names A,B the tools are these (echo's behaviour), no others
@@ -40,6 +46,9 @@ def value(name, default=None):
         return args[args.index(name) + 1]
     return default
 
+
+if flag("--detach"):
+    os.setsid()
 
 if value("--started"):
     with open(value("--started"), "a") as f:
@@ -145,6 +154,11 @@ def call(name, arguments):
 
 page = int(value("--page", "0"))
 
+
+def log_call(params):
+    with open(value("--calls"), "a") as f:
+        f.write("call %s\n" % params.get("name"))
+
 for line in sys.stdin.buffer:
     try:
         msg = json.loads(line)
@@ -153,9 +167,14 @@ for line in sys.stdin.buffer:
     if "id" not in msg or "method" not in msg:
         continue  # a notification, or an answer to us
     mid, method, params = msg["id"], msg["method"], msg.get("params") or {}
+    if method == "tools/call" and value("--calls"):
+        log_call(params)
     if method == "initialize":
         if flag("--hang-init"):
             continue
+        if value("--die-init"):
+            time.sleep(int(value("--die-init")) / 1000.0)
+            sys.exit(1)
         if value("--slow-init"):
             time.sleep(int(value("--slow-init")) / 1000.0)
         send(
