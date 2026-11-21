@@ -871,25 +871,34 @@ into the form, not yet saved, changes neither the listing nor the marks.
 
 ### What a chat costs (an estimate)
 
-The chat header shows the tokens a chat used and, once the server has prices,
-an estimate of what it cost: `≈ $0.42 (last turn $0.03)`. The figures move
+Under the message box, at the right of the small strip that holds the agent,
+approval-mode and step-limit pickers, the chat shows its figures: the tokens
+it used in and out (`12k in · 1.2k out`), a ring with how full the model's
+context window is (hover: the window and where older turns are summarised),
+and, once the server has prices, an estimate of what it cost:
+`≈ $0.42 (last turn $0.03)`. A "quota" placeholder stands last: it shows no
+number yet and says on hover and keyboard focus that your plan's quota will
+show there later. The strip is also where the home screen puts the model,
+effort, mode and search controls (it has no figures: there is no chat yet); on
+a narrow screen the figures wrap under the controls. The chat header keeps the
+title, the agent, the model, the node and shell badges and the folder. The figures move
 after each model reply while a turn runs, not only when it ends (they are an
 estimate: the provider's own count for the whole turn replaces the running
 one when the turn ends, and a turn stopped by a restart keeps what it had
 reached). The chat's figure includes its sub-agents. A foreground
 sub-agent's cost is written into the chat's own log only when its result
-returns, but the header already adds the latest known total of each
+returns, but the figures already add the latest known total of each
 foreground sub-agent of the turn from the moment it is seen running until
 its result is in (read from its own log, which this tab follows for the side
 panel; several run in parallel and their results come together), so a long
-delegate moves the header instead of freezing it and then jumping. The node
+delegate moves the figures instead of freezing them and then jumping. The node
 logs the chat's total that takes a sub-agent in only after that sub-agent's
 result, so nothing is counted twice. Within one open view of a running turn
-the header never shows less than it showed (tokens and the cost estimate
+the figures never show less than they showed (tokens and the cost estimate
 each); after a page reload, or coming back from another chat mid-turn, it
 can show less for a moment until the sub-agent's log has replayed. A
 sub-agent whose run fails without a result the chat takes in is shown while
-it runs and leaves the figure when the turn ends: the header then drops to
+it runs and leaves the figure when the turn ends: the figures then drop to
 the log's figure, which is the truth. Background sub-agents are not part of
 the turn and are not added while they run. One level only: a sub-agent's own
 sub-agents are not added while they run. A row in the side panel shows that sub-agent's own
@@ -1163,7 +1172,7 @@ built-in command: a skill named `compact` is still offered to the agent,
 but `/compact` never loads it. The chat shows "Summarising
 the chat for the model…" until the summary appears ("summarised for the
 model at your request", with your focus and the summary under it), and the
-context meter drops to the new size. It works between turns only (a running
+context ring drops to the new size. It works between turns only (a running
 turn shortens its own context when it must; Stop it first if you want to
 summarise now), one at a time, and no message is sent while it runs; Stop
 shows while it runs and cancels it. A message you sent during the last turn
@@ -2678,7 +2687,7 @@ it does not stop one already running (a follow-up). What bounds it: the chat's o
 the node's `max_steps`, the repeated-call guard (the same call with the same
 result is refused and then ends the turn), the model stream timeouts, Stop,
 and the provider's own rate and spending limits. A chat's owner can set the
-chat's own limit, from 1 up to the node's, in the composer next to the
+chat's own limit, from 1 up to the node's, in the strip under the box, next to the
 approval mode ("N steps"): the node clamps whatever it is sent, records it in
 the chat (shown as "Step limit: N"), keeps it across a restart, and applies
 it from the running turn's next request (a limit below what the turn has

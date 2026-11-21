@@ -48,7 +48,7 @@ const check = (c, m) => { if (!c) throw new Error(m); };
     const meter = p.locator('.cost-meter');
     await meter.waitFor({ timeout: 30000 });
     const text = await meter.textContent();
-    check(/^≈ \$\d/.test(text), 'the header shows a dollar estimate: ' + text);
+    check(/^≈ \$\d/.test(text), 'the strip shows a dollar estimate: ' + text);
     const hint = await meter.getAttribute('title');
     check(hint.includes('not the bill'), 'labelled an estimate: ' + hint);
     const sid = (await p.evaluate(() => location.hash)).split('/').pop();
