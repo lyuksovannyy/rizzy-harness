@@ -684,6 +684,42 @@ fn search_does_not_find_its_own_calls() {
     assert!(a.contains("0 turns"), "{a}");
 }
 
+/// The turn that is calling `history` has the search words in its own
+/// text (the person asked for them, the model wrote them into the call and
+/// its sentence): it is not a result. It stays in the index, and is found
+/// once it has ended.
+#[test]
+fn search_leaves_out_the_turn_that_is_still_running() {
+    let mut log = Log::new();
+    log.turn(None, "the Quokka plan", &[], "ok");
+    log.turn(
+        None,
+        "search the chat for quokka please",
+        &[("history", json!({"search": "quokka"}), "")],
+        "I looked for quokka",
+    );
+    let ended = log
+        .events
+        .iter()
+        .rposition(|e| e.kind == "turn_ended")
+        .unwrap();
+    let end = log.events.remove(ended);
+    let a = ask(&log, json!({"search": "quokka"}));
+    let hits: Vec<&str> = a.lines().filter(|l| l.starts_with("turn ")).collect();
+    assert_eq!(hits.len(), 1, "{a}");
+    assert!(hits[0].starts_with("turn 1 |"), "{a}");
+    assert!(a.contains("1 turn for"), "{a}");
+    // Still in the index, and readable in full.
+    let index = ask(&log, json!({}));
+    assert!(index.contains("\n2. "), "{index}");
+    assert!(ask(&log, json!({"turn": 2})).contains("search the chat"));
+    // Once it has ended it is a turn like another.
+    log.events.push(end);
+    let a = ask(&log, json!({"search": "quokka"}));
+    let hits: Vec<&str> = a.lines().filter(|l| l.starts_with("turn ")).collect();
+    assert_eq!(hits.len(), 2, "{a}");
+}
+
 #[test]
 fn an_earlier_history_read_is_shown_as_one_without_its_text() {
     let mut log = Log::new();

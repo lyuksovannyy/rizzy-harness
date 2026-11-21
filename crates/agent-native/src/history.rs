@@ -314,6 +314,10 @@ struct Turn {
     agent: Option<String>,
     /// A person's message opened it (not a callback or a mention).
     person: bool,
+    /// Its `turn_ended` is in the log. A turn without one is running: the
+    /// one that is calling `history` now, whose own text holds the words
+    /// it searches for, so `search` leaves it out (the index lists it).
+    ended: bool,
     first_seq: u64,
     last_seq: u64,
     /// The person's first message, one line.
@@ -439,6 +443,7 @@ impl Chat {
                 ts_ms: 0,
                 agent: None,
                 person: false,
+                ended: false,
                 first_seq: 0,
                 last_seq: 0,
                 lead: String::new(),
@@ -506,6 +511,9 @@ impl Chat {
                     };
                     if let Some(i) = turn_id.and_then(at) {
                         turns[i].last_seq = turns[i].last_seq.max(e.seq);
+                        if matches!(other, EventKind::TurnEnded(_)) {
+                            turns[i].ended = true;
+                        }
                     }
                 }
             }
@@ -1106,6 +1114,10 @@ impl Chat {
         let mut hits: Vec<String> = Vec::new();
         let mut more = 0usize;
         for (i, t) in self.turns.iter().enumerate().rev() {
+            // The turn that is running is the one asking.
+            if !t.ended {
+                continue;
+            }
             let found = self.blocks(t).into_iter().find_map(|b| {
                 // A `history` call's input and result are about the chat,
                 // not in it.
