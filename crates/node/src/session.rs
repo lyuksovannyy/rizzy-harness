@@ -5506,6 +5506,25 @@ impl TurnHost for Session {
             return Ok(Vec::new());
         };
         let queued = std::mem::take(&mut *self.bg_queue.lock().unwrap_or_else(|p| p.into_inner()));
+        // The end of a command a rewound turn started is not the model's
+        // to read (X.46): recorded as not delivered, outside the history.
+        let queued = if queued.is_empty() {
+            queued
+        } else {
+            let log = match self.read_log().await {
+                Ok(l) => l,
+                Err(e) => {
+                    self.bg_queue
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .extend(queued);
+                    return Err(harness_core::backend::LogError(e));
+                }
+            };
+            let (kept, gone) = rewind_op::split_rewound_ends(&log, queued);
+            self.record_background(gone).await;
+            kept
+        };
         let mut out = Vec::new();
         let mut rest = queued.into_iter();
         while let Some(e) = rest.next() {

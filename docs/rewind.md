@@ -41,6 +41,7 @@ The Rust fold, the model's rebuild, the seen table, the retry rule, the hand-off
 `rewind::check(log, message_seq)` refuses: a message that is not the person's or did not open a turn (a message sent while an answer ran is read into that answer; a retry has no message of its own, its target is the retried turn's); one already rewound (also anything inside a rewound range); one the latest summary holds ("this chat was compacted after that message": the summary would still hold its text); a sub-agent's chat.
 The master adds a routine's own first message.
 The node adds, under the turn slot: a turn running or being stopped, a `/compact`, a hand-off note being written (it is cancelled), the agents of one message still taking turns, and **any background command or sub-agent of the chat running, or an end not recorded yet** (`Session::restore` counts commands only; a sub-agent writes into the folder as well).
+A command that exited just before the rewind has its end in the node's channel, not yet in the queue the check reads: that end is read after the rewind, and a turn never hands it to the model when its `background_started` is in a rewound range (`session_rewind::split_rewound_ends`, used when a turn collects its background notes and when the rewind reloads the queue); it is recorded as not delivered, and the history rebuild drops it as well.
 `rewind::check_undo(log, rewind_seq)`: the event is a rewind, not undone, and no message, turn or summary came after it.
 
 ## Files
