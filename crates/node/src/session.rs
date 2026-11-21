@@ -5432,6 +5432,13 @@ impl TurnHost for Session {
         }))
     }
 
+    fn history(&self) -> Option<Arc<dyn harness_core::history::HistorySource>> {
+        Some(Arc::new(crate::history::OwnHistory {
+            node: self.node.clone(),
+            session: self.id,
+        }))
+    }
+
     fn board(&self) -> Option<Arc<dyn harness_core::board::BoardSource>> {
         Some(Arc::new(crate::board::LinkBoard {
             node: self.node.clone(),

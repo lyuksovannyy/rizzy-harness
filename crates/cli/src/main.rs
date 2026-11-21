@@ -352,6 +352,8 @@ async fn serve(
     }
     // Searching earlier chats needs no memory store (PLAN.md T55).
     web_tools.push(Arc::new(harness_memory::Recall));
+    // Reading the chat's own log: node code, no master round trip (T91).
+    web_tools.push(Arc::new(harness_agent_native::history::History));
     // The project board tools: the master answers them too (PLAN.md T78).
     web_tools.push(Arc::new(harness_tools::Board));
     web_tools.push(Arc::new(harness_tools::BoardEdit));
@@ -888,6 +890,8 @@ fn agentic_tools(
     tools.push(Arc::new(harness_memory::Remember));
     // Runs nothing here either: the master answers it (PLAN.md T55).
     tools.push(Arc::new(harness_memory::Recall));
+    // Reads the session's own log on this node (PLAN.md T91).
+    tools.push(Arc::new(harness_agent_native::history::History));
     // And the project board tools (PLAN.md T78).
     tools.push(Arc::new(harness_tools::Board));
     tools.push(Arc::new(harness_tools::BoardEdit));

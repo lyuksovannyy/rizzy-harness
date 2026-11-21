@@ -19,6 +19,7 @@
 //! memory: true                                    # recall and `remember` (default true)
 //! project_memory: true                            # a project's facts, the same (default true)
 //! personalisation: true                           # the person's reply style and instructions (default true)
+//! history: true                                   # read this chat's earlier messages in full (default true)
 //! available_as: [agent, subagent]                 # default both
 //! ---
 //! System prompt in markdown...
@@ -151,6 +152,9 @@ struct Frontmatter {
     project_memory: bool,
     #[serde(default = "yes")]
     personalisation: bool,
+    /// `history`: reads this chat's earlier messages in full (PLAN.md T91).
+    #[serde(default = "yes")]
+    history: bool,
     #[serde(default = "both")]
     available_as: Vec<Use>,
 }
@@ -195,6 +199,10 @@ const COMMAND_TOOLS: &[&str] = &["bash", "bash_output", "bash_stop", "tool_outpu
 const MEMORY_TOOL: &str = "remember";
 /// Searching earlier chats and memory: its own switch.
 const RECALL_TOOL: &str = "recall";
+/// Reading this chat's own earlier messages in full: its own switch, on
+/// when absent (it shows an agent only what it was sent once, in the one
+/// chat it is in).
+const HISTORY_TOOL: &str = harness_core::history::TOOL;
 
 /// **The built-in agents that have "Earlier chats and memory search"**
 /// (PLAN.md T55): the ones without commands, MCP servers or publishing,
@@ -247,6 +255,12 @@ pub struct Features {
     /// and time zone still come). On when absent.
     #[serde(default = "yes")]
     pub personalisation: bool,
+    /// `history`: reads this chat's own earlier messages in full, as they
+    /// were before a summary or the clearing of old results (PLAN.md T91).
+    /// Its own switch, on when absent: it shows the agent only what it was
+    /// sent once, from the one chat it is in.
+    #[serde(default = "yes")]
+    pub history: bool,
     /// `recall`: searches the person's own earlier chats and memory
     /// (PLAN.md T55). Its own switch, off when absent.
     #[serde(default)]
@@ -307,6 +321,7 @@ impl Features {
             // The master offers it per turn only for the memory it may write.
             (self.memory || self.project_memory, &[MEMORY_TOOL][..]),
             (self.recall, &[RECALL_TOOL][..]),
+            (self.history, &[HISTORY_TOOL][..]),
             (self.web, WEB_TOOLS),
             (self.read_files, READ_TOOLS),
             (self.edit_files, EDIT_TOOLS),
@@ -450,6 +465,7 @@ pub fn custom(
         memory: features.memory,
         project_memory: features.project_memory,
         personalisation: features.personalisation,
+        history: features.history,
         available_as,
     };
     let mut agent = build(id, fm, prompt, Origin::Custom)?;
@@ -463,7 +479,7 @@ pub fn custom(
     Ok(agent)
 }
 
-fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent, AgentError> {
+fn build(id: &str, mut fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent, AgentError> {
     if let Some(e) = &fm.effort
         && !matches!(e.as_str(), "low" | "medium" | "high" | "max")
     {
@@ -474,6 +490,16 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
     }
     if fm.available_as.is_empty() {
         return Err(AgentError::Unavailable(id.into()));
+    }
+    // `history` is its own switch (PLAN.md T91): a list holds it exactly
+    // when the switch is on, whatever the list said; `tools: all` turns it
+    // off through `deny_tools`, which only ever grows afterwards.
+    if let ToolSelection::List(tools) = &mut fm.tools {
+        if !fm.history {
+            tools.retain(|t| t != HISTORY_TOOL);
+        } else if !tools.iter().any(|t| t == HISTORY_TOOL) {
+            tools.push(HISTORY_TOOL.into());
+        }
     }
     let (aliases, category) = labels(id, &fm.aliases, fm.category.as_deref())?;
     let system_prompt = body.trim().to_string();
@@ -534,6 +560,7 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
         memory: fm.memory,
         project_memory: fm.project_memory,
         personalisation: fm.personalisation,
+        history: fm.history,
         recall: fm.tools.allows(RECALL_TOOL),
         board: fm.tools.allows(BOARD_TOOL),
         web: any(WEB_TOOLS),
@@ -574,7 +601,11 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
             ui: fm.ui,
             no_personalisation: !fm.personalisation,
             prompt_hash,
-            deny_tools: vec![],
+            deny_tools: if fm.history {
+                vec![]
+            } else {
+                vec![HISTORY_TOOL.into()]
+            },
             deny_skills: vec![],
             deny_mcp_servers: vec![],
             stored_skills: vec![],

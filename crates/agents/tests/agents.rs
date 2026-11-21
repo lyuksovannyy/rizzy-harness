@@ -365,6 +365,7 @@ fn features() -> harness_agents::Features {
         memory: true,
         project_memory: true,
         personalisation: true,
+        history: true,
         recall: false,
         board: false,
         web: true,
@@ -519,6 +520,7 @@ fn custom_agents_get_tools_from_their_features() {
         tools,
         &[
             "remember",
+            "history",
             "web_search",
             "web_fetch",
             "read",
@@ -1398,4 +1400,53 @@ fn a_delegates_list_narrows_and_never_widens() {
     // set alone has no `wsonly`.
     let (server_set, _) = base.with_edits(&server);
     assert_eq!(server_set.get("narrow").unwrap().delegates, ["scout"]);
+}
+
+/// The History switch (PLAN.md T91): on unless a definition says off; the
+/// tool is in the list exactly when it is on; every built-in has it; an
+/// agent that reads nothing else but its own chat is still read-only.
+#[test]
+fn the_history_switch() {
+    use harness_agents::{Features, custom};
+    for a in builtins() {
+        assert!(a.features.history, "{}", a.id);
+        assert!(a.spec.allows_tool("history"), "{}", a.id);
+    }
+    let defined = |tools: &str, extra: &str| {
+        parse(
+            "notes",
+            &format!("---\nname: N\ntools: {tools}\n{extra}---\nhi\n"),
+            false,
+        )
+        .unwrap()
+    };
+    // On when absent, whatever the list says.
+    let plain = defined("[read]", "");
+    assert!(plain.features.history && plain.spec.allows_tool("history"));
+    // Off takes it out of a list that names it, and out of `all`.
+    for tools in ["[read]", "[read, history]", "all"] {
+        let off = defined(tools, "history: false\n");
+        assert!(!off.features.history, "{tools}");
+        assert!(!off.spec.allows_tool("history"), "{tools}");
+    }
+    assert!(defined("all", "").spec.allows_tool("history"));
+    // A page agent: the tool follows the switch.
+    let make = |f: Features| custom("x", "X", "", "Do.", f, vec![]).unwrap();
+    assert!(features().history);
+    assert!(make(features()).spec.allows_tool("history"));
+    let off = make(Features {
+        history: false,
+        ..features()
+    });
+    assert!(!off.features.history && !off.spec.allows_tool("history"));
+    // Reading its own chat changes nothing: the shared rule still calls an
+    // agent with only read tools read-only, and Smol (no tools) too.
+    assert!(!plain.spec.changes_things(|_| true));
+    let smol = builtins().into_iter().find(|a| a.id == "smol").unwrap();
+    assert!(!smol.spec.changes_things(|_| true));
+    // Stored switches from before it parse with it on.
+    let mut v = serde_json::to_value(features()).unwrap();
+    v.as_object_mut().unwrap().remove("history");
+    let old: Features = serde_json::from_value(v).unwrap();
+    assert!(old.history);
 }

@@ -369,6 +369,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.recall()
     }
 
+    fn history(&self) -> Option<Arc<dyn harness_core::history::HistorySource>> {
+        self.host.history()
+    }
+
     fn board(&self) -> Option<Arc<dyn harness_core::board::BoardSource>> {
         self.host.board()
     }
@@ -1330,16 +1334,19 @@ impl NativeBackend {
         let harness_core::agent::ToolSelection::List(declared) = &d.tools else {
             return None;
         };
-        if declared.is_empty() {
+        if declared.iter().all(|n| n == history::NAME) {
             return None;
         }
         // Proposing a memory does none of a task's work: `remember` alone
         // leaves a delegate with nothing to work with (A.11, on nodes that
         // register it).
         // Nor does searching earlier chats (`recall`).
+        // Nor does reading the chat's own history (`history`, which every
+        // agent has unless switched off).
         let usable = |name: &str| {
             name != "remember"
                 && name != "recall"
+                && name != history::NAME
                 && d.allows_tool(name)
                 && !host.tool_denied(name)
                 && self
@@ -1355,6 +1362,7 @@ impl NativeBackend {
             .map(|n| match n.as_str() {
                 "remember" => "memory".to_string(),
                 "recall" => "earlier chats search".to_string(),
+                "history" => "chat history".to_string(),
                 n => n.replace('_', " "),
             })
             .collect();
@@ -1869,7 +1877,12 @@ fn unanswered_note(reason: TurnEndReason) -> String {
 }
 
 /// The path a call named (`path`), as the line over its image shows it.
-fn image_name(input: &serde_json::Value) -> String {
+fn image_name(tool: &str, input: &serde_json::Value) -> String {
+    // A `history` image has no path: it is named by where it is from.
+    if tool == history::NAME {
+        let n = |k: &str| input.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        return images::history_image_name(n("turn"), n("image"));
+    }
     input
         .get("path")
         .and_then(|v| v.as_str())
@@ -2085,7 +2098,7 @@ pub fn rebuild_spans(
                 paths = m
                     .tool_calls
                     .iter()
-                    .map(|c| (c.call_id.clone(), image_name(&c.input)))
+                    .map(|c| (c.call_id.clone(), image_name(&c.tool, &c.input)))
                     .collect();
                 if !m.text.is_empty() || !m.tool_calls.is_empty() {
                     // Another agent's answer says whose it is (only in a
@@ -5146,8 +5159,21 @@ impl NativeBackend {
         Option<ChatMsg>,
     ) {
         let sees = agent.is_some_and(|a| a.vision.iter().any(|m| m == model));
+        let history = call.tool == history::NAME;
+        let capped_line = |why: &str| {
+            if history {
+                images::history_image_capped(why)
+            } else {
+                images::tool_image_capped(why)
+            }
+        };
         if !sees {
-            return (None, Some(images::tool_image_unseen(model)), None);
+            let line = if history {
+                images::history_image_unseen(model)
+            } else {
+                images::tool_image_unseen(model)
+            };
+            return (None, Some(line), None);
         }
         let len = img.bytes.len() as u64;
         let capped = if *turn >= images::TURN_IMAGES {
@@ -5164,9 +5190,9 @@ impl NativeBackend {
             None
         };
         if let Some(why) = capped {
-            return (None, Some(images::tool_image_capped(&why)), None);
+            return (None, Some(capped_line(&why)), None);
         }
-        let name = image_name(&call.input);
+        let name = image_name(&call.tool, &call.input);
         let r = harness_core::event::ToolImage {
             sha256: img.sha256.clone(),
             mime: img.mime.to_string(),
@@ -5187,7 +5213,7 @@ impl NativeBackend {
                 "the chat could not keep it ({}).",
                 self.config.secrets.scrub(&e)
             );
-            return (None, Some(images::tool_image_capped(&why)), None);
+            return (None, Some(capped_line(&why)), None);
         }
         *turn += 1;
         step.0 += 1;
@@ -5198,7 +5224,14 @@ impl NativeBackend {
         let msg = tool_image_msg(call.call_id.clone(), name, &r);
         (
             Some(r),
-            Some(images::TOOL_IMAGE_SENT.to_string()),
+            Some(
+                if history {
+                    images::HISTORY_IMAGE_SENT
+                } else {
+                    images::TOOL_IMAGE_SENT
+                }
+                .to_string(),
+            ),
             Some(msg),
         )
     }
@@ -6019,6 +6052,7 @@ impl NativeBackend {
             skills: ctx.extra.skills.clone(),
             seen: self.seen.session(ctx.session_id),
             recall: host.recall(),
+            history: host.history(),
             board: host.board(),
             stored_skills: host.stored_skills(),
             read_offered: self.read_offered(ctx, host),
