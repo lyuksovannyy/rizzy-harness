@@ -185,7 +185,7 @@ pub(crate) async fn make(
     // Room, before anything is made.
     let git_bytes = fork_copy::git_dir_bytes(&source, max.saturating_add(1)).await;
     let tree_bytes = match &req.cut.snapshot {
-        Some(s) => fork_copy::tree_bytes(&req.shadow, s).await,
+        Some(s) => fork_copy::tree_bytes(&req.shadow, s).await?,
         None => git_bytes,
     };
     let need = git_bytes.saturating_add(tree_bytes);
@@ -237,13 +237,13 @@ pub(crate) async fn make(
             source: &source,
             dest: build.path(),
             outside: &outside,
-            ceiling: req.bounds.ceiling.as_deref(),
             branch: &branch,
             head: req.cut.head.as_deref(),
             shadow: &req.shadow,
             snapshot: req.cut.snapshot.as_deref(),
             timeout: Duration::from_secs(policy.limits.clone_timeout_s),
             max_bytes: max,
+            max_entries: crate::git::fork_copy::ENTRY_MAX,
         })
         .await?;
         build

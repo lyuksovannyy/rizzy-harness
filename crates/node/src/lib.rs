@@ -522,6 +522,36 @@ pub mod testing {
         Ok(sub.make_folder(child, &snap, &sessions).await?.path)
     }
 
+    /// A fork's own copy of the repository at `folder` (stage 1, then the
+    /// clone in `sandbox` when there is one), the branch at the parent's
+    /// current HEAD and the files as committed; returns the branch's commit.
+    pub async fn fork_copy(
+        folder: &Path,
+        base: &Path,
+        sandbox: Option<Arc<Sandbox>>,
+        protected: &[PathBuf],
+        dest: &Path,
+        outside: &Path,
+    ) -> Result<String, String> {
+        let repo = crate::git::checkpoint_repo(folder, Some(base), &bounds(sandbox, protected))
+            .await?
+            .ok_or("no checkpoint repository")?;
+        crate::git::fork_copy::fill(&crate::git::fork_copy::Plan {
+            source: folder,
+            dest,
+            outside,
+            branch: "fork/test",
+            head: None,
+            shadow: &repo,
+            snapshot: None,
+            timeout: std::time::Duration::from_secs(60),
+            max_bytes: 1 << 30,
+            max_entries: crate::git::fork_copy::ENTRY_MAX,
+        })
+        .await
+        .map(|f| f.commit)
+    }
+
     /// The checkpoint repository of `folder` is made (the object store is
     /// accepted for borrowing then), `between` runs, then a snapshot is
     /// taken with that same handle.

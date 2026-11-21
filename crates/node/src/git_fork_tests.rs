@@ -281,13 +281,13 @@ async fn run(r: &Rig, head: Option<&str>) -> Result<fork_copy::Filled, String> {
         source: &r.h.repo,
         dest: &r.dest,
         outside: &r.outside,
-        ceiling: Some(&r.top),
         branch: "fork/ab12cd34",
         head,
         shadow: &r.shadow,
         snapshot: snap,
         timeout: Duration::from_secs(60),
         max_bytes: 1 << 30,
+        max_entries: fork_copy::ENTRY_MAX,
     })
     .await
 }
@@ -621,6 +621,61 @@ async fn an_old_git_is_refused_with_its_version_and_nothing_is_written() {
     assert_eq!(std::fs::read_dir(&r.dest).unwrap().count(), 0);
 }
 
+/// Stage 2 runs in the node's jail when the node has one: the wrapper is
+/// the program, and the only folders it is given read-write are the
+/// sanitised copy's and the destination, never the parent or the staging
+/// folder as a whole. (A real jail is run by
+/// `crates/cli/tests/fork_copy_sandbox.rs`.)
+#[tokio::test]
+async fn the_clone_is_given_the_jail_with_only_its_own_folders() {
+    use harness_tools::sandbox::{Sandbox, Settings};
+    let r = rig(true).await;
+    let mut shadow = r.shadow.clone();
+    shadow.jail = Jail(Some(std::sync::Arc::new(
+        Sandbox::new("/bin/true".into(), &Settings::default(), None, &[]).unwrap(),
+    )));
+    let plan = Plan {
+        source: &r.h.repo,
+        dest: &r.dest,
+        outside: &r.outside,
+        branch: "fork/ab12cd34",
+        head: None,
+        shadow: &shadow,
+        snapshot: None,
+        timeout: Duration::from_secs(60),
+        max_bytes: 1 << 30,
+        max_entries: fork_copy::ENTRY_MAX,
+    };
+    let (argv, work) = fork_copy::clone_command_for_test(&plan);
+    let all = argv.join("\n");
+    assert!(
+        argv.iter().any(|a| a == "sandbox-exec"),
+        "not through the wrapper: {all}"
+    );
+    let granted: Vec<String> = argv
+        .iter()
+        .zip(argv.iter().skip(1))
+        .zip(argv.iter().skip(2))
+        .filter(|((a, _), _)| *a == "--rw")
+        .map(|((_, id), path)| format!("{id} {path}"))
+        .collect();
+    let writable = |p: &Path| {
+        granted
+            .iter()
+            .any(|g| g.ends_with(&p.display().to_string()))
+    };
+    assert!(writable(&work) && writable(&r.dest), "{all}");
+    assert!(!writable(&r.outside) && !writable(&r.h.repo), "{all}");
+    assert!(
+        !all.contains(&r.h.repo.display().to_string()),
+        "the parent is named: {all}"
+    );
+    assert!(
+        all.contains("--no-local") && all.contains("--no-checkout") && all.contains("--template="),
+        "{all}"
+    );
+}
+
 /// The test above must be able to fail: a copy made by `git -C <parent>
 /// worktree add` runs the parent's hooks.
 #[tokio::test]
@@ -663,4 +718,663 @@ async fn the_real_test_with_a_wrong_clone() {
     }
     let res = run(&r, Some(&r.head)).await;
     assert_eq!(violations(&r, &res), Vec::<String>::new());
+}
+
+/// The blocker of the review: git must never open the parent's repository,
+/// and the harness must never follow a link inside it. Every case plants
+/// something an agent in the parent's folder can write (a link to another
+/// repository on the disk, a special file, a huge config) and checks that
+/// nothing of the victim reaches the fork and that the end is a plain
+/// refusal naming the path.
+mod leaks {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    const SECRET: &str = "TOPSECRET-VICTIM";
+
+    fn g(dir: &Path, args: &[&str]) -> String {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// Another repository on the disk, with a secret in its history and in
+    /// its `origin` URL.
+    struct Victim {
+        dir: PathBuf,
+        head: String,
+    }
+
+    fn victim(r: &Rig, pack: bool) -> Victim {
+        let v = r.top.join("victim");
+        std::fs::create_dir_all(&v).unwrap();
+        g(&v, &["init", "-q", "-b", "main"]);
+        std::fs::write(v.join("secret.txt"), format!("{SECRET}\n")).unwrap();
+        g(&v, &["add", "."]);
+        g(&v, &["commit", "-qm", "victim"]);
+        g(
+            &v,
+            &[
+                "config",
+                "remote.origin.url",
+                &format!("https://u:{SECRET}@h.invalid/x.git"),
+            ],
+        );
+        if pack {
+            g(&v, &["gc", "-q"]);
+        }
+        let head = g(&v, &["rev-parse", "HEAD"]);
+        Victim { dir: v, head }
+    }
+
+    impl Victim {
+        fn git(&self) -> PathBuf {
+            self.dir.join(".git")
+        }
+    }
+
+    /// The pack files of the victim, linked into the parent's store.
+    fn pack_links(r: &Rig, v: &Victim) {
+        let pd = r.h.repo.join(".git/objects/pack");
+        std::fs::create_dir_all(&pd).unwrap();
+        for e in std::fs::read_dir(v.git().join("objects/pack")).unwrap() {
+            let p = e.unwrap().path();
+            symlink(&p, pd.join(p.file_name().unwrap())).unwrap();
+        }
+    }
+
+    /// A loose ref (a plain file) naming the victim's commit: an agent that
+    /// knows the id can write it.
+    fn ref_naming(r: &Rig, v: &Victim, name: &str) {
+        std::fs::write(r.h.repo.join(".git").join(name), format!("{}\n", v.head)).unwrap();
+    }
+
+    /// The branch-hiding config of the hostile rig would hide the planted
+    /// ref from `upload-pack`; the leak does not need it.
+    fn unhide(r: &Rig) {
+        g(&r.h.repo, &["config", "--unset-all", "transfer.hideRefs"]);
+    }
+
+    /// Where anything of the victim is in the fork.
+    fn leaked(dest: &Path, v: &Victim) -> Vec<String> {
+        let mut hits = Vec::new();
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dest)
+            .args(["cat-file", "--batch-all-objects", "--batch"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output();
+        if let Ok(o) = o {
+            let text = String::from_utf8_lossy(&o.stdout).into_owned();
+            if text.contains(SECRET) || text.contains(&v.head) {
+                hits.push("the object store".to_string());
+            }
+        }
+        for e in walkdir::WalkDir::new(dest)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+        {
+            if e.file_type().is_file()
+                && !e.path().starts_with(dest.join(".git/objects"))
+                && let Ok(b) = std::fs::read(e.path())
+            {
+                let t = String::from_utf8_lossy(&b);
+                if t.contains(SECRET) || t.contains(&v.head) {
+                    hits.push(e.path().display().to_string());
+                }
+            }
+        }
+        hits
+    }
+
+    fn append(p: PathBuf, text: &str) {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(p)
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+    }
+
+    /// Plant, copy, and check: nothing of the victim in the fork, a plain
+    /// refusal that names `hint`, nothing left in the destination, nothing
+    /// run, the parent untouched.
+    async fn refused(name: &str, hint: &str, pack: bool, setup: impl FnOnce(&Rig, &Victim)) {
+        let r = rig(true).await;
+        unhide(&r);
+        let v = victim(&r, pack);
+        setup(&r, &v);
+        for e in std::fs::read_dir(r.top.join("marks")).unwrap() {
+            std::fs::remove_file(e.unwrap().path()).unwrap();
+        }
+        let before = digest(&r.h.repo);
+        let res = run(&r, Some(&r.head)).await;
+        let leak = leaked(&r.dest, &v);
+        assert!(
+            leak.is_empty(),
+            "{name}: the victim is in the fork: {leak:?} / {res:?}"
+        );
+        let e = res
+            .err()
+            .unwrap_or_else(|| panic!("{name}: was copied, not refused"));
+        assert!(
+            e.contains(hint),
+            "{name}: the refusal does not name {hint:?}: {e}"
+        );
+        assert!(!e.contains(SECRET), "{name}: {e}");
+        assert_eq!(
+            std::fs::read_dir(&r.dest).unwrap().count(),
+            0,
+            "{name}: left files in the destination"
+        );
+        assert_eq!(r.h.marked(), Vec::<String>::new(), "{name}: ran something");
+        assert_eq!(digest(&r.h.repo), before, "{name}: wrote the parent");
+    }
+
+    #[tokio::test]
+    async fn pack_files_that_are_links_to_another_repository_are_refused() {
+        refused("pack links", "objects/pack/pack-", true, |r, v| {
+            pack_links(r, v);
+            ref_naming(r, v, "refs/heads/leak");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_ref_that_is_a_link_to_another_repository_is_refused() {
+        refused("ref link", "refs/heads/leak", true, |r, v| {
+            pack_links(r, v);
+            symlink(
+                v.git().join("refs/heads/main"),
+                r.h.repo.join(".git/refs/heads/leak"),
+            )
+            .unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn relative_links_are_refused_like_absolute_ones() {
+        refused("relative links", "refs/heads/leak", true, |r, v| {
+            pack_links(r, v);
+            symlink(
+                "../../../../victim/.git/refs/heads/main",
+                r.h.repo.join(".git/refs/heads/leak"),
+            )
+            .unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn objects_pack_as_a_link_is_refused() {
+        refused("objects/pack link", "objects/pack", true, |r, v| {
+            let pd = r.h.repo.join(".git/objects/pack");
+            let _ = std::fs::remove_dir_all(&pd);
+            symlink(v.git().join("objects/pack"), &pd).unwrap();
+            ref_naming(r, v, "refs/heads/leak");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_folder_of_refs_that_is_a_link_is_refused() {
+        refused("refs/heads/dd link", "refs/heads/dd", true, |r, v| {
+            pack_links(r, v);
+            let d = v.git().join("refs/heads/d");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("x"), format!("{}\n", v.head)).unwrap();
+            symlink(&d, r.h.repo.join(".git/refs/heads/dd")).unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn loose_objects_that_are_links_are_refused() {
+        refused("loose object links", "objects/", false, |r, v| {
+            let git = v.git();
+            for o in [
+                v.head.clone(),
+                g(&v.dir, &["rev-parse", "HEAD^{tree}"]),
+                g(&v.dir, &["rev-parse", "HEAD:secret.txt"]),
+            ] {
+                let d = r.h.repo.join(".git/objects").join(&o[..2]);
+                std::fs::create_dir_all(&d).unwrap();
+                symlink(
+                    git.join("objects").join(&o[..2]).join(&o[2..]),
+                    d.join(&o[2..]),
+                )
+                .unwrap();
+            }
+            ref_naming(r, v, "refs/heads/leak");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_config_that_is_a_link_to_another_repositorys_config_is_refused() {
+        refused("config link", "config", true, |r, v| {
+            let c = r.h.repo.join(".git/config");
+            std::fs::remove_file(&c).unwrap();
+            symlink(v.git().join("config"), &c).unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn packed_refs_that_is_a_link_is_refused() {
+        refused("packed-refs link", "packed-refs", true, |r, v| {
+            std::fs::write(
+                v.git().join("packed-refs"),
+                format!("{} refs/heads/zz\n", v.head),
+            )
+            .unwrap();
+            symlink(
+                v.git().join("packed-refs"),
+                r.h.repo.join(".git/packed-refs"),
+            )
+            .unwrap();
+        })
+        .await;
+    }
+
+    /// A link at the top of the parent's `.git` entries that are not
+    /// copied (hooks, info, logs) does not matter: they are not looked at.
+    #[tokio::test]
+    async fn links_in_what_is_not_copied_are_not_even_looked_at() {
+        let r = rig(true).await;
+        let v = victim(&r, true);
+        let git = r.h.repo.join(".git");
+        for (name, to) in [
+            ("logs", v.git().join("objects")),
+            ("modules", v.dir.clone()),
+            ("config.worktree", v.git().join("config")),
+            ("index", v.git().join("config")),
+        ] {
+            let at = git.join(name);
+            let _ = std::fs::remove_dir_all(&at);
+            let _ = std::fs::remove_file(&at);
+            symlink(to, at).unwrap();
+        }
+        let res = run(&r, Some(&r.head)).await;
+        res.as_ref().unwrap_or_else(|e| panic!("refused: {e}"));
+        assert_eq!(leaked(&r.dest, &v), Vec::<String>::new());
+    }
+
+    /// `core.attributesFile` and `info/grafts` of the parent are read by
+    /// upload-pack in a git process inside the parent; here nothing reads
+    /// them, so nothing of them is in any message.
+    #[tokio::test]
+    async fn the_parents_attributes_file_and_grafts_are_never_read() {
+        let r = rig(true).await;
+        std::fs::write(r.h.repo.join(".git/info/grafts"), format!("{} \n", r.head)).unwrap();
+        let before = digest(&r.h.repo);
+        let res = run(&r, Some(&r.head)).await;
+        let text = format!("{res:?}");
+        assert!(!text.contains("attrsfile"), "{text}");
+        assert!(!text.contains("marks"), "{text}");
+        assert_eq!(r.h.marked(), Vec::<String>::new());
+        assert_eq!(digest(&r.h.repo), before);
+        // The grafts file is not copied: the fork's history is the real one.
+        let f = res.unwrap_or_else(|e| panic!("refused: {e}"));
+        assert_eq!(f.commit, r.head);
+        assert!(!r.dest.join(".git/info/grafts").exists());
+    }
+
+    /// Something at each path the copy reads, in turn, that is not a plain
+    /// file: refused at once (never waited on), naming the path.
+    #[tokio::test]
+    async fn special_files_at_every_copied_path_are_refused_at_once() {
+        use std::os::unix::net::UnixListener;
+        let cases: &[(&str, &str)] = &[
+            ("HEAD", "fifo"),
+            ("packed-refs", "fifo"),
+            ("shallow", "fifo"),
+            ("config", "fifo"),
+            ("info/exclude", "fifo"),
+            ("refs/heads/fifo", "fifo"),
+            ("refs/tags/sock", "socket"),
+            ("objects/ab/cdef", "fifo"),
+            ("objects/pack/pack-x.pack", "fifo"),
+            ("objects/info/alternates", "fifo"),
+            ("objects/info/packs", "fifo"),
+        ];
+        for (path, kind) in cases {
+            let r = rig(true).await;
+            let p = r.h.repo.join(".git").join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let _ = std::fs::remove_file(&p);
+            let _sock;
+            if *kind == "fifo" {
+                nix::unistd::mkfifo(&p, nix::sys::stat::Mode::S_IRWXU).unwrap();
+            } else {
+                _sock = UnixListener::bind(&p).unwrap();
+            }
+            let snap = (!r.snap.is_empty()).then_some(r.snap.as_str());
+            let t0 = std::time::Instant::now();
+            let res = fill(&Plan {
+                source: &r.h.repo,
+                dest: &r.dest,
+                outside: &r.outside,
+                branch: "fork/ab12cd34",
+                head: Some(&r.head),
+                shadow: &r.shadow,
+                snapshot: snap,
+                timeout: Duration::from_secs(6),
+                max_bytes: 1 << 30,
+                max_entries: fork_copy::ENTRY_MAX,
+            })
+            .await;
+            let took = t0.elapsed();
+            let e = res.err().unwrap_or_else(|| panic!("{path}: was copied"));
+            assert!(
+                e.contains(path),
+                "{path}: the refusal does not name it: {e}"
+            );
+            assert!(
+                took < Duration::from_secs(4),
+                "{path}: waited {took:?}: {e}"
+            );
+            assert!(!e.contains("took longer"), "{path}: {e}");
+            assert_eq!(std::fs::read_dir(&r.dest).unwrap().count(), 0, "{path}");
+        }
+    }
+
+    /// A config of 40 MB is not read: the cap refuses it, quickly.
+    #[tokio::test]
+    async fn a_config_over_the_cap_is_refused() {
+        let r = rig(true).await;
+        let line = format!("# {}\n", "x".repeat(78));
+        append(r.h.repo.join(".git/config"), &line.repeat(500_000));
+        let t0 = std::time::Instant::now();
+        let res = run(&r, Some(&r.head)).await;
+        let e = res
+            .err()
+            .unwrap_or_else(|| panic!("a 40 MB config was read"));
+        assert!(e.contains("config") && e.contains("larger"), "{e}");
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        assert_eq!(std::fs::read_dir(&r.dest).unwrap().count(), 0);
+    }
+
+    /// A repository the copy cannot make (sha256 objects, reftable refs) is
+    /// refused with a sentence, from its config read as data.
+    #[tokio::test]
+    async fn sha256_and_reftable_parents_are_refused() {
+        for (key, value, want) in [
+            ("extensions.objectformat", "sha256", "sha256"),
+            ("extensions.refstorage", "reftable", "reftable"),
+        ] {
+            let r = rig(true).await;
+            g(&r.h.repo, &["config", "core.repositoryformatversion", "1"]);
+            g(&r.h.repo, &["config", key, value]);
+            let e = run(&r, Some(&r.head)).await.unwrap_err();
+            assert!(e.contains(want) && e.contains("not copied"), "{key}: {e}");
+            assert_eq!(std::fs::read_dir(&r.dest).unwrap().count(), 0);
+        }
+    }
+
+    /// `include.path` / `includeIf` of the parent's config is not followed:
+    /// a URL only an included file holds is not the fork's `upstream`.
+    #[tokio::test]
+    async fn the_parents_includes_are_not_followed() {
+        let r = rig(true).await;
+        let extra = r.top.join("included.config");
+        std::fs::write(
+            &extra,
+            "[remote \"origin\"]\n\turl = https://included.invalid/x.git\n",
+        )
+        .unwrap();
+        g(&r.h.repo, &["config", "--unset-all", "remote.origin.url"]);
+        g(
+            &r.h.repo,
+            &[
+                "config",
+                "--replace-all",
+                "include.path",
+                &extra.to_string_lossy(),
+            ],
+        );
+        let res = run(&r, Some(&r.head)).await;
+        assert_eq!(res.unwrap().upstream, None);
+        assert!(
+            !std::fs::read_to_string(r.dest.join(".git/config"))
+                .unwrap()
+                .contains("included.invalid")
+        );
+    }
+
+    /// Credentials in an https URL are the parent's, not the fork's.
+    #[tokio::test]
+    async fn userinfo_is_stripped_from_the_upstream_url() {
+        let r = rig(true).await;
+        g(
+            &r.h.repo,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://alice:s3cret-pw@example.invalid/team/proj.git",
+            ],
+        );
+        let res = run(&r, Some(&r.head)).await;
+        let f = res.unwrap();
+        assert_eq!(
+            f.upstream.as_deref(),
+            Some("https://example.invalid/team/proj.git")
+        );
+        let cfg = std::fs::read_to_string(r.dest.join(".git/config")).unwrap();
+        assert!(!cfg.contains("s3cret") && !cfg.contains("alice"), "{cfg}");
+    }
+
+    /// The mutation the review found uncaught: a git process that reads the
+    /// parent's config (`git config` in or pointed at the parent). Every git
+    /// the operation starts is logged by a stand-in `git`; none may name
+    /// the parent's folder, in an argument, a working directory or the
+    /// environment.
+    #[tokio::test]
+    async fn no_git_process_is_started_in_or_pointed_at_the_parent() {
+        let r = rig(true).await;
+        let real = String::from_utf8(
+            std::process::Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let log = r.top.join("git-calls.log");
+        let script = r.top.join("fake-git/git");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        crate::test_script::script(
+            &script,
+            &format!(
+                "#!/bin/sh\n{{ echo \"PWD=$PWD\"; echo \"GIT_DIR=$GIT_DIR\"; \
+                 echo \"GIT_WORK_TREE=$GIT_WORK_TREE\"; for a in \"$@\"; do echo \"ARG=$a\"; done; \
+                 echo ---; }} >> '{}'\nexec {} \"$@\"\n",
+                log.display(),
+                real.trim()
+            ),
+        );
+        crate::git::use_test_git(Some(script));
+        let res = run(&r, Some(&r.head)).await;
+        crate::git::use_test_git(None);
+        res.as_ref().unwrap_or_else(|e| panic!("refused: {e}"));
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            calls.contains("ARG=clone"),
+            "the stand-in git was not used:\n{calls}"
+        );
+        let parent = r.h.repo.display().to_string();
+        for call in calls.split("---\n").filter(|c| !c.trim().is_empty()) {
+            let mut lines: Vec<&str> = call.lines().collect();
+            // Setting the fork's `origin` to the parent's path is a value
+            // written into the fork's own config, not an access to the
+            // parent: the one argument after the key (and never a `--get`).
+            if !lines.contains(&"ARG=--get")
+                && let Some(i) = lines.iter().position(|l| *l == "ARG=remote.origin.url")
+            {
+                lines.remove(i + 1);
+            }
+            for l in lines {
+                assert!(
+                    !l.contains(&parent),
+                    "a git process names the parent: {l}\n{call}"
+                );
+            }
+        }
+    }
+
+    /// The bounds of stage 1: bytes and entries, each refused with its own
+    /// sentence, and nothing left behind.
+    #[tokio::test]
+    async fn the_size_and_entry_bounds_refuse_the_copy() {
+        for (bytes, entries, want) in [
+            (300u64, fork_copy::ENTRY_MAX, "clone_max_mb"),
+            (1 << 30, 5, "more than 5"),
+        ] {
+            let r = rig(true).await;
+            let snap = (!r.snap.is_empty()).then_some(r.snap.as_str());
+            let res = fill(&Plan {
+                source: &r.h.repo,
+                dest: &r.dest,
+                outside: &r.outside,
+                branch: "fork/ab12cd34",
+                head: Some(&r.head),
+                shadow: &r.shadow,
+                snapshot: snap,
+                timeout: Duration::from_secs(60),
+                max_bytes: bytes,
+                max_entries: entries,
+            })
+            .await;
+            let e = res.err().unwrap_or_else(|| panic!("{want}: was copied"));
+            assert!(e.contains(want), "{want}: {e}");
+            assert_eq!(std::fs::read_dir(&r.dest).unwrap().count(), 0, "{want}");
+            assert_eq!(
+                std::fs::read_dir(&r.outside)
+                    .unwrap()
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("forksrc-"))
+                    .count(),
+                0,
+                "{want}: the sanitised copy was left in staging"
+            );
+        }
+    }
+
+    /// A parent that goes on working while it is copied (commits, refs,
+    /// repacks, packed refs): the fork is a correct repository or the copy
+    /// is refused, never a ref without its objects.
+    #[tokio::test]
+    async fn a_parent_that_keeps_working_gives_a_correct_fork_or_a_refusal() {
+        let mut oks = 0;
+        for round in 0..4 {
+            let h = Hostile::new();
+            let repo = h.repo.clone();
+            let top = repo.parent().unwrap().canonicalize().unwrap();
+            for i in 0..60 {
+                std::fs::write(
+                    repo.join(format!("f{i}.txt")),
+                    format!("{i}\n").repeat(2000),
+                )
+                .unwrap();
+                sh(&repo, &["add", "."]);
+                sh(&repo, &["commit", "-qm", &format!("c{i}")]);
+            }
+            let head = out(&repo, &["rev-parse", "HEAD"]);
+            let shadow = repo_for(&repo, Some(&h.base)).await.unwrap();
+            let dest = top.join("dest");
+            let outside = top.join("outside");
+            std::fs::create_dir_all(&dest).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let worker = {
+                let (stop, repo) = (stop.clone(), repo.clone());
+                std::thread::spawn(move || {
+                    let git = |args: &[&str]| {
+                        let _ = std::process::Command::new("git")
+                            .arg("-C")
+                            .arg(&repo)
+                            .args(args)
+                            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                            .env("GIT_CONFIG_NOSYSTEM", "1")
+                            .env("GIT_AUTHOR_NAME", "t")
+                            .env("GIT_AUTHOR_EMAIL", "t@t")
+                            .env("GIT_COMMITTER_NAME", "t")
+                            .env("GIT_COMMITTER_EMAIL", "t@t")
+                            .output();
+                    };
+                    let mut i = 0;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        let _ = std::fs::write(repo.join(format!("g{i}.txt")), format!("{i}\n"));
+                        git(&["add", "."]);
+                        git(&["commit", "-qm", &format!("w{i}")]);
+                        git(&["update-ref", &format!("refs/heads/w{i}"), "HEAD"]);
+                        match i % 7 {
+                            3 => git(&["pack-refs", "--all"]),
+                            5 => git(&["repack", "-adq"]),
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                })
+            };
+            let res = fill(&Plan {
+                source: &repo,
+                dest: &dest,
+                outside: &outside,
+                branch: "fork/ab12cd34",
+                head: Some(&head),
+                shadow: &shadow,
+                snapshot: None,
+                timeout: Duration::from_secs(60),
+                max_bytes: 1 << 30,
+                max_entries: fork_copy::ENTRY_MAX,
+            })
+            .await;
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            worker.join().unwrap();
+            match res {
+                Err(e) => println!("round {round}: refused: {e}"),
+                Ok(_) => {
+                    oks += 1;
+                    let refs = out(&dest, &["for-each-ref", "--format=%(objectname)"]);
+                    for id in refs.lines() {
+                        assert!(
+                            std::process::Command::new("git")
+                                .arg("-C")
+                                .arg(&dest)
+                                .args(["cat-file", "-e", id])
+                                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                                .status()
+                                .unwrap()
+                                .success(),
+                            "round {round}: a ref names {id}, which the fork lacks"
+                        );
+                    }
+                    let fsck = std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&dest)
+                        .args(["rev-list", "--objects", "--all"])
+                        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                        .output()
+                        .unwrap();
+                    assert!(fsck.status.success(), "round {round}: {fsck:?}");
+                }
+            }
+        }
+        println!("{oks} of 4 copies made while the parent worked");
+    }
 }

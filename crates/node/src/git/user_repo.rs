@@ -124,7 +124,7 @@ fn branch_ref(name: &str) -> Option<&str> {
 }
 
 /// `HEAD`'s commit and branch in the git directory `git` (canonical).
-fn head_of(git: &Path) -> (Option<String>, String) {
+pub(super) fn head_of(git: &Path) -> (Option<String>, String) {
     let Some(text) = read_small(&git.join("HEAD"), REF_MAX) else {
         return (None, "HEAD".into());
     };

@@ -47,6 +47,7 @@ use tokio::process::Command;
 mod at;
 mod diff;
 pub(crate) mod fork_copy;
+mod fork_sanitise;
 mod init;
 mod merge;
 mod upkeep;
