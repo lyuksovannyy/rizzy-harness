@@ -3627,6 +3627,10 @@ button.swatch:hover:not(:disabled) {
 .chip .link {
   padding: 0 2px;
 }
+/* A file saved to the chat's folder (T94): its name gives way, never the note after it. */
+.chip.saved { max-width: min(380px, 100%); }
+.chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chip-note { flex-shrink: 0; }
 .attach {
   font-size: 18px;
   line-height: 1;

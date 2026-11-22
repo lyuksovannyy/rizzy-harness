@@ -885,7 +885,7 @@ export default function Conversation(props: {
                             ))}
                             {it.uploads?.map((u, j) => (
                               <li key={`u${j}`} className="chip" title={u.path}>
-                                <FileText size={14} /> {u.name} <span className="muted">({bytes(u.bytes)})</span>
+                                <FileText size={14} /> {u.path.split("/").pop() || u.name} <span className="muted">({bytes(u.bytes)})</span>
                               </li>
                             ))}
                           </ul>

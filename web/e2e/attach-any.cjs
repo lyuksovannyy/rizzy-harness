@@ -76,8 +76,8 @@ async function listing(sid) {
     // 1. A plain chat refuses the zip with the reason, at attach time.
     await p.click('.mode-switch button:has-text("Ask")');
     await p.setInputFiles('.composer input[type=file]', `${F}/Q3 report.zip`);
-    await p.waitForSelector('.composer .error-text:has-text("cannot open files")');
-    const reason = (await p.textContent('.composer .error-text')).trim();
+    await p.waitForSelector('.error-text:has-text("cannot open files")');
+    const reason = (await p.textContent('.error-text')).trim();
     check(reason.includes('coding chat') && reason.includes('PDF or an image'), 'the reason: ' + reason);
     check((await p.$$('.composer ul.chips li')).length === 0, 'no chip for a refused file');
     await p.screenshot({ path: `${S}/attach-1-plain-refused.png` });
@@ -113,8 +113,9 @@ async function listing(sid) {
     check(um && um.payload.uploads[0].path === 'attachments/Q3 report.zip', 'user_message.uploads: ' + JSON.stringify(um && um.payload.uploads));
     await p.fill('.composer textarea', 'script:[{"tool":"glob","input":{"pattern":"attachments/*"}}]');
     await p.keyboard.press('Enter');
-    await p.waitForSelector('.msg.assistant:has-text("Q3 report.zip")');
+    await p.waitForSelector('.msg.assistant:has-text("Tool said: attachments/Q3 report.zip")');
     log('the agent lists the file with its own tools');
+    await p.waitForFunction(() => !document.querySelector('.send.stop'));
 
     // 3. A text file and an image beside a zip: as before. The zip a second
     // time gets its own name.
@@ -128,7 +129,7 @@ async function listing(sid) {
     await p.fill('.composer textarea', 'what is in my notes, and look at this dot');
     await p.click('.composer .send');
     await p.waitForSelector('.msg.user:has-text("what is in my notes") .chip:has-text("notes.md")');
-    await p.waitForFunction(() => document.querySelectorAll('.msg.assistant').length >= 3);
+    await p.waitForSelector('.msg.assistant:has-text("I see 1 image")');
     await p.waitForFunction(() => !document.querySelector('.send.stop'));
     const files = await listing();
     check(files.join('|') === 'Q3 report (2).zip|Q3 report.zip', 'the second zip did not overwrite: ' + files);
@@ -138,8 +139,8 @@ async function listing(sid) {
 
     // 4. A file over the node's limit is refused with the number.
     await p.setInputFiles('.composer input[type=file]', `${F}/too-big.bin`);
-    await p.waitForSelector('.composer .error-text:has-text("1 MB")');
-    log('over the limit:', (await p.textContent('.composer .error-text')).trim());
+    await p.waitForSelector('.error-text:has-text("1 MB")');
+    log('over the limit:', (await p.textContent('.error-text')).trim());
     await p.screenshot({ path: `${S}/attach-5-too-big.png` });
 
     // 5. The same at phone width.
@@ -154,6 +155,7 @@ async function listing(sid) {
     await p.fill('.composer textarea', 'and once more on a phone');
     await p.click('.composer .send');
     await p.waitForSelector('.msg.user:has-text("on a phone") .chip');
+    await p.waitForSelector('.msg.assistant:has-text("You said: and once more on a phone")');
     await p.waitForFunction(() => !document.querySelector('.send.stop'));
     check((await listing()).includes('Q3 report (3).zip'), 'third copy: ' + (await listing()));
     await p.screenshot({ path: `${S}/attach-7-phone-sent.png` });

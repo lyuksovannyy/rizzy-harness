@@ -819,9 +819,9 @@ export function Composer(props: {
               </li>
             ))}
             {files.map((f) => (
-              <li key={f.attachment_id} className="chip" title={f.saved ? t("composer.savedHint") : `${(f.chars ?? 0).toLocaleString()} ${t("composer.chars")}`}>
-                <FileText size={14} /> {f.name}
-                {f.saved && <span className="muted"> ({bytes(f.bytes ?? 0)}, {t("composer.saved")})</span>}
+              <li key={f.attachment_id} className={f.saved ? "chip saved" : "chip"} title={f.saved ? t("composer.savedHint") : `${(f.chars ?? 0).toLocaleString()} ${t("composer.chars")}`}>
+                <FileText size={14} /> <span className="chip-name">{f.name}</span>
+                {f.saved && <span className="muted chip-note"> ({bytes(f.bytes ?? 0)}, {t("composer.saved")})</span>}
                 {f.truncated && <span className="muted"> ({t("composer.truncated")})</span>}
                 <button
                   type="button"
