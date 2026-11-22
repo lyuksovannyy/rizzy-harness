@@ -309,6 +309,7 @@ impl Turn<'_> {
                 tags: vec![],
                 files: vec![],
                 uploads: vec![],
+                attached: vec![],
             }));
         }
         let out = self

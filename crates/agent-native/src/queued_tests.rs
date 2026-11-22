@@ -29,6 +29,7 @@ fn msg(text: &str) -> UserMessage {
         tags: vec![],
         files: vec![],
         uploads: vec![],
+        attached: vec![],
     }
 }
 

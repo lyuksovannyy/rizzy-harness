@@ -63,6 +63,11 @@ const FREE: &[(&str, &[&str])] = &[
             "uploads.*.path",
             "uploads.*.sha256",
             "uploads.*.mime",
+            // Files read through `attached_file` (T95): the name, hash and
+            // type are text the person's file gave; the id is the master's.
+            "attached.*.name",
+            "attached.*.sha256",
+            "attached.*.mime",
         ],
     ),
     ("assistant_delta", &["text", "author", "variant.model"]),
@@ -830,6 +835,7 @@ fn scrubbing_twice_is_scrubbing_once() {
             triggers: vec![],
             tags: vec![],
             uploads: vec![],
+            attached: vec![],
         })
         .into_parts();
         set.scrub_event(&kind, &mut once);

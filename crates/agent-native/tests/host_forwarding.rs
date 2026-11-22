@@ -329,3 +329,91 @@ async fn the_sessions_mode_picks_its_confinement_through_the_loop() {
         );
     }
 }
+
+/// The same for `attached_file` (PLAN.md T95): the host's link to the master
+/// reaches the tool through the wrapper, and a request carries the id the
+/// model gave and nothing else of the session.
+#[tokio::test]
+async fn the_hosts_attached_source_reaches_the_tool_through_the_loop() {
+    use harness_core::attached::{AttachedAnswer, AttachedRequest, AttachedSource};
+
+    struct Source(Mutex<Vec<AttachedRequest>>);
+    #[async_trait::async_trait]
+    impl AttachedSource for Source {
+        async fn attached(&self, r: AttachedRequest) -> Result<AttachedAnswer, String> {
+            self.0.lock().unwrap().push(r);
+            Ok(AttachedAnswer::Info {
+                name: "x.zip".into(),
+                bytes: 5,
+                sha256: "ab".repeat(32),
+                label: "ZIP archive".into(),
+                mime: None,
+                archive: true,
+            })
+        }
+    }
+    struct Linked {
+        inner: Host,
+        source: Arc<Source>,
+    }
+    #[async_trait::async_trait]
+    impl TurnHost for Linked {
+        async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+            self.inner.emit(kind).await
+        }
+        async fn approve(&self, a: &str, b: &str, c: &Value, d: ToolRisk) -> Decision {
+            self.inner.approve(a, b, c, d).await
+        }
+        fn attached(&self) -> Option<Arc<dyn AttachedSource>> {
+            Some(self.source.clone())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ws: PathBuf = dir.path().canonicalize().unwrap().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let source = Arc::new(Source(Mutex::default()));
+    let host = Linked {
+        inner: Host {
+            events: Mutex::default(),
+            pin: None,
+            owned: None,
+            exec: None,
+        },
+        source: source.clone(),
+    };
+    let backend = NativeBackend::new(
+        Arc::new(Script {
+            calls: vec![("attached_file", json!({"op": "info", "file_id": "f-1"}))],
+            before: Mutex::default(),
+        }),
+        vec![Arc::new(harness_tools::AttachedFileTool)],
+        NativeConfig::default(),
+    );
+    backend.run_turn(turn_of(&host, &ws)).await;
+    let seen = source.0.lock().unwrap();
+    assert_eq!(seen.len(), 1, "{:?}", host.inner.results());
+    assert_eq!(seen[0].file_id, "f-1");
+    let results = host.inner.results();
+    assert!(
+        results[0].0 && results[0].1.contains("Attached file \"x.zip\""),
+        "{results:?}"
+    );
+}
+
+/// `turn` for any host.
+fn turn_of<'a>(host: &'a dyn TurnHost, cwd: &Path) -> TurnCtx<'a> {
+    TurnCtx {
+        session_id: harness_core::SessionId::new(),
+        turn_id: "t".into(),
+        history: vec![],
+        user_text: "go".into(),
+        cwd: cwd.to_path_buf(),
+        model: "x".into(),
+        agent: None,
+        compare: vec![],
+        parent_session: None,
+        extra: Default::default(),
+        cancel: Default::default(),
+        host,
+    }
+}

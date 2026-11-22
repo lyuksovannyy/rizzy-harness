@@ -345,6 +345,7 @@ Each row's full text is in `docs/plan/`.
 | [X.51 **sec** (T93)](docs/plan/X.51.md) | The row under a finished answer (Copy, Fork from here, Pin, the time, the tokens with models and sub-agents on hover) and pinned messages as a bookmark the model is never told of (`docs/pins.md`)… |
 | [X.52 **sec** (T39)](docs/plan/X.52.md) | Switch an existing agentic chat between the sandbox and the host shell while nothing of it runs (the owner, 2026-11-21: "Yes, build it"; `docs/execution-modes.md`)… |
 | [X.53 **sec** (T94)](docs/plan/X.53.md) | Attach any file: what the model cannot read as text is saved by the node into `attachments/` in the chat's folder and the agent is told its path (the owner, 2026-11-21: "add ability to attach any files please"; `README.md` "Any other file")… |
+| [X.54 **sec** (T95)](docs/plan/X.54.md) | Read attached files in a plain chat: a file the model cannot read as text is kept by the master and the agent reads it, never changes it, through `attached_file` (info, list, read; the owner, 2026-11-22; `README.md` "Files in a chat without a folder")… |
 
 When X.2's work on instruction files and prompts starts, the instructions of every agent that can change files gain the 100-file rule of `docs/undo-and-stash.md` §2.6 (try to keep a turn's changes to at most 100 files; split larger work across turns; exceeding it is allowed).
 

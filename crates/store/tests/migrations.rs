@@ -924,7 +924,7 @@ fn a_version_2_database_is_migrated_to_the_latest_and_keeps_its_rows() {
         }
         drop(Store::open(&path, d).unwrap_or_else(|e| panic!("{name}: {e}")));
         assert_eq!(version_of(&path), MIGRATIONS.len() as i64, "{name}");
-        assert_eq!(MIGRATIONS.len(), 4);
+        assert_eq!(MIGRATIONS.len(), 5);
         let c = Connection::open(&path).unwrap();
         assert_eq!(count(&c, "events"), 1, "{name}: the row is kept");
         assert_eq!(
@@ -1011,11 +1011,74 @@ fn a_version_3_database_is_migrated_to_the_latest_and_keeps_its_rows() {
             assert_eq!(has, 0, "version 3 has no chat_uploads");
         }
         drop(Store::open(&path, d).unwrap_or_else(|e| panic!("{name}: {e}")));
-        assert_eq!(version_of(&path), 4, "{name}");
+        assert_eq!(version_of(&path), MIGRATIONS.len() as i64, "{name}");
         let c = Connection::open(&path).unwrap();
         assert_eq!(count(&c, "events"), 1, "{name}: the row is kept");
         assert_eq!(
             count(&c, "chat_uploads"),
+            0,
+            "{name}: the new table is there"
+        );
+        drop(c);
+        drop(Store::open(&path, d).unwrap());
+    }
+}
+
+/// Version 4 is as recorded when migration 4 shipped: a copy of its own
+/// text, so editing or re-recording it fails here.
+#[test]
+fn the_recorded_version_4_is_the_frozen_one() {
+    let recorded = include_str!("../schema/4.sql");
+    assert!(
+        !recorded.contains("session_files"),
+        "version 4 was recorded before session_files; that table is migration 5"
+    );
+    assert_eq!(recorded.len(), FROZEN_V4_BYTES, "schema/4.sql was changed");
+    assert_eq!(
+        fnv1a(recorded.as_bytes()),
+        FROZEN_V4_FNV1A,
+        "schema/4.sql was changed"
+    );
+}
+
+/// Migration 5 (PLAN.md T95): a version 4 database gets `session_files` on
+/// its next open and keeps what it held, its upload rows included.
+#[test]
+fn a_version_4_database_is_migrated_to_the_latest_and_keeps_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, d) in [
+        ("master.db", Durability::Normal),
+        ("node.db", Durability::Full),
+    ] {
+        let path = dir.path().join(name);
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(include_str!("../schema/4.sql")).unwrap();
+            c.execute_batch(
+                "INSERT INTO events (session_id, seq, ts_ms, kind, payload) VALUES ('s', 1, 5, 'k', '{}');
+                 PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        }
+        migrate::check_file(&path, &harness_store::DB_SCHEMA).unwrap();
+        {
+            let c = Connection::open(&path).unwrap();
+            let has: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = 'session_files'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(has, 0, "version 4 has no session_files");
+        }
+        drop(Store::open(&path, d).unwrap_or_else(|e| panic!("{name}: {e}")));
+        assert_eq!(version_of(&path), 5, "{name}");
+        let c = Connection::open(&path).unwrap();
+        assert_eq!(count(&c, "events"), 1, "{name}: the row is kept");
+        assert_eq!(count(&c, "chat_uploads"), 0, "{name}");
+        assert_eq!(
+            count(&c, "session_files"),
             0,
             "{name}: the new table is there"
         );
@@ -1048,6 +1111,8 @@ const FROZEN_V2_BYTES: usize = 24338;
 const FROZEN_V2_FNV1A: u64 = 0x542a_4855_6139_4e4c;
 const FROZEN_V3_BYTES: usize = 24543;
 const FROZEN_V3_FNV1A: u64 = 0xef81_eb03_3e46_0a98;
+const FROZEN_V4_BYTES: usize = 25235;
+const FROZEN_V4_FNV1A: u64 = 0x29f4_5b7b_4f19_bd90;
 
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {

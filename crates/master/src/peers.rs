@@ -166,6 +166,7 @@ mod tests {
             peers,
             tags: vec![],
             uploads: vec![],
+            attached: vec![],
         })
     }
 

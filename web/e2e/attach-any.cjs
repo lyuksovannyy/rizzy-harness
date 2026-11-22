@@ -73,12 +73,15 @@ async function listing(sid) {
     await p.click('button:has-text("Finish")');
     await p.waitForSelector('h1.greeting');
 
-    // 1. A plain chat refuses the zip with the reason, at attach time.
+    // 1. A plain chat whose agent cannot read attached files refuses the zip
+    // with the reason, at attach time (the Assistant keeps it read-only since
+    // T95; the Researcher has no such switch).
     await p.click('.mode-switch button:has-text("Ask")');
+    await pickAgent(p, 'Researcher');
     await p.setInputFiles('.composer input[type=file]', `${F}/Q3 report.zip`);
-    await p.waitForSelector('.error-text:has-text("cannot open files")');
+    await p.waitForSelector('.error-text:has-text("Read attached files")');
     const reason = (await p.textContent('.error-text')).trim();
-    check(reason.includes('switch to Agentic') && reason.includes('PDF or an image'), 'the reason: ' + reason);
+    check(reason.includes('Researcher cannot read attached files') && reason.includes('Agents page'), 'the reason: ' + reason);
     check((await p.$$('.composer ul.chips li')).length === 0, 'no chip for a refused file');
     await p.screenshot({ path: `${S}/attach-1-plain-refused.png` });
     log('a plain chat refused the zip:', reason);

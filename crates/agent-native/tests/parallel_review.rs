@@ -117,6 +117,7 @@ impl TurnHost for LogHost {
                 triggers: vec![],
                 tags: vec![],
                 uploads: vec![],
+                attached: vec![],
             })
             .collect();
         // As the node: recorded when sent, delivered when read.
@@ -420,6 +421,7 @@ fn open_turn(host: &LogHost, queued_seqs: Vec<u64>) {
         triggers: vec![],
         tags: vec![],
         uploads: vec![],
+        attached: vec![],
     }));
 }
 
@@ -738,6 +740,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         triggers: vec![],
         tags: vec![],
         uploads: vec![],
+        attached: vec![],
     }));
     for i in 0..6 {
         push(EventKind::AssistantMessage(AssistantMessage {
@@ -778,6 +781,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         triggers: vec![],
         tags: vec![],
         uploads: vec![],
+        attached: vec![],
     };
     let qseq = push(EventKind::UserMessage(q.clone()));
     push(EventKind::AssistantMessage(AssistantMessage {
@@ -1891,6 +1895,7 @@ async fn reviewer_manual_summary_between_turns_rebuilds() {
                 triggers: vec![],
                 tags: vec![],
                 uploads: vec![],
+                attached: vec![],
             }));
             let out = b
                 .run_turn(TurnCtx {

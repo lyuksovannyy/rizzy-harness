@@ -549,8 +549,10 @@ async fn a_home_upload_sent_to_a_plain_chat_is_refused_at_send_and_kept() {
     let plain = chat(&t, &t.alex, "plain", "chat").await;
     let (st, v) = send(&t, &t.alex, &plain, &[&id]).await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    // The chat's node (this test's chat runtime) does not read attached
+    // files: the send says to update it (PLAN.md T95).
     assert!(
-        v["error"].as_str().unwrap().contains("cannot open files"),
+        v["error"].as_str().unwrap().contains("attached-file"),
         "{v}"
     );
     assert!(t.big.chunks().is_empty());

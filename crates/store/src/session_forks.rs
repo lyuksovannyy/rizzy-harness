@@ -79,6 +79,17 @@ pub(crate) fn on_session_deleted(tx: &rusqlite::Transaction, sid: &str) -> Resul
     Ok(())
 }
 
+/// The chat `sid` was forked from, as its lineage row says.
+pub(crate) fn parent(conn: &Connection, sid: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT parent_id FROM session_forks WHERE session_id = ?1",
+            params![sid],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?)
+}
+
 /// How many of the chat's first events are its parent's copies; 0 for a
 /// chat that is no fork.
 pub(crate) fn through(conn: &Connection, sid: &str) -> Result<u64> {

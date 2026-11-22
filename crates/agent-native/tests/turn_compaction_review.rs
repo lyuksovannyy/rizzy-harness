@@ -162,6 +162,7 @@ impl TurnHost for LogHost {
                 tags: vec![],
                 files: vec![],
                 uploads: vec![],
+                attached: vec![],
             })
             .collect();
         // As the node: recorded when sent, delivered when read.
@@ -474,6 +475,7 @@ fn open_turn(host: &LogHost, queued_seqs: Vec<u64>) {
         tags: vec![],
         files: vec![],
         uploads: vec![],
+        attached: vec![],
     }));
 }
 
@@ -1087,6 +1089,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         tags: vec![],
         files: vec![],
         uploads: vec![],
+        attached: vec![],
     }));
     for i in 0..6 {
         push(EventKind::AssistantMessage(AssistantMessage {
@@ -1127,6 +1130,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         tags: vec![],
         files: vec![],
         uploads: vec![],
+        attached: vec![],
     };
     let qseq = push(EventKind::UserMessage(q.clone()));
     push(EventKind::AssistantMessage(AssistantMessage {
@@ -2110,6 +2114,7 @@ async fn a_mentioned_file_survives_an_in_turn_summary() {
         triggers: vec![],
         tags: vec![],
         uploads: vec![],
+        attached: vec![],
     };
     host.push(EventKind::UserMessage(msg.clone()));
     let out = b
@@ -2200,6 +2205,7 @@ async fn rebuild_matches_live_after_leaving_plan_mode() {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         }));
         if !plan {
             first_of_second = p.main().len();
@@ -2456,6 +2462,7 @@ async fn nested_turn(
         tags: vec![],
         files: vec![],
         uploads: vec![],
+        attached: vec![],
     }));
     let out = b
         .run_turn(TurnCtx {
@@ -3106,6 +3113,7 @@ async fn retry_chains_rebuild_and_keep_the_message() {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         }));
         let _ = one_turn(
             &host,
@@ -3251,6 +3259,7 @@ async fn retry_chains_rebuild_and_keep_the_message() {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         }));
         let (n2, bad2, _) = one_turn(
             &host,
@@ -3328,6 +3337,7 @@ fn a_retry_is_told_which_calls_ran() {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         }),
     );
     let call = |id: &str, cmd: &str| ToolCallRef {

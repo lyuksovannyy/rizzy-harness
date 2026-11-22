@@ -175,6 +175,7 @@ impl Plain for UserMessage {
             triggers: vec![],
             tags: vec![],
             uploads: vec![],
+            attached: vec![],
         }
     }
 }

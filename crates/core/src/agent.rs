@@ -57,6 +57,8 @@ pub fn mcp_server_of(tool: &str) -> Option<&str> {
 /// - `todo`: writes only the chat's own task list (its own log).
 /// - `skill`: loads a skill's instructions.
 /// - `recall`: searches the person's earlier chats and memory.
+/// - `attached_file`: reads a file the person attached to the chat, through
+///   the master; it writes nothing and unpacks nothing to disk.
 /// - `history`: reads the chat's own log on the node, nothing else.
 /// - `board`: lists the project's task board (its writes are `board_edit`,
 ///   which is not here: it changes a board other people read).
@@ -84,6 +86,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "todo",
     "skill",
     "recall",
+    "attached_file",
     "history",
     "board",
     "web_search",
@@ -501,6 +504,7 @@ mod tests {
             ),
             (&["read", "remember"], false),
             (&["read", "recall", "todo", "tool_output"], false),
+            (&["attached_file", "read"], false),
             (&["web_search", "web_fetch", "remember"], false),
             // The shell: read-only for such an agent, so no writer.
             (&["read", "bash"], false),

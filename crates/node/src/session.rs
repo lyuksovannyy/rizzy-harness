@@ -466,6 +466,9 @@ pub(crate) struct Input {
     /// Files pushed ahead of this prompt (`session.upload`), which the
     /// node saves into the chat's folder (T94, `uploads.rs`).
     pub uploads: Vec<harness_protocol::UploadRef>,
+    /// Files the master keeps for a plain chat (`session.prompt.attached`,
+    /// T95): recorded in the message, never written anywhere here.
+    pub attached: Vec<harness_protocol::AttachedRef>,
 }
 
 /// A sub-agent's private, node-owned folder.
@@ -2961,8 +2964,10 @@ impl Session {
             images,
             files,
             uploads,
+            attached,
         } = input;
         let files = self.read_mentions(files).await?;
+        let attached = self.check_attached(attached)?;
         let images = self.keep_images(images).await?;
         let text = match &reply {
             None => text,
@@ -2994,6 +2999,7 @@ impl Session {
             tags: vec![],
             files,
             uploads: saved.iter().map(|s| s.file.clone()).collect(),
+            attached,
         };
         // Scrubbed here, as the log will store it (`append` scrubs every
         // payload): the model is sent this very message, so it never gets
@@ -3009,6 +3015,67 @@ impl Session {
                 Err(e.to_string())
             }
         }
+    }
+
+    /// The files the master keeps for this plain chat, as the message
+    /// records them (T95): checked on this node's own limits (the count and
+    /// size of `[limits]`), the chat a plain one that is not a sub-agent's,
+    /// the tool offered here; each id once and in the form an id has, each
+    /// hash a sha256, names and types cleaned. Nothing is written: the
+    /// bytes stay on the master.
+    fn check_attached(
+        &self,
+        refs: Vec<harness_protocol::AttachedRef>,
+    ) -> Result<Vec<harness_core::event::AttachedFile>, String> {
+        if refs.is_empty() {
+            return Ok(vec![]);
+        }
+        let tool = harness_core::attached::TOOL;
+        if self.profile != Profile::Chat {
+            return Err("a chat with its own folder saves attached files there".into());
+        }
+        if self.parent_session.is_some() {
+            return Err("a sub-agent's chat takes no attached files".into());
+        }
+        if !self.node.cfg.backend.has_tool(tool) || self.node.cfg.policy.denies(tool) {
+            return Err("this node does not read attached files".into());
+        }
+        let limits = &self.node.cfg.policy.limits;
+        if refs.len() > limits.uploads_per_message {
+            return Err(format!(
+                "at most {} attached files per message on this node",
+                limits.uploads_per_message
+            ));
+        }
+        let max = limits.upload_max_mb.saturating_mul(1 << 20);
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::with_capacity(refs.len());
+        for r in refs {
+            let id_ok = !r.file_id.is_empty()
+                && r.file_id.len() <= harness_core::attached::MAX_ID_CHARS
+                && r.file_id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
+            if !id_ok || !seen.insert(r.file_id.clone()) {
+                return Err("an attached file is named twice or by a bad id".into());
+            }
+            let sha_ok = r.sha256.len() == 64 && r.sha256.chars().all(|c| c.is_ascii_hexdigit());
+            if !sha_ok || r.size == 0 || r.size > max {
+                return Err(format!(
+                    "{}: this node reads attached files up to {} MiB",
+                    harness_core::event::shown_name(&r.name),
+                    limits.upload_max_mb
+                ));
+            }
+            out.push(harness_core::event::AttachedFile {
+                file_id: r.file_id,
+                name: harness_core::event::shown_name(&r.name),
+                bytes: r.size,
+                sha256: r.sha256.to_ascii_lowercase(),
+                mime: harness_core::text::clean_line(&r.mime, 80),
+            });
+        }
+        Ok(out)
     }
 
     /// Whether this chat takes files the model cannot read as text: an
@@ -4853,6 +4920,7 @@ impl Session {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         };
         let extra = TurnExtra {
             savings,
@@ -5345,6 +5413,7 @@ impl Session {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         };
         let extra = TurnExtra {
             savings,
@@ -6009,6 +6078,13 @@ impl TurnHost for Session {
 
     fn history(&self) -> Option<Arc<dyn harness_core::history::HistorySource>> {
         Some(Arc::new(crate::history::OwnHistory {
+            node: self.node.clone(),
+            session: self.id,
+        }))
+    }
+
+    fn attached(&self) -> Option<Arc<dyn harness_core::attached::AttachedSource>> {
+        Some(Arc::new(crate::attached::LinkAttached {
             node: self.node.clone(),
             session: self.id,
         }))

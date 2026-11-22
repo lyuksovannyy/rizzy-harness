@@ -17,6 +17,7 @@ axum.workspace = true
 futures.workspace = true
 getrandom.workspace = true
 harness-agents.workspace = true
+harness-attached.workspace = true
 harness-core.workspace = true
 harness-node.workspace = true
 harness-protocol.workspace = true

@@ -334,6 +334,7 @@ fn a_call_cut_off_by_a_restart_reads_as_unknown() {
                 tags: vec![],
                 files: vec![],
                 uploads: vec![],
+                attached: vec![],
             }),
         ),
         ev(
@@ -639,6 +640,7 @@ async fn the_next_turn_rebuilds_this_turns_requests_byte_for_byte() {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         }),
     ];
     kinds.extend(host.0.lock().unwrap().iter().cloned());

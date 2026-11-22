@@ -354,6 +354,10 @@ async fn serve(
     web_tools.push(Arc::new(harness_memory::Recall));
     // Reading the chat's own log: node code, no master round trip (T91).
     web_tools.push(Arc::new(harness_agent_native::history::History));
+    // Files a person attached to a plain chat: the master keeps them and
+    // answers the reads (PLAN.md T95). Only this runtime, which runs plain
+    // chats: a coding chat saves its files in its folder.
+    web_tools.push(Arc::new(harness_tools::AttachedFileTool));
     // The project board tools: the master answers them too (PLAN.md T78).
     web_tools.push(Arc::new(harness_tools::Board));
     web_tools.push(Arc::new(harness_tools::BoardEdit));
@@ -1868,6 +1872,9 @@ mod tests {
             names.contains(&"board") && names.contains(&"board_edit"),
             "{names:?}"
         );
+        // Not `attached_file`: a coding chat saves its files in its folder
+        // (PLAN.md T95); only the chat runtime registers it.
+        assert!(!names.contains(&"attached_file"), "{names:?}");
     }
     /// A node registers the web tools its own configuration built, and
     /// nothing else of the sort: the chat runtime's `[web]` default

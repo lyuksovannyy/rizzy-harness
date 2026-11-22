@@ -9,8 +9,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { UploadedAttachment } from "../types";
 import type { Submission } from "./Composer";
 
-const upload = vi.fn<(f: File, to: { session?: string; folder?: boolean }) => Promise<UploadedAttachment>>();
-vi.mock("../api", () => ({ api: { upload: (f: File, to: { session?: string; folder?: boolean }) => upload(f, to) }, call: vi.fn(), HttpError: Error }));
+type To = { session?: string; folder?: boolean; agent?: string };
+const upload = vi.fn<(f: File, to: To) => Promise<UploadedAttachment>>();
+vi.mock("../api", () => ({ api: { upload: (f: File, to: To) => upload(f, to) }, call: vi.fn(), HttpError: Error }));
 const { Composer } = await import("./Composer");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -31,7 +32,7 @@ afterEach(() => {
   sessionStorage.clear();
 });
 
-function show(p: { where: "home" | "session"; filesOf?: string }) {
+function show(p: { where: "home" | "session"; filesOf?: string; chatId?: string; agentId?: string }) {
   act(() =>
     root.render(
       <Composer
@@ -39,10 +40,11 @@ function show(p: { where: "home" | "session"; filesOf?: string }) {
         agents={[]}
         models={[]}
         workers={[]}
-        agentId=""
+        agentId={p.agentId ?? ""}
         onAgentChange={() => {}}
         agenticBlocked={null}
         filesOf={p.filesOf}
+        chatId={p.chatId}
         onSubmit={async (s) => {
           sent.push(s);
         }}
@@ -98,6 +100,26 @@ describe("attaching any file", () => {
     expect(upload).toHaveBeenCalledWith(expect.anything(), { session: undefined, folder: false });
     expect(host.querySelector(".error-text")?.textContent).toContain("cannot open files");
     expect(chips()).toEqual([]);
+  });
+
+  test("a plain chat's box names its chat and agent, and says the kept file is read-only (T95)", async () => {
+    show({ where: "session", chatId: "sid-2", agentId: "general" });
+    upload.mockResolvedValue({ attachment_id: "k1", name: "q3 report.zip", mime: "application/zip", bytes: 1_258_291, kept: true });
+    await pick([zip()]);
+    expect(upload).toHaveBeenCalledWith(expect.objectContaining({ name: "q3 report.zip" }), { session: "sid-2", folder: false, agent: "general" });
+    expect(chips()).toEqual(["q3 report.zip (1.2 MB, read-only)"]);
+    expect(host.querySelector("ul.chips li")?.getAttribute("title")).toContain("cannot change it");
+    type("what is in it");
+    await send();
+    expect(sent[0]!.attachments).toEqual(["k1"]);
+  });
+
+  test("the home bar's plain mode names the agent the chat will start with", async () => {
+    show({ where: "home", agentId: "general" });
+    upload.mockRejectedValue(new Error("Researcher cannot read attached files: turn on \"Read attached files\" for it on the Agents page"));
+    await pick([zip()]);
+    expect(upload).toHaveBeenCalledWith(expect.anything(), { session: undefined, folder: false, agent: "general" });
+    expect(host.querySelector(".error-text")?.textContent).toContain("Read attached files");
   });
 
   test("a file over the limit shows the number the server gave", async () => {

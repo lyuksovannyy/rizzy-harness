@@ -93,6 +93,11 @@ describe("resend: what a logged message can honestly be sent again with", () => 
     expect(r.lost).toEqual(["notes.txt"]);
     expect(r.pictures).toEqual([{ key: "m1", name: "shot.png", size: 0, media_id: "m1" }]);
   });
+  it("a file kept for the agent to read is named too: it must be attached again (T95)", () => {
+    const v = fold(turn(1, "t1", "look", { attached: [{ file_id: "f1", name: "q3.zip", bytes: 9, sha256: "ab", mime: "application/zip" }] }));
+    const r = resend(v.items.find((i): i is Extract<Item, { type: "user" }> => i.type === "user")!)!;
+    expect(r.lost).toEqual(["q3.zip"]);
+  });
   it("a form's answer is not a message to edit", () => {
     expect(resend({ type: "user", turn_id: "t", text: "x", reply: {} as never })).toBeNull();
   });

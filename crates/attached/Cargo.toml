@@ -1,0 +1,20 @@
+[package]
+name = "harness-attached"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+flate2.workspace = true
+harness-core.workspace = true
+infer.workspace = true
+# tar is only used by the tests to build archives (the walker is our own).
+
+
+[dev-dependencies]
+tar.workspace = true

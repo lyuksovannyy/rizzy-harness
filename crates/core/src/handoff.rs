@@ -303,6 +303,7 @@ mod tests {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         })
     }
 

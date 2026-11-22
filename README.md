@@ -1469,9 +1469,12 @@ line after your message (it opens the file with its own tools). The chip in
 the composer says "saved to the folder" before you send, and the sent message
 shows the file with its size. Text, Markdown, code, CSV, JSON and PDFs are read
 as text and images go to the model, as before; they are not saved. A chat
-without tools (a plain chat) refuses such a file when you attach it, and
-says so: "this chat's agent cannot open files; switch to Agentic (next to Ask
-under the box) to attach any file, or attach text, a PDF or an image".
+without tools (a plain chat) keeps such a file for the agent to read, never
+change (next section), when its agent has the switch "Read attached files";
+otherwise it refuses the file when you attach it and says which switch, or,
+for a server or node that predates the switch, "this chat's agent cannot open
+files; switch to Agentic (next to Ask under the box) to attach any file, or
+attach text, a PDF or an image".
 
 - **Where.** `attachments/<name>` in the chat's folder, made if missing. The name is
   your file's name reduced to one safe component (no folders, no leading dot
@@ -1505,6 +1508,51 @@ under the box) to attach any file, or attach text, a PDF or an image".
 - **What is not scrubbed.** The file's name is text and is scrubbed like any
   text; the bytes are yours and are saved as they are, even if they hold a
   secret of the node's.
+
+**Files in a chat without a folder.** In a plain chat you can attach any file
+too: a zip, a tar, a gzip, a binary, a spreadsheet. The server keeps it as your
+own stored file (encrypted at rest, counted in your storage quota) and the
+agent reads it, read-only, through the tool `attached_file`; nothing is written
+to any folder and the file cannot be changed. The chip in the composer says
+"(size, read-only)", the sent message shows the file with its size, and the
+agent is told in one line after your message which files, their sizes, their
+ids and the tool's name. The tool has three operations: `info` (name, size,
+the type the first bytes say, sha256), `list` (the entries of a zip, tar,
+tar.gz or gz: path, size and whether each is a folder, a link or a device, 500
+a call, at most 20,000 read) and `read` (the file, or one archive entry by its
+listed path (or `#` and its number, when two share a path): text as numbered lines, anything else as a hex dump of at most
+4 KiB, or its printable runs). Its calls show as tool blocks in the chat. Word,
+OpenDocument and spreadsheet files are not unpacked into text for the model; it
+can list them and read their XML entries.
+
+- **The switch.** "Read attached files" is a per-agent switch on the agent's
+  page, on for the built-in Assistant and off for every other agent and for a
+  new one. If the agent you picked has it off, attaching a file says so, naming
+  the agent and the switch; if you switch agent between attaching and sending,
+  the send says it and your file stays in the box. A sub-agent's chat takes no
+  files and a temporary chat keeps none. A coding chat is unchanged: its files
+  are saved into its folder (see above).
+- **Limits.** The same as every attachment: 10 MiB per file and at most 10
+  files and images together per message, 20 unsent files per account, counted
+  in your storage quota. A file never sent is deleted with the unsent ones; the
+  stored copy lives as long as a chat of yours refers to it (a fork refers to the
+  same copy) and is deleted when the last such chat is.
+- **Bounded.** Reading never unpacks to disk. A compressed stream is read at
+  most 16 MiB deep per call, an archive that claims far more than it holds is
+  refused with a sentence, an archive inside an archive is read as bytes, a
+  link or a device is listed and never followed, and a call stops after 8
+  seconds; two calls run at once on the server and the rest wait. A chat has
+  one call at a time, a turn can look into files 60 times and a chat 240 times in
+  10 minutes. A zip entry read whole is checked against its checksum, and a
+  mismatch is noted, not refused.
+- **Whose file.** The server answers only for a file your own chat's log names,
+  in the chat the call runs in: never another chat's, another person's, or an id
+  the model made up.
+- **Not scrubbed from the file.** What the tool returns passes the node's
+  scrubber like any tool result, so a secret of the node's is hidden; a secret
+  that is only yours, inside your file, is shown to the model, as you attached it.
+- **A node that predates this** (a chat runtime that does not announce
+  `attached-file`) refuses the file as before.
 
 The model is sent your message as you wrote it and, after it, each file as a
 quoted document under a line that names it. Nothing in a file, its name

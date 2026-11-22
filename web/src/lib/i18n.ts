@@ -55,6 +55,8 @@ const en = {
   "composer.tooManyFiles": "At most 10 files and images go with one message.",
   "composer.saved": "saved to the folder",
   "composer.savedHint": "The model cannot read this as text: it is saved in the chat's folder under attachments/ and the agent is told where",
+  "composer.kept": "read-only",
+  "composer.keptHint": "The agent can list and read this file but cannot change it; nothing is saved to any folder",
   "composer.files": "Files",
   "composer.mentionHint": "Goes with the message: the agent gets this file's content",
   "composer.noFile": "No file or folder by that name in this chat's folder",

@@ -27,6 +27,7 @@ mod agents_http;
 mod approval_answers_http;
 mod approval_mode_http;
 mod artifacts_http;
+mod attached_http;
 mod attention_http;
 mod background_stop_http;
 mod board_http;

@@ -246,6 +246,8 @@ export type ItemKind =
       files?: string[];
       /** Files the node saved into the chat's folder (T94). */
       uploads?: { name: string; path: string; bytes: number }[];
+      /** Files kept for the agent to read through `attached_file` in a chat without a folder (T95). */
+      attached?: { file_id: string; name: string; bytes: number }[];
       reply?: FormReply;
       images?: ImageRef[];
       /** Sent while a turn ran (X.5): its seq, and whether the agent has read it. */
@@ -560,6 +562,8 @@ export interface UploadedAttachment {
   /** A file for the chat's folder (T94): its size; the model reads no text of it. */
   bytes?: number;
   saved?: boolean;
+  /** A file kept on the server for the agent to read, read-only (T95). */
+  kept?: boolean;
 }
 
 export type Effort = "low" | "medium" | "high" | "max";
@@ -608,6 +612,8 @@ export interface AgentFeatures {
   recall: boolean;
   /** `history`: reads this chat's own earlier messages in full (PLAN.md T91); its own switch, on unless turned off. */
   history: boolean;
+  /** `attached_file`: reads the files you attach to a chat without a folder, never changes them (PLAN.md T95); its own switch. */
+  attached_files: boolean;
   /** The project's task board in project chats (`board`, `board_edit`); its own switch (PLAN.md T78). */
   board: boolean;
   web: boolean;

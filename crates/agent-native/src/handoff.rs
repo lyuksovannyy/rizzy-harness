@@ -301,6 +301,7 @@ mod tests {
                 tags: vec![],
                 files: vec![],
                 uploads: vec![],
+                attached: vec![],
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 author: None,

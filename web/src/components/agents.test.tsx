@@ -175,7 +175,7 @@ describe("an agent's page", () => {
     expect(api.agent).toHaveBeenCalledWith("coder", "server");
     expect(host.querySelector("h1")!.textContent).toBe("Coder");
     expect(host.querySelector("pre.agent-prompt")!.textContent).toBe("You are careful.");
-    expect(switches().length).toBe(19);
+    expect(switches().length).toBe(20);
     expect(switches().every((s) => s.disabled)).toBe(true);
     expect(sw("Change files").checked).toBe(true);
     expect(button("Duplicate")).toBeDefined();
@@ -330,6 +330,25 @@ describe("an agent's page", () => {
     expect(api.updateAgent).toHaveBeenCalledWith(
       "reviewer",
       { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, recall: true } },
+      "server",
+    );
+  });
+
+  test("reading attached files is its own switch, off for a new agent (T95)", async () => {
+    expect(NEW_FEATURES.attached_files).toBe(false);
+    api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it." }));
+    await show(admin, "reviewer");
+    expect(sw("Read attached files").checked).toBe(false);
+    // Reading files and the other switches do not bring it.
+    act(() => sw("Read files").click());
+    expect(sw("Read attached files").checked).toBe(false);
+    act(() => sw("Read files").click());
+    act(() => sw("Read attached files").click());
+    api.updateAgent.mockResolvedValue(detail(reviewer));
+    await act(async () => button("Save")!.click());
+    expect(api.updateAgent).toHaveBeenCalledWith(
+      "reviewer",
+      { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, attached_files: true } },
       "server",
     );
   });
