@@ -1462,7 +1462,7 @@ uploaded files not yet sent (8 MiB of text); unsent files are deleted after
 the incognito TTL (`[chat] incognito_ttl_minutes`, a day by default).
 
 **Any other file.** In a coding chat (one with a folder) you can attach any
-file: a zip, a docx, an xlsx, a binary, a text file or PDF over 10 MiB.
+file: a zip, a docx, an xlsx, a binary, a PDF without a text layer.
 The model cannot read those as text, so the file is saved into the chat's
 folder, in `attachments/`, and the agent is told its path and size in one
 line after your message (it opens the file with its own tools). The chip in
@@ -1470,8 +1470,8 @@ the composer says "saved to the folder" before you send, and the sent message
 shows the file with its size. Text, Markdown, code, CSV, JSON and PDFs are read
 as text and images go to the model, as before; they are not saved. A chat
 without tools (a plain chat) refuses such a file when you attach it, and
-says so: "this chat's agent cannot open files; start a coding chat, or attach
-text, a PDF or an image".
+says so: "this chat's agent cannot open files; switch to Agentic (next to Ask
+under the box) to attach any file, or attach text, a PDF or an image".
 
 - **Where.** `attachments/<name>` in the chat's folder, made if missing. The name is
   your file's name reduced to one safe component (no folders, no leading dot
@@ -1479,13 +1479,18 @@ text, a PDF or an image".
   replaced: the new file is `name (2).ext`, `name (3).ext`. If `attachments`
   in the folder is a link or a file, the node refuses with a sentence and
   saves nothing; it never follows a link out of the folder.
-- **Limits.** Per file 50 MiB and per message 5 such files, set on the node:
+- **Limits.** Per file 10 MiB (every kind of attachment: text, PDF, image and saved file), and at most 10 files and images together per message, set on the node:
   node.toml `[limits] upload_max_mb` and `uploads_per_message` (the server
   asks the node). A bigger file is refused when you attach it, with the
   number. A node that predates this refuses the send with "update the
-  node"; your files stay in the composer. You can hold 10 such files not yet
+  node"; your files stay in the composer. You can hold 20 such files not yet
   sent per account; they count against your storage quota and are deleted
-  after the same TTL as unsent text.
+  after the same TTL as unsent text. Images keep their lower limits (4 a
+  message, 3.5 MiB each: what the model providers take); they count toward
+  the 10.
+- **The name in the URL.** The file's name travels in the upload's query string, as
+  it always did for attachments: the server logs only the path, but a reverse
+  proxy in front of it may log the whole URL.
 - **How it travels.** The server keeps the bytes as your own stored file (encrypted at
   rest, the same store as Media) and, when you send, pushes them to the node
   in 256 KiB chunks, one at a time, ahead of your message; the node checks
@@ -1987,8 +1992,8 @@ handoff_notes_per_hour = 4           # hand-off notes this node writes per chat 
 projects_per_hour = 20               # new project folders this node makes or clones per hour (only those made count; in memory); 0: off (0 .. 200)
 clone_timeout_s = 600                # the longest one clone may run; then git is ended and what it fetched removed (10 .. 7200)
 clone_max_mb = 2048                  # the most one clone may put on disk, objects and checkout together (1 .. 1048576)
-upload_max_mb = 50                   # the largest file saved into a chat's folder when you attach one the model cannot read as text; 0: off (0 .. 1024)
-uploads_per_message = 5              # the most such files one message may bring; 0: off (0 .. 20)
+upload_max_mb = 10                   # the largest file saved into a chat's folder when you attach one the model cannot read as text; 0: off (0 .. 10)
+uploads_per_message = 10             # the most such files one message may bring; 0: off (0 .. 10)
 
 [projects]
 dir = "~/rizzy-projects"             # where "New project" makes folders (see "Projects"); inside workspace_roots, its parent existing, on the data directory's file system; "" turns it off

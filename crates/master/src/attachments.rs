@@ -12,10 +12,10 @@ pub const MAX_UPLOAD: usize = 10 * 1024 * 1024;
 /// Extracted text kept per document (about 25k tokens).
 pub const MAX_TEXT_CHARS: usize = 100_000;
 /// Attachments per message.
-pub const MAX_PER_MESSAGE: usize = 5;
+pub const MAX_PER_MESSAGE: usize = 10;
 
 /// Unsent uploads one account may hold (count): four full messages.
-pub const MAX_UNSENT: usize = 4 * MAX_PER_MESSAGE;
+pub const MAX_UNSENT: usize = 2 * MAX_PER_MESSAGE;
 /// Unsent uploads one account may hold (bytes of extracted text). A full
 /// attachment is at most about 400 KB of UTF-8, so the count is the limit
 /// ordinary use meets first.
@@ -87,8 +87,8 @@ fn unsupported() -> String {
 
 /// Why a chat without tools takes no other file (T94): said at attach
 /// time, in the words of the plan.
-pub const NO_TOOLS: &str = "unsupported file: this chat's agent cannot open files; start a coding \
-     chat, or attach text, a PDF or an image";
+pub const NO_TOOLS: &str = "unsupported file: this chat's agent cannot open files; switch to \
+     Agentic (next to Ask under the box) to attach any file, or attach text, a PDF or an image";
 
 fn cap(text: String) -> (String, bool) {
     if text.chars().count() <= MAX_TEXT_CHARS {
@@ -100,8 +100,9 @@ fn cap(text: String) -> (String, bool) {
 /// A display-safe file name: last path segment, no control characters, short.
 pub fn clean_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("");
-    let s: String = base.chars().filter(|c| !c.is_control()).take(120).collect();
-    let s = s.trim().to_string();
+    // Hidden characters (a right-to-left override or isolate would show the
+    // person's own file name reversed) and controls go, as the node does.
+    let s = harness_core::text::clean_line(base, 120);
     if s.is_empty() { "document".into() } else { s }
 }
 
@@ -145,6 +146,16 @@ mod tests {
         let big = "a".repeat(MAX_TEXT_CHARS + 10);
         let a = extract("big.txt", big.into_bytes(), None).await.unwrap();
         assert!(a.truncated && a.text.len() == MAX_TEXT_CHARS);
+    }
+
+    /// A name shows as one line of the person's own: no bidi override or
+    /// isolate, no zero-width character, no control, one segment.
+    #[test]
+    fn a_name_has_no_hidden_or_bidi_characters() {
+        assert_eq!(clean_name("a\u{202e}fdp.exe"), "afdp.exe");
+        assert_eq!(clean_name("x\u{2066}y\u{2069}\u{200b}.zip"), "xy.zip");
+        assert_eq!(clean_name("..\\..\\a\u{202d}b\n.txt"), "ab .txt");
+        assert_eq!(clean_name("\u{202e}"), "document");
     }
 
     #[tokio::test]

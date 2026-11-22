@@ -9,7 +9,7 @@ Claude.ai's code-execution uploads work the same way (the file lands in the sand
 ## Safeguards and abuse tests
 
 One event field, `user_message.uploads` (additive), one link message (`session.upload`, acked, lane-ordered) and one prompt field with their capabilities; one migration (4, `chat_uploads` on the owner's blobs).
-The node writes with `O_NOFOLLOW` directory handles and `RENAME_NOREPLACE`; the master stores and forwards; the node's `[limits] upload_max_mb` (50) and `uploads_per_message` (5) decide.
+The node writes with `O_NOFOLLOW` directory handles and `RENAME_NOREPLACE`; the master stores and forwards; the node's `[limits] upload_max_mb` (10) and `uploads_per_message` (10) decide.
 Tests: `node/src/uploads_tests.rs`, `node/tests/uploads.rs`, `master/tests/it/uploads_http.rs`, `store/tests/chat_uploads.rs`, `store/tests/migrations.rs`, `core/src/event.rs` (`upload_line_tests`), `protocol/src/lib.rs`, `protocol/tests/turn_wire.rs`, `web/e2e/attach-any.cjs`.
 
 ## Invariants

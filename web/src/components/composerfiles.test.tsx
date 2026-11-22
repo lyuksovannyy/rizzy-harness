@@ -93,7 +93,7 @@ describe("attaching any file", () => {
 
   test("a plain box names no folder, and shows the server's reason", async () => {
     show({ where: "home" });
-    upload.mockRejectedValue(new Error("unsupported file: this chat's agent cannot open files; start a coding chat, or attach text, a PDF or an image"));
+    upload.mockRejectedValue(new Error("unsupported file: this chat's agent cannot open files; switch to Agentic (next to Ask under the box) to attach any file, or attach text, a PDF or an image"));
     await pick([zip()]);
     expect(upload).toHaveBeenCalledWith(expect.anything(), { session: undefined, folder: false });
     expect(host.querySelector(".error-text")?.textContent).toContain("cannot open files");
@@ -102,8 +102,8 @@ describe("attaching any file", () => {
 
   test("a file over the limit shows the number the server gave", async () => {
     show({ where: "session", filesOf: "sid-1" });
-    upload.mockRejectedValue(new Error("Files are at most 50 MB."));
+    upload.mockRejectedValue(new Error("Files are at most 10 MB."));
     await pick([zip()]);
-    expect(host.querySelector(".error-text")?.textContent).toContain("50 MB");
+    expect(host.querySelector(".error-text")?.textContent).toContain("10 MB");
   });
 });

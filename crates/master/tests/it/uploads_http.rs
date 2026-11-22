@@ -44,6 +44,8 @@ struct Knobs {
     refuse_prompt: Mutex<Option<String>>,
     /// Never answer a prompt (the master's wait runs out).
     silent_prompt: Mutex<bool>,
+    /// Wait this long before acking each chunk (a slow link).
+    slow_chunk_ms: Mutex<u64>,
 }
 
 struct Fake {
@@ -190,6 +192,10 @@ fn fake(id: &str, caps: &[String], chat_runtime: bool) -> (NodeLink, Fake) {
                             });
                         }
                         MasterToNode::UploadChunk { upload_id, offset, data, .. } => {
+                            let ms = *k.slow_chunk_ms.lock().unwrap();
+                            if ms > 0 {
+                                tokio::time::sleep(Duration::from_millis(ms)).await;
+                            }
                             let i = n.fetch_add(1, Ordering::SeqCst);
                             if *k.fail_chunk.lock().unwrap() == Some(i) {
                                 error = Some("this node's disk is full".into());
@@ -273,7 +279,7 @@ async fn start() -> T {
     };
     let (l, node) = fake("small", &caps(1, 2), false);
     master.add_link(l, true).await.unwrap();
-    let (l, big) = fake("big", &caps(50, 5), false);
+    let (l, big) = fake("big", &caps(10, 10), false);
     master.add_link(l, false).await.unwrap();
     let (l, old) = fake("old", &[], false);
     master.add_link(l, false).await.unwrap();
@@ -520,7 +526,7 @@ async fn a_plain_chat_refuses_the_file_with_the_reason() {
         let e = v["error"].as_str().unwrap();
         assert!(
             e.contains("cannot open files")
-                && e.contains("coding chat")
+                && e.contains("switch to Agentic")
                 && e.contains("PDF or an image"),
             "{e}"
         );
@@ -587,10 +593,10 @@ async fn a_file_over_the_limit_is_refused_with_the_number() {
     // Exactly the limit is taken.
     let (st, v) = upload(&t, &t.alex, "ok.zip", &q, zip(1024 * 1024 - 6)).await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    // Unknown chat: the default, 50 MB.
-    let (st, v) = upload(&t, &t.alex, "huge.zip", "&agentic=1", zip(51 * 1024 * 1024)).await;
+    // Unknown chat: the default, 10 MB.
+    let (st, v) = upload(&t, &t.alex, "huge.zip", "&agentic=1", zip(11 * 1024 * 1024)).await;
     assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
-    assert!(v["error"].as_str().unwrap().contains("50 MB"), "{v}");
+    assert!(v["error"].as_str().unwrap().contains("10 MB"), "{v}");
 }
 
 /// A file over the limit of text (10 MiB) in a plain chat says the text
@@ -810,7 +816,7 @@ async fn an_account_holds_a_bounded_number_of_unsent_files() {
     let sid = chat(&t, &t.alex, "big", "agentic").await;
     let q = format!("&session={sid}");
     let mut last = StatusCode::OK;
-    for i in 0..12 {
+    for i in 0..25 {
         let (st, _) = upload(&t, &t.alex, &format!("f{i}.zip"), &q, zip(50 + i)).await;
         last = st;
         if st != StatusCode::OK {
@@ -841,4 +847,183 @@ async fn a_sub_agents_chat_takes_no_files() {
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
     assert!(v["error"].as_str().unwrap().contains("sub-agent"), "{v}");
     assert_eq!(blob_files(&t), 0);
+}
+
+/// A send the client gives up on (its request is dropped while the push is
+/// still running) is settled all the same: the bookkeeping runs in a task of
+/// its own. Here the node refuses the prompt after the client left, so the
+/// upload must be given back, not stranded "already used" (reviewer's probe,
+/// flipped).
+#[tokio::test]
+async fn a_dropped_send_does_not_strand_the_upload() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "big", "agentic").await;
+    let (_, v) = upload(
+        &t,
+        &t.alex,
+        "x.zip",
+        &format!("&session={sid}"),
+        zip(1_000_000),
+    )
+    .await;
+    let id = v["attachment_id"].as_str().unwrap().to_string();
+    *t.big.knobs.slow_chunk_ms.lock().unwrap() = 300;
+    *t.big.knobs.refuse_prompt.lock().unwrap() = Some("a turn is running".into());
+    let gone = reqwest::Client::new()
+        .post(format!("{}/api/sessions/{sid}/prompt", t.base))
+        .login(&t.alex)
+        .same_origin()
+        .timeout(Duration::from_millis(500))
+        .json(&json!({"text": "unpack it", "attachments": [id.clone()]}))
+        .send()
+        .await;
+    assert!(gone.is_err(), "the client gave up while the push ran");
+    // The settled send: all chunks pushed, the prompt refused, the row back.
+    for _ in 0..100 {
+        if !t.big.prompts().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(t.big.prompts().len(), 1, "the send ran to its end");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    *t.big.knobs.slow_chunk_ms.lock().unwrap() = 0;
+    *t.big.knobs.refuse_prompt.lock().unwrap() = None;
+    let (st, v) = send(&t, &t.alex, &sid, &[&id]).await;
+    assert_eq!(st, StatusCode::OK, "the upload was given back: {v}");
+}
+
+/// The other end of the same send: the node takes the prompt after the
+/// client left, so the upload is done and cannot go twice.
+#[tokio::test]
+async fn a_dropped_send_the_node_took_is_finished() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "big", "agentic").await;
+    let (_, v) = upload(
+        &t,
+        &t.alex,
+        "x.zip",
+        &format!("&session={sid}"),
+        zip(1_000_000),
+    )
+    .await;
+    let id = v["attachment_id"].as_str().unwrap().to_string();
+    *t.big.knobs.slow_chunk_ms.lock().unwrap() = 300;
+    let gone = reqwest::Client::new()
+        .post(format!("{}/api/sessions/{sid}/prompt", t.base))
+        .login(&t.alex)
+        .same_origin()
+        .timeout(Duration::from_millis(500))
+        .json(&json!({"text": "unpack it", "attachments": [id.clone()]}))
+        .send()
+        .await;
+    assert!(gone.is_err());
+    for _ in 0..100 {
+        if !t.big.prompts().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(t.big.prompts().len(), 1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    *t.big.knobs.slow_chunk_ms.lock().unwrap() = 0;
+    let (st, v) = send(&t, &t.alex, &sid, &[&id]).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+}
+
+/// A file uploaded for a coding chat and sent to a sub-agent's chat is
+/// refused at send too, nothing pushed (reviewer's probe).
+#[tokio::test]
+async fn a_home_upload_sent_to_a_sub_agents_chat_is_refused() {
+    let t = start().await;
+    let (st, v) = upload(&t, &t.alex, "x.zip", "&agentic=1", zip(500)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let id = v["attachment_id"].as_str().unwrap().to_string();
+    let _parent = chat(&t, &t.alex, "big", "agentic").await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"cwd": "/w", "title": "child", "node_id": "big", "profile": "agentic"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let child = v["session_id"].as_str().unwrap().to_string();
+    let (st, v) = send(&t, &t.alex, &child, &[&id]).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("sub-agent"), "{v}");
+    assert!(t.big.chunks().is_empty(), "nothing was pushed");
+}
+
+/// The master's own sentence for a file over the node's number at send: a
+/// file made from the home composer (default 10 MB) sent to a chat whose
+/// node takes 1 MB.
+#[tokio::test]
+async fn a_home_upload_over_the_nodes_number_is_refused_at_send() {
+    let t = start().await;
+    let (st, v) = upload(&t, &t.alex, "big.zip", "&agentic=1", zip(2 * 1024 * 1024)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let id = v["attachment_id"].as_str().unwrap().to_string();
+    let sid = chat(&t, &t.alex, "small", "agentic").await;
+    let (st, v) = send(&t, &t.alex, &sid, &[&id]).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("up to 1 MB"), "{v}");
+    assert!(t.node.chunks().is_empty());
+}
+
+/// One count for everything a message carries: text, saved files and
+/// images together are at most 10 (refused before anything is taken).
+#[tokio::test]
+async fn a_message_carries_at_most_ten_files_and_images_together() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "big", "agentic").await;
+    let q = format!("&session={sid}");
+    let mut ids = vec![];
+    for i in 0..10 {
+        let (name, body) = if i % 2 == 0 {
+            (format!("f{i}.zip"), zip(100 + i))
+        } else {
+            (format!("f{i}.txt"), format!("text {i}").into_bytes())
+        };
+        let (st, v) = upload(&t, &t.alex, &name, &q, body).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        ids.push(v["attachment_id"].as_str().unwrap().to_string());
+    }
+    // 6 attachments and 5 images: 11.
+    let mut body = json!({"text": "all of it", "attachments": &ids[..6], "images": vec!["a"; 5]});
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(body.clone()),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("at most 10 files and images"),
+        "{v}"
+    );
+    assert!(t.big.chunks().is_empty(), "nothing was taken or pushed");
+    // 11 attachments, no image.
+    body["attachments"] = json!([&ids[..], &ids[..1]].concat());
+    body["images"] = json!([]);
+    let (st, _) = req(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(body),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    // Exactly 10 (five files and five texts) go.
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let (st, v) = send(&t, &t.alex, &sid, &refs).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(t.big.prompts()[0].len(), 5);
 }

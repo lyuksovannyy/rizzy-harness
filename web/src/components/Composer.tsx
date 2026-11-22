@@ -82,7 +82,8 @@ export interface ComposerHandle {
   focus: () => void;
 }
 
-const MAX_ATTACHMENTS = 5;
+/** Files and images together in one message (the server counts the same). */
+const MAX_ATTACHMENTS = 10;
 /** Images per message (docs/media.md §6.6). */
 const MAX_IMAGES = 4;
 const isImage = (f: File) => f.type.startsWith("image/") || /\.hei[cf]$/i.test(f.name);
@@ -522,7 +523,7 @@ export function Composer(props: {
   const blind = canImage
     ? [effortModel, home && mode === "ask" ? compareWith : null].map((m) => resolveModel(props.models, m)).find((m) => m && !m.vision)
     : undefined;
-  const imageRoom = Math.min(MAX_IMAGES, props.images?.left ?? MAX_IMAGES) - pictures.length;
+  const imageRoom = Math.min(MAX_IMAGES, props.images?.left ?? MAX_IMAGES, MAX_ATTACHMENTS - files.length) - pictures.length;
   const sendingImages = pictures.some((x) => !x.media_id);
 
   const choose = (id: string) => {
@@ -621,8 +622,8 @@ export function Composer(props: {
   // node saves what the model cannot read into the chat's folder (T94).
   const folder = home ? mode === "agentic" : !!props.filesOf;
   const addFiles = async (list: File[]) => {
-    const picked = list.slice(0, MAX_ATTACHMENTS - files.length);
-    setErr(null);
+    const picked = list.slice(0, Math.max(0, MAX_ATTACHMENTS - files.length - pictures.length));
+    setErr(picked.length < list.length ? t("composer.tooMany") : null);
     for (const f of picked) {
       setUploading((n) => n + 1);
       try {
@@ -843,7 +844,7 @@ export function Composer(props: {
                 className="icon attach"
                 aria-label={t("composer.attach")}
                 title={canImage ? "Attach documents or images (images are kept in Media)" : t("composer.attachHint")}
-                disabled={files.length >= MAX_ATTACHMENTS || uploading > 0}
+                disabled={files.length + pictures.length >= MAX_ATTACHMENTS || uploading > 0}
                 onClick={() => fileInput.current?.click()}
               >
                 {uploading > 0 ? <Loader2 size={18} className="spin" /> : <Paperclip size={18} />}

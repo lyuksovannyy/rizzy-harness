@@ -54,9 +54,9 @@ pub const CAP_UPLOAD_MAX_PREFIX: &str = "upload-max:";
 pub const CAP_UPLOADS_PER_MESSAGE_PREFIX: &str = "uploads-per-message:";
 /// `[limits] upload_max_mb` by default, and what the master allows an
 /// upload before it knows the chat's node (the home composer).
-pub const DEFAULT_UPLOAD_MAX_MB: u64 = 50;
+pub const DEFAULT_UPLOAD_MAX_MB: u64 = 10;
 /// `[limits] uploads_per_message` by default.
-pub const DEFAULT_UPLOADS_PER_MESSAGE: usize = 5;
+pub const DEFAULT_UPLOADS_PER_MESSAGE: usize = 10;
 
 /// The node capability that announces `session.stop_background` (T.8d,
 /// docs/background-commands.md). The master sends it only to nodes whose
@@ -148,9 +148,9 @@ pub struct UploadLimits {
 
 /// The most `[limits] upload_max_mb` may say, and so the most the master
 /// believes a node's hello about it.
-pub const MAX_UPLOAD_MAX_MB: u64 = 1024;
+pub const MAX_UPLOAD_MAX_MB: u64 = 10;
 /// The most `[limits] uploads_per_message` may say.
-pub const MAX_UPLOADS_PER_MESSAGE: usize = 20;
+pub const MAX_UPLOADS_PER_MESSAGE: usize = 10;
 
 /// The upload limits `capabilities` announce: `None` for a node that does
 /// not list [`CAP_UPLOADS`]. A missing or unreadable number is the default
@@ -2305,11 +2305,11 @@ mod tests {
         assert_eq!(
             upload_limits_of(&caps(&[
                 "uploads",
-                "upload-max:50",
-                "uploads-per-message:5"
+                "upload-max:10",
+                "uploads-per-message:10"
             ])),
             Some(UploadLimits {
-                max_mb: 50,
+                max_mb: 10,
                 per_message: 5
             })
         );

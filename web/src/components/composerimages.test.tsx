@@ -113,7 +113,7 @@ describe("where images are offered", () => {
   test("only where the server takes them; never in search or a temporary chat", () => {
     const hint = () => attach()?.title;
     show({ images: null });
-    expect(hint()).toBe("Attach documents (text, code, Markdown, CSV, JSON, PDF; up to 5)");
+    expect(hint()).toBe("Attach documents (text, code, Markdown, CSV, JSON, PDF; up to 10 files and images with a message, each at most 10 MB)");
     // The picker is not narrowed (T94): any file may be picked, and the server says what it does with it.
     expect(input().accept).toBe("");
     show();

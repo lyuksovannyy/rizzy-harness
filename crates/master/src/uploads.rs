@@ -21,8 +21,8 @@ use harness_store::chat_uploads::TakenUpload;
 use crate::{CommandError, Master, storage};
 
 /// Unsent files one account may hold. Each may be tens of MiB on disk, so
-/// fewer than text attachments (`attachments::MAX_UNSENT`).
-pub const MAX_UNSENT: usize = 10;
+/// as many as text attachments (`attachments::MAX_UNSENT`), two messages' worth.
+pub const MAX_UNSENT: usize = 2 * crate::attachments::MAX_PER_MESSAGE;
 
 /// The number the master allows a file before it knows the chat's node:
 /// the home composer uploads before the chat exists.
@@ -163,4 +163,32 @@ pub async fn push(
         });
     }
     Ok(refs)
+}
+
+/// Extra wait for a prompt's ack per MiB of files it names: the node
+/// copies, hashes and syncs them before it answers (PLAN.md T94). Generous
+/// for a slow disk (2 MiB/s); only a ceiling, an answer ends the wait.
+pub const ACK_PER_MIB: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The wait to add to a prompt's ack for files of `sizes` bytes.
+pub fn ack_extra(sizes: &[u64]) -> std::time::Duration {
+    let total: u64 = sizes.iter().fold(0u64, |a, s| a.saturating_add(*s));
+    ACK_PER_MIB.saturating_mul(u32::try_from(total.div_ceil(1024 * 1024)).unwrap_or(u32::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn the_ack_wait_grows_with_the_bytes_a_prompt_carries() {
+        assert_eq!(ack_extra(&[]), Duration::ZERO);
+        assert_eq!(ack_extra(&[1]), Duration::from_millis(500));
+        assert_eq!(ack_extra(&[1024 * 1024, 1]), Duration::from_secs(1));
+        // Ten files of 10 MiB: 50 s on top of the base.
+        assert_eq!(ack_extra(&[10 << 20; 10]), Duration::from_secs(50));
+        // Never overflows.
+        assert!(ack_extra(&[u64::MAX, u64::MAX]) > Duration::from_secs(1));
+    }
 }

@@ -194,7 +194,7 @@ expire with the incognito TTL.
 A file the model cannot read as text is the exception (T94, `docs/plan/X.53.md`): in a coding
 chat (`?session=<id>`, or `?agentic=1` from the home bar) `POST /api/attachments` streams it into
 this blob store as the owner's file (table `chat_uploads`, at most 10 unsent per account, under
-the node's `upload-max` number, 50 MiB by default) and answers `{attachment_id, name, mime,
+the node's `upload-max` number, 10 MiB by default) and answers `{attachment_id, name, mime,
 bytes, saved: true}`; at send the master pushes it to the node, which saves it into the chat's
 folder. A plain chat answers 422 with the reason, an upload over the limit 413 with the number.
 The row keeps its blob out of the unreferenced sweep until it is sent or purged with the unsent

@@ -53,6 +53,11 @@ fn limit(method: &Method, template: &str) -> Limit {
         // storage quota bound them. /api/transcribe also waits for the
         // transcription (its own 120 s client timeout).
         | ("POST", "/api/attachments" | "/api/transcribe" | "/api/media")
+        // A send that carries files pushes them in acked 256 KiB chunks
+        // before the prompt (T94): up to 10 x 10 MiB is four hundred round
+        // trips. Bounded by each chunk's ack wait and the file limits, not by
+        // wall time; the send's bookkeeping runs in its own task either way.
+        | ("POST", "/api/sessions/{id}/prompt")
         // Blob downloads: file size over the client's link.
         | ("GET", "/api/media/{id}/content")
         | ("GET", "/api/artifacts/{id}/latest/download")

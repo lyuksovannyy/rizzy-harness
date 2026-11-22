@@ -1315,11 +1315,13 @@ async fn prompt(
     if let Some(r) = &b.reply {
         check_reply_body(r, &b)?;
     }
-    if b.attachments.len() > crate::attachments::MAX_PER_MESSAGE {
+    // One count for everything a message carries: text, PDFs and saved
+    // files (the attachments) and images together.
+    if b.attachments.len() + b.images.len() > crate::attachments::MAX_PER_MESSAGE {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             format!(
-                "at most {} attachments per message",
+                "at most {} files and images per message",
                 crate::attachments::MAX_PER_MESSAGE
             ),
         ));
@@ -1335,129 +1337,140 @@ async fn prompt(
     // every turn the owner sends there.
     let flags = crate::routines::on_owner_prompt(&m, row.session_id).await;
     let sid = row.session_id;
-    // The ids name text attachments and files for the folder alike; the
-    // files are held (not consumed) until the node has taken the message.
-    let (file_ids, text_ids): (Vec<String>, Vec<String>) = if b.attachments.is_empty() {
-        (vec![], vec![])
-    } else {
-        let ids = b.attachments.clone();
-        let files = m
-            .inner
-            .mirror
-            .call(move |s| s.chat_uploads_among(&ids))
-            .await?;
-        let text = b
-            .attachments
-            .iter()
-            .filter(|i| !files.contains(i))
-            .cloned()
-            .collect();
-        (files, text)
-    };
-    let unknown = || {
-        ApiError(
-            StatusCode::BAD_REQUEST,
-            "unknown or already used attachment; upload it again".into(),
-        )
-    };
-    let files = if file_ids.is_empty() {
-        Vec::new()
-    } else {
-        let (ids, owner) = (file_ids.clone(), who.user_id.clone());
-        m.inner
-            .mirror
-            .call(move |s| s.chat_uploads_take(&ids, owner.as_deref()))
-            .await?
-            .ok_or_else(unknown)?
-    };
-    let attachments = if text_ids.is_empty() {
-        Vec::new()
-    } else {
-        let (ids, owner) = (text_ids.clone(), who.user_id.clone());
-        let taken = m
-            .inner
-            .mirror
-            .call(move |s| s.attachments_take_owned(&ids, owner.as_deref()))
-            .await?;
-        match taken {
-            Some(t) => t,
-            None => {
-                give_back_files(&m, &file_ids).await;
-                return Err(unknown());
-            }
-        }
-    };
-    let taken = (!attachments.is_empty()).then(|| (text_ids.clone(), attachments.clone()));
-    let attachments = attachments.into_iter().map(|(a, _)| a).collect();
-    let sent = m
-        .prompt(
-            sid,
-            b.text,
-            crate::PromptOpts {
-                agent_id: b.agent_id,
-                effort: b.effort,
-                context: Some(
-                    crate::prefs::Prefs::load(&m, who.user_id.as_deref())
-                        .await
-                        .for_turn(flags.untrusted)
-                        .model_context(
-                            &who.username,
-                            jiff::Timestamp::now(),
-                            row.profile.as_deref() == Some("chat"),
-                        ),
-                ),
-                attachments,
-                compare: b.compare,
-                reply: b.reply,
-                untrusted: flags.untrusted,
-                images,
-                callback: vec![],
-                by_owner: who.user_id.is_some() && who.user_id == row.owner_id,
-                // Never from a request: only the routine runner sets it.
-                routine_run: None,
-                files: b.files,
-                uploads: files,
-                retry: None,
-                retry_images: false,
-            },
-        )
-        .await;
-    // A prompt the node certainly did not take gives its uploads back, so
-    // "send this again" works (review A19-8): a refusal (a stopping node,
-    // a turn already running) or one never sent (the node away, too
-    // large). Not after a timeout: the node may have taken it and only its
-    // answer was lost, and giving them back could let one file go twice.
-    // The files for the folder follow the same rule; once the node took
-    // the message they are done.
-    match &sent {
-        Ok(()) => {
-            if !file_ids.is_empty() {
-                let ids = file_ids.clone();
-                if let Err(e) = m
-                    .inner
-                    .mirror
-                    .call(move |s| s.chat_uploads_done(&ids))
-                    .await
-                {
-                    tracing::warn!(error = %e, "could not clear the files a message carried");
+    // The take, the send and what is done with the uploads after it run in
+    // a task of their own: a request the route's time limit (or a client
+    // that went away) drops cannot cancel the bookkeeping half way and leave
+    // a file held for a message the node never got (T94).
+    let task = tokio::spawn(async move {
+        // The ids name text attachments and files for the folder alike; the
+        // files are held (not consumed) until the node has taken the message.
+        let (file_ids, text_ids): (Vec<String>, Vec<String>) = if b.attachments.is_empty() {
+            (vec![], vec![])
+        } else {
+            let ids = b.attachments.clone();
+            let files = m
+                .inner
+                .mirror
+                .call(move |s| s.chat_uploads_among(&ids))
+                .await?;
+            let text = b
+                .attachments
+                .iter()
+                .filter(|i| !files.contains(i))
+                .cloned()
+                .collect();
+            (files, text)
+        };
+        let unknown = || {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                "unknown or already used attachment; upload it again".into(),
+            )
+        };
+        let files = if file_ids.is_empty() {
+            Vec::new()
+        } else {
+            let (ids, owner) = (file_ids.clone(), who.user_id.clone());
+            m.inner
+                .mirror
+                .call(move |s| s.chat_uploads_take(&ids, owner.as_deref()))
+                .await?
+                .ok_or_else(unknown)?
+        };
+        let attachments = if text_ids.is_empty() {
+            Vec::new()
+        } else {
+            let (ids, owner) = (text_ids.clone(), who.user_id.clone());
+            let taken = m
+                .inner
+                .mirror
+                .call(move |s| s.attachments_take_owned(&ids, owner.as_deref()))
+                .await?;
+            match taken {
+                Some(t) => t,
+                None => {
+                    give_back_files(&m, &file_ids).await;
+                    return Err(unknown());
                 }
             }
-        }
-        Err(e) if !matches!(e, CommandError::Timeout) => {
-            give_back_files(&m, &file_ids).await;
-            if let Some((ids, atts)) = taken
-                && let Err(e) = m
-                    .inner
-                    .mirror
-                    .call(move |s| s.attachments_give_back(&ids, &atts))
-                    .await
-            {
-                tracing::warn!(error = %e, "could not give a refused message's uploads back");
+        };
+        let taken = (!attachments.is_empty()).then(|| (text_ids.clone(), attachments.clone()));
+        let attachments = attachments.into_iter().map(|(a, _)| a).collect();
+        let sent = m
+            .prompt(
+                sid,
+                b.text,
+                crate::PromptOpts {
+                    agent_id: b.agent_id,
+                    effort: b.effort,
+                    context: Some(
+                        crate::prefs::Prefs::load(&m, who.user_id.as_deref())
+                            .await
+                            .for_turn(flags.untrusted)
+                            .model_context(
+                                &who.username,
+                                jiff::Timestamp::now(),
+                                row.profile.as_deref() == Some("chat"),
+                            ),
+                    ),
+                    attachments,
+                    compare: b.compare,
+                    reply: b.reply,
+                    untrusted: flags.untrusted,
+                    images,
+                    callback: vec![],
+                    by_owner: who.user_id.is_some() && who.user_id == row.owner_id,
+                    // Never from a request: only the routine runner sets it.
+                    routine_run: None,
+                    files: b.files,
+                    uploads: files,
+                    retry: None,
+                    retry_images: false,
+                },
+            )
+            .await;
+        // A prompt the node certainly did not take gives its uploads back, so
+        // "send this again" works (review A19-8): a refusal (a stopping node,
+        // a turn already running) or one never sent (the node away, too
+        // large). Not after a timeout: the node may have taken it and only its
+        // answer was lost, and giving them back could let one file go twice.
+        // The files for the folder follow the same rule; once the node took
+        // the message they are done.
+        match &sent {
+            Ok(()) => {
+                if !file_ids.is_empty() {
+                    let ids = file_ids.clone();
+                    if let Err(e) = m
+                        .inner
+                        .mirror
+                        .call(move |s| s.chat_uploads_done(&ids))
+                        .await
+                    {
+                        tracing::warn!(error = %e, "could not clear the files a message carried");
+                    }
+                }
             }
+            Err(e) if !matches!(e, CommandError::Timeout) => {
+                give_back_files(&m, &file_ids).await;
+                if let Some((ids, atts)) = taken
+                    && let Err(e) = m
+                        .inner
+                        .mirror
+                        .call(move |s| s.attachments_give_back(&ids, &atts))
+                        .await
+                {
+                    tracing::warn!(error = %e, "could not give a refused message's uploads back");
+                }
+            }
+            Err(_) => {}
         }
-        Err(_) => {}
-    }
-    sent?;
+        sent?;
+        Ok::<(), ApiError>(())
+    });
+    task.await.map_err(|e| {
+        tracing::error!(error = %e, "a prompt's task failed");
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "the send failed".into())
+    })??;
     Ok(Json(json!({ "ok": true })))
 }
 

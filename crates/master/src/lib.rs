@@ -2030,6 +2030,10 @@ impl Master {
                 set_turn_identity(&mut msg, id);
             }
         }
+        let msg_uploads: Vec<u64> = match &msg {
+            MasterToNode::Prompt(p) => p.uploads.iter().map(|u| u.size).collect(),
+            _ => Vec::new(),
+        };
         let (tx, rx) = oneshot::channel();
         lock(&self.inner.acks).insert(req_id.clone(), (node_id.to_string(), tx));
         // However this call ends, its ack entry goes with it: also when the
@@ -2073,6 +2077,9 @@ impl Master {
         if slow {
             ack_timeout *= FORK_ACK_FACTOR;
         }
+        // A prompt that names files is acked after the node copied, hashed
+        // and synced them (T94): the wait grows with their bytes.
+        ack_timeout += uploads::ack_extra(&msg_uploads);
         let acked = tokio::time::timeout(ack_timeout, rx).await;
         if matches!(acked, Ok(Ok(Ok(())))) {
             noted.send = None;

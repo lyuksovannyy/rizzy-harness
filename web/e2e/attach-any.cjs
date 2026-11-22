@@ -78,7 +78,7 @@ async function listing(sid) {
     await p.setInputFiles('.composer input[type=file]', `${F}/Q3 report.zip`);
     await p.waitForSelector('.error-text:has-text("cannot open files")');
     const reason = (await p.textContent('.error-text')).trim();
-    check(reason.includes('coding chat') && reason.includes('PDF or an image'), 'the reason: ' + reason);
+    check(reason.includes('switch to Agentic') && reason.includes('PDF or an image'), 'the reason: ' + reason);
     check((await p.$$('.composer ul.chips li')).length === 0, 'no chip for a refused file');
     await p.screenshot({ path: `${S}/attach-1-plain-refused.png` });
     log('a plain chat refused the zip:', reason);

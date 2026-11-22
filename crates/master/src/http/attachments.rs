@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
-use axum::body::{Body, Bytes};
+use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::routing::post;
@@ -149,14 +149,8 @@ async fn upload(
         }
     }
     if more {
-        // Past what is read as text: only a coding chat takes it.
-        let Target::Folder { max, session } = target else {
-            return Err(too_large(text_max));
-        };
-        let prefix =
-            futures::stream::once(async move { Ok::<Bytes, axum::Error>(Bytes::from(head)) });
-        let body = Body::from_stream(prefix.chain(stream));
-        return keep(&m, &who, &q, session, length, body, max).await;
+        // Past what is read as text, which is also the most any file may be.
+        return Err(too_large(ceiling.min(text_max)));
     }
     let keep_copy = matches!(target, Target::Folder { .. }).then(|| head.clone());
     match attachments::extract(&q.name, head, m.pdf_reader()).await {
