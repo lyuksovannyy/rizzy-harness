@@ -296,10 +296,10 @@ async fn a_pushed_file_is_saved_recorded_and_named_to_the_model() {
         "{:?}",
         n.capabilities
     );
-    assert!(n.capabilities.contains(&"upload-max:50".to_string()));
+    assert!(n.capabilities.contains(&"upload-max:10".to_string()));
     assert!(
         n.capabilities
-            .contains(&"uploads-per-message:5".to_string())
+            .contains(&"uploads-per-message:10".to_string())
     );
     let sid = n.create().await;
     // Three chunks: more than the link's chunk size.
@@ -334,7 +334,7 @@ async fn a_pushed_file_is_saved_recorded_and_named_to_the_model() {
         .expect("the person's message")
         .to_string();
     assert!(
-        user.contains("[harness] The person attached 1 file(s), saved in this chat's folder: \"attachments/Q3 report.zip\" (512.1 KB)"),
+        user.contains("[harness] The person attached 1 file, saved in this chat's folder: \"attachments/Q3 report.zip\" (512.1 KB)"),
         "{user}"
     );
     assert!(user.ends_with(&m.model_text()), "{user}");
@@ -425,7 +425,7 @@ async fn a_chat_without_tools_and_a_node_without_staging_refuse() {
     let sid = chat.create_in(Some(Profile::Chat)).await;
     let e = chat.push(sid, &id(1), b"bytes").await.unwrap_err();
     assert!(
-        e.contains("cannot open files") && e.contains("coding chat"),
+        e.contains("cannot open files") && e.contains("switch to Agentic"),
         "{e}"
     );
 
@@ -655,4 +655,76 @@ async fn the_name_is_scrubbed_in_the_event_but_the_bytes_are_not() {
         bytes.as_bytes()
     );
     let _: Option<&Path> = None;
+}
+
+/// A name whose secret is split by a zero-width character: the recorded
+/// path is the file on disk, not a path the scrub rewrote afterwards.
+#[tokio::test]
+async fn the_recorded_path_is_the_file_on_disk_when_a_split_secret_is_scrubbed() {
+    let secret = "sk-test-secret-value-0123456789";
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("ws")).unwrap();
+    let model = Arc::new(plain_model());
+    let node = NodeRuntime::start(NodeConfig {
+        node_id: "n".into(),
+        hostname: "test".into(),
+        policy: NodePolicy {
+            workspace_roots: vec![dir.path().canonicalize().unwrap()],
+            max_approval_mode: ApprovalMode::Auto,
+            ..Default::default()
+        },
+        store: Store::open(&dir.path().join("node.db"), Durability::Full).unwrap(),
+        backend: Arc::new(NativeBackend::new(
+            model.clone(),
+            harness_tools::builtin(),
+            NativeConfig::default(),
+        )),
+        default_model: "mock".into(),
+        secrets: harness_core::SecretSet::new(vec![harness_core::Secret::new(secret.to_string())]),
+        profile: Profile::Agentic,
+        incognito_ttl: None,
+        checkpoints_dir: None,
+        git_sandbox: None,
+        artifacts: Some(StageConfig::new(dir.path().join("data"))),
+    })
+    .await
+    .unwrap();
+    let link = node.attach().await;
+    let mut n = N {
+        dir,
+        node,
+        link,
+        model,
+        capabilities: vec![],
+    };
+    let _hello = n.next().await;
+    let sid = n.create().await;
+    let mut r = n.push(sid, &id(1), b"bytes").await.unwrap();
+    let (a, b) = secret.split_at(10);
+    r.name = format!("{a}\u{200b}{b}.txt");
+    n.turn(sid, "go", vec![r]).await.unwrap();
+    let u = &n.messages(sid)[0].uploads[0];
+    assert!(!u.path.contains(secret), "{u:?}");
+    assert_eq!(
+        std::fs::read(n.ws().join(&u.path)).unwrap(),
+        b"bytes",
+        "{u:?}"
+    );
+}
+
+/// A prompt that names one upload twice saves nothing (an honest master
+/// cannot send it).
+#[tokio::test]
+async fn the_same_upload_named_twice_saves_nothing() {
+    let mut n = start().await;
+    let sid = n.create().await;
+    let r = n.push(sid, &id(1), b"bytes").await.unwrap();
+    n.send(n.prompt(sid, "go", vec![r.clone(), r.clone()]));
+    let e = n.ack().await.unwrap_err();
+    assert!(e.contains("more than once"), "{e}");
+    assert_eq!(n.files(), Vec::<String>::new());
+    assert!(n.messages(sid).is_empty());
+    // Once is fine.
+    n.turn(sid, "go", vec![r]).await.unwrap();
+    assert_eq!(n.files(), ["x"]);
 }

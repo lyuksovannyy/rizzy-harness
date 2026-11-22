@@ -43,7 +43,7 @@ use sha2::{Digest, Sha256};
 pub(crate) const DIR: &str = "attachments";
 
 /// Staged uploads this node holds at once, all chats together: with the
-/// file limit this bounds the staging folder (16 x 50 MiB by default).
+/// file limit this bounds the staging folder (16 x 10 MiB at most).
 const MAX_STAGED: usize = 16;
 /// A staged upload nobody took within this long is deleted.
 const STAGE_TTL: Duration = Duration::from_secs(3600);
@@ -54,8 +54,8 @@ const MAX_SUFFIX: u32 = 999;
 const MAX_NAME_BYTES: usize = 120;
 
 /// The refusal for a chat without tools.
-pub(crate) const NO_TOOLS: &str = "this chat's agent cannot open files; start a coding chat, or \
-     attach text, a PDF or an image";
+pub(crate) const NO_TOOLS: &str = "this chat's agent cannot open files; switch to Agentic \
+     (next to Ask under the box) to attach any file, or attach text, a PDF or an image";
 
 // ---------------------------------------------------------------- names
 
@@ -100,6 +100,25 @@ pub(crate) fn safe_name(name: &str) -> String {
     } else {
         capped
     }
+}
+
+/// The name a file is saved under when the node scrubs names: [`safe_name`]
+/// and `scrub` repeated until neither changes it. `safe_name` may join what
+/// a zero-width character split (a secret then shows and is scrubbed), and
+/// the scrub may leave what `safe_name` changes again, so one pass of each
+/// is not enough. The event scrubs the recorded path the same way, and a
+/// path that is already scrubbed is left alone: the path in the log is the
+/// file on disk (T94).
+pub(crate) fn scrubbed_name(name: &str, scrub: impl Fn(&str) -> String) -> String {
+    let mut n = safe_name(name);
+    for _ in 0..4 {
+        let next = safe_name(&scrub(&n));
+        if next == n {
+            break;
+        }
+        n = next;
+    }
+    n
 }
 
 /// `name` cut to [`MAX_NAME_BYTES`] on a character boundary, keeping a
@@ -418,6 +437,9 @@ struct Entry {
     hash: Sha256,
     complete: bool,
     touched: Instant,
+    /// A chunk of it is being written: the slot is held, nothing else may
+    /// touch it, and the sweep leaves it.
+    busy: bool,
 }
 
 /// The staging folder and what it holds, per chat and upload id.
@@ -472,11 +494,12 @@ impl Staging {
         self.table.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Delete the staged files nobody took within [`STAGE_TTL`].
-    fn sweep(&self) {
-        let mut t = self.table();
+    /// Delete the staged files nobody took within [`STAGE_TTL`] (a partial
+    /// push that stopped, a file no prompt named), except one being written.
+    /// Done at every chunk, so a node that is pushed to stays clean.
+    fn sweep_locked(t: &mut HashMap<(SessionId, String), Entry>) {
         t.retain(|_, e| {
-            let keep = e.touched.elapsed() < STAGE_TTL;
+            let keep = e.busy || e.touched.elapsed() < STAGE_TTL;
             if !keep {
                 let _ = std::fs::remove_file(&e.path);
             }
@@ -490,6 +513,11 @@ impl Staging {
     /// limit, the offset against what was received, the chunk against
     /// [`MAX_CHUNK`] and the declared size, and at the last chunk the
     /// sha256. A bad chunk deletes what was staged of that file.
+    ///
+    /// The entry stays in the table while its chunk is written (marked
+    /// busy), and a new file takes its slot, counted against
+    /// [`MAX_STAGED`], in the same lock that checks the count: pushes to
+    /// several chats at once cannot pass the bound.
     // The fields of one `session.upload` and the limit, as the command names them.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn chunk(
@@ -518,75 +546,102 @@ impl Staging {
             return Err("a chunk of an upload is between 1 byte and 256 KiB".into());
         }
         let key = (sid, upload_id.to_string());
-        let mut entry = if offset == 0 {
-            // A start, or a start again: what was staged of it goes.
-            if let Some(old) = self.table().remove(&key) {
-                let _ = std::fs::remove_file(&old.path);
-            }
-            self.sweep();
-            if self.table().len() >= MAX_STAGED {
-                return Err(
-                    "this node already holds as many uploads as it takes; send them first".into(),
+        let dir = root.join(sid.to_string());
+        let path = dir.join(format!("{upload_id}.part"));
+        // Under one lock: the checks, and the slot (a new file) or the busy
+        // mark (a later chunk).
+        let (path, mut hash, received) = {
+            let mut t = self.table();
+            Self::sweep_locked(&mut t);
+            if offset == 0 {
+                // A start, or a start again: what was staged of it goes.
+                if let Some(old) = t.get(&key) {
+                    if old.busy {
+                        return Err("this upload is being written; send it again".into());
+                    }
+                    let _ = std::fs::remove_file(&old.path);
+                    t.remove(&key);
+                }
+                if t.len() >= MAX_STAGED {
+                    return Err(
+                        "this node already holds as many uploads as it takes; send them first"
+                            .into(),
+                    );
+                }
+                t.insert(
+                    key.clone(),
+                    Entry {
+                        path: path.clone(),
+                        size,
+                        sha256: sha256.to_string(),
+                        received: 0,
+                        hash: Sha256::new(),
+                        complete: false,
+                        touched: Instant::now(),
+                        busy: true,
+                    },
                 );
+                (path, Sha256::new(), 0u64)
+            } else {
+                let Some(e) = t.get_mut(&key) else {
+                    return Err("this upload did not start here: send it again".into());
+                };
+                if e.busy
+                    || e.size != size
+                    || e.sha256 != sha256
+                    || e.received != offset
+                    || e.complete
+                {
+                    let _ = std::fs::remove_file(&e.path);
+                    t.remove(&key);
+                    return Err("an upload chunk out of order: send the file again".into());
+                }
+                e.busy = true;
+                (e.path.clone(), e.hash.clone(), e.received)
             }
-            let dir = root.join(sid.to_string());
-            private_dir(&dir).map_err(|e| format!("cannot stage the upload: {e}"))?;
-            let path = dir.join(format!("{upload_id}.part"));
-            let _ = std::fs::remove_file(&path);
-            Entry {
-                path,
-                size,
-                sha256: sha256.to_string(),
-                received: 0,
-                hash: Sha256::new(),
-                complete: false,
-                touched: Instant::now(),
-            }
-        } else {
-            let e = self
-                .table()
-                .remove(&key)
-                .ok_or("this upload did not start here: send it again")?;
-            if e.size != size || e.sha256 != sha256 || e.received != offset || e.complete {
-                let _ = std::fs::remove_file(&e.path);
-                return Err("an upload chunk out of order: send the file again".into());
-            }
-            e
         };
-        if entry.received + data.len() as u64 > entry.size {
-            let _ = std::fs::remove_file(&entry.path);
-            return Err("an upload is longer than it said".into());
+        let fail = |why: String| {
+            let _ = std::fs::remove_file(&path);
+            self.table().remove(&key);
+            Err(why)
+        };
+        if received + data.len() as u64 > size {
+            return fail("an upload is longer than it said".into());
         }
         let wrote = (|| -> std::io::Result<()> {
             use std::os::unix::fs::OpenOptionsExt;
+            if offset == 0 {
+                private_dir(&dir)?;
+                let _ = std::fs::remove_file(&path);
+            }
             let mut f = std::fs::OpenOptions::new()
                 .append(true)
                 .create(true)
                 .mode(0o600)
                 .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC).bits())
-                .open(&entry.path)?;
+                .open(&path)?;
             f.write_all(data)?;
             f.flush()
         })();
         if let Err(e) = wrote {
-            let _ = std::fs::remove_file(&entry.path);
-            return Err(format!("cannot stage the upload ({e}): is the disk full?"));
+            return fail(format!("cannot stage the upload ({e}): is the disk full?"));
         }
-        entry.hash.update(data);
-        entry.received += data.len() as u64;
-        entry.touched = Instant::now();
-        if entry.received == entry.size {
-            let got = hex::encode(entry.hash.clone().finalize());
-            if got != entry.sha256 {
-                let _ = std::fs::remove_file(&entry.path);
-                return Err(
-                    "the file does not match its sha256: it was damaged on the way; send it again"
-                        .into(),
-                );
-            }
-            entry.complete = true;
+        hash.update(data);
+        let received = received + data.len() as u64;
+        let complete = received == size;
+        if complete && hex::encode(hash.clone().finalize()) != sha256 {
+            return fail(
+                "the file does not match its sha256: it was damaged on the way; send it again"
+                    .into(),
+            );
         }
-        self.table().insert(key, entry);
+        if let Some(e) = self.table().get_mut(&key) {
+            e.hash = hash;
+            e.received = received;
+            e.complete = complete;
+            e.touched = Instant::now();
+            e.busy = false;
+        }
         Ok(())
     }
 

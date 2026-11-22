@@ -3045,6 +3045,12 @@ impl Session {
                 limits.uploads_per_message
             ));
         }
+        // One file, one name in the message: an honest master cannot send the
+        // same upload twice, and a hostile one saves nothing by it.
+        let mut seen = std::collections::HashSet::new();
+        if !refs.iter().all(|r| seen.insert(r.upload_id.as_str())) {
+            return Err("an attached file is named more than once in this message".into());
+        }
         let max = limits.upload_max_mb.saturating_mul(1 << 20);
         if let Some(r) = refs.iter().find(|r| r.size == 0 || r.size > max) {
             return Err(format!(
@@ -3066,7 +3072,8 @@ impl Session {
             // The name is text: scrubbed before the file is named, so the
             // path the event and the model's line give is the real one.
             let (dir, mut r2) = (folder.clone(), r.clone());
-            r2.name = self.node.cfg.secrets.scrub(&r.name);
+            let secrets = self.node.cfg.secrets.clone();
+            r2.name = crate::uploads::scrubbed_name(&r.name, |n| secrets.scrub(n));
             let one = tokio::task::spawn_blocking(move || {
                 crate::uploads::save_file(&dir, &staged, &r2.name, &r2.mime, r2.size, &r2.sha256)
             })

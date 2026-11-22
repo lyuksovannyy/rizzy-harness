@@ -348,7 +348,13 @@ fn a_rollback_removes_only_the_saved_file() {
     rollback(&rig.folder, &s);
     assert_eq!(rig.listing(), Vec::<String>::new());
     let s = rig.save("y.zip", b"saved").unwrap();
-    std::fs::remove_file(rig.folder.join("attachments/y.zip")).unwrap();
+    // The saved inode stays alive (moved aside, not deleted), so the file
+    // written in its place cannot get the same inode, on any filesystem.
+    std::fs::rename(
+        rig.folder.join("attachments/y.zip"),
+        rig.folder.join("attachments/y.saved"),
+    )
+    .unwrap();
     std::fs::write(rig.folder.join("attachments/y.zip"), b"the agent's own").unwrap();
     rollback(&rig.folder, &s);
     assert_eq!(
@@ -504,4 +510,80 @@ fn a_restart_wipes_the_staging_folder_and_none_means_off() {
         off.chunk(sid(), &"a".repeat(32), 0, 4, &sha(b"abcd"), b"abcd", MAX)
             .is_err()
     );
+}
+
+/// A name the scrubber changes into something `safe_name` changes again
+/// (a leading dot or dash, a zero-width character): the saved name is the
+/// fixed point, which the event's own scrub of the path leaves alone.
+#[test]
+fn the_scrubbed_name_is_a_fixed_point_of_both() {
+    let scrub = |n: &str| n.replace("SECRET", "-\u{200b}.hidden");
+    let got = scrubbed_name("SECRET.zip", scrub);
+    assert_eq!(got, "hidden.zip");
+    assert_eq!(safe_name(&scrub(&got)), got);
+    // A secret split by a zero-width character joins in safe_name, then goes.
+    let scrub2 = |n: &str| n.replace("topsecret", "[REDACTED]");
+    assert_eq!(
+        scrubbed_name("top\u{200b}secret.txt", scrub2),
+        "[REDACTED].txt"
+    );
+    // Nothing to change.
+    assert_eq!(scrubbed_name("a/b.zip", |n| n.to_string()), "b.zip");
+}
+
+/// The bound holds under concurrent starts (different chats push in
+/// parallel lanes): the check and the slot are one step, and a file being
+/// written keeps its slot.
+#[test]
+fn the_staging_bound_holds_under_concurrent_starts_and_counts_files_in_flight() {
+    let tmp = tempfile::tempdir().unwrap();
+    let st = std::sync::Arc::new(staging(tmp.path()));
+    let h = sha(b"abcd");
+    let ok = std::sync::atomic::AtomicUsize::new(0);
+    let gate = std::sync::Barrier::new(48);
+    std::thread::scope(|s| {
+        for i in 0..48usize {
+            let (st, h, ok, gate) = (&st, &h, &ok, &gate);
+            s.spawn(move || {
+                let me: SessionId = format!("0193f2a0-0000-7000-8000-{i:012}").parse().unwrap();
+                gate.wait();
+                if st
+                    .chunk(me, &format!("{i:032x}"), 0, 8, h, b"abcd", MAX)
+                    .is_ok()
+                {
+                    ok.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+        }
+    });
+    assert_eq!(ok.load(std::sync::atomic::Ordering::SeqCst), MAX_STAGED);
+    assert_eq!(st.held(), MAX_STAGED);
+}
+
+/// A partial push nobody finished is swept by the next chunk of anyone's,
+/// not only by a new start.
+#[test]
+fn an_expired_partial_file_is_swept_at_the_next_chunk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let st = staging(tmp.path());
+    let h = sha(b"abcd");
+    st.chunk(sid(), &"a".repeat(32), 0, 8, &h, b"abcd", MAX)
+        .unwrap();
+    let path = tmp
+        .path()
+        .join("uploads-stage")
+        .join(sid().to_string())
+        .join(format!("{}.part", "a".repeat(32)));
+    assert!(path.exists());
+    // Old enough: its time is rewound.
+    for e in st.table().values_mut() {
+        e.touched = Instant::now() - STAGE_TTL - Duration::from_secs(1);
+    }
+    // A later chunk of the same upload finds it gone (expired).
+    let e = st
+        .chunk(sid(), &"a".repeat(32), 4, 8, &h, b"abcd", MAX)
+        .unwrap_err();
+    assert!(e.contains("did not start here"), "{e}");
+    assert!(!path.exists());
+    assert_eq!(st.held(), 0);
 }
