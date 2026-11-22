@@ -60,7 +60,10 @@ pub struct SessionFile {
 /// Called by `Store::delete_session` inside its transaction: the chat's
 /// rows go, and the blobs they alone held are swept by the hourly sweep.
 pub(crate) fn on_session_deleted(tx: &Transaction, sid: &str) -> Result<()> {
-    tx.execute("DELETE FROM session_files WHERE session_id = ?1", params![sid])?;
+    tx.execute(
+        "DELETE FROM session_files WHERE session_id = ?1",
+        params![sid],
+    )?;
     Ok(())
 }
 
@@ -161,12 +164,11 @@ impl Store {
     /// the tool is offered to a turn only then.
     pub fn session_files_any(&self, sid: &str) -> Result<bool> {
         let conn = self.lock();
-        Ok(conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_files WHERE session_id = ?1)",
-                params![sid],
-                |r| r.get(0),
-            )?)
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_files WHERE session_id = ?1)",
+            params![sid],
+            |r| r.get(0),
+        )?)
     }
 
     /// The file `file_id` of chat `sid`, when the chat's own log has the

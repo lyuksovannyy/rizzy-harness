@@ -180,7 +180,8 @@ async fn turn_may(m: &Master, row: &harness_store::SessionRow) -> Result<OpenTur
 }
 
 /// What a turn is told when its agent has no switch.
-pub const NOT_OFFERED: &str = "attached files are not available to this agent: its \"Read attached files\" switch is off";
+pub const NOT_OFFERED: &str =
+    "attached files are not available to this agent: its \"Read attached files\" switch is off";
 
 /// The file `file_id` of chat `sid`, if its own log names it and it is the
 /// chat owner's blob.
@@ -270,11 +271,17 @@ pub async fn answer(
     m.inner.attached.take(sid, &open.turn_id)?;
     if q.file_id.is_empty()
         || q.file_id.len() > MAX_ID_CHARS
-        || !q.file_id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        || !q
+            .file_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
     {
         return Err("no such file in this chat: use the id the message names the file by".into());
     }
-    if q.entry.as_ref().is_some_and(|e| e.chars().count() > MAX_ENTRY_CHARS) {
+    if q.entry
+        .as_ref()
+        .is_some_and(|e| e.chars().count() > MAX_ENTRY_CHARS)
+    {
         return Err(format!("`entry` is at most {MAX_ENTRY_CHARS} characters"));
     }
     let file = file_of(m, &row, &q.file_id).await?;

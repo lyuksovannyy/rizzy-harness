@@ -18,9 +18,7 @@ use harness_core::{RawEvent, Secret, SessionId};
 use harness_master::auth::{Auth, Claim};
 use harness_master::{Master, router};
 use harness_node::NodeLink;
-use harness_protocol::{
-    CAP_ATTACHED, MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg,
-};
+use harness_protocol::{CAP_ATTACHED, MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg};
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -148,8 +146,12 @@ impl Fake {
     async fn take_prompt(&self, sid: SessionId, turn: &str) {
         let p = self.last_prompt(sid);
         let agent = p.agent.as_ref().map(|a| a.agent_ref());
-        self.emit(sid, "turn_started", json!({"turn_id": turn, "agent": agent}))
-            .await;
+        self.emit(
+            sid,
+            "turn_started",
+            json!({"turn_id": turn, "agent": agent}),
+        )
+        .await;
         let attached: Vec<Value> = p
             .attached
             .iter()
@@ -167,7 +169,11 @@ impl Fake {
     }
 
     /// Ask on behalf of `sid` and wait for the answer.
-    async fn ask(&self, sid: SessionId, request: AttachedRequest) -> Result<AttachedAnswer, String> {
+    async fn ask(
+        &self,
+        sid: SessionId,
+        request: AttachedRequest,
+    ) -> Result<AttachedAnswer, String> {
         let req_id = harness_core::new_id();
         self.tx
             .send(NodeToMaster::Attached {
@@ -249,7 +255,13 @@ async fn start_with(caps: &[&str]) -> T {
     }
 }
 
-async fn req(t: &T, method: Method, path: &str, body: Option<Value>, c: &str) -> (StatusCode, Value) {
+async fn req(
+    t: &T,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+    c: &str,
+) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new().request(method, format!("{}{path}", t.base));
     if let Some(b) = body {
         rb = rb.json(&b);
@@ -281,14 +293,26 @@ async fn users(t: &T) -> [String; 2] {
         .await,
     )
     .await;
-    let pw = req(t, Method::POST, "/api/users", Some(json!({"username": "bob"})), &alex)
-        .await
-        .1["password"]
+    let pw = req(
+        t,
+        Method::POST,
+        "/api/users",
+        Some(json!({"username": "bob"})),
+        &alex,
+    )
+    .await
+    .1["password"]
         .as_str()
         .unwrap()
         .to_string();
     let first = common::signed_in(
-        post_anon(t, "/api/login", json!({"username": "bob", "password": pw}), None).await,
+        post_anon(
+            t,
+            "/api/login",
+            json!({"username": "bob", "password": pw}),
+            None,
+        )
+        .await,
     )
     .await;
     let bob = common::signed_in(
@@ -348,13 +372,23 @@ async fn send(t: &T, who: &str, sid: SessionId, ids: &[&str], extra: Value) -> (
     for (k, v) in extra.as_object().unwrap() {
         body[k] = v.clone();
     }
-    req(t, Method::POST, &format!("/api/sessions/{sid}/prompt"), Some(body), who).await
+    req(
+        t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(body),
+        who,
+    )
+    .await
 }
 
 /// A zip with stored entries, made by hand: a text file, a binary one.
 fn zip() -> Vec<u8> {
     let ents: [(&str, &[u8]); 3] = [
-        ("hello.txt", b"one\ntwo\nthree\nsecret=sk-live-9f8e7d6c5b4a39281706\n"),
+        (
+            "hello.txt",
+            b"one\ntwo\nthree\nsecret=sk-live-9f8e7d6c5b4a39281706\n",
+        ),
         ("bin/blob.dat", &[0, 1, 2, 3, 250, 251, 252]),
         ("../../escape.txt", b"x"),
     ];
@@ -443,7 +477,14 @@ async fn a_plain_chat_keeps_a_zip_and_the_prompt_names_it_without_a_byte() {
     let [alex, _] = users(&t).await;
     let sid = chat(&t, &alex, json!({})).await;
     let bytes = zip();
-    let (st, v) = upload(&t, &alex, "Q3 report.zip", &format!("&session={sid}"), bytes.clone()).await;
+    let (st, v) = upload(
+        &t,
+        &alex,
+        "Q3 report.zip",
+        &format!("&session={sid}"),
+        bytes.clone(),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["kept"], json!(true), "{v}");
     assert!(v.get("saved").is_none(), "{v}");
@@ -475,8 +516,17 @@ async fn a_plain_chat_keeps_a_zip_and_the_prompt_names_it_without_a_byte() {
     landed(&t, sid).await;
     let got = t.chat.ask(sid, ask(AttachedOp::Info, &id)).await.unwrap();
     match got {
-        AttachedAnswer::Info { name, bytes: n, label, archive, .. } => {
-            assert_eq!((name.as_str(), n, label.as_str()), ("Q3 report.zip", bytes.len() as u64, "ZIP archive"));
+        AttachedAnswer::Info {
+            name,
+            bytes: n,
+            label,
+            archive,
+            ..
+        } => {
+            assert_eq!(
+                (name.as_str(), n, label.as_str()),
+                ("Q3 report.zip", bytes.len() as u64, "ZIP archive")
+            );
             assert!(archive);
         }
         other => panic!("{other:?}"),
@@ -494,8 +544,12 @@ async fn list_and_read_entries_of_the_zip() {
     let t = start().await;
     let [alex, _] = users(&t).await;
     let (sid, id) = with_file(&t, &alex, "t1").await;
-    let AttachedAnswer::List { entries, complete, more, .. } =
-        t.chat.ask(sid, ask(AttachedOp::List, &id)).await.unwrap()
+    let AttachedAnswer::List {
+        entries,
+        complete,
+        more,
+        ..
+    } = t.chat.ask(sid, ask(AttachedOp::List, &id)).await.unwrap()
     else {
         panic!("not a list")
     };
@@ -505,10 +559,16 @@ async fn list_and_read_entries_of_the_zip() {
     let mut r = ask(AttachedOp::Read, &id);
     r.entry = Some("hello.txt".into());
     r.limit = Some(2);
-    let AttachedAnswer::Read { mode, text, next, .. } = t.chat.ask(sid, r.clone()).await.unwrap() else {
+    let AttachedAnswer::Read {
+        mode, text, next, ..
+    } = t.chat.ask(sid, r.clone()).await.unwrap()
+    else {
         panic!()
     };
-    assert_eq!((mode.as_str(), text.as_str(), next), ("text", "1\tone\n2\ttwo", Some(3)));
+    assert_eq!(
+        (mode.as_str(), text.as_str(), next),
+        ("text", "1\tone\n2\ttwo", Some(3))
+    );
     r.entry = Some("bin/blob.dat".into());
     r.limit = None;
     let AttachedAnswer::Read { mode, text, .. } = t.chat.ask(sid, r.clone()).await.unwrap() else {
@@ -519,13 +579,17 @@ async fn list_and_read_entries_of_the_zip() {
     r.mode = Some(ReadMode::Strings);
     r.entry = Some("hello.txt".into());
     r.limit = None;
-    let AttachedAnswer::Read { mode, text, .. } = t.chat.ask(sid, r).await.unwrap() else { panic!() };
+    let AttachedAnswer::Read { mode, text, .. } = t.chat.ask(sid, r).await.unwrap() else {
+        panic!()
+    };
     assert_eq!(mode, "strings");
     assert!(text.contains("three") && !text.contains("one"), "{text}");
     // A path that tries to leave names an entry, nothing more.
     let mut r = ask(AttachedOp::Read, &id);
     r.entry = Some("../../escape.txt".into());
-    let AttachedAnswer::Read { text, .. } = t.chat.ask(sid, r).await.unwrap() else { panic!() };
+    let AttachedAnswer::Read { text, .. } = t.chat.ask(sid, r).await.unwrap() else {
+        panic!()
+    };
     assert_eq!(text, "1\tx");
     // Not an entry of the archive.
     let mut r = ask(AttachedOp::Read, &id);
@@ -545,32 +609,59 @@ async fn a_call_reaches_only_the_files_its_own_log_names() {
     let (b_chat, b_id) = with_file(&t, &bob, "t1").await;
     // Bob's chat asking for Alex's file id, and the reverse.
     for (sid, id) in [(b_chat, &a_id), (a_chat, &b_id)] {
-        let e = t.chat.ask(sid, ask(AttachedOp::Info, id)).await.unwrap_err();
+        let e = t
+            .chat
+            .ask(sid, ask(AttachedOp::Info, id))
+            .await
+            .unwrap_err();
         assert!(e.contains("no such file in this chat"), "{e}");
     }
     // Another chat of the same person, with a file of its own and its turn
     // open: it reaches that one and not the first chat's.
     let (other, o_id) = with_file(&t, &alex, "t1").await;
     assert_ne!(o_id, a_id);
-    let e = t.chat.ask(other, ask(AttachedOp::Info, &a_id)).await.unwrap_err();
+    let e = t
+        .chat
+        .ask(other, ask(AttachedOp::Info, &a_id))
+        .await
+        .unwrap_err();
     assert!(e.contains("no such file in this chat"), "{e}");
-    assert!(t.chat.ask(other, ask(AttachedOp::Info, &o_id)).await.is_ok());
+    assert!(
+        t.chat
+            .ask(other, ask(AttachedOp::Info, &o_id))
+            .await
+            .is_ok()
+    );
     // And one with no file at all is not offered the tool.
     let bare = chat(&t, &alex, json!({})).await;
     send(&t, &alex, bare, &[], json!({})).await;
     t.chat.take_prompt(bare, "t1").await;
     landed(&t, bare).await;
-    let e = t.chat.ask(bare, ask(AttachedOp::Info, &a_id)).await.unwrap_err();
+    let e = t
+        .chat
+        .ask(bare, ask(AttachedOp::Info, &a_id))
+        .await
+        .unwrap_err();
     assert!(e.contains("not available"), "{e}");
     // Ids that cannot be ids, and ones nobody sent.
     for bad in ["", "../x", "a b", &"x".repeat(200), "invented-id"] {
-        let e = t.chat.ask(a_chat, ask(AttachedOp::Info, bad)).await.unwrap_err();
+        let e = t
+            .chat
+            .ask(a_chat, ask(AttachedOp::Info, bad))
+            .await
+            .unwrap_err();
         assert!(e.contains("no such file in this chat"), "{bad}: {e}");
     }
     // A session that is not this node's.
-    let (link, stranger) = fake_node("stranger", &["profile:agentic", "exec:sandbox", CAP_ATTACHED]);
+    let (link, stranger) = fake_node(
+        "stranger",
+        &["profile:agentic", "exec:sandbox", CAP_ATTACHED],
+    );
     t.master.add_link(link, false).await.unwrap();
-    let e = stranger.ask(a_chat, ask(AttachedOp::Info, &a_id)).await.unwrap_err();
+    let e = stranger
+        .ask(a_chat, ask(AttachedOp::Info, &a_id))
+        .await
+        .unwrap_err();
     assert!(e.contains("no such session"), "{e}");
     // A sub-agent's chat: its own log has no file, and its parent's is not its.
     let child = SessionId::new();
@@ -584,10 +675,19 @@ async fn a_call_reaches_only_the_files_its_own_log_names() {
         )
         .await;
     landed(&t, child).await;
-    let e = t.chat.ask(child, ask(AttachedOp::Info, &a_id)).await.unwrap_err();
+    let e = t
+        .chat
+        .ask(child, ask(AttachedOp::Info, &a_id))
+        .await
+        .unwrap_err();
     assert!(e.contains("sub-agent"), "{e}");
     // The real one still works.
-    assert!(t.chat.ask(a_chat, ask(AttachedOp::Info, &a_id)).await.is_ok());
+    assert!(
+        t.chat
+            .ask(a_chat, ask(AttachedOp::Info, &a_id))
+            .await
+            .is_ok()
+    );
 }
 
 /// A fork is a chat of its own that keeps the messages it copies, and with
@@ -598,9 +698,19 @@ async fn a_fork_reads_the_same_blob_and_the_last_chat_frees_it() {
     let t = start().await;
     let [alex, _] = users(&t).await;
     let (p, id) = with_file(&t, &alex, "t1").await;
-    t.chat.emit(p, "assistant_message", json!({"turn_id": "t1", "message_id": "m1", "text": "ok"})).await;
     t.chat
-        .emit(p, "turn_ended", json!({"turn_id": "t1", "reason": "completed"}))
+        .emit(
+            p,
+            "assistant_message",
+            json!({"turn_id": "t1", "message_id": "m1", "text": "ok"}),
+        )
+        .await;
+    t.chat
+        .emit(
+            p,
+            "turn_ended",
+            json!({"turn_id": "t1", "reason": "completed"}),
+        )
         .await;
     landed(&t, p).await;
     let events = t.master.inner_mirror().events_after(p, 0, 100).unwrap();
@@ -620,13 +730,25 @@ async fn a_fork_reads_the_same_blob_and_the_last_chat_frees_it() {
         t.chat.emit(f, &e.kind, e.payload.clone()).await;
     }
     landed(&t, f).await;
-    t.master.inner_mirror().claim_session(f, Some(&owner_of(&t, p)), None).unwrap();
+    t.master
+        .inner_mirror()
+        .claim_session(f, Some(&owner_of(&t, p)), None)
+        .unwrap();
     // The fork's next turn.
-    t.chat.emit(f, "turn_started", json!({"turn_id": "t2"})).await;
-    landed(&t, f).await;
-    assert!(t.chat.ask(f, ask(AttachedOp::Info, &id)).await.is_err(), "no agent on the open turn");
     t.chat
-        .emit(f, "turn_ended", json!({"turn_id": "t2", "reason": "completed"}))
+        .emit(f, "turn_started", json!({"turn_id": "t2"}))
+        .await;
+    landed(&t, f).await;
+    assert!(
+        t.chat.ask(f, ask(AttachedOp::Info, &id)).await.is_err(),
+        "no agent on the open turn"
+    );
+    t.chat
+        .emit(
+            f,
+            "turn_ended",
+            json!({"turn_id": "t2", "reason": "completed"}),
+        )
         .await;
     send(&t, &alex, f, &[], json!({})).await;
     t.chat.take_prompt(f, "t3").await;
@@ -634,15 +756,42 @@ async fn a_fork_reads_the_same_blob_and_the_last_chat_frees_it() {
     let got = t.chat.ask(f, ask(AttachedOp::Info, &id)).await.unwrap();
     assert!(matches!(got, AttachedAnswer::Info { .. }), "{got:?}");
     // Delete the parent: the fork still reads, the blob stays.
-    let (st, _) = req(&t, Method::DELETE, &format!("/api/sessions/{p}"), None, &alex).await;
+    let (st, _) = req(
+        &t,
+        Method::DELETE,
+        &format!("/api/sessions/{p}"),
+        None,
+        &alex,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert!(t.chat.ask(f, ask(AttachedOp::Info, &id)).await.is_ok());
-    assert!(t.master.inner_mirror().blobs_unreferenced(i64::MAX).unwrap().is_empty());
+    assert!(
+        t.master
+            .inner_mirror()
+            .blobs_unreferenced(i64::MAX)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(blob_files(&t), 1);
     // The last chat goes: the blob is a leftover the sweep takes.
-    let (st, _) = req(&t, Method::DELETE, &format!("/api/sessions/{f}"), None, &alex).await;
+    let (st, _) = req(
+        &t,
+        Method::DELETE,
+        &format!("/api/sessions/{f}"),
+        None,
+        &alex,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(t.master.inner_mirror().blobs_unreferenced(i64::MAX).unwrap().len(), 1);
+    assert_eq!(
+        t.master
+            .inner_mirror()
+            .blobs_unreferenced(i64::MAX)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 fn owner_of(t: &T, sid: SessionId) -> String {
@@ -665,10 +814,20 @@ async fn the_switch_decides_at_attach_at_send_and_in_the_turn() {
     let [alex, _] = users(&t).await;
     let sid = chat(&t, &alex, json!({})).await;
     // At attach: Researcher has no such switch.
-    let (st, v) = upload(&t, &alex, "a.zip", &format!("&session={sid}&agent=researcher"), zip()).await;
+    let (st, v) = upload(
+        &t,
+        &alex,
+        "a.zip",
+        &format!("&session={sid}&agent=researcher"),
+        zip(),
+    )
+    .await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     let why = v["error"].as_str().unwrap();
-    assert!(why.contains("Read attached files") && why.contains("Researcher"), "{why}");
+    assert!(
+        why.contains("Read attached files") && why.contains("Researcher"),
+        "{why}"
+    );
     assert_eq!(blob_files(&t), 0, "nothing is stored");
     // At the home composer too (no chat yet).
     let (st, v) = upload(&t, &alex, "a.zip", "&agent=researcher", zip()).await;
@@ -681,9 +840,17 @@ async fn the_switch_decides_at_attach_at_send_and_in_the_turn() {
     let id = v["attachment_id"].as_str().unwrap().to_string();
     let (st, v) = send(&t, &alex, sid, &[&id], json!({"agent_id": "researcher"})).await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
-    assert!(v["error"].as_str().unwrap().contains("Read attached files"), "{v}");
     assert!(
-        !t.chat.seen.lock().unwrap().iter().any(|m| matches!(m, MasterToNode::Prompt(_))),
+        v["error"].as_str().unwrap().contains("Read attached files"),
+        "{v}"
+    );
+    assert!(
+        !t.chat
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| matches!(m, MasterToNode::Prompt(_))),
         "nothing reached the node"
     );
     // Given back: the same file goes with an agent that has the switch.
@@ -692,7 +859,13 @@ async fn the_switch_decides_at_attach_at_send_and_in_the_turn() {
     t.chat.take_prompt(sid, "t1").await;
     landed(&t, sid).await;
     assert!(t.chat.ask(sid, ask(AttachedOp::Info, &id)).await.is_ok());
-    t.chat.emit(sid, "turn_ended", json!({"turn_id": "t1", "reason": "completed"})).await;
+    t.chat
+        .emit(
+            sid,
+            "turn_ended",
+            json!({"turn_id": "t1", "reason": "completed"}),
+        )
+        .await;
     // A later turn of an agent without the switch: the tool is withheld and
     // the service refuses it from the log.
     let (st, v) = send(&t, &alex, sid, &[], json!({"agent_id": "researcher"})).await;
@@ -701,13 +874,29 @@ async fn the_switch_decides_at_attach_at_send_and_in_the_turn() {
     assert!(!p.agent.as_ref().unwrap().allows_tool("attached_file"));
     t.chat.take_prompt(sid, "t2").await;
     landed(&t, sid).await;
-    let e = t.chat.ask(sid, ask(AttachedOp::Info, &id)).await.unwrap_err();
+    let e = t
+        .chat
+        .ask(sid, ask(AttachedOp::Info, &id))
+        .await
+        .unwrap_err();
     assert!(e.contains("not available"), "{e}");
-    t.chat.emit(sid, "turn_ended", json!({"turn_id": "t2", "reason": "completed"})).await;
+    t.chat
+        .emit(
+            sid,
+            "turn_ended",
+            json!({"turn_id": "t2", "reason": "completed"}),
+        )
+        .await;
     // A chat that never had a file is not offered the tool.
     let bare = chat(&t, &alex, json!({})).await;
     send(&t, &alex, bare, &[], json!({})).await;
-    assert!(!t.chat.last_prompt(bare).agent.unwrap().allows_tool("attached_file"));
+    assert!(
+        !t.chat
+            .last_prompt(bare)
+            .agent
+            .unwrap()
+            .allows_tool("attached_file")
+    );
 }
 
 /// A node that does not announce the capability: the chat refuses the file
@@ -719,7 +908,10 @@ async fn an_old_chat_runtime_is_refused_cleanly() {
     let sid = chat(&t, &alex, json!({})).await;
     let (st, v) = upload(&t, &alex, "a.zip", &format!("&session={sid}"), zip()).await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
-    assert!(v["error"].as_str().unwrap().contains("cannot open files"), "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("cannot open files"),
+        "{v}"
+    );
     assert_eq!(blob_files(&t), 0);
     assert!(t.chat.nothing_came(sid, ask(AttachedOp::Info, "x")).await);
 }
@@ -787,7 +979,10 @@ async fn a_file_removed_while_it_is_read_is_a_sentence() {
     let t = start().await;
     let [alex, _] = users(&t).await;
     let (sid, id) = with_file(&t, &alex, "t1").await;
-    for shard in std::fs::read_dir(t.dir.path().join("blobs")).unwrap().flatten() {
+    for shard in std::fs::read_dir(t.dir.path().join("blobs"))
+        .unwrap()
+        .flatten()
+    {
         if shard.file_name() == "tmp" {
             continue;
         }
@@ -795,7 +990,11 @@ async fn a_file_removed_while_it_is_read_is_a_sentence() {
             std::fs::remove_file(f.path()).unwrap();
         }
     }
-    let e = t.chat.ask(sid, ask(AttachedOp::Info, &id)).await.unwrap_err();
+    let e = t
+        .chat
+        .ask(sid, ask(AttachedOp::Info, &id))
+        .await
+        .unwrap_err();
     assert!(e.contains("the file is gone"), "{e}");
 }
 
@@ -849,7 +1048,12 @@ async fn a_zip_bomb_is_read_in_a_window() {
     let mut r = ask(AttachedOp::Read, &id);
     r.entry = Some("zeros.bin".into());
     let started = std::time::Instant::now();
-    let AttachedAnswer::Read { mode, text, shown, .. } = t.chat.ask(sid, r).await.unwrap() else { panic!() };
+    let AttachedAnswer::Read {
+        mode, text, shown, ..
+    } = t.chat.ask(sid, r).await.unwrap()
+    else {
+        panic!()
+    };
     assert_eq!((mode.as_str(), shown), ("hex", 512));
     assert!(text.len() < 8192);
     assert!(started.elapsed() < Duration::from_secs(5));

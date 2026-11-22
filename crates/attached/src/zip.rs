@@ -41,7 +41,10 @@ pub(crate) struct Raw {
 /// Where the central directory is: `(offset, size)`.
 fn directory(b: &[u8]) -> Result<(u64, u64), String> {
     let start = b.len().saturating_sub(22 + MAX_COMMENT);
-    let mut at = b.len().checked_sub(22).ok_or("it is too short to be a zip")?;
+    let mut at = b
+        .len()
+        .checked_sub(22)
+        .ok_or("it is too short to be a zip")?;
     loop {
         if u32le(b, at) == Some(EOCD) {
             break;
@@ -123,8 +126,11 @@ pub(crate) fn walk(
             let len = usize::from(u16le(extra, e + 2).unwrap_or(0));
             let body = extra.get(e + 4..e + 4 + len).unwrap_or(&[]);
             if id == 1 {
-                let (want_size, want_comp, want_local) =
-                    (size == 0xFFFF_FFFF, comp == 0xFFFF_FFFF, local == 0xFFFF_FFFF);
+                let (want_size, want_comp, want_local) = (
+                    size == 0xFFFF_FFFF,
+                    comp == 0xFFFF_FFFF,
+                    local == 0xFFFF_FFFF,
+                );
                 let mut p = 0;
                 for (wanted, v) in [
                     (want_size, &mut size),
@@ -142,7 +148,9 @@ pub(crate) fn walk(
         let raw_name = String::from_utf8_lossy(name);
         let unix = made >> 8 == 3;
         let mode = external >> 16;
-        let dir = raw_name.ends_with('/') || (external & 0x10 != 0) || (unix && mode & 0o170000 == 0o040000);
+        let dir = raw_name.ends_with('/')
+            || (external & 0x10 != 0)
+            || (unix && mode & 0o170000 == 0o040000);
         let kind = if dir {
             EntryKind::Dir
         } else if unix && mode & 0o170000 == 0o120000 {

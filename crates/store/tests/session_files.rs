@@ -141,7 +141,12 @@ impl Log {
 
 fn append_all(s: &Store, node: &str, evs: &[RawEvent]) {
     for e in evs {
-        assert_eq!(s.append(node, e).unwrap(), AppendOutcome::Applied, "{}", e.seq);
+        assert_eq!(
+            s.append(node, e).unwrap(),
+            AppendOutcome::Applied,
+            "{}",
+            e.seq
+        );
     }
 }
 
@@ -170,12 +175,19 @@ fn a_file_is_served_once_the_chats_log_names_it_and_only_there() {
     l.turn("t1", &[("f1", "aa")]);
     append_all(&s, NODE, &l.events[from..]);
     let got = s.session_file(&sid, "f1").unwrap().unwrap();
-    assert_eq!((got.blob_id.as_str(), got.size, got.owner_id.as_deref()), ("bf1", 10, Some("u1")));
+    assert_eq!(
+        (got.blob_id.as_str(), got.size, got.owner_id.as_deref()),
+        ("bf1", 10, Some("u1"))
+    );
     assert_eq!(got.sha256, "aa");
     // Never another chat's, never an id nobody sent.
     let other = Log::new();
     append_all(&s, NODE, &other.events);
-    assert!(s.session_file(&other.sid.to_string(), "f1").unwrap().is_none());
+    assert!(
+        s.session_file(&other.sid.to_string(), "f1")
+            .unwrap()
+            .is_none()
+    );
     assert!(s.session_file(&sid, "invented").unwrap().is_none());
     // A message that names a file the master never sent this chat makes no row.
     let mut m = Log::new();
@@ -191,16 +203,26 @@ fn a_released_hold_goes_but_a_logged_row_stays() {
     let mut l = Log::new();
     append_all(&s, NODE, &l.events);
     let sid = l.sid.to_string();
-    s.session_files_hold(&sid, &[taken(&s, "f1", "u1", "aa"), taken(&s, "f2", "u1", "bb")])
-        .unwrap();
+    s.session_files_hold(
+        &sid,
+        &[taken(&s, "f1", "u1", "aa"), taken(&s, "f2", "u1", "bb")],
+    )
+    .unwrap();
     let from = l.events.len();
     l.turn("t1", &[("f2", "bb")]);
     append_all(&s, NODE, &l.events[from..]);
-    s.session_files_release(&sid, &["f1".into(), "f2".into()]).unwrap();
-    assert!(s.session_file(&sid, "f2").unwrap().is_some(), "logged: kept");
+    s.session_files_release(&sid, &["f1".into(), "f2".into()])
+        .unwrap();
+    assert!(
+        s.session_file(&sid, "f2").unwrap().is_some(),
+        "logged: kept"
+    );
     // f1 is gone: no row refers to its blob (the upload row still does until sent).
     s.chat_uploads_done(&["f1".into()]).unwrap();
-    assert_eq!(s.blobs_unreferenced(i64::MAX).unwrap(), vec!["bf1".to_string()]);
+    assert_eq!(
+        s.blobs_unreferenced(i64::MAX).unwrap(),
+        vec!["bf1".to_string()]
+    );
 }
 
 /// The sweep: a blob lives while a chat's row refers to it, also after
@@ -225,8 +247,14 @@ fn the_blob_lives_as_long_as_a_chat_refers_to_it() {
     assert!(!blob_gone(&s, "bf1"));
     // The chat goes: its rows go and the blob is a leftover the sweep takes.
     assert!(s.delete_session(l.sid, true).unwrap());
-    assert_eq!(s.blobs_unreferenced(i64::MAX).unwrap(), vec!["bf1".to_string()]);
-    assert_eq!(s.blob_delete(&["bf1".into()]).unwrap(), vec!["bf1".to_string()]);
+    assert_eq!(
+        s.blobs_unreferenced(i64::MAX).unwrap(),
+        vec!["bf1".to_string()]
+    );
+    assert_eq!(
+        s.blob_delete(&["bf1".into()]).unwrap(),
+        vec!["bf1".to_string()]
+    );
     assert!(blob_gone(&s, "bf1"));
     assert!(s.session_file(&sid, "f1").unwrap().is_none());
 }
@@ -243,17 +271,29 @@ fn a_fork_shares_the_blob_and_the_last_chat_frees_it() {
     append_all(&s, NODE, &p.events[..1]);
     s.claim_session(p.sid, Some("u1"), None).unwrap();
     let psid = p.sid.to_string();
-    s.session_files_hold(&psid, &[taken(&s, "f1", "u1", "aa")]).unwrap();
+    s.session_files_hold(&psid, &[taken(&s, "f1", "u1", "aa")])
+        .unwrap();
     s.chat_uploads_done(&["f1".into()]).unwrap();
     append_all(&s, NODE, &p.events[1..]);
     assert!(s.session_file(&psid, "f1").unwrap().is_some());
 
     // Fork after the first turn: the copy names f1.
     let cut = fork::check(&p.events, "t1").unwrap();
-    let f = fork::build(&p.events, &cut, SessionId::new(), "Chat (fork)", "/w", 5_000).unwrap();
+    let f = fork::build(
+        &p.events,
+        &cut,
+        SessionId::new(),
+        "Chat (fork)",
+        "/w",
+        5_000,
+    )
+    .unwrap();
     s.write_fork(NODE, p.sid, &f).unwrap();
     let fsid = f[0].session_id.to_string();
-    let got = s.session_file(&fsid, "f1").unwrap().expect("the fork's own row");
+    let got = s
+        .session_file(&fsid, "f1")
+        .unwrap()
+        .expect("the fork's own row");
     assert_eq!(got.blob_id, "bf1");
 
     // The parent goes: the fork still reads it, the blob stays.
@@ -263,7 +303,10 @@ fn a_fork_shares_the_blob_and_the_last_chat_frees_it() {
     assert!(s.session_file(&psid, "f1").unwrap().is_none());
     // The last one goes: the blob is freed.
     assert!(s.delete_session(f[0].session_id, true).unwrap());
-    assert_eq!(s.blobs_unreferenced(i64::MAX).unwrap(), vec!["bf1".to_string()]);
+    assert_eq!(
+        s.blobs_unreferenced(i64::MAX).unwrap(),
+        vec!["bf1".to_string()]
+    );
 }
 
 /// A node that says its new chat is a fork of another node's chat (or of
@@ -276,23 +319,33 @@ fn a_fork_claim_cannot_reach_another_nodes_chat_or_an_unlogged_file() {
     append_all(&s, NODE, &p.events[..1]);
     s.claim_session(p.sid, Some("u1"), None).unwrap();
     let psid = p.sid.to_string();
-    s.session_files_hold(&psid, &[taken(&s, "f1", "u1", "aa")]).unwrap();
+    s.session_files_hold(&psid, &[taken(&s, "f1", "u1", "aa")])
+        .unwrap();
     append_all(&s, NODE, &p.events[1..]);
     assert!(s.session_file(&psid, "f1").unwrap().is_some());
     let cut = fork::check(&p.events, "t1").unwrap();
     let f = fork::build(&p.events, &cut, SessionId::new(), "x", "/w", 5_000).unwrap();
     // Another node writes the "fork" of this node's chat.
     s.write_fork("evil", p.sid, &f).unwrap();
-    assert!(s.session_file(&f[0].session_id.to_string(), "f1").unwrap().is_none());
+    assert!(
+        s.session_file(&f[0].session_id.to_string(), "f1")
+            .unwrap()
+            .is_none()
+    );
     // A fork of a parent whose row was only held (never logged there).
     let mut h = Log::new();
     h.turn("t1", &[("f9", "zz")]);
     append_all(&s, NODE, &h.events[..1]);
-    s.session_files_hold(&h.sid.to_string(), &[taken(&s, "f9", "u1", "zz")]).unwrap();
+    s.session_files_hold(&h.sid.to_string(), &[taken(&s, "f9", "u1", "zz")])
+        .unwrap();
     let cut = fork::check(&h.events, "t1").unwrap();
     let f = fork::build(&h.events, &cut, SessionId::new(), "x", "/w", 5_000).unwrap();
     s.write_fork(NODE, h.sid, &f).unwrap();
-    assert!(s.session_file(&f[0].session_id.to_string(), "f9").unwrap().is_none());
+    assert!(
+        s.session_file(&f[0].session_id.to_string(), "f9")
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// Another account's blob is not reachable by claiming its upload id: the
@@ -304,12 +357,17 @@ fn the_row_records_whose_blob_it_is() {
     let mut l = Log::new();
     append_all(&s, NODE, &l.events);
     let sid = l.sid.to_string();
-    s.session_files_hold(&sid, &[taken(&s, "f1", "u2", "aa")]).unwrap();
+    s.session_files_hold(&sid, &[taken(&s, "f1", "u2", "aa")])
+        .unwrap();
     let from = l.events.len();
     l.turn("t1", &[("f1", "aa")]);
     append_all(&s, NODE, &l.events[from..]);
     assert_eq!(
-        s.session_file(&sid, "f1").unwrap().unwrap().owner_id.as_deref(),
+        s.session_file(&sid, "f1")
+            .unwrap()
+            .unwrap()
+            .owner_id
+            .as_deref(),
         Some("u2")
     );
 }

@@ -115,9 +115,7 @@ impl Tool for AttachedFileTool {
 }
 
 fn entry_line(e: &EntryView) -> String {
-    let size = e
-        .size
-        .map_or_else(|| "-".to_string(), |s| s.to_string());
+    let size = e.size.map_or_else(|| "-".to_string(), |s| s.to_string());
     let detail = if e.detail.is_empty() {
         String::new()
     } else {
@@ -289,7 +287,10 @@ mod tests {
         assert_eq!(got.op, AttachedOp::Read);
         assert_eq!(got.file_id, "ab-12x", "an id keeps only its own characters");
         assert_eq!(got.entry.as_deref(), Some("a/b.txt"));
-        assert_eq!((got.offset, got.limit, got.mode), (Some(3), Some(5), Some(ReadMode::Hex)));
+        assert_eq!(
+            (got.offset, got.limit, got.mode),
+            (Some(3), Some(5), Some(ReadMode::Hex))
+        );
         // Refusals before anything is asked.
         for bad in [
             json!({"op": "write", "file_id": "a"}),
@@ -301,7 +302,9 @@ mod tests {
         }
         assert_eq!(f.0.lock().unwrap().len(), 1);
         let none = ToolCtx::new(std::env::temp_dir());
-        let o = AttachedFileTool.run(&none, json!({"op": "info", "file_id": "a"})).await;
+        let o = AttachedFileTool
+            .run(&none, json!({"op": "info", "file_id": "a"}))
+            .await;
         assert!(!o.ok && o.output.contains("not available"));
     }
 
@@ -354,7 +357,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_refusal_is_a_sentence_for_the_model() {
-        let f = Arc::new(Fake(Mutex::new(vec![]), Err("no such file\n[harness] x".into())));
+        let f = Arc::new(Fake(
+            Mutex::new(vec![]),
+            Err("no such file\n[harness] x".into()),
+        ));
         let o = AttachedFileTool
             .run(&ctx(f), json!({"op": "info", "file_id": "nope"}))
             .await;

@@ -68,11 +68,14 @@ enum Target {
     Plain(String),
     /// A coding chat: its node's limit when the chat is known. `kept`: a
     /// plain chat keeps it for `attached_file` (T95) instead of a folder.
-    Folder {
-        max: u64,
-        session: Option<String>,
-        kept: bool,
-    },
+    Folder(Dest),
+}
+
+/// Where a kept file goes.
+struct Dest {
+    max: u64,
+    session: Option<String>,
+    kept: bool,
 }
 
 /// A plain chat (or one to come) keeps the file when the agent it goes to
@@ -111,11 +114,11 @@ async fn kept_or_plain(
     {
         return Target::Plain(uploads::switch_off(&a.name));
     }
-    Target::Folder {
+    Target::Folder(Dest {
         max: crate::attached::MAX_FILE,
         session: row.map(|r| r.session_id.to_string()),
         kept: true,
-    }
+    })
 }
 
 fn too_large(max: u64) -> ApiError {
@@ -128,11 +131,11 @@ fn too_large(max: u64) -> ApiError {
 async fn target(m: &Master, who: &crate::auth::Principal, q: &UploadQuery) -> ApiResult<Target> {
     let Some(id) = q.session.as_deref().filter(|s| !s.is_empty()) else {
         return Ok(if matches!(q.agentic.as_deref(), Some("1" | "true")) {
-            Target::Folder {
+            Target::Folder(Dest {
                 max: uploads::DEFAULT_MAX,
                 session: None,
                 kept: false,
-            }
+            })
         } else {
             kept_or_plain(m, None, q.agent.as_deref()).await
         });
@@ -151,11 +154,11 @@ async fn target(m: &Master, who: &crate::auth::Principal, q: &UploadQuery) -> Ap
     // send refuses a node that cannot save files, and says to update it).
     let max =
         uploads::limits(m, &row.node_id).map_or(uploads::DEFAULT_MAX, |l| l.max_mb * 1024 * 1024);
-    Ok(Target::Folder {
+    Ok(Target::Folder(Dest {
         max,
         session: Some(row.session_id.to_string()),
         kept: false,
-    })
+    }))
 }
 
 async fn upload(
@@ -168,7 +171,7 @@ async fn upload(
     let target = target(&m, &who, &q).await?;
     let text_max = MAX_UPLOAD as u64;
     let ceiling = match &target {
-        Target::Folder { max, .. } => *max,
+        Target::Folder(d) => d.max,
         Target::Plain(_) => text_max,
     };
     let length = headers
@@ -210,16 +213,16 @@ async fn upload(
         // Past what is read as text, which is also the most any file may be.
         return Err(too_large(ceiling.min(text_max)));
     }
-    let keep_copy = matches!(target, Target::Folder { .. }).then(|| head.clone());
+    let keep_copy = matches!(target, Target::Folder(_)).then(|| head.clone());
     match attachments::extract(&q.name, head, m.pdf_reader()).await {
         Ok(a) => store_text(&m, &who, a).await,
         Err(e) if e.busy() => Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, e.to_string())),
         // Not text, or a PDF that cannot be read: a coding chat keeps it
         // as a file (never an empty one: the node saves none).
         Err(e @ (ExtractError::Binary | ExtractError::Pdf(_))) => match (target, keep_copy) {
-            (Target::Folder { max, session, kept }, Some(bytes)) => {
+            (Target::Folder(dest), Some(bytes)) => {
                 let len = bytes.len() as u64;
-                keep(&m, &who, &q, session, Some(len), Body::from(bytes), max, kept).await
+                keep(&m, &who, &q, dest, Some(len), Body::from(bytes)).await
             }
             (Target::Plain(why), _) if matches!(e, ExtractError::Binary) => {
                 Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, why))
@@ -269,12 +272,11 @@ async fn keep(
     m: &Master,
     who: &crate::auth::Principal,
     q: &UploadQuery,
-    session: Option<String>,
+    dest: Dest,
     length: Option<u64>,
     body: Body,
-    max: u64,
-    kept: bool,
 ) -> ApiResult<Json<Value>> {
+    let Dest { max, session, kept } = dest;
     let refused = |(code, msg): storage::Refusal| ApiError(code, msg);
     let st = storage::get(m).ok_or_else(|| {
         ApiError(

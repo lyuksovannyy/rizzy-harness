@@ -1077,7 +1077,11 @@ fn a_version_4_database_is_migrated_to_the_latest_and_keeps_its_rows() {
         let c = Connection::open(&path).unwrap();
         assert_eq!(count(&c, "events"), 1, "{name}: the row is kept");
         assert_eq!(count(&c, "chat_uploads"), 0, "{name}");
-        assert_eq!(count(&c, "session_files"), 0, "{name}: the new table is there");
+        assert_eq!(
+            count(&c, "session_files"),
+            0,
+            "{name}: the new table is there"
+        );
         drop(c);
         drop(Store::open(&path, d).unwrap());
     }

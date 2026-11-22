@@ -5,9 +5,9 @@
 
 pub mod approval;
 pub mod args;
+mod attached;
 pub mod background;
 mod bash;
-mod attached;
 mod board;
 pub mod connector;
 pub mod contain;
@@ -65,12 +65,12 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 pub use approval::{CallKey, call_key};
+pub use attached::AttachedFileTool;
 pub use background::{BashOutput, BashStop};
 pub use bash::{
     Bash, ENDED_MS_LEAD, FOREGROUND_DESCRIPTION, HOST_DESCRIPTION, KEPT_OUTPUT_LEAD,
     STILL_ALIVE_TAIL, ShellChild, foreground_schema, read_only_note,
 };
-pub use attached::AttachedFileTool;
 pub use board::{Board, BoardEdit, render as render_board};
 pub use edit::Edit;
 pub use env::ToolEnv;

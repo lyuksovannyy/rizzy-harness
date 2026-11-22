@@ -2,8 +2,8 @@
 //! session's event log, and talks to the master over a `NodeLink`.
 
 pub mod artifacts;
-mod audit;
 mod attached;
+mod audit;
 mod board;
 mod connectors;
 mod environment;
@@ -899,7 +899,11 @@ impl NodeRuntime {
             // `attached_file` likewise (PLAN.md T95): the master keeps a
             // plain chat's file, and answers reads of it, only for a node
             // that offers the tool.
-            if self.inner.cfg.backend.has_tool(harness_core::attached::TOOL)
+            if self
+                .inner
+                .cfg
+                .backend
+                .has_tool(harness_core::attached::TOOL)
                 && !self.inner.cfg.policy.denies(harness_core::attached::TOOL)
             {
                 capabilities.push(harness_protocol::CAP_ATTACHED.into());

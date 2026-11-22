@@ -683,10 +683,13 @@ fn read_hex(r: &mut dyn Read, req: &ReadReq<'_>) -> io::Result<Out> {
             }
         }
         text.push_str("  |");
-        text.extend(
-            row.iter()
-                .map(|b| if (0x20..0x7f).contains(b) { *b as char } else { '.' }),
-        );
+        text.extend(row.iter().map(|b| {
+            if (0x20..0x7f).contains(b) {
+                *b as char
+            } else {
+                '.'
+            }
+        }));
         text.push('|');
     }
     Ok(Out {
@@ -825,10 +828,10 @@ fn read_text(r: &mut dyn Read, req: &ReadReq<'_>) -> io::Result<Out> {
     // A finished line: kept when it is in the window; false when the window
     // is full (the caller stops after noting where to go on).
     let finish_line = |cur: &mut Vec<u8>,
-                           over: &mut bool,
-                           lineno: u64,
-                           lines: &mut Vec<String>,
-                           chars: &mut usize|
+                       over: &mut bool,
+                       lineno: u64,
+                       lines: &mut Vec<String>,
+                       chars: &mut usize|
      -> bool {
         if lineno >= first && lineno < last {
             let mut s = String::from_utf8_lossy(cur).into_owned();

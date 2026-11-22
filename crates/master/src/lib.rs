@@ -2935,7 +2935,10 @@ impl Master {
             if held {
                 let (id, ids) = (
                     sid.to_string(),
-                    uploads.iter().map(|u| u.upload_id.clone()).collect::<Vec<_>>(),
+                    uploads
+                        .iter()
+                        .map(|u| u.upload_id.clone())
+                        .collect::<Vec<_>>(),
                 );
                 if let Err(e) = self
                     .inner

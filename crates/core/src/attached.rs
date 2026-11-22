@@ -156,8 +156,14 @@ mod tests {
         assert_eq!(bare.entry, None);
         for extra in ["user_id", "owner", "session_id", "workspace_id", "path"] {
             let v = json!({"op": "info", "file_id": "f1", extra: "x"});
-            assert!(serde_json::from_value::<AttachedRequest>(v).is_err(), "{extra}");
+            assert!(
+                serde_json::from_value::<AttachedRequest>(v).is_err(),
+                "{extra}"
+            );
         }
-        assert!(serde_json::from_value::<AttachedRequest>(json!({"op": "write", "file_id": "f"})).is_err());
+        assert!(
+            serde_json::from_value::<AttachedRequest>(json!({"op": "write", "file_id": "f"}))
+                .is_err()
+        );
     }
 }

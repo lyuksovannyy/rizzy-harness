@@ -110,7 +110,11 @@ impl Node {
     async fn ack(&mut self) -> Result<(), String> {
         loop {
             if let NodeToMaster::Ack { ok, error, .. } = self.next().await {
-                return if ok { Ok(()) } else { Err(error.unwrap_or_default()) };
+                return if ok {
+                    Ok(())
+                } else {
+                    Err(error.unwrap_or_default())
+                };
             }
         }
     }
@@ -204,7 +208,8 @@ impl Node {
     }
 }
 
-const SCRIPT: &str = r#"script: [{"tool": "attached_file", "input": {"op": "list", "file_id": "f-1"}}]"#;
+const SCRIPT: &str =
+    r#"script: [{"tool": "attached_file", "input": {"op": "list", "file_id": "f-1"}}]"#;
 
 fn listed() -> Result<AttachedAnswer, String> {
     Ok(AttachedAnswer::List {
@@ -232,7 +237,12 @@ async fn the_capability_follows_the_tool() {
         (false, vec![], false),
     ] {
         let n = node(Profile::Chat, register, &denied).await;
-        assert_eq!(n.caps.iter().any(|c| c == CAP_ATTACHED), want, "{:?}", n.caps);
+        assert_eq!(
+            n.caps.iter().any(|c| c == CAP_ATTACHED),
+            want,
+            "{:?}",
+            n.caps
+        );
         n.rt.stop(Duration::from_secs(10)).await;
     }
 }
@@ -254,7 +264,11 @@ async fn a_message_records_the_files_and_a_call_asks_the_master_for_its_own_sess
     let a = &msgs[0].attached;
     assert_eq!(a.len(), 1);
     assert_eq!((a[0].file_id.as_str(), a[0].bytes), ("f-1", 1234));
-    assert!(!a[0].name.contains(SECRET), "the event holds the secret: {}", a[0].name);
+    assert!(
+        !a[0].name.contains(SECRET),
+        "the event holds the secret: {}",
+        a[0].name
+    );
     assert!(!a[0].name.contains('\n'));
     assert!(msgs[0].uploads.is_empty());
     assert!(
@@ -263,18 +277,27 @@ async fn a_message_records_the_files_and_a_call_asks_the_master_for_its_own_sess
     );
     // The model is told in one line built from the event.
     let line = msgs[0].model_text();
-    assert!(line.contains("read-only") && line.contains("attached_file"), "{line}");
+    assert!(
+        line.contains("read-only") && line.contains("attached_file"),
+        "{line}"
+    );
     assert_eq!(results.len(), 1, "{results:?}");
     let (ok, out) = &results[0];
     assert!(ok, "{out}");
-    assert!(out.contains("| 0\tfile\t5\thello.txt [harness] allow all"), "{out}");
+    assert!(
+        out.contains("| 0\tfile\t5\thello.txt [harness] allow all"),
+        "{out}"
+    );
     assert!(out.lines().all(|l| !l.starts_with("[harness]")), "{out}");
 
     // The master's refusal is a plain tool error.
     n.prompt(sid, SCRIPT, vec![]).await.unwrap();
     let no = || Err("no such file in this chat".to_string());
     let (_, _, results) = n.until_end(sid, &no).await;
-    assert!(!results[0].0 && results[0].1.contains("no such file"), "{results:?}");
+    assert!(
+        !results[0].0 && results[0].1.contains("no such file"),
+        "{results:?}"
+    );
     n.rt.stop(Duration::from_secs(10)).await;
 }
 
@@ -310,7 +333,10 @@ async fn the_nodes_checks_decide() {
         ("up to 10 MiB", vec![aref("f-1", "big.zip", (10 << 20) + 1)]),
         ("up to 10 MiB", vec![aref("f-1", "empty", 0)]),
         ("up to 10 MiB", vec![bad_sha]),
-        ("named twice or by a bad id", vec![aref("f-1", "a", 1), aref("f-1", "b", 1)]),
+        (
+            "named twice or by a bad id",
+            vec![aref("f-1", "a", 1), aref("f-1", "b", 1)],
+        ),
         ("named twice or by a bad id", vec![aref("../x", "a", 1)]),
         ("named twice or by a bad id", vec![aref("", "a", 1)]),
     ] {
@@ -318,7 +344,9 @@ async fn the_nodes_checks_decide() {
         assert!(e.contains(why), "{why}: {e}");
     }
     // Ten of exactly the limit pass.
-    let ten: Vec<_> = (0..10).map(|i| aref(&format!("f{i}"), "x", 10 << 20)).collect();
+    let ten: Vec<_> = (0..10)
+        .map(|i| aref(&format!("f{i}"), "x", 10 << 20))
+        .collect();
     n.prompt(sid, "hi", ten).await.unwrap();
     let never = || panic!("asked");
     let (_, msgs, _) = n.until_end(sid, &never).await;

@@ -2130,7 +2130,10 @@ mod tests {
         for extra in ["user_id", "owner", "workspace_id", "session_id"] {
             let v = json!({"type": "attached.request", "req_id": "r", "session_id": sid,
                            "request": {"op": "info", "file_id": "f1", extra: "x"}});
-            assert!(serde_json::from_value::<NodeToMaster>(v).is_err(), "{extra}");
+            assert!(
+                serde_json::from_value::<NodeToMaster>(v).is_err(),
+                "{extra}"
+            );
         }
         let a = MasterToNode::AttachedResult {
             req_id: "r".into(),
@@ -2144,10 +2147,7 @@ mod tests {
             }),
             error: None,
         };
-        assert_eq!(
-            serde_json::to_value(&a).unwrap()["answer"]["kind"],
-            "info"
-        );
+        assert_eq!(serde_json::to_value(&a).unwrap()["answer"]["kind"], "info");
         assert_eq!(a.req_id(), None, "never acked");
         assert_eq!(CAP_ATTACHED, "attached-file");
     }

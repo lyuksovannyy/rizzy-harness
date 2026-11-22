@@ -3710,7 +3710,10 @@ mod attached_line_tests {
         assert!(ATTACHED_LEAD.starts_with(NOTE_LEAD));
         assert_eq!(own_words(&m.model_text()), "What is in it?");
         let one = message(vec![file("i", "x.zip", 5)]).model_text();
-        assert!(one.contains("1 file, read-only") && one.contains("It is the person's file"), "{one}");
+        assert!(
+            one.contains("1 file, read-only") && one.contains("It is the person's file"),
+            "{one}"
+        );
         assert_eq!(message(vec![]).model_text(), "What is in it?");
     }
 
@@ -3727,7 +3730,10 @@ mod attached_line_tests {
         let sent = m.model_text();
         let after = sent.strip_prefix("What is in it?\n\n").unwrap();
         assert!(after.starts_with(ATTACHED_LEAD), "{after}");
-        assert!(!after.contains('\n') && !after.contains('\u{2028}'), "{after:?}");
+        assert!(
+            !after.contains('\n') && !after.contains('\u{2028}'),
+            "{after:?}"
+        );
         // Two quotes around the name and nothing else of the person's data.
         assert_eq!(after.matches('"').count(), 2, "{after}");
         assert!(!after.contains('\u{201C}'));

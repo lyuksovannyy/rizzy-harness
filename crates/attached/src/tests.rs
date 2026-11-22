@@ -28,7 +28,11 @@ fn zip_with(ents: &[Ent<'_>], declared: Option<u64>) -> Vec<u8> {
     let mut out = Vec::new();
     let mut central = Vec::new();
     for (i, e) in ents.iter().enumerate() {
-        let body = if e.deflate { deflate(e.data) } else { e.data.to_vec() };
+        let body = if e.deflate {
+            deflate(e.data)
+        } else {
+            e.data.to_vec()
+        };
         let at = out.len() as u32;
         out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
         out.extend_from_slice(&[20, 0, 0, 0]);
@@ -126,8 +130,11 @@ fn kinds_are_told_by_the_first_bytes() {
     assert_eq!(detect(&zip(&[("a", b"x")])), Kind::Zip);
     assert_eq!(detect(&gz(b"hello")), Kind::Gz);
     let t = tar_with(|b| {
-        b.append(&file_header("a.txt", 2, tar::EntryType::Regular), &b"hi"[..])
-            .unwrap()
+        b.append(
+            &file_header("a.txt", 2, tar::EntryType::Regular),
+            &b"hi"[..],
+        )
+        .unwrap()
     });
     assert_eq!(detect(&t), Kind::Tar);
     assert_eq!(detect(&gz(&t)), Kind::TarGz);
@@ -187,11 +194,23 @@ fn a_zip_is_listed_and_a_text_entry_read_as_numbered_lines() {
     // A binary entry is a hex dump with its printable side.
     let o = read(&z, &req(Some("data/blob.bin")), soon()).unwrap();
     assert_eq!(o.mode, "hex");
-    assert!(o.text.starts_with("00000000  00 01 02 03 fa fb"), "{}", o.text);
+    assert!(
+        o.text.starts_with("00000000  00 01 02 03 fa fb"),
+        "{}",
+        o.text
+    );
     assert!(o.text.ends_with("|......|"), "{}", o.text);
 
-    assert!(read(&z, &req(Some("nope")), soon()).unwrap_err().contains("no entry"));
-    assert!(read(&z, &req(Some("data/")), soon()).unwrap_err().contains("folder"));
+    assert!(
+        read(&z, &req(Some("nope")), soon())
+            .unwrap_err()
+            .contains("no entry")
+    );
+    assert!(
+        read(&z, &req(Some("data/")), soon())
+            .unwrap_err()
+            .contains("folder")
+    );
 }
 
 #[test]
@@ -462,7 +481,10 @@ fn truncated_and_corrupt_archives_are_refused_with_a_sentence() {
     assert!(list(&bad, 0, 10, soon()).is_err());
     // Entry data that lies outside the file.
     let mut cut_data = z.clone();
-    let at = cut_data.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+    let at = cut_data
+        .windows(4)
+        .position(|w| w == b"PK\x01\x02")
+        .unwrap();
     cut_data[at + 42..at + 46].copy_from_slice(&0x00ff_ffffu32.to_le_bytes());
     assert!(read(&cut_data, &req(Some("a.txt")), soon()).is_err());
     // An unsupported method and an encrypted entry.
@@ -525,7 +547,11 @@ fn demo_tar() -> Vec<u8> {
 fn a_tar_lists_links_and_devices_as_what_they_are_and_never_follows_them() {
     for data in [demo_tar(), gz(&demo_tar())] {
         let l = list(&data, 0, 500, soon()).unwrap();
-        let kinds: Vec<_> = l.entries.iter().map(|e| (&e.path[..], e.kind.clone())).collect();
+        let kinds: Vec<_> = l
+            .entries
+            .iter()
+            .map(|e| (&e.path[..], e.kind.clone()))
+            .collect();
         assert_eq!(
             kinds,
             vec![
@@ -540,10 +566,25 @@ fn a_tar_lists_links_and_devices_as_what_they_are_and_never_follows_them() {
         let o = read(&data, &req(Some("src/main.rs")), soon()).unwrap();
         assert_eq!(o.text, "1\tfn main() {}");
         let e = read(&data, &req(Some("link")), soon()).unwrap_err();
-        assert!(e.contains("never followed") && e.contains("/etc/passwd"), "{e}");
-        assert!(read(&data, &req(Some("hard")), soon()).unwrap_err().contains("never followed"));
-        assert!(read(&data, &req(Some("dev/null")), soon()).unwrap_err().contains("character device"));
-        assert!(read(&data, &req(Some("src/")), soon()).unwrap_err().contains("folder"));
+        assert!(
+            e.contains("never followed") && e.contains("/etc/passwd"),
+            "{e}"
+        );
+        assert!(
+            read(&data, &req(Some("hard")), soon())
+                .unwrap_err()
+                .contains("never followed")
+        );
+        assert!(
+            read(&data, &req(Some("dev/null")), soon())
+                .unwrap_err()
+                .contains("character device")
+        );
+        assert!(
+            read(&data, &req(Some("src/")), soon())
+                .unwrap_err()
+                .contains("folder")
+        );
     }
 }
 
@@ -672,7 +713,10 @@ fn text_reads_page_by_lines_with_a_bounded_window() {
     let wide = format!("{}\n", "z".repeat(1900)).repeat(100);
     let o = read(wide.as_bytes(), &req(None), soon()).unwrap();
     assert!(o.text.len() <= TEXT_CAP, "{}", o.text.len());
-    assert!(o.next.is_some(), "the cap stopped the read before the limit");
+    assert!(
+        o.next.is_some(),
+        "the cap stopped the read before the limit"
+    );
 }
 
 #[test]
@@ -704,7 +748,9 @@ fn hex_and_strings_are_bounded_windows() {
     assert_eq!(o.mode, "strings");
     assert_eq!(o.text, "00000064  hello world\n00000075  api_key=sk-123456");
     // The strings output is capped.
-    let many: Vec<u8> = (0..5000).flat_map(|i| format!("string number {i}\0").into_bytes()).collect();
+    let many: Vec<u8> = (0..5000)
+        .flat_map(|i| format!("string number {i}\0").into_bytes())
+        .collect();
     let o = read(&many, &r, soon()).unwrap();
     assert!(o.text.len() <= STRINGS_CAP);
     assert!(o.next.is_some());
@@ -712,7 +758,11 @@ fn hex_and_strings_are_bounded_windows() {
 
 #[test]
 fn an_entry_path_is_needed_only_for_an_archive() {
-    assert!(read(b"text\n", &req(Some("x")), soon()).unwrap_err().contains("not an archive"));
+    assert!(
+        read(b"text\n", &req(Some("x")), soon())
+            .unwrap_err()
+            .contains("not an archive")
+    );
     // An archive read without an entry is read as bytes.
     let z = zip(&[("a", b"x")]);
     assert_eq!(read(&z, &req(None), soon()).unwrap().mode, "hex");
