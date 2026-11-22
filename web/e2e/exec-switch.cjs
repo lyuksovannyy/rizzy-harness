@@ -112,7 +112,7 @@ async function choose(p, word) {
     await sleep(400);
     const text = await p.innerText('dialog.host-warning');
     check(text.includes("Switch this chat's commands to the host shell?"), 'the warning is for a switch');
-    check(text.includes('This chat is in Auto: from its next message every command runs in the host shell with no question asked'), 'the warning says what Auto means');
+    check(text.includes('This chat is in Auto: from its next turn every command runs in the host shell with no question asked'), 'the warning says what Auto means');
     check(text.includes('does not carry over'), 'the warning says the grants do not carry over');
     await p.screenshot({ path: `${d1}/shots/2-warning-1440.png` });
     await p.click('dialog.host-warning button:text-is("Cancel")');
@@ -137,14 +137,16 @@ async function choose(p, word) {
     log('switched to the host shell; a reload keeps it');
 
     // A turn runs: the control is disabled and says why.
-    await p.fill('.composer textarea', 'again');
+    // A command that lasts: the demo model's own turn is over before a click lands.
+    await p.fill('.composer textarea', script([['bash', { command: 'sleep 4' }]]));
     await p.keyboard.press('Enter');
     await p.waitForSelector(`${CONTROL}[aria-disabled="true"]`, { timeout: 5000 });
     const why = await p.getAttribute('.exec-switch', 'title');
     check(why && why.includes('Stop the agent'), `the reason: ${why}`);
     // Nothing moves until it is asked for; a click says why, in words, over the controls.
     check(!(await p.$('[data-testid=exec-busy-note]')), 'no note before a click');
-    await p.click(CONTROL);
+    // Forced: Playwright waits for an aria-disabled control to be enabled, a person does not.
+    await p.click(CONTROL, { force: true });
     await p.waitForSelector('[data-testid=exec-busy-note]');
     check((await p.innerText('[data-testid=exec-busy-note]')).includes('Stop the agent'), 'the note says why');
     await p.screenshot({ path: `${d1}/shots/4-running-1440.png` });
@@ -161,7 +163,8 @@ async function choose(p, word) {
     check((await p.getAttribute(CONTROL, 'aria-disabled')) === 'true', 'an approval waits: disabled');
     const why2 = await p.getAttribute('.exec-switch', 'title');
     check(why2 && (why2.includes('Answer the approval') || why2.includes('Stop the agent')), `the reason: ${why2}`);
-    await p.click(CONTROL);
+    // Forced: Playwright waits for an aria-disabled control to be enabled, a person does not.
+    await p.click(CONTROL, { force: true });
     await p.waitForSelector('[data-testid=exec-busy-note]');
     const note2 = await p.innerText('[data-testid=exec-busy-note]');
     check(note2.includes('Answer the approval'), `while an approval waits the reason is the approval: ${note2}`);
