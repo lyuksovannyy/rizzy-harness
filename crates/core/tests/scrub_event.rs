@@ -56,6 +56,13 @@ const FREE: &[(&str, &[&str])] = &[
             "reply.values.**",
             "images.*.mime",
             "images.*.name",
+            // Files saved in the folder (T94): the name and the path are
+            // text the person's file gave; the node's recorded path is the
+            // scrubbed one (it names the file with the scrubbed name).
+            "uploads.*.name",
+            "uploads.*.path",
+            "uploads.*.sha256",
+            "uploads.*.mime",
         ],
     ),
     ("assistant_delta", &["text", "author", "variant.model"]),
