@@ -490,6 +490,8 @@ impl Staging {
     /// limit, the offset against what was received, the chunk against
     /// [`MAX_CHUNK`] and the declared size, and at the last chunk the
     /// sha256. A bad chunk deletes what was staged of that file.
+    // The fields of one `session.upload` and the limit, as the command names them.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn chunk(
         &self,
         sid: SessionId,

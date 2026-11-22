@@ -1008,10 +1008,10 @@ pub struct LimitsPolicy {
 
 /// `[limits] upload_max_mb` by default, and the most it may say.
 pub const DEFAULT_UPLOAD_MAX_MB: u64 = harness_protocol::DEFAULT_UPLOAD_MAX_MB;
-pub const MAX_UPLOAD_MAX_MB: u64 = 1024;
+pub const MAX_UPLOAD_MAX_MB: u64 = harness_protocol::MAX_UPLOAD_MAX_MB;
 /// `[limits] uploads_per_message` by default, and the most it may say.
 pub const DEFAULT_UPLOADS_PER_MESSAGE: usize = harness_protocol::DEFAULT_UPLOADS_PER_MESSAGE;
-pub const MAX_UPLOADS_PER_MESSAGE: usize = 20;
+pub const MAX_UPLOADS_PER_MESSAGE: usize = harness_protocol::MAX_UPLOADS_PER_MESSAGE;
 
 /// `[limits] clone_timeout_s` by default, and its range.
 pub const DEFAULT_CLONE_TIMEOUT_S: u64 = 600;

@@ -3542,7 +3542,7 @@ mod upload_line_tests {
             !after.contains('\n') && !after.contains('\u{2028}'),
             "{after:?}"
         );
-        assert_eq!(after.matches('"').count(), 2 * 1, "{after}");
+        assert_eq!(after.matches('"').count(), 2, "{after}");
         assert!(!after.contains('\u{201C}'));
     }
 

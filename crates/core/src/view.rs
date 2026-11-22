@@ -47,6 +47,10 @@ pub enum Item {
         /// never their content.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<String>,
+        /// Files the node saved into the chat's folder
+        /// (`user_message.uploads`, T94): shown as chips with their size.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        uploads: Vec<crate::event::UploadedFile>,
         /// The answer to an input block, when this message is one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply: Option<FormReply>,
@@ -761,6 +765,7 @@ impl SessionView {
                     text: m.text,
                     attachments: m.attachments.into_iter().map(|a| a.name).collect(),
                     files: m.files.into_iter().map(|f| f.path).collect(),
+                    uploads: m.uploads,
                     reply: m.reply,
                     images: m.images,
                     queued: m.queued.then_some(Queued { seq, read: false }),
@@ -1765,6 +1770,41 @@ mod tests {
         }
         let json = serde_json::to_value(&v.items[0]).unwrap();
         assert_eq!(json["blocks"][0]["type"], "progress");
+    }
+
+    /// A message that brought files for the folder lists them on its item
+    /// (the chips with their size); one that did not omits the field.
+    #[test]
+    fn user_items_list_the_files_saved_for_them() {
+        let sid = SessionId::new();
+        let msg = |uploads| {
+            EventKind::UserMessage(UserMessage {
+                turn_id: "t".into(),
+                text: "Unpack it".into(),
+                attachments: vec![],
+                reply: None,
+                images: vec![],
+                queued: false,
+                triggers: vec![],
+                tags: vec![],
+                files: vec![],
+                uploads,
+            })
+        };
+        let up = crate::event::UploadedFile {
+            name: "x.zip".into(),
+            path: "attachments/x.zip".into(),
+            bytes: 1234,
+            sha256: "ab".repeat(32),
+            mime: "application/zip".into(),
+        };
+        let evs = vec![ev(sid, 1, msg(vec![up.clone()])), ev(sid, 2, msg(vec![]))];
+        let v = SessionView::fold(&evs).unwrap();
+        let first = serde_json::to_value(&v.items[0]).unwrap();
+        assert_eq!(first["uploads"][0]["path"], "attachments/x.zip");
+        assert_eq!(first["uploads"][0]["bytes"], 1234);
+        let second = serde_json::to_value(&v.items[1]).unwrap();
+        assert!(second.get("uploads").is_none(), "{second}");
     }
 
     #[test]

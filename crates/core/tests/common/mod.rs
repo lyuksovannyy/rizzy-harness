@@ -152,7 +152,13 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             queued: true,
             triggers: vec![s()],
             tags: vec![s()],
-            uploads: vec![],
+            uploads: vec![UploadedFile {
+                name: s(),
+                path: s(),
+                bytes: 1,
+                sha256: s(),
+                mime: s(),
+            }],
         }),
         EventKind::AssistantDelta(AssistantDelta {
             turn_id: s(),

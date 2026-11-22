@@ -137,6 +137,48 @@ pub fn clone_timeout_of(capabilities: &[String]) -> Option<u64> {
     })
 }
 
+/// What a node saves of attached files (PLAN.md T94), as its hello says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UploadLimits {
+    /// The largest file, in MiB.
+    pub max_mb: u64,
+    /// Files in one message.
+    pub per_message: usize,
+}
+
+/// The most `[limits] upload_max_mb` may say, and so the most the master
+/// believes a node's hello about it.
+pub const MAX_UPLOAD_MAX_MB: u64 = 1024;
+/// The most `[limits] uploads_per_message` may say.
+pub const MAX_UPLOADS_PER_MESSAGE: usize = 20;
+
+/// The upload limits `capabilities` announce: `None` for a node that does
+/// not list [`CAP_UPLOADS`]. A missing or unreadable number is the default
+/// and one over the ceiling is the ceiling, so a hello cannot widen what
+/// the master pushes.
+pub fn upload_limits_of(capabilities: &[String]) -> Option<UploadLimits> {
+    if !capabilities.iter().any(|c| c == CAP_UPLOADS) {
+        return None;
+    }
+    let number = |prefix: &str| -> Option<u64> {
+        capabilities.iter().find_map(|c| {
+            let n = c.strip_prefix(prefix)?;
+            (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                // Longer than any limit: over the ceiling.
+                .then(|| n.parse::<u64>().unwrap_or(u64::MAX))
+        })
+    };
+    Some(UploadLimits {
+        max_mb: number(CAP_UPLOAD_MAX_PREFIX)
+            .unwrap_or(DEFAULT_UPLOAD_MAX_MB)
+            .min(MAX_UPLOAD_MAX_MB),
+        per_message: number(CAP_UPLOADS_PER_MESSAGE_PREFIX)
+            .map_or(DEFAULT_UPLOADS_PER_MESSAGE, |n| {
+                n.min(MAX_UPLOADS_PER_MESSAGE as u64) as usize
+            }),
+    })
+}
+
 /// The longest `[limits] clone_timeout_s` a node may be set to, in seconds.
 pub const MAX_CLONE_TIMEOUT_S: u64 = 7200;
 
@@ -2249,6 +2291,54 @@ mod tests {
         assert_eq!(back, m);
         assert!(
             CAP_UPLOADS_PER_MESSAGE_PREFIX.ends_with(':') && CAP_UPLOAD_MAX_PREFIX.ends_with(':')
+        );
+    }
+
+    /// What a node says it saves comes from its hello, bounded: a node
+    /// that announces no `uploads` has none; a number that is not one, or
+    /// is over the ceilings, counts as the ceiling's own default or cap, so
+    /// a hostile hello widens nothing on the master.
+    #[test]
+    fn upload_limits_are_read_from_the_hello_and_bounded() {
+        let caps = |c: &[&str]| c.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(upload_limits_of(&caps(&["native"])), None);
+        assert_eq!(
+            upload_limits_of(&caps(&[
+                "uploads",
+                "upload-max:50",
+                "uploads-per-message:5"
+            ])),
+            Some(UploadLimits {
+                max_mb: 50,
+                per_message: 5
+            })
+        );
+        // Announced without numbers (a first version of a node): the defaults.
+        assert_eq!(
+            upload_limits_of(&caps(&["uploads"])),
+            Some(UploadLimits {
+                max_mb: DEFAULT_UPLOAD_MAX_MB,
+                per_message: DEFAULT_UPLOADS_PER_MESSAGE
+            })
+        );
+        // Junk and huge numbers: never above the ceilings.
+        assert_eq!(
+            upload_limits_of(&caps(&[
+                "uploads",
+                "upload-max:99999999999",
+                "uploads-per-message:x"
+            ])),
+            Some(UploadLimits {
+                max_mb: MAX_UPLOAD_MAX_MB,
+                per_message: DEFAULT_UPLOADS_PER_MESSAGE
+            })
+        );
+        assert_eq!(
+            upload_limits_of(&caps(&["uploads", "uploads-per-message:900"])),
+            Some(UploadLimits {
+                max_mb: DEFAULT_UPLOAD_MAX_MB,
+                per_message: MAX_UPLOADS_PER_MESSAGE
+            })
         );
     }
 
