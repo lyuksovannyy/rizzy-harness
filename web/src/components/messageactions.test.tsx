@@ -131,7 +131,7 @@ describe("the row's order and visibility", () => {
       ev(8, "turn_ended", { turn_id: "a", reason: "completed", usage }),
     ]);
     expect(rows()).toHaveLength(1);
-    expect(words(rows()[0]!)).toEqual(["Copy", "Fork from here", "Pin", expect.stringMatching(/ago|just now|\d{4}|[A-Z][a-z]{2} \d/), "1.2k in · 340 out"]);
+    expect(words(rows()[0]!)).toEqual(["Copy", "Fork from here", "Pin", expect.stringMatching(/ago|just now|yesterday|\d/), "1.2k in · 340 out"]);
     const msgs = [...host.querySelectorAll(".msg.assistant")];
     expect(msgs[0]!.querySelector(".answer-actions")).toBeNull();
     expect(msgs[0]!.querySelector(".msg-actions")).not.toBeNull();
@@ -154,7 +154,7 @@ describe("the row's order and visibility", () => {
 
   test("where the server would refuse Fork it is absent, Copy and Pin stay", async () => {
     await show([created(), ...turn(2, "a", "ok", usage)], row({ blocked: "not yours" } as Partial<SessionRow>));
-    expect(words(rows()[0]!).slice(0, 2)).toEqual(["Copy", expect.stringMatching(/ago|just now|\d/)]);
+    expect(words(rows()[0]!).slice(0, 2)).toEqual(["Copy", expect.stringMatching(/ago|just now|yesterday|\d/)]);
     await draw(row(), [], { fork: false });
     expect(words(rows()[0]!)[1]).toBe("Pin");
   });
