@@ -55,7 +55,7 @@ const MAX_NAME_BYTES: usize = 120;
 
 /// The refusal for a chat without tools.
 pub(crate) const NO_TOOLS: &str = "this chat's agent cannot open files; switch to Agentic \
-     (next to Ask under the box) to attach any file, or attach text, a PDF or an image";
+     (next to Ask under the box) to attach any file, or attach text, a PDF, an Office document or an image";
 
 // ---------------------------------------------------------------- names
 

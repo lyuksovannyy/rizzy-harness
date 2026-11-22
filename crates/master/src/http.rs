@@ -1394,6 +1394,25 @@ async fn prompt(
                 }
             }
         };
+        // A document's text came with its file (X.55): the message that
+        // takes the text takes the file too, when it can still be taken.
+        let optional = if text_ids.is_empty() {
+            Vec::new()
+        } else {
+            let ids: Vec<String> = text_ids
+                .iter()
+                .map(|i| crate::attachments::file_id_of(i))
+                .collect();
+            let owner = who.user_id.clone();
+            m.inner
+                .mirror
+                .call(move |s| s.chat_uploads_take_available(&ids, owner.as_deref()))
+                .await?
+        };
+        let file_ids: Vec<String> = file_ids
+            .into_iter()
+            .chain(optional.iter().map(|u| u.upload_id.clone()))
+            .collect();
         let taken = (!attachments.is_empty()).then(|| (text_ids.clone(), attachments.clone()));
         let attachments = attachments.into_iter().map(|(a, _)| a).collect();
         let sent = m
@@ -1424,6 +1443,7 @@ async fn prompt(
                     routine_run: None,
                     files: b.files,
                     uploads: files,
+                    optional_uploads: optional,
                     retry: None,
                     retry_images: false,
                 },

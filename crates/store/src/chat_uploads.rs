@@ -198,6 +198,24 @@ impl Store {
         Ok(Some(out))
     }
 
+    /// Hold each of `ids` that can be held (it exists, is the owner's and is
+    /// not held already) and skip the rest: the files a document's text came
+    /// with (X.55), which go along when they can and are not worth a refused
+    /// send when they cannot.
+    pub fn chat_uploads_take_available(
+        &self,
+        ids: &[String],
+        owner: Option<&str>,
+    ) -> Result<Vec<TakenUpload>> {
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(mut one) = self.chat_uploads_take(std::slice::from_ref(id), owner)? {
+                out.append(&mut one);
+            }
+        }
+        Ok(out)
+    }
+
     /// The node certainly did not take the message: the uploads can be
     /// taken again.
     pub fn chat_uploads_give_back(&self, ids: &[String]) -> Result<()> {

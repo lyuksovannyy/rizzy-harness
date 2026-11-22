@@ -34,17 +34,44 @@ pub enum ExtractError {
     /// The PDF reader's answer (`PdfError::Busy` is 503, the rest 422).
     #[error("{0}")]
     Pdf(crate::pdf::PdfError),
+    /// An office document the reader found and could not read (503 when
+    /// busy, the rest 422): kept as a plain file where files are kept, with
+    /// this sentence (X.55, T96).
+    #[error("{0}")]
+    Doc(crate::pdf::DocError),
 }
 
 impl ExtractError {
     pub fn busy(&self) -> bool {
-        matches!(self, Self::Pdf(crate::pdf::PdfError::Busy))
+        matches!(
+            self,
+            Self::Pdf(crate::pdf::PdfError::Busy) | Self::Doc(crate::pdf::DocError::Busy)
+        )
     }
+}
+
+/// Whether `mime` is one an office document is read as (`crate::doc`).
+pub fn is_document_mime(mime: &str) -> bool {
+    crate::doc::Format::from_mime(mime).is_some()
+}
+
+/// The id a document's kept file is stored under, next to its text
+/// attachment `text_id`: the message that names the text takes the file too
+/// (X.55). Derived, never stored: no schema, and an id is only ever one an
+/// upload of the same person made.
+pub fn file_id_of(text_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    // The node takes an upload id only as 32 lowercase hex characters.
+    let h = Sha256::digest(format!("document-file:{text_id}"));
+    hex::encode(&h[..16])
 }
 
 /// Extract text from an upload. A file is a PDF only by its `%PDF-` header,
 /// never by its name; PDFs go to the out-of-process reader (`crate::pdf`),
-/// and are refused where there is none.
+/// and are refused where there is none. A zip goes to the same reader's
+/// document mode (`crate::doc`): it comes back as text when its parts say it
+/// is a Word, Excel, PowerPoint or OpenDocument file, and as a plain binary
+/// file when they do not.
 pub async fn extract(
     name: &str,
     bytes: Vec<u8>,
@@ -58,6 +85,13 @@ pub async fn extract(
         let reader = pdf.ok_or(ExtractError::Pdf(crate::pdf::PdfError::NotSetUp))?;
         let text = reader.extract(bytes).await.map_err(ExtractError::Pdf)?;
         ("application/pdf".to_string(), text)
+    } else if let (true, Some(reader)) = (crate::doc::is_zip(&bytes), pdf) {
+        match reader.extract_doc(bytes).await {
+            Ok(Some((mime, text))) => (mime, text),
+            // Not a document by its parts, or encrypted: whatever it was.
+            Ok(None) => return Err(ExtractError::Binary),
+            Err(e) => return Err(ExtractError::Doc(e)),
+        }
     } else {
         let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
         if body.contains(&0) {
@@ -82,13 +116,13 @@ pub async fn extract(
 }
 
 fn unsupported() -> String {
-    "unsupported file: text, Markdown, code, CSV, JSON and PDF work".into()
+    "unsupported file: text, Markdown, code, CSV, JSON, PDF and Office documents (Word, Excel, PowerPoint, OpenDocument) work".into()
 }
 
 /// Why a chat without tools takes no other file (T94): said at attach
 /// time, in the words of the plan.
 pub const NO_TOOLS: &str = "unsupported file: this chat's agent cannot open files; switch to \
-     Agentic (next to Ask under the box) to attach any file, or attach text, a PDF or an image";
+     Agentic (next to Ask under the box) to attach any file, or attach text, a PDF, an Office document or an image";
 
 fn cap(text: String) -> (String, bool) {
     if text.chars().count() <= MAX_TEXT_CHARS {
@@ -110,7 +144,7 @@ pub fn clean_name(name: &str) -> String {
 mod tests {
     use super::*;
 
-    use crate::pdf::{PdfError, PdfReader};
+    use crate::pdf::{DocError, PdfError, PdfReader};
 
     #[tokio::test]
     async fn text_files_and_rejections() {
@@ -187,5 +221,62 @@ mod tests {
             (a.mime.as_str(), a.text.as_str()),
             ("application/pdf", "page text")
         );
+    }
+
+    const DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+    /// A zip goes to the document reader whatever it is called, and comes
+    /// back as text only when the reader says it is a document.
+    #[tokio::test]
+    async fn a_zip_is_a_document_by_the_readers_word_not_by_its_name() {
+        let doc = PdfReader::with_command(
+            "/bin/sh".into(),
+            vec![
+                "-c".into(),
+                format!("cat >/dev/null; printf '{DOCX}\\nthe words'").into(),
+            ],
+        );
+        let zip = harness_attached::testkit::zip(&[("a", b"x")]);
+        for name in ["report.docx", "report.bin", "../../etc/x.txt"] {
+            let a = extract(name, zip.clone(), Some(&doc)).await.unwrap();
+            assert_eq!(
+                (a.mime.as_str(), a.text.as_str()),
+                (DOCX, "the words"),
+                "{name}"
+            );
+            assert!(is_document_mime(&a.mime));
+        }
+        let none = PdfReader::with_command(
+            "/bin/sh".into(),
+            vec!["-c".into(), "cat >/dev/null; exit 5".into()],
+        );
+        let e = extract("report.docx", zip.clone(), Some(&none)).await;
+        assert!(matches!(e, Err(ExtractError::Binary)), "{e:?}");
+        // Without a reader a zip is a binary file, never parsed here.
+        let e = extract("report.docx", zip, None).await;
+        assert!(matches!(e, Err(ExtractError::Binary)), "{e:?}");
+        let bad = PdfReader::with_command(
+            "/bin/sh".into(),
+            vec![
+                "-c".into(),
+                "cat >/dev/null; printf 'broken'; exit 3".into(),
+            ],
+        );
+        let e = extract(
+            "a.docx",
+            harness_attached::testkit::zip(&[("a", b"x")]),
+            Some(&bad),
+        )
+        .await;
+        assert!(
+            matches!(e, Err(ExtractError::Doc(DocError::Unreadable(_)))),
+            "{e:?}"
+        );
+        assert!(!is_document_mime("application/zip"));
+        // Derived, the shape the node takes (32 lowercase hex), one per text id.
+        let id = file_id_of("abc");
+        assert!(id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        assert_eq!(id, file_id_of("abc"));
+        assert_ne!(id, file_id_of("abd"));
     }
 }
