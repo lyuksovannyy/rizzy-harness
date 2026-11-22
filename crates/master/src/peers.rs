@@ -165,6 +165,7 @@ mod tests {
             identity: None,
             peers,
             tags: vec![],
+            uploads: vec![],
         })
     }
 

@@ -463,6 +463,9 @@ pub(crate) struct Input {
     /// Paths the person mentioned with `@path` (`session.prompt.files`),
     /// read by [`Session::read_mentions`] (T63).
     pub files: Vec<String>,
+    /// Files pushed ahead of this prompt (`session.upload`), which the
+    /// node saves into the chat's folder (T94, `uploads.rs`).
+    pub uploads: Vec<harness_protocol::UploadRef>,
 }
 
 /// A sub-agent's private, node-owned folder.
@@ -1897,8 +1900,8 @@ impl Session {
             }
             self.unclosed.store(false, Ordering::SeqCst);
         }
-        let mut msg = match self.user_message(turn_id.clone(), input).await {
-            Ok(msg) => msg,
+        let (mut msg, saved) = match self.user_message(turn_id.clone(), input).await {
+            Ok(m) => m,
             Err(e) => {
                 self.release(&turn_id);
                 return Err(e);
@@ -1929,6 +1932,9 @@ impl Session {
         {
             Ok(h) => h,
             Err(e) => {
+                // The message was not recorded: the files saved for it go
+                // too, or they would stay without a message (T94).
+                self.rollback_uploads(&saved).await;
                 self.release(&turn_id);
                 return Err(e);
             }
@@ -2040,7 +2046,15 @@ impl Session {
                  send this once it has"
             ));
         }
-        let mut msg = self.user_message(turn_id, input).await?;
+        // A file saved now would land inside the running turn's changes,
+        // and undoing that turn would delete it: it waits for the turn's
+        // end like an answer does (T94).
+        if !input.uploads.is_empty() {
+            return Err(format!(
+                "{TURN_RUNNING}: a message with attached files waits until it ends"
+            ));
+        }
+        let (mut msg, _) = self.user_message(turn_id, input).await?;
         msg.queued = true;
         let ev = self
             .append(Append::Scrubbed(EventKind::UserMessage(msg.clone())))
@@ -2935,13 +2949,18 @@ impl Session {
     /// log here, while the caller holds the turn slot: nothing else can
     /// append (another prompt, a variant choice) until the turn has
     /// recorded it, so the log checked is the log it joins.
-    async fn user_message(&self, turn_id: String, input: Input) -> Result<UserMessage, String> {
+    async fn user_message(
+        &self,
+        turn_id: String,
+        input: Input,
+    ) -> Result<(UserMessage, Vec<crate::uploads::Saved>), String> {
         let Input {
             text,
             attachments,
             reply,
             images,
             files,
+            uploads,
         } = input;
         let files = self.read_mentions(files).await?;
         let images = self.keep_images(images).await?;
@@ -2960,6 +2979,10 @@ impl Session {
                 harness_core::ui::answer_text(canonical, &text)
             }
         };
+        // Last, so nothing after it can fail and leave files without a
+        // message; written before the turn's `before` checkpoint, so undoing
+        // the turn leaves them (they are the person's files, T94).
+        let saved = self.save_uploads(uploads).await?;
         let msg = UserMessage {
             turn_id,
             text,
@@ -2970,6 +2993,7 @@ impl Session {
             triggers: vec![],
             tags: vec![],
             files,
+            uploads: saved.iter().map(|s| s.file.clone()).collect(),
         };
         // Scrubbed here, as the log will store it (`append` scrubs every
         // payload): the model is sent this very message, so it never gets
@@ -2978,7 +3002,107 @@ impl Session {
         // Appended as [`Append::Scrubbed`], not scrubbed a second time.
         let (kind, mut v) = EventKind::UserMessage(msg).into_parts();
         self.node.cfg.secrets.scrub_event(&kind, &mut v);
-        serde_json::from_value(v).map_err(|e| e.to_string())
+        match serde_json::from_value(v) {
+            Ok(m) => Ok((m, saved)),
+            Err(e) => {
+                self.rollback_uploads(&saved).await;
+                Err(e.to_string())
+            }
+        }
+    }
+
+    /// Whether this chat takes files the model cannot read as text: an
+    /// agentic chat with its own folder (never a plain chat, never a
+    /// sub-agent's chat), on a node that stages uploads.
+    pub(crate) fn accepts_uploads(&self) -> Result<(), String> {
+        if self.profile != Profile::Agentic {
+            return Err(crate::uploads::NO_TOOLS.into());
+        }
+        if self.parent_session.is_some() {
+            return Err("a sub-agent's chat takes no attached files".into());
+        }
+        if !self.node.uploads.enabled() {
+            return Err("this node saves no uploaded files".into());
+        }
+        Ok(())
+    }
+
+    /// Save the staged files a prompt names into the chat's folder, under
+    /// this node's own limits (T94). All or none: a file that fails takes
+    /// back the ones saved before it.
+    async fn save_uploads(
+        &self,
+        refs: Vec<harness_protocol::UploadRef>,
+    ) -> Result<Vec<crate::uploads::Saved>, String> {
+        if refs.is_empty() {
+            return Ok(vec![]);
+        }
+        self.accepts_uploads()?;
+        let limits = &self.node.cfg.policy.limits;
+        if refs.len() > limits.uploads_per_message {
+            return Err(format!(
+                "at most {} attached files per message on this node",
+                limits.uploads_per_message
+            ));
+        }
+        let max = limits.upload_max_mb.saturating_mul(1 << 20);
+        if let Some(r) = refs.iter().find(|r| r.size == 0 || r.size > max) {
+            return Err(format!(
+                "{}: this node saves files up to {} MiB",
+                harness_core::event::shown_name(&r.name),
+                limits.upload_max_mb
+            ));
+        }
+        let folder = self.checked_folder()?;
+        let mut saved: Vec<crate::uploads::Saved> = Vec::with_capacity(refs.len());
+        for r in &refs {
+            let staged = match self.node.uploads.ready(self.id, r) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.rollback_uploads(&saved).await;
+                    return Err(e);
+                }
+            };
+            // The name is text: scrubbed before the file is named, so the
+            // path the event and the model's line give is the real one.
+            let (dir, mut r2) = (folder.clone(), r.clone());
+            r2.name = self.node.cfg.secrets.scrub(&r.name);
+            let one = tokio::task::spawn_blocking(move || {
+                crate::uploads::save_file(&dir, &staged, &r2.name, &r2.mime, r2.size, &r2.sha256)
+            })
+            .await
+            .map_err(|e| format!("saving failed: {e}"))
+            .and_then(|r| r);
+            match one {
+                Ok(s) => saved.push(s),
+                Err(e) => {
+                    self.rollback_uploads(&saved).await;
+                    return Err(e);
+                }
+            }
+        }
+        // Saved: the staged copies are not needed again.
+        for r in &refs {
+            self.node.uploads.discard(self.id, &r.upload_id);
+        }
+        Ok(saved)
+    }
+
+    /// Take back files saved for a message that was not recorded.
+    async fn rollback_uploads(&self, saved: &[crate::uploads::Saved]) {
+        if saved.is_empty() {
+            return;
+        }
+        let Ok(folder) = self.checked_folder() else {
+            return;
+        };
+        let saved = saved.to_vec();
+        let _ = tokio::task::spawn_blocking(move || {
+            for s in &saved {
+                crate::uploads::rollback(&folder, s);
+            }
+        })
+        .await;
     }
 
     /// A context like a `read` call's of this session (T63): its folder
@@ -4721,6 +4845,7 @@ impl Session {
             triggers: vec![],
             tags: vec![],
             files: vec![],
+            uploads: vec![],
         };
         let extra = TurnExtra {
             savings,
@@ -5212,6 +5337,7 @@ impl Session {
             triggers: vec![],
             tags: vec![],
             files: vec![],
+            uploads: vec![],
         };
         let extra = TurnExtra {
             savings,

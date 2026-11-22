@@ -230,11 +230,11 @@ fn head(text: &str, n: usize) -> &str {
 /// The person's words in a user message as the model was sent it: after
 /// the environment line and the context block in front of it, up to the
 /// first line the harness wrote for an attached file, a mentioned file, an
-/// image or a queued message. Unlike [`harness_core::event::own_words`] a
+/// image, files saved in the folder or a queued message. Unlike [`harness_core::event::own_words`] a
 /// message that begins with the harness's lead is still shown (the person
 /// typed it: it is quoted here, so it forges nothing).
 fn person_text(text: &str) -> &str {
-    use harness_core::event::{ATTACHMENT_LEAD, MENTION_LEAD, QUEUED_LEAD};
+    use harness_core::event::{ATTACHMENT_LEAD, MENTION_LEAD, QUEUED_LEAD, UPLOAD_LEAD};
     let mut t = text;
     for lead in [
         harness_core::backend::ENVIRONMENT_LEAD,
@@ -249,6 +249,7 @@ fn person_text(text: &str) -> &str {
         MENTION_LEAD,
         crate::provider::IMAGE_LEAD,
         QUEUED_LEAD,
+        UPLOAD_LEAD,
     ]
     .iter()
     .filter_map(|lead| {
@@ -1279,6 +1280,11 @@ impl harness_tools::Tool for History {
 }
 
 /// [`parts`] for the tests of the parts' sizes.
+#[cfg(test)]
+pub(crate) fn person_text_for_test(text: &str) -> &str {
+    person_text(text)
+}
+
 #[cfg(test)]
 pub(crate) fn split_for_test(s: &str) -> Vec<std::ops::Range<usize>> {
     parts(s, PART)

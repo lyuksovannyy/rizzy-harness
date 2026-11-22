@@ -724,6 +724,9 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Resume { .. }
         | MasterToNode::ArtifactFetch { .. }
         | MasterToNode::ArtifactRelease { .. }
+        // Bytes into the node's own staging folder: the prompt that names
+        // them is the command that is checked and writes (PLAN.md T94).
+        | MasterToNode::UploadChunk { .. }
         // An answer to the node's own search: nothing is written.
         | MasterToNode::RecallResult { .. }
         // An answer to the node's own board call: nothing is run there.
@@ -2783,6 +2786,7 @@ impl Master {
                 identity: None,
                 peers: peer_specs,
                 tags,
+                uploads: vec![],
             }),
         };
         // The link drops a frame over 8 MiB; the margin covers the request

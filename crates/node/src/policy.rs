@@ -997,7 +997,21 @@ pub struct LimitsPolicy {
     /// The most one clone may put on disk, in MB (its fetched objects and
     /// its checkout together), checked while git runs and once after.
     pub clone_max_mb: u64,
+    /// The largest file this node saves into a chat's folder when the
+    /// person attaches one the model cannot read as text (T94), in MiB; 0
+    /// turns saving uploaded files off on this node. The master follows
+    /// the number this node announces.
+    pub upload_max_mb: u64,
+    /// The most such files one message may bring; 0 turns them off.
+    pub uploads_per_message: usize,
 }
+
+/// `[limits] upload_max_mb` by default, and the most it may say.
+pub const DEFAULT_UPLOAD_MAX_MB: u64 = harness_protocol::DEFAULT_UPLOAD_MAX_MB;
+pub const MAX_UPLOAD_MAX_MB: u64 = 1024;
+/// `[limits] uploads_per_message` by default, and the most it may say.
+pub const DEFAULT_UPLOADS_PER_MESSAGE: usize = harness_protocol::DEFAULT_UPLOADS_PER_MESSAGE;
+pub const MAX_UPLOADS_PER_MESSAGE: usize = 20;
 
 /// `[limits] clone_timeout_s` by default, and its range.
 pub const DEFAULT_CLONE_TIMEOUT_S: u64 = 600;
@@ -1062,6 +1076,8 @@ impl Default for LimitsPolicy {
             projects_per_hour: DEFAULT_PROJECTS_PER_HOUR,
             clone_timeout_s: DEFAULT_CLONE_TIMEOUT_S,
             clone_max_mb: DEFAULT_CLONE_MAX_MB,
+            upload_max_mb: DEFAULT_UPLOAD_MAX_MB,
+            uploads_per_message: DEFAULT_UPLOADS_PER_MESSAGE,
         }
     }
 }
@@ -1328,6 +1344,12 @@ impl NodePolicy {
                 MAX_PROJECTS_PER_HOUR,
             ),
             (
+                "uploads_per_message",
+                self.limits.uploads_per_message,
+                0,
+                MAX_UPLOADS_PER_MESSAGE,
+            ),
+            (
                 "callback_max_steps",
                 self.limits.callback_max_steps,
                 harness_core::policy::MIN_MAX_STEPS,
@@ -1352,6 +1374,12 @@ impl NodePolicy {
                 self.limits.clone_max_mb,
                 1,
                 MAX_CLONE_MAX_MB,
+            ),
+            (
+                "upload_max_mb",
+                self.limits.upload_max_mb,
+                0,
+                MAX_UPLOAD_MAX_MB,
             ),
         ] {
             if !(min..=max).contains(&n) {

@@ -178,6 +178,7 @@ fn turn(id: &str, text: &str, _ts: i64) -> Vec<EventKind> {
             triggers: vec![],
             tags: vec![],
             files: vec![],
+            uploads: vec![],
         }),
         EventKind::TurnEnded(TurnEnded {
             turn_id: id.into(),
@@ -209,6 +210,7 @@ fn work(id: &str, ask: &str) -> Vec<EventKind> {
             triggers: vec![],
             tags: vec![],
             files: vec![],
+            uploads: vec![],
         }),
         EventKind::Checkpoint(Checkpoint {
             turn_id: id.into(),
