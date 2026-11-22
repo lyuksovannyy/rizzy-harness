@@ -531,3 +531,22 @@ fn the_output_is_at_most_the_helper_cap() {
     let t = text(&docx(&body));
     assert_eq!(t.chars().count(), crate::pdf::HELPER_CHARS);
 }
+
+/// A limit that hits after some text was read keeps that text and says it stops.
+#[test]
+fn a_read_that_stops_midway_keeps_what_it_read_and_says_so() {
+    let mut xml = String::from(
+        "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>start of it</w:t></w:r></w:p><w:p><w:r><w:t>",
+    );
+    xml.push_str(&" ".repeat(100 << 20));
+    xml.push_str("</w:t></w:r></w:p></w:body></w:document>");
+    let b = zip(&[
+        ("[Content_Types].xml", b"<Types/>"),
+        ("word/document.xml", xml.as_bytes()),
+    ]);
+    let t = text(&b);
+    assert!(
+        t.starts_with("start of it\n[cut: reading stopped here:"),
+        "{t:?}"
+    );
+}

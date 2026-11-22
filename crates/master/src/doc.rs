@@ -95,23 +95,23 @@ pub fn is_zip(bytes: &[u8]) -> bool {
 }
 
 /// What the files are, by their parts. `Ok(None)`: not a document.
-fn classify(pkg: &Package<'_>) -> Result<Option<Format>, String> {
+fn classify(pkg: &Package<'_>) -> Option<Format> {
     if pkg.has("mimetype") {
         // OpenDocument: the type is the first entry's content.
         let kind = match pkg.read_small("mimetype", 128) {
             Ok(b) => String::from_utf8_lossy(&b).trim().to_string(),
-            Err(_) => return Ok(None),
+            Err(_) => return None,
         };
         let format = match kind.as_str() {
             "application/vnd.oasis.opendocument.text" => Format::Odt,
             "application/vnd.oasis.opendocument.spreadsheet" => Format::Ods,
             "application/vnd.oasis.opendocument.presentation" => Format::Odp,
-            _ => return Ok(None),
+            _ => return None,
         };
         if !pkg.has("content.xml") || odf_encrypted(pkg) {
-            return Ok(None);
+            return None;
         }
-        return Ok(Some(format));
+        return Some(format);
     }
     if pkg.has("[Content_Types].xml") {
         for (part, f) in [
@@ -120,11 +120,11 @@ fn classify(pkg: &Package<'_>) -> Result<Option<Format>, String> {
             ("ppt/presentation.xml", Format::Pptx),
         ] {
             if pkg.has(part) {
-                return Ok(Some(f));
+                return Some(f);
             }
         }
     }
-    Ok(None)
+    None
 }
 
 /// An OpenDocument file that encrypts its parts says so in its manifest.
@@ -146,10 +146,8 @@ fn read(bytes: &[u8]) -> Verdict {
         // Not a zip it can read: not a document.
         Err(_) => return Verdict::NotDocument,
     };
-    let format = match classify(&pkg) {
-        Ok(Some(f)) => f,
-        Ok(None) => return Verdict::NotDocument,
-        Err(m) => return Verdict::Unreadable(m),
+    let Some(format) = classify(&pkg) else {
+        return Verdict::NotDocument;
     };
     let mut out = Out::new(HELPER_CHARS);
     let done = match format {
@@ -161,7 +159,6 @@ fn read(bytes: &[u8]) -> Verdict {
         Format::Ods => odf::sheets(&pkg, &mut out),
     };
     match done {
-        // What was read before a limit hit is still the document's start.
         Err(m) if out.s.trim().is_empty() => {
             if m == ENCRYPTED {
                 Verdict::NotDocument
@@ -169,7 +166,13 @@ fn read(bytes: &[u8]) -> Verdict {
                 Verdict::Unreadable(m)
             }
         }
-        _ => Verdict::Text(format!("{}\n{}", format.mime(), out.s).into_bytes()),
+        // What was read before a limit hit is still the document's start,
+        // and the text says it stops there.
+        Err(m) => {
+            out.line(&format!("[cut: reading stopped here: {m}]"));
+            Verdict::Text(format!("{}\n{}", format.mime(), out.s).into_bytes())
+        }
+        Ok(()) => Verdict::Text(format!("{}\n{}", format.mime(), out.s).into_bytes()),
     }
 }
 
@@ -181,7 +184,7 @@ pub(crate) fn fail(pkg: &Package<'_>, f: xml::Fail) -> String {
     match f {
         xml::Fail::Deep => "the document nests its elements too deeply".into(),
         xml::Fail::Syntax => "the document's XML is damaged".into(),
-        xml::Fail::Io(e) => pkg.failed(&e).into_message(),
+        xml::Fail::Io(e) => fail_part(pkg, pkg.failed(&e)),
     }
 }
 
@@ -191,20 +194,6 @@ pub(crate) fn fail_part(_: &Package<'_>, e: PartError) -> String {
         PartError::Missing => "a part of the document is missing".into(),
         PartError::Encrypted => ENCRYPTED.into(),
         PartError::Failed(m) => m,
-    }
-}
-
-trait IntoMessage {
-    fn into_message(self) -> String;
-}
-
-impl IntoMessage for PartError {
-    fn into_message(self) -> String {
-        match self {
-            PartError::Failed(m) => m,
-            PartError::Encrypted => ENCRYPTED.into(),
-            PartError::Missing => "a part of the document is missing".into(),
-        }
     }
 }
 
