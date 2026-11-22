@@ -70,7 +70,7 @@ export interface Resend {
   text: string;
   /** Images are references into Media; a chat sends again what it already carries. */
   pictures: Picture[];
-  /** Attachments are consumed when the message is sent (the master deletes the upload): they must be attached again. */
+  /** Attachments, and the files kept for the agent to read (T95), are consumed when the message is sent: they must be attached again. */
   lost: string[];
 }
 
@@ -80,7 +80,7 @@ export function resend(item: Extract<Item, { type: "user" }>): Resend | null {
   return {
     text: item.text,
     pictures: (item.images ?? []).map((m) => ({ key: m.media_id, name: m.name, size: 0, media_id: m.media_id })),
-    lost: item.attachments ?? [],
+    lost: [...(item.attachments ?? []), ...(item.attached ?? []).map((a) => a.name)],
   };
 }
 

@@ -98,6 +98,10 @@ async fn kept_or_plain(
     if storage::get(m).is_none() {
         return plain();
     }
+    // No chat yet: the runtime that will run it must offer the tool.
+    if row.is_none() && !m.chat_runtime_has(harness_protocol::CAP_ATTACHED) {
+        return plain();
+    }
     let r = m
         .resolver_for(row.and_then(|r| r.workspace_id.as_deref()))
         .await;

@@ -1123,6 +1123,15 @@ impl Master {
             .map(|n| n.capabilities.clone())
     }
 
+    /// Whether the chat runtime (the node that runs plain chats) announced
+    /// `cap`: for a chat that does not exist yet.
+    pub fn chat_runtime_has(&self, cap: &str) -> bool {
+        lock(&self.inner.nodes).values().any(|n| {
+            n.capabilities.iter().any(|c| c == "profile:chat")
+                && n.capabilities.iter().any(|c| c == cap)
+        })
+    }
+
     /// Whether `node_id`'s latest hello announced `cap`.
     pub fn node_has(&self, node_id: &str, cap: &str) -> bool {
         lock(&self.inner.nodes)
