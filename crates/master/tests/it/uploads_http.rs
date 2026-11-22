@@ -527,7 +527,7 @@ async fn a_plain_chat_refuses_the_file_with_the_reason() {
         assert!(
             e.contains("cannot open files")
                 && e.contains("switch to Agentic")
-                && e.contains("PDF or an image"),
+                && e.contains("an Office document or an image"),
             "{e}"
         );
     }
