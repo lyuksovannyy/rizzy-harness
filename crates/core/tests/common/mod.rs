@@ -101,6 +101,7 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             parent_session: Some(sid()),
             no_callbacks: true,
             exec_mode: Some(ExecMode::Sandbox),
+            sub_folder: Some(harness_core::subagent::SubFolder::Own),
         }),
         EventKind::TurnStarted(TurnStarted {
             turn_id: s(),

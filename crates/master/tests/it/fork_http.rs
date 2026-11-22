@@ -136,6 +136,7 @@ impl Fake {
                 agent_id: None,
                 incognito: false,
                 parent_session: parent,
+                sub_folder: None,
             }),
         );
     }
@@ -895,6 +896,7 @@ fn forked_created(parent: SessionId, through: u64) -> (String, Value) {
         agent_id: None,
         incognito: false,
         parent_session: None,
+        sub_folder: None,
     })
     .into_parts()
 }

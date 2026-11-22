@@ -605,21 +605,18 @@ fn spec(
     }
 }
 
-/// T32 end to end, on a node set up as the binary sets one up: the data
-/// directory protected, every shell command through the real
-/// `sandbox-exec` inside bubblewrap where it works. A sub-agent that can
-/// change files is delegated to by a real turn; its `write` and its `bash`
-/// work in its own folder under `<data>/sessions`, its changes are merged
-/// back into the parent's folder, and its shell still reaches neither the
-/// user's `~/.ssh`, nor the node's data directory, nor a sibling's folder,
-/// nor the parent's folder for writing.
-#[tokio::test]
-async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
+/// A real turn of a lead that delegates to `dev` with `folder`, on a node
+/// set up as the binary sets one up (see the tests below). Returns the
+/// finished calls of the sub-agent and of the lead; `None` where the
+/// kernel has no Landlock.
+async fn delegated(
+    f: &Fixture,
+    folder: &str,
+) -> Option<(Vec<(bool, String)>, Vec<(bool, String)>)> {
     use harness_core::event::EventKind;
     use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
-    let f = fixture();
     if !f.landlock() {
-        return;
+        return None;
     }
     std::fs::write(f.data.join("node-key"), "NODE-KEY-CANARY\n").unwrap();
     let sandbox = f.sandbox();
@@ -692,7 +689,10 @@ async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
         ["write", {"path": "made.txt", "content": "by the child\n"}],
         ["bash", {"command": shell}],
     ]);
-    let task = json!([["delegate", {"agent": "dev", "task": child_calls.to_string()}]]);
+    let task = json!([[
+        "delegate",
+        {"agent": "dev", "folder": folder, "task": child_calls.to_string()}
+    ]]);
     link.to_node
         .try_send(MasterToNode::Prompt(PromptMsg {
             agent: Some(spec(
@@ -736,6 +736,23 @@ async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
     let child = finished(None);
     let parent = finished(Some(sid));
     eprintln!("child: {child:#?}\nparent: {parent:#?}");
+    Some((child, parent))
+}
+
+/// T32 end to end, on a node set up as the binary sets one up: the data
+/// directory protected, every shell command through the real
+/// `sandbox-exec` inside bubblewrap where it works. A sub-agent that can
+/// change files is delegated to by a real turn; its `write` and its `bash`
+/// work in its own folder under `<data>/sessions`, its changes are merged
+/// back into the parent's folder, and its shell still reaches neither the
+/// user's `~/.ssh`, nor the node's data directory, nor a sibling's folder,
+/// nor the parent's folder for writing.
+#[tokio::test]
+async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
+    let f = fixture();
+    let Some((child, parent)) = delegated(&f, "own").await else {
+        return;
+    };
     assert_eq!(child.len(), 2, "{child:#?} / {parent:#?}");
     assert!(child[0].0, "the child's write was refused: {}", child[0].1);
     let out = &child[1].1;
@@ -763,5 +780,61 @@ async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
     assert_eq!(
         std::fs::read_to_string(f.repo.join("a.txt")).unwrap(),
         "b\n"
+    );
+}
+
+/// The same turn with `folder: "shared"` (the default): the sub-agent
+/// works in the chat's own folder, so it can write there, and that is all
+/// it gains: its shell still reaches neither the user's `~/.ssh`, nor the
+/// node's data directory, nor another sub-agent's folder or the sessions
+/// folder (PLAN.md T32; the view is the parent's).
+#[tokio::test]
+async fn a_shared_sub_agent_writes_the_chats_folder_and_reaches_nothing_else() {
+    let f = fixture();
+    std::fs::write(f.data.join("node-key"), "NODE-KEY-CANARY\n").unwrap();
+    let Some((child, parent)) = delegated(&f, "shared").await else {
+        return;
+    };
+    assert_eq!(child.len(), 2, "{child:#?} / {parent:#?}");
+    assert!(child[0].0, "the child's write was refused: {}", child[0].1);
+    let out = &child[1].1;
+    assert_eq!(
+        out.lines().next(),
+        Some(f.repo.display().to_string().as_str()),
+        "the child's shell is not in the chat's folder: {out}"
+    );
+    assert!(out.contains("by the child"), "{out}");
+    for leak in ["SSH-KEY-CANARY", "NODE-KEY-CANARY", "SIBLING-WORK"] {
+        assert!(!out.contains(leak), "{leak}: {out}");
+    }
+    for step in ["ssh", "key", "sib", "lsdata"] {
+        assert!(!out.contains(&format!("{step}=0")), "{step}: {out}");
+    }
+    // The chat's folder is writable, by file tool and shell alike.
+    assert!(out.contains("par=0"), "{out}");
+    assert!(f.repo.join("planted").exists());
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("made.txt")).unwrap(),
+        "by the child\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("a.txt")).unwrap(),
+        "b\n"
+    );
+    // No folder of its own was made.
+    let made = std::fs::read_dir(f.data.join("sessions"))
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .filter(|e| {
+                    !["child1", "child2"].contains(&e.file_name().to_string_lossy().as_ref())
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(made, 0, "a folder was made for a shared sub-agent");
+    let line = &parent.last().expect("the delegate call").1;
+    assert!(
+        line.contains("worked in this chat's folder") && line.lines().any(|l| l == "| a.txt"),
+        "{line}"
     );
 }

@@ -31,8 +31,8 @@ async fn two_children_changing_different_functions_both_land_and_undo_restores()
     let before = r.files();
     let (turn, outs) = r
         .lead_turn(
-            "delegate: dev=run: sed -i 's/{ a }/{ ONE }/' f.rs | \
-             dev=run: sed -i 's/{ z }/{ TWO }/' f.rs",
+            "delegate: dev#own=run: sed -i 's/{ a }/{ ONE }/' f.rs | \
+             dev#own=run: sed -i 's/{ z }/{ TWO }/' f.rs",
         )
         .await;
     assert_eq!(outs.len(), 2, "{outs:#?}");
@@ -61,8 +61,8 @@ async fn overlapping_children_leave_the_folder_alone_and_hand_back_the_diff() {
     let mut r = rig_with_file().await;
     let (_, outs) = r
         .lead_turn(
-            "delegate: dev=run: sed -i 's/{ a }/{ ONE }/' f.rs | \
-             dev=run: sed -i 's/{ a }/{ TWO }/' f.rs; echo extra > also.txt",
+            "delegate: dev#own=run: sed -i 's/{ a }/{ ONE }/' f.rs | \
+             dev#own=run: sed -i 's/{ a }/{ TWO }/' f.rs; echo extra > also.txt",
         )
         .await;
     let applied: Vec<&String> = outs
@@ -118,8 +118,8 @@ async fn a_refused_childs_delegate_result_is_not_ok_and_ends_with_what_to_do() {
     let mut r = rig_with_file().await;
     let (_, outs) = r
         .lead_turn(
-            "delegate: dev=run: sed -i 's/{ a }/{ ONE }/' f.rs | \
-             dev=run: sed -i 's/{ a }/{ TWO }/' f.rs",
+            "delegate: dev#own=run: sed -i 's/{ a }/{ ONE }/' f.rs | \
+             dev#own=run: sed -i 's/{ a }/{ TWO }/' f.rs",
         )
         .await;
     let refused = outs
@@ -164,7 +164,7 @@ async fn a_childs_ignored_files_are_named_in_the_note() {
     r.git(&["add", "."]);
     r.git(&["commit", "-qm", "ignore logs"]);
     let (_, outs) = r
-        .lead_turn("delegate: dev=run: echo work > report.log")
+        .lead_turn("delegate: dev#own=run: echo work > report.log")
         .await;
     assert!(
         outs[0].contains(

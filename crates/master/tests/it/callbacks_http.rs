@@ -174,7 +174,7 @@ fn fake_with(
                                        incognito: false,
                                        parent_session: None,
                                        no_callbacks: false,
-                                   });
+                                    sub_folder: None, });
                                    send(&mut seqs, *session_id, created, now);
                                }
                                let mut error = None;

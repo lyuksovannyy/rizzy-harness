@@ -76,7 +76,7 @@ fn lead(background: bool) -> Value {
 }
 
 fn bg_delegate(agent: &str, task: &str) -> Value {
-    json!({"tool": "delegate", "input": {"agent": agent, "task": task, "background": true}})
+    json!({"tool": "delegate", "input": {"agent": agent, "task": task, "background": true, "folder": "own"}})
 }
 
 fn bash(cmd: &str) -> Value {

@@ -949,6 +949,13 @@ pub struct LimitsPolicy {
     /// How deep delegation may nest: 1 lets a turn's agent delegate and
     /// its sub-agents not; 0 turns delegation off on this node.
     pub max_delegation_depth: u32,
+    /// Where a sub-agent that can change files works (`"shared"`, the
+    /// default: in the chat's folder; `"own"`: every one gets a copy of
+    /// its own, merged back when it ends, and none starts where the folder
+    /// is not a git repository). The node's word: a `delegate` call's
+    /// `folder` asks for one of them and `"own"` here wins over it
+    /// (PLAN.md T32, the owner's decision of 2026-11-21).
+    pub sub_agent_folder: harness_core::subagent::SubFolder,
     /// Background commands one chat may run at once (`bash` with
     /// `background: true`, T.8d); 0 turns them off on this node.
     pub background_per_session: usize,
@@ -1043,6 +1050,7 @@ impl Default for LimitsPolicy {
             // resolves a sub-agent's own delegates to none).
             max_subagents: harness_core::agent::DelegateCaps::default().max_subagents,
             max_delegation_depth: 1,
+            sub_agent_folder: harness_core::subagent::SubFolder::Shared,
             background_per_session: harness_tools::background::DEFAULT_PER_SESSION,
             background_per_node: harness_tools::background::DEFAULT_PER_NODE,
             background_output_kb: harness_tools::background::DEFAULT_OUTPUT_KB,
@@ -1899,6 +1907,30 @@ tool_timeout_sec = 120
             let p: NodePolicy = toml::from_str(&format!("[limits]\n{bad}\n")).unwrap();
             let e = p.validate().unwrap_err();
             assert!(e.contains(bad.split(' ').next().unwrap()), "{bad}: {e}");
+        }
+    }
+
+    /// `[limits] sub_agent_folder` (the owner, 2026-11-21): `shared` unless
+    /// the node says `own`; any other word is refused when node.toml is
+    /// read, never taken as one of the two.
+    #[test]
+    fn sub_agent_folder_defaults_to_shared_and_takes_two_words() {
+        use harness_core::subagent::SubFolder;
+        assert_eq!(
+            NodePolicy::default().limits.sub_agent_folder,
+            SubFolder::Shared
+        );
+        let own: NodePolicy = toml::from_str("[limits]\nsub_agent_folder = \"own\"\n").unwrap();
+        assert_eq!(own.limits.sub_agent_folder, SubFolder::Own);
+        assert!(own.validate().is_ok());
+        for bad in ["\"both\"", "\"Own\"", "true", "\"\""] {
+            let e = toml::from_str::<NodePolicy>(&format!("[limits]\nsub_agent_folder = {bad}\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                e.contains("sub_agent_folder") || e.contains("variant"),
+                "{bad}: {e}"
+            );
         }
     }
 

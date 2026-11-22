@@ -382,7 +382,7 @@ async fn builtin_delegates_outside_a_repository_by_role() {
     turns_ended(&m, sid, 1).await;
     m.prompt(
         sid,
-        "delegate: coder=build | writer=draft".into(),
+        "delegate: coder#own=build | writer#own=draft".into(),
         PromptOpts::default(),
     )
     .await
@@ -547,7 +547,7 @@ async fn parallel_coders_get_worktrees_and_merge_back() {
     let sid = session(&m, &ws, "teamlead").await;
     m.prompt(
         sid,
-        "delegate: coder=run: cat draft.txt > a.txt | coder=run: echo b > b.txt".into(),
+        "delegate: coder#own=run: cat draft.txt > a.txt | coder#own=run: echo b > b.txt".into(),
         PromptOpts::default(),
     )
     .await
@@ -583,7 +583,8 @@ async fn parallel_coders_get_worktrees_and_merge_back() {
     // Two sub-agents editing the same file: one applies, the other is kept aside.
     m.prompt(
         sid,
-        "delegate: coder=run: echo one > shared.txt | coder=run: echo two > shared.txt".into(),
+        "delegate: coder#own=run: echo one > shared.txt | coder#own=run: echo two > shared.txt"
+            .into(),
         PromptOpts::default(),
     )
     .await

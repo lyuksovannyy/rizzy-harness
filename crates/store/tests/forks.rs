@@ -93,6 +93,7 @@ fn parent_log() -> Log {
         parent_session: None,
         no_callbacks: false,
         exec_mode: None,
+        sub_folder: None,
     }));
     l.turn("t1", "inheritedneedle question", "inheritedanswer", 100);
     l

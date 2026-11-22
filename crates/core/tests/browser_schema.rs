@@ -250,6 +250,13 @@ fn enums() -> Vec<(&'static [&'static str], Vec<String>)> {
             variants!(ExecMode::Sandbox, ExecMode::Host),
         ),
         (
+            &["session_created.sub_folder"],
+            variants!(
+                harness_core::subagent::SubFolder::Shared,
+                harness_core::subagent::SubFolder::Own
+            ),
+        ),
+        (
             &["turn_started.retry.reason", "turn_ended.reason"],
             variants!(
                 TurnEndReason::Completed,

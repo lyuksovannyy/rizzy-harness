@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 struct Host {
     events: Mutex<Vec<EventKind>>,
     started: AtomicUsize,
+    /// The `folder` each started sub-agent was asked for.
+    folders: Mutex<Vec<Option<harness_core::subagent::SubFolder>>>,
     denied: Vec<&'static str>,
 }
 
@@ -38,8 +40,10 @@ impl TurnHost for Host {
         _observed: Arc<Vec<String>>,
         _cancel: tokio_util::sync::CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
+        folder: Option<harness_core::subagent::SubFolder>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
         self.started.fetch_add(1, Ordering::SeqCst);
+        self.folders.lock().unwrap().push(folder);
         let child = SessionId::new();
         started(child);
         Ok(harness_core::backend::DelegateOutcome {
@@ -166,6 +170,7 @@ async fn run_seen(
     let host = Host {
         events: Mutex::default(),
         started: AtomicUsize::new(0),
+        folders: Mutex::default(),
         denied,
     };
     let dir = tempfile::tempdir().unwrap();
@@ -347,13 +352,13 @@ async fn described(tool: &str) -> String {
         .unwrap_or_else(|| panic!("`{tool}` was not offered"))
 }
 
-/// Delegations of one step run at the same time on separate copies: the
-/// model is told to start only independent work together.
+/// Delegations of one step run at the same time: the model is told to
+/// start only independent work together.
 #[tokio::test]
 async fn the_delegate_description_says_one_steps_children_do_not_see_each_other() {
     let d = described(DELEGATE).await;
     assert!(d.contains(DELEGATE_PARALLEL), "{d}");
-    assert!(d.contains("do not see each other's changes"), "{d}");
+    assert!(d.contains("may not see each other's changes"), "{d}");
     assert!(
         d.contains("in a later step, after that result is back"),
         "{d}"
@@ -424,6 +429,7 @@ async fn delegate_offers_follow_ups() {
         let host = Host {
             events: Mutex::default(),
             started: AtomicUsize::new(0),
+            folders: Mutex::default(),
             denied: vec![],
         };
         let dir = tempfile::tempdir().unwrap();
@@ -495,6 +501,7 @@ fn the_shells_web_note_is_made_only_where_web_fetch_is_offered() {
     let host = |denied: Vec<&'static str>| Host {
         events: Mutex::default(),
         started: AtomicUsize::new(0),
+        folders: Mutex::default(),
         denied,
     };
     let all = spec("a", ToolSelection::All(AllTools::All));
@@ -511,4 +518,155 @@ fn the_shells_web_note_is_made_only_where_web_fetch_is_offered() {
     let mut denied = all.clone();
     denied.deny_tools = vec!["web_fetch".into()];
     assert!(!on.offers_web_fetch(Some(&denied), &host(vec![])));
+}
+
+// ---- Where a sub-agent that writes works (the owner, 2026-11-21) ---------
+
+/// The `delegate` tool's schema as the model received it.
+async fn delegate_schema() -> Value {
+    let rec = Arc::new(Rec {
+        reqs: Mutex::default(),
+    });
+    let backend = NativeBackend::new(
+        rec.clone(),
+        harness_tools::builtin(),
+        NativeConfig::default(),
+    );
+    let host = Host {
+        events: Mutex::default(),
+        started: AtomicUsize::new(0),
+        folders: Mutex::default(),
+        denied: vec![],
+    };
+    let dir = tempfile::tempdir().unwrap();
+    backend
+        .run_turn(TurnCtx {
+            session_id: SessionId::new(),
+            turn_id: "t".into(),
+            history: vec![],
+            user_text: "hello".into(),
+            cwd: dir.path().to_path_buf(),
+            model: "mock".into(),
+            agent: Some(AgentSpec {
+                delegates: vec![spec("dev", list(&["read", "write", "bash"]))],
+                ..spec("lead", ToolSelection::All(AllTools::All))
+            }),
+            compare: vec![],
+            parent_session: None,
+            extra: Default::default(),
+            cancel: Default::default(),
+            host: &host,
+        })
+        .await;
+    let reqs = rec.reqs.lock().unwrap();
+    reqs[0]
+        .tools
+        .iter()
+        .find(|t| t.name == DELEGATE)
+        .unwrap()
+        .schema
+        .clone()
+}
+
+/// `folder` is an optional choice of two words, and the description says
+/// in plain words which is the default, when to ask for the other and what
+/// each costs.
+#[tokio::test]
+async fn delegate_offers_a_folder_choice_and_says_what_each_costs() {
+    let schema = delegate_schema().await;
+    assert_eq!(
+        schema["properties"]["folder"]["enum"],
+        json!(["shared", "own"]),
+        "{schema}"
+    );
+    assert_eq!(schema["required"], json!(["agent", "task"]));
+    let d = described(DELEGATE).await;
+    assert!(d.contains(DELEGATE_FOLDER), "{d}");
+    assert!(
+        d.contains("`folder: \"own\"`") && d.contains("`folder: \"shared\"`"),
+        "{d}"
+    );
+    assert!(
+        !d.contains("works on its own copy of the folder"),
+        "the old rule is gone: {d}"
+    );
+}
+
+/// A word other than `shared` or `own` is refused before any child exists,
+/// and so is a `folder` on a follow-up (it works where it started).
+#[tokio::test]
+async fn a_folder_that_is_neither_shared_nor_own_is_refused() {
+    let all = vec![spec("dev", list(&["read", "write"]))];
+    for bad in [r#""both""#, r#""Own""#, "true", "1", r#""""#, r#"{"a":1}"#] {
+        let script = format!(
+            r#"script: [{{"tool":"delegate","input":{{"agent":"dev","task":"x","folder":{bad}}}}}]"#
+        );
+        let (_, started, outs) = run(&[], vec![], all.clone(), &script).await;
+        assert_eq!(started, 0, "{bad}");
+        assert!(
+            outs[0].contains("`folder` must be \"shared\" or \"own\""),
+            "{bad}: {outs:?}"
+        );
+    }
+    let id = SessionId::new();
+    let script = format!(
+        r#"script: [{{"tool":"delegate","input":{{"agent":"dev","task":"x","session":"{id}","folder":"own"}}}}]"#
+    );
+    let (_, started, outs) = run(&[], vec![], all.clone(), &script).await;
+    assert_eq!(started, 0);
+    assert!(outs[0].contains("follow-up"), "{outs:?}");
+    // `null` is absent.
+    let script =
+        r#"script: [{"tool":"delegate","input":{"agent":"dev","task":"x","folder":null}}]"#;
+    let (_, started, _) = run(&[], vec![], all, script).await;
+    assert_eq!(started, 1);
+}
+
+/// The host gets what the call asked for, and `None` when it left the
+/// field out: the node decides the rest.
+#[tokio::test]
+async fn the_host_is_told_which_folder_the_call_asked_for() {
+    use harness_core::subagent::SubFolder;
+    let backend = NativeBackend::new(
+        Arc::new(Rec {
+            reqs: Mutex::default(),
+        }),
+        harness_tools::builtin(),
+        NativeConfig::default(),
+    );
+    let host = Host {
+        events: Mutex::default(),
+        started: AtomicUsize::new(0),
+        folders: Mutex::default(),
+        denied: vec![],
+    };
+    let dir = tempfile::tempdir().unwrap();
+    backend
+        .run_turn(TurnCtx {
+            session_id: SessionId::new(),
+            turn_id: "t".into(),
+            history: vec![],
+            user_text: "delegate: dev#own=a | dev#shared=b | dev=c".into(),
+            cwd: dir.path().to_path_buf(),
+            model: "mock".into(),
+            agent: Some(AgentSpec {
+                delegates: vec![spec("dev", list(&["read", "write"]))],
+                ..spec("lead", ToolSelection::All(AllTools::All))
+            }),
+            compare: vec![],
+            parent_session: None,
+            extra: Default::default(),
+            cancel: Default::default(),
+            host: &host,
+        })
+        .await;
+    let mut got: Vec<String> = host
+        .folders
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|f| f.map_or("none", SubFolder::as_str).to_string())
+        .collect();
+    got.sort();
+    assert_eq!(got, ["none", "own", "shared"]);
 }

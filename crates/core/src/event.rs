@@ -542,6 +542,11 @@ pub struct SessionCreated {
     /// one runs nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_mode: Option<crate::policy::ExecMode>,
+    /// A sub-agent that can change files: where it works, in its parent's
+    /// folder (`shared`) or in a copy of its own (`own`, PLAN.md T32).
+    /// Absent for a chat and for a sub-agent that only reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_folder: Option<crate::subagent::SubFolder>,
     /// Set when this chat is a fork: its first `through_seq` events are
     /// copies of that chat's, at the same seqs ([`crate::fork`] is the one
     /// rule). Not `parent_session`, which means "sub-agent of".
@@ -2657,6 +2662,7 @@ mod tests {
                 agent_id: Some("general".into()),
                 incognito: true,
                 parent_session: None,
+                sub_folder: None,
             }),
             EventKind::TurnStarted(TurnStarted {
                 cause: None,

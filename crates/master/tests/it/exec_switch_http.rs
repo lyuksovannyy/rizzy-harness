@@ -73,6 +73,7 @@ fn older_node(
                             parent_session: None,
                             no_callbacks: false,
                             exec_mode: *exec_mode,
+                            sub_folder: None,
                         })
                         .into_parts();
                     let _ = tx.try_send(NodeToMaster::Event {
@@ -372,6 +373,7 @@ async fn a_chat_and_a_sub_agents_chat_are_refused() {
         parent_session: Some(parent.parse().unwrap()),
         no_callbacks: true,
         exec_mode: Some(ExecMode::Sandbox),
+        sub_folder: None,
     })
     .into_parts();
     payload["parent_session"] = json!(parent);
@@ -515,6 +517,7 @@ async fn a_sub_agents_row_keeps_its_own_mode_when_its_chat_is_switched() {
         parent_session: Some(parent.parse().unwrap()),
         no_callbacks: true,
         exec_mode: Some(ExecMode::Sandbox),
+        sub_folder: None,
     })
     .into_parts();
     payload["parent_session"] = json!(parent);

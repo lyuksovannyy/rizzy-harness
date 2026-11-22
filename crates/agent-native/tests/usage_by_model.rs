@@ -249,6 +249,7 @@ impl TurnHost for Host {
         _observed: Arc<Vec<String>>,
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
+        _folder: Option<harness_core::subagent::SubFolder>,
     ) -> Result<DelegateOutcome, String> {
         let child = SessionId::new();
         started(child);

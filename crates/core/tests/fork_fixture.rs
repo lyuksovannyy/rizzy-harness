@@ -99,6 +99,7 @@ fn events() -> Vec<RawEvent> {
         parent_session: None,
         no_callbacks: false,
         exec_mode: None,
+        sub_folder: None,
     }));
     p.turn("t1", "First", "One.", 100, &["a.rs"]);
     p.push(EventKind::ChatAllowAdded(ChatAllowAdded {

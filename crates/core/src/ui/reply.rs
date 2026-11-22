@@ -111,6 +111,7 @@ mod tests {
             agent_id: None,
             incognito: false,
             parent_session: None,
+            sub_folder: None,
         })
     }
 

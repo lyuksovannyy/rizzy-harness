@@ -80,6 +80,7 @@ fn careless_node(id: &str) -> (harness_node::NodeLink, Arc<std::sync::Mutex<usiz
                         parent_session: None,
                         no_callbacks: false,
                         exec_mode: None,
+                        sub_folder: None,
                     },
                 )
                 .into_parts();

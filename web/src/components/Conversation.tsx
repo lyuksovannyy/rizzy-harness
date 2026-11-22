@@ -52,6 +52,7 @@ import { DeleteChat } from "./DeleteChat";
 import { useAvatarState } from "./avatarState";
 import { useSubagentOnly } from "../lib/useSubagentOnly";
 import { Markdown } from "./Markdown";
+import { folderWords } from "../lib/subFolder";
 import { Mentioned } from "./Mentioned";
 import { peersLeft } from "../lib/peers";
 import { ChatHeader } from "./ChatHeader";
@@ -759,7 +760,8 @@ export default function Conversation(props: {
       {props.row?.parent_id && (
         <div className="incognito-banner">
           <span>
-            Sub-task run by {agentName(activeAgent)} for another session.
+            Sub-task run by {agentName(activeAgent)} for another session
+            {folderWords(meta?.sub_folder) ? `, worked ${folderWords(meta?.sub_folder)}` : ""}.
           </span>
           <a className="link" href={`#/s/${props.row.parent_id}`}>
             Back to the main session

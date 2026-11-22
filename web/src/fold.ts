@@ -180,6 +180,7 @@ const ENUMS: Record<string, string> = {
   approvalMode: "plan ask_all ask accept_edits auto",
   profile: "chat agentic",
   execMode: "sandbox host",
+  subFolder: "shared own",
   turnEnd: "completed cancelled error interrupted stopped limit",
   mention: "file cut folder missing refused binary too_large",
   uiKind: "choices form progress chart",
@@ -230,7 +231,7 @@ const STRUCTS: Record<string, string> = {
 // Every kind the fold handles.
 const KINDS: Record<string, string> = {
   session_created:
-    "title cwd model backend node_id approval_mode:=approvalMode profile:=profile ?agent_id ?incognito:b ?parent_session ?no_callbacks:b ?exec_mode:=execMode ?forked:@forkedFrom",
+    "title cwd model backend node_id approval_mode:=approvalMode profile:=profile ?agent_id ?incognito:b ?parent_session ?no_callbacks:b ?exec_mode:=execMode ?sub_folder:=subFolder ?forked:@forkedFrom",
   turn_started: "turn_id ?agent:@agent ?cause:@cause ?continued_by ?retry:@retry",
   user_message: "turn_id text ?attachments:[@attachment ?files:[@mention ?reply:@reply ?images:[@image ?queued:b ?triggers:[s ?tags:[s",
   assistant_delta: "turn_id message_id text ?author ?variant:@variant",
@@ -603,6 +604,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (p.parent_session != null) meta!.parent_session = p.parent_session;
       if (p.no_callbacks) meta!.no_callbacks = true;
       if (p.exec_mode != null) meta!.exec_mode = p.exec_mode;
+      if (p.sub_folder != null) meta!.sub_folder = p.sub_folder;
       if (p.forked != null) meta!.forked = p.forked;
       v.meta = meta;
       break;

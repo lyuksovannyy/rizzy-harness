@@ -313,9 +313,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         observed: Arc<Vec<String>>,
         cancel: tokio_util::sync::CancellationToken,
         started: Box<dyn FnOnce(harness_core::SessionId) + Send>,
+        folder: Option<harness_core::subagent::SubFolder>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
         self.host
-            .delegate(agent, task, refs, observed, cancel, started)
+            .delegate(agent, task, refs, observed, cancel, started, folder)
             .await
     }
 
@@ -352,12 +353,15 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         call_id: String,
         observed: Arc<Vec<String>>,
         max_tokens: u64,
+        folder: Option<harness_core::subagent::SubFolder>,
     ) -> Result<harness_core::backend::BackgroundDelegated, String> {
         if self.failure().is_some() {
             return Err("the session log could not be written".into());
         }
         self.host
-            .delegate_background(agent, task, follow_up, call_id, observed, max_tokens)
+            .delegate_background(
+                agent, task, follow_up, call_id, observed, max_tokens, folder,
+            )
             .await
     }
 
@@ -551,10 +555,27 @@ fn plan_no_writer(agent: Option<&str>) -> String {
 /// test of 2026-11-15: "write the function" and "write its tests" started
 /// together, each blind to the other).
 pub const DELEGATE_PARALLEL: &str = "Several calls in one step run at the same time, and \
-     they do not see each other's changes (a sub-agent that can change files works on its own \
-     copy of the folder; one that only reads works in this folder): in one step delegate only \
-     independent work (different files, or reading only); delegate work that builds on another \
-     sub-agent's result in a later step, after that result is back.";
+     they may not see each other's changes: in one step delegate only independent work \
+     (different files, or reading only, or each with `folder: \"own\"`); delegate work that \
+     builds on another sub-agent's result in a later step, after that result is back.";
+
+/// What the `delegate` description says about where a sub-agent that
+/// writes works (the owner, 2026-11-21; PLAN.md T32).
+pub const DELEGATE_FOLDER: &str = "A sub-agent that can change files works in this chat's \
+     folder by default (`folder: \"shared\"`): it sees your changes and you see its, and it costs \
+     nothing to set up. Ask for `folder: \"own\"` for larger work and for sub-agents that run at \
+     the same time on the same files: it then works on a copy of the folder of its own (a git \
+     repository only), merged back per file when it ends, so you and the others do not see its \
+     changes until then; the copy takes time to make, and a file you or another sub-agent changed \
+     meanwhile can conflict (nothing of that sub-agent is then written, and you get its diff). \
+     Several sub-agents in one folder can overwrite each other's files through commands (the \
+     `edit` and `write` tools refuse a file that changed since that agent read it); a sub-agent \
+     that only reads always works in this folder.";
+
+/// The `folder` argument's description.
+const DELEGATE_FOLDER_ARG: &str = "Only for a sub-agent that can change files: \"shared\" (the \
+     default) works in this chat's folder; \"own\" works on a copy of its own that is merged back \
+     when it ends, for larger work and for sub-agents running at the same time on the same files";
 
 /// What the `delegate` description says of follow-ups (PLAN.md T68).
 pub const DELEGATE_FOLLOW_UP: &str = "A finished sub-agent keeps its conversation: to ask it \
@@ -1175,7 +1196,12 @@ impl NativeBackend {
                         "enum": offered.iter().map(|d| d.agent_id.clone()).collect::<Vec<_>>()
                     },
                     "task": { "type": "string", "description": "Everything the specialist needs to know; for a follow-up, the next message to it" },
-                    "session": { "type": "string", "description": "Only for a follow-up: the id a finished delegate result of this chat began with (`session: <id>`); `agent` must be that sub-agent's" }
+                    "session": { "type": "string", "description": "Only for a follow-up: the id a finished delegate result of this chat began with (`session: <id>`); `agent` must be that sub-agent's" },
+                    "folder": {
+                        "type": "string",
+                        "enum": ["shared", "own"],
+                        "description": DELEGATE_FOLDER_ARG
+                    }
                 },
                 "required": ["agent", "task"]
             });
@@ -1193,7 +1219,8 @@ impl NativeBackend {
                     "Hand a self-contained sub-task to a specialist, who works in its own session \
                      on the same machine with this turn's project context (not this conversation) \
                      and returns a status (done, partial or failed) with its own report, which \
-                     nobody has checked. Available: {}. {DELEGATE_PARALLEL} {DELEGATE_FOLLOW_UP}{} \
+                     nobody has checked. Available: {}. {DELEGATE_FOLDER} {DELEGATE_PARALLEL} \
+                     {DELEGATE_FOLLOW_UP}{} \
                      Limits per turn: {} sub-agents, {} tokens (a follow-up counts as one).",
                     roster.join(", "),
                     if bg_agents { DELEGATE_BACKGROUND } else { "" },
@@ -1476,6 +1503,35 @@ impl NativeBackend {
                 }
             }
         };
+        // Where a writing child works: two words, or left out (`null` is
+        // left out). A follow-up works where the sub-agent started.
+        let folder = match call.input.get("folder") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v) => match v
+                .as_str()
+                .and_then(harness_core::subagent::SubFolder::parse)
+            {
+                Some(f) => Some(f),
+                None => {
+                    return (
+                        ToolOutcome::err(
+                            "`folder` must be \"shared\" or \"own\" (leave it out for \"shared\")",
+                        ),
+                        none,
+                        false,
+                    );
+                }
+            },
+        };
+        if folder.is_some() && follow_up.is_some() {
+            return (
+                ToolOutcome::err(
+                    "a follow-up works where the sub-agent started: leave `folder` out",
+                ),
+                none,
+                false,
+            );
+        }
         // Plan mode (X.7): a child that can write is not started, nor
         // given a follow-up (T68); one that only reads is, and inherits the
         // mode (the node's ceiling).
@@ -1537,6 +1593,7 @@ impl NativeBackend {
                     call.call_id.clone(),
                     observed.clone(),
                     grant,
+                    folder,
                 )
                 .await
             {
@@ -1609,6 +1666,7 @@ impl NativeBackend {
                         observed.clone(),
                         ctx.cancel.child_token(),
                         started,
+                        folder,
                     )
                     .await
                 }
@@ -7214,6 +7272,7 @@ mod tests {
             observed: Arc<Vec<String>>,
             cancel: tokio_util::sync::CancellationToken,
             started: Box<dyn FnOnce(SessionId) + Send>,
+            _folder: Option<harness_core::subagent::SubFolder>,
         ) -> Result<harness_core::backend::DelegateOutcome, String> {
             let child = SessionId::new();
             started(child);
@@ -8216,6 +8275,7 @@ mod tests {
                 _observed: Arc<Vec<String>>,
                 cancel: tokio_util::sync::CancellationToken,
                 started: Box<dyn FnOnce(SessionId) + Send>,
+                _folder: Option<harness_core::subagent::SubFolder>,
             ) -> Result<harness_core::backend::DelegateOutcome, String> {
                 if agent.agent_id == "a" {
                     // Only `a` reports its child, so only its link fails.
@@ -8293,6 +8353,7 @@ mod tests {
                 _observed: Arc<Vec<String>>,
                 _cancel: tokio_util::sync::CancellationToken,
                 _started: Box<dyn FnOnce(SessionId) + Send>,
+                _folder: Option<harness_core::subagent::SubFolder>,
             ) -> Result<harness_core::backend::DelegateOutcome, String> {
                 let (input, wait) = if agent.agent_id == "a" {
                     (7_000, 40)

@@ -2806,7 +2806,7 @@ async fn a_writer_childs_changes_are_kept_out_of_a_folder_now_in_plan_mode() {
     ]);
     n.send(prompt(
         sid,
-        &format!("delegate: dev={task}"),
+        &format!("delegate: dev#own={task}"),
         Some(agent(
             "lead",
             &["read"],
