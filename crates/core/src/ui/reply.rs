@@ -143,6 +143,7 @@ mod tests {
             triggers: vec![],
             tags: vec![],
             files: vec![],
+            uploads: vec![],
         })
     }
 

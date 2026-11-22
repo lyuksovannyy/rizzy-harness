@@ -6,7 +6,7 @@
 
 use harness_protocol::MasterToNode;
 
-const PROMPT_FULL: &str = r#"{"type":"session.prompt","req_id":"r1","session_id":"0193f2a0-0000-7000-8000-000000000001","text":"hi","agent":{"agent_id":"a","name":"N","system_prompt":"S","tools":"all","ui":"rich","prompt_hash":"h"},"agent_named":true,"attachments":[{"name":"f.txt","mime":"text/plain","text":"x","truncated":true}],"compare":["m1","m2"],"savings":{"prompt_cache":true,"keep_tool_outputs":3,"filter_shell_output":true,"bounded_reads":true,"web_readability":true,"style":"lite","repo_map_tokens":100,"outline_tool":true,"graphify":true},"context":{"turn":"t","standing":[{"part":"memory","text":"m"}],"unattended":true},"reply":{"message_id":"m1","block_id":"b","values":{"k":"v"}},"images":[{"media_id":"m","sha256":"abababababababababababababababababababababababababababababababab","mime":"image/png","name":"a.png","width":2,"height":1,"data":"aGk="}],"files":["src/a.rs"],"owner":"u1","identity":{"login":"ann","name":"Ann A","email":"ann@example.org"},"peers":[{"agent_id":"p","name":"N","system_prompt":"S","tools":"all","ui":"rich","prompt_hash":"h"}],"tags":["t"]}"#;
+const PROMPT_FULL: &str = r#"{"type":"session.prompt","req_id":"r1","session_id":"0193f2a0-0000-7000-8000-000000000001","text":"hi","agent":{"agent_id":"a","name":"N","system_prompt":"S","tools":"all","ui":"rich","prompt_hash":"h"},"agent_named":true,"attachments":[{"name":"f.txt","mime":"text/plain","text":"x","truncated":true}],"compare":["m1","m2"],"savings":{"prompt_cache":true,"keep_tool_outputs":3,"filter_shell_output":true,"bounded_reads":true,"web_readability":true,"style":"lite","repo_map_tokens":100,"outline_tool":true,"graphify":true},"context":{"turn":"t","standing":[{"part":"memory","text":"m"}],"unattended":true},"reply":{"message_id":"m1","block_id":"b","values":{"k":"v"}},"images":[{"media_id":"m","sha256":"abababababababababababababababababababababababababababababababab","mime":"image/png","name":"a.png","width":2,"height":1,"data":"aGk="}],"files":["src/a.rs"],"owner":"u1","identity":{"login":"ann","name":"Ann A","email":"ann@example.org"},"peers":[{"agent_id":"p","name":"N","system_prompt":"S","tools":"all","ui":"rich","prompt_hash":"h"}],"tags":["t"],"uploads":[{"upload_id":"u1","name":"a.zip","mime":"application/zip","size":5,"sha256":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"}]}"#;
 
 const PROMPT_EMPTY: &str = r#"{"type":"session.prompt","req_id":"r1","session_id":"0193f2a0-0000-7000-8000-000000000001","text":"hi"}"#;
 
@@ -37,6 +37,7 @@ const PROMPT_FIELDS: &[&str] = &[
     "identity",
     "peers",
     "tags",
+    "uploads",
 ];
 const CALLBACK_FIELDS: &[&str] = &[
     "type",

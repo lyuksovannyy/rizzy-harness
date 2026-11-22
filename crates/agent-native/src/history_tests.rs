@@ -174,6 +174,7 @@ impl Plain for UserMessage {
             queued: false,
             triggers: vec![],
             tags: vec![],
+            uploads: vec![],
         }
     }
 }
@@ -1320,4 +1321,25 @@ fn odd_arguments_are_answered_never_panic() {
             Ok(Reply::Image { .. }) | Err(_) => {}
         }
     }
+}
+
+/// The history tool shows the person's own words of a message that brought
+/// saved files, not the harness's line about them (T94).
+#[test]
+fn the_persons_words_end_before_the_line_about_saved_files() {
+    use harness_core::event::UploadedFile;
+    let mut m = UserMessage::plain("t", "Unpack it, please.");
+    m.uploads = vec![UploadedFile {
+        name: "x.zip".into(),
+        path: "attachments/x.zip".into(),
+        bytes: 5,
+        sha256: "ab".repeat(32),
+        mime: "application/zip".into(),
+    }];
+    let sent = m.model_text();
+    assert!(sent.contains("saved in this chat's folder"), "{sent}");
+    assert_eq!(
+        crate::history::person_text_for_test(&sent),
+        "Unpack it, please."
+    );
 }

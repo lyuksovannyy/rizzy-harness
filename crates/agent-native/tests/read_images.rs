@@ -243,6 +243,7 @@ fn open(host: &Host, turn: &str) {
         triggers: vec![],
         tags: vec![],
         files: vec![],
+        uploads: vec![],
     }));
 }
 

@@ -137,6 +137,7 @@ fn message(turn: &str, text: &str, attachments: Vec<Attachment>) -> UserMessage 
         triggers: vec![],
         tags: vec![],
         files: vec![],
+        uploads: vec![],
     }
 }
 

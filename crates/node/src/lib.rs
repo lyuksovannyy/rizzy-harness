@@ -22,6 +22,7 @@ mod session;
 mod stored_skills;
 #[cfg(test)]
 mod test_script;
+mod uploads;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,6 +58,7 @@ fn starts_work(msg: &MasterToNode) -> bool {
             | MasterToNode::Compact { .. }
             | MasterToNode::Restore { .. }
             | MasterToNode::ArtifactStage { .. }
+            | MasterToNode::UploadChunk { .. }
     )
 }
 
@@ -138,6 +140,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::RevokeAllow { session_id, .. }
         | MasterToNode::SetStepLimit { session_id, .. }
         | MasterToNode::ArtifactStage { session_id, .. }
+        | MasterToNode::UploadChunk { session_id, .. }
         | MasterToNode::ArtifactRelease { session_id, .. } => Some(*session_id),
         MasterToNode::Welcome { .. }
         | MasterToNode::Cancel { .. }
@@ -235,6 +238,9 @@ pub(crate) struct Inner {
     /// Where published files are staged; `None` when this runtime does not
     /// publish (the chat runtime, or `[artifacts] enabled = false`).
     pub(crate) stages: Option<Arc<artifacts::Stages>>,
+    /// Files the master pushed for a prompt that has not taken them yet
+    /// (PLAN.md T94); off where this runtime has no data directory.
+    pub(crate) uploads: uploads::Staging,
     /// Set once by [`NodeRuntime::stop`]: new work is refused from then on
     /// ([`NODE_STOPPING`]) and a cancelled turn ends `stopped`.
     stopping: AtomicBool,
@@ -642,6 +648,16 @@ impl NodeRuntime {
         let hosted: std::collections::HashSet<SessionId> =
             rows.iter().map(|r| r.session_id).collect();
         let stages = open_stages(&cfg, &hosted);
+        let uploads = uploads::Staging::new(
+            cfg.artifacts
+                .as_ref()
+                .filter(|_| {
+                    cfg.profile == harness_core::event::Profile::Agentic
+                        && cfg.policy.limits.upload_max_mb > 0
+                        && cfg.policy.limits.uploads_per_message > 0
+                })
+                .map(|a| a.data_dir.join("uploads-stage")),
+        );
         let bg_limits = cfg.policy.limits.background();
         let bg_secrets = cfg.secrets.clone();
         let audit_log = audit::AuditLog::start(cfg.store.clone());
@@ -653,6 +669,7 @@ impl NodeRuntime {
             plugins: tokio::sync::OnceCell::new(),
             audit_log,
             stages,
+            uploads,
             stopping: AtomicBool::new(false),
             background: harness_tools::background::Registry::new(bg_limits, bg_secrets),
             recalls: Default::default(),
@@ -958,6 +975,23 @@ impl NodeRuntime {
                     capabilities.push(harness_protocol::CAP_HANDOFF.into());
                 }
                 capabilities.push(harness_protocol::CAP_COMPACT.into());
+                // Files the model cannot read as text, saved into the chat's
+                // folder (T94): only with a staging folder, and the node's
+                // own numbers, so the master refuses what this node would.
+                if self.inner.uploads.enabled() {
+                    let l = &self.inner.cfg.policy.limits;
+                    capabilities.push(harness_protocol::CAP_UPLOADS.into());
+                    capabilities.push(format!(
+                        "{}{}",
+                        harness_protocol::CAP_UPLOAD_MAX_PREFIX,
+                        l.upload_max_mb
+                    ));
+                    capabilities.push(format!(
+                        "{}{}",
+                        harness_protocol::CAP_UPLOADS_PER_MESSAGE_PREFIX,
+                        l.uploads_per_message
+                    ));
+                }
                 // Off is silent: with `callback_turns = 0` the master asks
                 // nothing, and an end waits for the person as before.
                 if self.inner.cfg.policy.limits.callback_turns > 0 {
@@ -1250,6 +1284,44 @@ impl NodeRuntime {
                 }
             }
         }
+    }
+
+    /// One chunk of a file the master pushed for a prompt (T94): checked
+    /// against this node's own limits and the chat's kind, then staged.
+    /// The node decides: nothing the chunk says widens `[limits]`, and a
+    /// chat with no folder takes none.
+    async fn upload_chunk(
+        &self,
+        sid: SessionId,
+        upload_id: String,
+        offset: u64,
+        size: u64,
+        sha256: String,
+        data: String,
+    ) -> Result<(), String> {
+        use base64::Engine as _;
+        let Some(s) = self.session(sid) else {
+            return Err("unknown session".into());
+        };
+        s.accepts_uploads()?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data.as_bytes())
+            .map_err(|_| "the chunk is not base64".to_string())?;
+        let max = self
+            .inner
+            .cfg
+            .policy
+            .limits
+            .upload_max_mb
+            .saturating_mul(1 << 20);
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            inner
+                .uploads
+                .chunk(sid, &upload_id, offset, size, &sha256, &bytes, max)
+        })
+        .await
+        .map_err(|e| format!("staging failed: {e}"))?
     }
 
     /// Answer `artifact.fetch` (never acked: the chunk is the answer).
@@ -1774,6 +1846,7 @@ impl NodeRuntime {
                 identity,
                 peers,
                 tags,
+                uploads,
                 ..
             }) => {
                 self.audit("session.prompt", session_id).await;
@@ -1795,6 +1868,7 @@ impl NodeRuntime {
                     reply,
                     images,
                     files,
+                    uploads,
                 };
                 match self.session(session_id) {
                     Some(s) => match learn_owner(&s, owner, identity).await {
@@ -1806,6 +1880,22 @@ impl NodeRuntime {
                     },
                     None => Err("unknown session".into()),
                 }
+            }
+            MasterToNode::UploadChunk {
+                session_id,
+                upload_id,
+                offset,
+                size,
+                sha256,
+                data,
+                ..
+            } => {
+                if offset == 0 {
+                    // Once a file, never per chunk (the audit stays small).
+                    self.audit("session.upload", session_id).await;
+                }
+                self.upload_chunk(session_id, upload_id, offset, size, sha256, data)
+                    .await
             }
             MasterToNode::Callback(CallbackMsg {
                 session_id,
@@ -2405,6 +2495,7 @@ impl NodeRuntime {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&sid);
+        self.inner.uploads.drop_session(sid);
         // What the backend keeps for it in memory (the file tools' record).
         self.inner.cfg.backend.forget_session(sid);
         // The session's sandbox temp folder (TMPDIR) goes with it.

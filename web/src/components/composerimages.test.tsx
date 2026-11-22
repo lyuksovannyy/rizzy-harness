@@ -113,11 +113,12 @@ describe("where images are offered", () => {
   test("only where the server takes them; never in search or a temporary chat", () => {
     const hint = () => attach()?.title;
     show({ images: null });
-    expect(hint()).toBe("Attach documents (text, code, Markdown, CSV, JSON, PDF; up to 5)");
-    expect(input().accept).not.toContain("image/");
+    expect(hint()).toBe("Attach documents (text, code, Markdown, CSV, JSON, PDF; up to 10 with a message, each at most 10 MB)");
+    // The picker is not narrowed (T94): any file may be picked, and the server says what it does with it.
+    expect(input().accept).toBe("");
     show();
     expect(hint()).toBe("Attach documents or images (images are kept in Media)");
-    expect(input().accept).toContain(",image/*,.heic,.heif");
+    expect(input().accept).toBe("");
     act(() => host.querySelector<HTMLButtonElement>("button.incognito")!.click());
     expect(hint()).not.toContain("images");
     act(() => host.querySelector<HTMLButtonElement>("button.incognito")!.click());

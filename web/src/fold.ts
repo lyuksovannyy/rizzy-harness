@@ -209,6 +209,7 @@ const STRUCTS: Record<string, string> = {
   called: "message_seq:n by:=calledBy ?tags:[s",
   retry: "turn_id reason:=turnEnd ?failed_model ?model",
   attachment: "name mime text",
+  upload: "name path bytes:n sha256 mime",
   mention: "path state:=mention",
   reply: "message_id block_id values:{j",
   image: "media_id sha256 mime name width:n height:n",
@@ -233,7 +234,7 @@ const KINDS: Record<string, string> = {
   session_created:
     "title cwd model backend node_id approval_mode:=approvalMode profile:=profile ?agent_id ?incognito:b ?parent_session ?no_callbacks:b ?exec_mode:=execMode ?sub_folder:=subFolder ?forked:@forkedFrom",
   turn_started: "turn_id ?agent:@agent ?cause:@cause ?continued_by ?retry:@retry",
-  user_message: "turn_id text ?attachments:[@attachment ?files:[@mention ?reply:@reply ?images:[@image ?queued:b ?triggers:[s ?tags:[s",
+  user_message: "turn_id text ?attachments:[@attachment ?files:[@mention ?reply:@reply ?images:[@image ?queued:b ?triggers:[s ?tags:[s ?uploads:[@upload",
   assistant_delta: "turn_id message_id text ?author ?variant:@variant",
   assistant_message: "turn_id message_id text ?author ?variant:@variant ?blocks:[@ui ?thinking:@thinking",
   tool_call_started: "turn_id call_id tool input:j ?author",
@@ -708,6 +709,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (names.length) item.attachments = names;
       const files = ((p.files ?? []) as { path: string }[]).map((f) => f.path);
       if (files.length) item.files = files;
+      if (p.uploads?.length) item.uploads = p.uploads;
       if (p.reply != null) item.reply = p.reply;
       if (p.images?.length) item.images = p.images;
       if (p.queued) item.queued = { seq: e.seq, read: false };

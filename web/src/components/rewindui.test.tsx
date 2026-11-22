@@ -526,7 +526,9 @@ describe("a rewind arriving after the chat is on screen", () => {
     const before = header();
     expect(before).toContain("2.0k in");
     expect(actions()).toHaveLength(2);
-    await wait(20);
+    // The task list is a lazy chunk: wait for it, not for a fixed time (a
+    // loaded CI runner needs more than 20 ms).
+    for (let i = 0; i < 100 && !host.querySelector(".todo-panel"); i++) await wait(20);
     expect(host.querySelector(".todo-panel")!.textContent).toContain("0 of 1 done");
     // The same view object, grown in place, as the socket does.
     const sameView = current;

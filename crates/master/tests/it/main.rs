@@ -83,6 +83,7 @@ mod step_limit_http;
 mod storage_http;
 mod stored_skills_http;
 mod turn_diff_http;
+mod uploads_http;
 mod usage_http;
 mod version_refusal;
 mod voice_http;

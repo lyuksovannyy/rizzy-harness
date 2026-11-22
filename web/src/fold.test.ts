@@ -34,6 +34,21 @@ describe("fold", () => {
     expect(v.unknown_events).toBe(0);
   });
 
+  it("shows the files saved into the chat's folder on the message that brought them (T94)", () => {
+    const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
+    const up = { name: "x.zip", path: "attachments/x (2).zip", bytes: 1234, sha256: "ab".repeat(32), mime: "application/zip" };
+    const v = fold([
+      ev(1, "turn_started", { turn_id: "t" }),
+      ev(2, "user_message", { turn_id: "t", text: "unpack it", uploads: [up] }),
+      ev(3, "turn_ended", { turn_id: "t", reason: "completed" }),
+      ev(4, "turn_started", { turn_id: "u" }),
+      ev(5, "user_message", { turn_id: "u", text: "again" }),
+    ]);
+    expect(v.items[0]).toMatchObject({ type: "user", uploads: [{ name: "x.zip", path: "attachments/x (2).zip", bytes: 1234 }] });
+    expect(v.items.find((i) => i.type === "user" && i.turn_id === "u")).not.toHaveProperty("uploads");
+    expect(v.unknown_events).toBe(0);
+  });
+
   it("keeps the latest task list only, and drops a cleared one", () => {
     const sid = "11111111-1111-1111-1111-111111111111";
     const ev = (seq: number, items: unknown[]): RawEvent => ({

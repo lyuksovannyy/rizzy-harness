@@ -8,6 +8,7 @@ import { modelLabel, offeredModels, rawModel, resolveModel } from "../lib/models
 import { radioKeys, radioTab } from "../lib/radios";
 import { api } from "../api";
 import { readDraft, writeDraft } from "../lib/drafts";
+import { bytes } from "../lib/bytes";
 import { parseCompact } from "../lib/compactCommand";
 import type { Picture } from "../lib/downscale";
 import { abilities, allEngines, type CustomEngine, engineByUrl, engineMention, engineOrigin, type SearchKind, supports } from "../lib/engines";
@@ -81,7 +82,8 @@ export interface ComposerHandle {
   focus: () => void;
 }
 
-const MAX_ATTACHMENTS = 5;
+/** Files and images together in one message (the server counts the same). */
+const MAX_ATTACHMENTS = 10;
 /** Images per message (docs/media.md §6.6). */
 const MAX_IMAGES = 4;
 const isImage = (f: File) => f.type.startsWith("image/") || /\.hei[cf]$/i.test(f.name);
@@ -521,7 +523,7 @@ export function Composer(props: {
   const blind = canImage
     ? [effortModel, home && mode === "ask" ? compareWith : null].map((m) => resolveModel(props.models, m)).find((m) => m && !m.vision)
     : undefined;
-  const imageRoom = Math.min(MAX_IMAGES, props.images?.left ?? MAX_IMAGES) - pictures.length;
+  const imageRoom = Math.min(MAX_IMAGES, props.images?.left ?? MAX_IMAGES, MAX_ATTACHMENTS - files.length) - pictures.length;
   const sendingImages = pictures.some((x) => !x.media_id);
 
   const choose = (id: string) => {
@@ -616,13 +618,16 @@ export function Composer(props: {
     }
   };
 
+  // A coding chat (or the home bar in agentic mode) takes any file: the
+  // node saves what the model cannot read into the chat's folder (T94).
+  const folder = home ? mode === "agentic" : !!props.filesOf;
   const addFiles = async (list: File[]) => {
-    const picked = list.slice(0, MAX_ATTACHMENTS - files.length);
-    setErr(null);
+    const picked = list.slice(0, Math.max(0, MAX_ATTACHMENTS - files.length - pictures.length));
+    setErr(picked.length < list.length ? t("composer.tooManyFiles") : null);
     for (const f of picked) {
       setUploading((n) => n + 1);
       try {
-        const up = await api.upload(f);
+        const up = await api.upload(f, { session: home ? undefined : props.filesOf, folder: folder });
         setFiles((prev) => [...prev, up]);
       } catch (x) {
         setErr(`${f.name}: ${x instanceof Error ? x.message : String(x)}`);
@@ -815,8 +820,9 @@ export function Composer(props: {
               </li>
             ))}
             {files.map((f) => (
-              <li key={f.attachment_id} className="chip" title={`${f.chars.toLocaleString()} ${t("composer.chars")}`}>
-                <FileText size={14} /> {f.name}
+              <li key={f.attachment_id} className={f.saved ? "chip saved" : "chip"} title={f.saved ? t("composer.savedHint") : `${(f.chars ?? 0).toLocaleString()} ${t("composer.chars")}`}>
+                <FileText size={14} /> <span className="chip-name">{f.name}</span>
+                {f.saved && <span className="muted chip-note"> ({bytes(f.bytes ?? 0)}, {t("composer.saved")})</span>}
                 {f.truncated && <span className="muted"> ({t("composer.truncated")})</span>}
                 <button
                   type="button"
@@ -838,7 +844,7 @@ export function Composer(props: {
                 className="icon attach"
                 aria-label={t("composer.attach")}
                 title={canImage ? "Attach documents or images (images are kept in Media)" : t("composer.attachHint")}
-                disabled={files.length >= MAX_ATTACHMENTS || uploading > 0}
+                disabled={files.length + pictures.length >= MAX_ATTACHMENTS || uploading > 0}
                 onClick={() => fileInput.current?.click()}
               >
                 {uploading > 0 ? <Loader2 size={18} className="spin" /> : <Paperclip size={18} />}
@@ -848,7 +854,6 @@ export function Composer(props: {
                 type="file"
                 multiple
                 hidden
-                accept={`.txt,.md,.markdown,.csv,.json,.xml,.yaml,.yml,.toml,.html,.log,.pdf,.rs,.ts,.tsx,.js,.py,.go,.java,.c,.h,.cpp,.sh,.sql,text/*,application/pdf${canImage ? ",image/*,.heic,.heif" : ""}`}
                 onChange={(e) => {
                   // Images go with the message (lib/downscale); documents attach.
                   const all = [...(e.target.files ?? [])];

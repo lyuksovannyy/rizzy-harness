@@ -2416,6 +2416,41 @@
         "path": "turn_id",
         "required": true,
         "type": "string"
+      },
+      {
+        "path": "uploads",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "uploads[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "uploads[].bytes",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "uploads[].mime",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "uploads[].name",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "uploads[].path",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "uploads[].sha256",
+        "required": true,
+        "type": "string"
       }
     ],
     "variant_selected": [

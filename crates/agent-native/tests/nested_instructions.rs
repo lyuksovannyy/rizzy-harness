@@ -363,6 +363,7 @@ async fn run(b: &NativeBackend, host: &Host, cwd: &Path, t: Turn<'_>) -> TurnOut
             triggers: vec![],
             tags: vec![],
             files: vec![],
+            uploads: vec![],
         }));
     }
     let mut extra = t.extra;
@@ -1550,6 +1551,7 @@ async fn a_queued_mention_brings_its_file_right_after_the_message() {
             queued: true,
             triggers: vec![],
             tags: vec![],
+            uploads: vec![],
         },
     ));
     // One step, then the model answers: the turn ends after the request

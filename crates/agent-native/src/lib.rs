@@ -8478,6 +8478,7 @@ mod tests {
                     triggers: vec![],
                     tags: vec![],
                     files: vec![],
+                    uploads: vec![],
                 }),
             ),
             mk(
@@ -8509,6 +8510,7 @@ mod tests {
                     triggers: vec![],
                     tags: vec![],
                     files: vec![],
+                    uploads: vec![],
                 }),
             ),
         ];
@@ -8575,6 +8577,7 @@ mod tests {
                 triggers: vec![],
                 tags: vec![],
                 files: vec![],
+                uploads: vec![],
             }),
             &mut out,
         );
@@ -8660,6 +8663,7 @@ mod tests {
                 triggers: vec![],
                 tags: vec![],
                 files: vec![],
+                uploads: vec![],
             }));
             for e in host.events.lock().unwrap().drain(..) {
                 push(e);
@@ -9938,6 +9942,7 @@ mod background_tests {
                     triggers: vec![],
                     tags: vec![],
                     files: vec![],
+                    uploads: vec![],
                 }),
             ),
         ];
