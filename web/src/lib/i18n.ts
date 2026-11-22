@@ -52,6 +52,8 @@ const en = {
   "strip.model": "Model answering in this chat: {id}",
   "composer.chars": "characters",
   "composer.truncated": "cut to fit",
+  "composer.saved": "saved to the folder",
+  "composer.savedHint": "The model cannot read this as text: it is saved in the chat's folder under attachments/ and the agent is told where",
   "composer.files": "Files",
   "composer.mentionHint": "Goes with the message: the agent gets this file's content",
   "composer.noFile": "No file or folder by that name in this chat's folder",

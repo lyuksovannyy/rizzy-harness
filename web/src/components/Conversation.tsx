@@ -16,6 +16,7 @@ import { changesFiles, forceable, noRewind, resend, runs, type Resend } from "..
 import { dropDraft, readDraft, writeDraft } from "../lib/drafts";
 import { useFeatures } from "../lib/features";
 import { t } from "../lib/i18n";
+import { bytes } from "../lib/bytes";
 import { fallbackNote } from "../lib/modelPlan";
 import { markRunSeen } from "../lib/routineResults";
 import { routineHash } from "../lib/routes";
@@ -870,7 +871,7 @@ export default function Conversation(props: {
                             <Mentioned text={it.text} agents={props.agents} triggers={it.triggers} />
                           </div>
                         )}
-                        {(it.attachments || it.files) && (
+                        {(it.attachments || it.files || it.uploads) && (
                           <ul className="chips">
                             {it.attachments?.map((n, j) => (
                               <li key={j} className="chip">
@@ -880,6 +881,11 @@ export default function Conversation(props: {
                             {it.files?.map((p, j) => (
                               <li key={`f${j}`} className="chip" title={t("conv.mentioned")}>
                                 <AtSign size={14} /> {p}
+                              </li>
+                            ))}
+                            {it.uploads?.map((u, j) => (
+                              <li key={`u${j}`} className="chip" title={u.path}>
+                                <FileText size={14} /> {u.name} <span className="muted">({bytes(u.bytes)})</span>
                               </li>
                             ))}
                           </ul>

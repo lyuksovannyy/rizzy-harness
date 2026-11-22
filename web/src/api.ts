@@ -212,9 +212,12 @@ export const api = {
       files?: string[];
     } = {},
   ) => call("POST", `/api/sessions/${id}/prompt`, { text, ...opts }),
-  upload: async (file: File): Promise<UploadedAttachment> => {
+  /** `to`: the chat it is for, or a coding chat to come (a file the model
+   * cannot read is saved into that chat's folder, T94). */
+  upload: async (file: File, to: { session?: string; folder?: boolean } = {}): Promise<UploadedAttachment> => {
+    const where = to.session ? `&session=${to.session}` : to.folder ? "&agentic=1" : "";
     const res = await reach(
-      fetch(`/api/attachments?name=${encodeURIComponent(file.name)}`, {
+      fetch(`/api/attachments?name=${encodeURIComponent(file.name)}${where}&type=${encodeURIComponent(file.type)}`, {
         method: "POST",
         credentials: "same-origin",
         headers: keyed({ "content-type": "application/octet-stream" }),

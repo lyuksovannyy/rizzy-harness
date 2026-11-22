@@ -244,6 +244,8 @@ export type ItemKind =
       attachments?: string[];
       /** Paths the person mentioned with `@path` (T63); the node read them. */
       files?: string[];
+      /** Files the node saved into the chat's folder (T94). */
+      uploads?: { name: string; path: string; bytes: number }[];
       reply?: FormReply;
       images?: ImageRef[];
       /** Sent while a turn ran (X.5): its seq, and whether the agent has read it. */
@@ -553,8 +555,11 @@ export interface UploadedAttachment {
   attachment_id: string;
   name: string;
   mime: string;
-  chars: number;
-  truncated: boolean;
+  chars?: number;
+  truncated?: boolean;
+  /** A file for the chat's folder (T94): its size; the model reads no text of it. */
+  bytes?: number;
+  saved?: boolean;
 }
 
 export type Effort = "low" | "medium" | "high" | "max";
