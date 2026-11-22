@@ -2519,7 +2519,7 @@ file landed first, so the phases merged without touching shared lines.
 * **Settings → Server → Storage**: the limits and each account's usage (numbers only).
 * **Bundle**: the login form is its own lazy chunk, so signed-in visits never load it. From
   this round on the total is a soft limit (each feature raises its own line with a reason);
-  the first load keeps a hard ceiling of 104 KB gzip, because every first visit waits for it.
+  the first load keeps a hard ceiling of 110 KB gzip (104 until 2026-11-22, raised by the owner), because every first visit waits for it.
 
 **Evidence**
 * Tests per area: store, unit and HTTP tests for routines (clock seam; the webhook order and

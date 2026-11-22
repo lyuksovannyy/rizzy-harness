@@ -610,7 +610,11 @@ const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB 
 // helpers, the page-only English strings, 19 of the project icons: 4.6 KB), so
 // the initial load measured 99.3. The ceiling stays 104: the room is for the
 // next fixes, not for features.
-const PROGRAM_INITIAL_KB = 104;
+// Raised to 110 on 2026-11-22 by the owner's decision (103.0 measured after
+// X.54): 104 had no reason of its own beyond "a little over the measure", and
+// 1 KB of room made every UI feature a diet first. It is still a hard limit,
+// now equal to the long-standing first-load budget above.
+const PROGRAM_INITIAL_KB = 110;
 const web = new URL("../", import.meta.url).pathname;
 const dist = join(web, "dist");
 const manifest = JSON.parse(readFileSync(join(dist, ".vite/manifest.json"), "utf8"));
