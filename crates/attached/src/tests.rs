@@ -1002,3 +1002,48 @@ fn an_entry_can_be_read_by_its_number() {
     });
     assert_eq!(read(&t, &req(Some("#1")), soon()).unwrap().text, "1\ttwo");
 }
+
+/// A tar header by hand: `name`, a 12-byte size field, a valid checksum.
+fn raw_tar_header(name: &[u8], size: [u8; 12], ty: u8) -> Vec<u8> {
+    let mut h = vec![0u8; 512];
+    h[..name.len()].copy_from_slice(name);
+    h[124..136].copy_from_slice(&size);
+    h[156] = ty;
+    h[257..263].copy_from_slice(b"ustar\0");
+    h[263..265].copy_from_slice(b"00");
+    h[148..156].copy_from_slice(b"        ");
+    let sum: u32 = h.iter().map(|b| u32::from(*b)).sum();
+    h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    h
+}
+
+/// An entry that says it holds 2^64-1 bytes (a binary size field, or a pax
+/// `size`) is a damaged tar with a sentence: its padding is not computed by
+/// a subtraction that overflows.
+#[test]
+fn a_tar_entry_of_the_largest_size_is_a_sentence_and_not_a_panic() {
+    let mut size = [0xffu8; 12];
+    size[..4].copy_from_slice(&[0x80, 0, 0, 0]);
+    let mut t = raw_tar_header(b"big.bin", size, b'0');
+    t.extend_from_slice(&[b'x'; 512]);
+    let l = list(&t, 0, 10, soon()).unwrap();
+    assert_eq!(l.entries.len(), 1, "{l:?}");
+    assert_eq!(l.entries[0].size, Some(u64::MAX));
+    assert!(l.note.as_deref().unwrap_or("").contains("damaged"), "{l:?}");
+
+    let rec = b"29 size=18446744073709551615\n";
+    assert_eq!(rec.len(), 29);
+    let mut octal = [0u8; 12];
+    octal.copy_from_slice(format!("{:011o}\0", rec.len()).as_bytes());
+    let mut t = raw_tar_header(b"pax", octal, b'x');
+    let mut body = rec.to_vec();
+    body.resize(512, 0);
+    t.extend_from_slice(&body);
+    let mut zero = [0u8; 12];
+    zero.copy_from_slice(b"00000000000\0");
+    t.extend_from_slice(&raw_tar_header(b"small.txt", zero, b'0'));
+    t.extend_from_slice(&[0u8; 1024]);
+    let l = list(&t, 0, 10, soon()).unwrap();
+    assert_eq!(l.entries[0].size, Some(u64::MAX), "{l:?}");
+    assert!(l.note.as_deref().unwrap_or("").contains("damaged"), "{l:?}");
+}

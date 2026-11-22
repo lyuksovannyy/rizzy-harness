@@ -68,8 +68,10 @@ fn discard(r: &mut impl Read, n: u64) -> io::Result<()> {
     Ok(())
 }
 
-fn padded(n: u64) -> u64 {
-    n.saturating_add(511) / 512 * 512
+/// The bytes after `n` bytes of data up to the next 512-byte block (never a
+/// subtraction: `n` is the archive's number and may be 2^64-1).
+fn padding(n: u64) -> u64 {
+    (512 - n % 512) % 512
 }
 
 /// `len key=value\n` records of a pax header: the keys this reader uses.
@@ -196,7 +198,7 @@ fn walk_in<R: Read>(
             }
             let mut data = vec![0u8; size as usize];
             if fill(&mut r, &mut data).is_ok_and(|g| g == data.len())
-                && discard(&mut r, padded(size) - size).is_ok()
+                && discard(&mut r, padding(size)).is_ok()
             {
                 match ty {
                     b'L' => {
@@ -253,7 +255,7 @@ fn walk_in<R: Read>(
         if !go {
             return (n, false, None);
         }
-        if discard(&mut r, left.saturating_add(padded(data_len) - data_len)).is_err() {
+        if discard(&mut r, left.saturating_add(padding(data_len))).is_err() {
             return stop(n, budget);
         }
     }
