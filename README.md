@@ -2047,7 +2047,31 @@ changed:** a node where bubblewrap did not
 work used to run the shell with Landlock alone and only warn; it now
 offers no `sandbox`, and without `host = true` nothing. A chat whose mode
 the node no longer offers after a restart (bubblewrap gone, `host` turned
-off) runs nothing and says why; it is never moved to another mode. Files
+off) runs nothing and says why; the node never moves it to another mode on
+its own. **Its owner can switch it, while nothing of the chat runs (no turn, not
+one of its sub-agents either):** the
+strip under the message box has a "Commands" control (a label where there
+is no choice: the node offers one mode, or your level is below `host`); it
+is shown disabled, with the reason, while a turn runs, an approval waits,
+a `/compact` runs or a background command or sub-agent has not ended; the
+reason shows in a line over the controls when you click it.
+Choosing `host` shows the warning first (and says what Auto means then);
+going back to the sandbox needs none. A switch is recorded in the chat
+(a line "Commands run on the host shell from here"), written to the audit
+log when it asks for `host`, decided again by the node (it must offer the
+mode), and it **stops the chat's MCP servers and drops the calls you had
+allowed "for this chat"**: they were decided about the other shell, so they
+are asked again, also when you switch back. The approval mode stays as it
+is: in Auto, the next turn runs host commands unasked. The model is
+told in the next turn's opening. The switch is state, not conversation: a
+rewind does not move it back, and a fork starts in the mode its chat has now.
+Switching back to the sandbox does not stop what host commands started
+outside their own process group (a tmux server, a service, a container):
+that keeps running uncontained. Only
+the chat's owner can switch it (an admin or the API token cannot, and get
+the "not found" any other chat gets), never a sub-agent's chat (it keeps the mode it was made in, and takes no
+more turns once its chat was switched: start a new one) or a routine's (always the sandbox). A node
+older than this build must be updated first. Files
 are shared between modes: what a `sandbox` chat writes in a folder (a
 script, a `Makefile`, `.git/hooks`), a `host` chat in that folder may run
 with every right of the node's user. See

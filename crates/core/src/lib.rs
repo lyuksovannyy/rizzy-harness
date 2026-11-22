@@ -7,6 +7,7 @@ pub mod backend;
 pub mod board;
 pub mod connectors;
 pub mod event;
+pub mod exec_mode;
 pub mod folder;
 pub mod fork;
 pub mod handoff;

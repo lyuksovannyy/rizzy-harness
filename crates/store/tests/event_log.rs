@@ -1281,6 +1281,44 @@ fn the_recorded_execution_mode_is_on_the_row() {
     assert_eq!(s.session(none).unwrap().unwrap().exec_mode, None);
 }
 
+/// N.10b: the mirror's `exec_mode` follows the latest `exec_mode_changed`
+/// (the rule of `harness_core::exec_mode`), also in a fork's copy of the
+/// parent's events, and a mode it cannot read stays as written so the
+/// master's check fails closed.
+#[test]
+fn the_exec_mode_on_the_row_follows_the_latest_change() {
+    let s = Store::open_in_memory().unwrap();
+    let sid = SessionId::new();
+    let mut e = created(sid);
+    e.payload["exec_mode"] = json!("sandbox");
+    s.append("local", &e).unwrap();
+    let mode = |s: &Store, sid| s.session(sid).unwrap().unwrap().exec_mode;
+    assert_eq!(mode(&s, sid).as_deref(), Some("sandbox"));
+    let change = |seq, to: &str| {
+        let mut e = ev(
+            sid,
+            seq,
+            EventKind::ExecModeChanged(ExecModeChanged {
+                mode: harness_core::policy::ExecMode::Host,
+                from: harness_core::policy::ExecMode::Sandbox,
+            }),
+        );
+        e.payload["mode"] = json!(to);
+        e
+    };
+    s.append("local", &change(2, "host")).unwrap();
+    assert_eq!(mode(&s, sid).as_deref(), Some("host"));
+    s.append("local", &change(3, "sandbox")).unwrap();
+    assert_eq!(mode(&s, sid).as_deref(), Some("sandbox"));
+    // Unknown: kept as written, so `ExecMode::parse` says no on the master.
+    s.append("local", &change(4, "quantum")).unwrap();
+    assert_eq!(mode(&s, sid).as_deref(), Some("quantum"));
+    assert_eq!(
+        harness_core::policy::ExecMode::parse(&mode(&s, sid).unwrap()),
+        None
+    );
+}
+
 /// A top-level chat's turn that completed or failed is "finished, unread"
 /// for its owner until they have seen it; a cancel, a sub-agent's chat, a
 /// callback turn (its own attention row) and a question (attention) are not.

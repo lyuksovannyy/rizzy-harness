@@ -137,6 +137,7 @@ const ITEM: Record<string, Check> = {
   turn_end: rec({ type: S, turn_id: S, reason: S, at: N, "?usage": usage }),
   agent_changed: rec({ type: S, agent: agentRef, "?model": nul(S) }),
   approval_mode_changed: rec({ type: S, mode: S, "?requested": S }),
+  exec_mode_changed: rec({ type: S, mode: S, from: S }),
   step_limit_changed: rec({ type: S, max_steps: N, "?requested": N }),
   summary: rec({ type: S, through_seq: N, text: S, "?manual": TRUE, "?focus": S }),
   shortened: rec({
@@ -253,12 +254,24 @@ function replaced(payload: unknown, path: (string | number)[], value: unknown): 
   return p;
 }
 /** The state a dropped event leaves: the one before, its cursor and counter moved. */
-const droppedFrom = (before: SessionView, e: RawEvent): SessionView => ({
-  ...before,
-  session_id: e.session_id,
-  head_seq: e.seq,
-  unknown_events: before.unknown_events + 1,
-});
+const droppedFrom = (before: SessionView, e: RawEvent): SessionView => {
+  const out: SessionView = { ...before, session_id: e.session_id, head_seq: e.seq, unknown_events: before.unknown_events + 1 };
+  // The one event whose mode is read before the rest of it (`exec_mode::step`): a
+  // dropped change still moves the mode in force, or makes it unreadable.
+  if (e.kind === "exec_mode_changed") {
+    const m = e.payload && typeof e.payload === "object" ? (e.payload as { mode?: unknown }).mode : undefined;
+    const meta = before.meta ? { ...before.meta } : before.meta;
+    delete out.exec_mode_unknown;
+    if (m === "sandbox" || m === "host") {
+      if (meta) meta.exec_mode = m;
+    } else {
+      if (meta) delete meta.exec_mode;
+      out.exec_mode_unknown = true;
+    }
+    out.meta = meta;
+  }
+  return out;
+};
 
 const KINDS = [...new Set(EVENTS.map((e) => e.kind))].filter((k) => k !== "from_a_newer_node");
 // One event of each kind (its first), with the fixture's events before it.
@@ -289,8 +302,8 @@ describe("the fold guard: no payload breaks the fold", () => {
         const v = structuredClone(before);
         const bad = { ...e, payload: path ? replaced(e.payload, path, value) : value };
         expect(() => apply(v, bad), what).not.toThrow();
-        if (JSON.stringify(v) === JSON.stringify(droppedFrom(before, e))) {
-          expect(v, what).toStrictEqual(droppedFrom(before, e));
+        if (JSON.stringify(v) === JSON.stringify(droppedFrom(before, bad))) {
+          expect(v, what).toStrictEqual(droppedFrom(before, bad));
           dropped++;
         } else {
           expect(v.unknown_events, what).toBe(before.unknown_events);

@@ -124,14 +124,27 @@ still shown until the node's next hello.
   `sandbox`, or a refusal on a node that offers only `host`: that mode is
   only ever given when asked for by name (review L-a); a mode it does not
   offer is refused whatever the master sends. Recorded in `session_created.exec_mode`; no
-  later command carries it.
-* At load the recorded mode is taken as it is. Before every turn, callback,
-  restore and delegation (`Session::checked_folder`) it is checked against
-  what the node offers now: a session whose mode is gone (bubblewrap
-  removed, `host` turned off) runs nothing and says why. It is never moved
-  to another mode, in either direction.
+  later command carries it except the owner's switch (below).
+* At load the mode is the log's (`harness_core::exec_mode`: the latest
+  `exec_mode_changed`, else `session_created.exec_mode`; one rule for the
+  node, the view, the master's mirror and the browser's fold). Before every
+  turn, callback, restore and delegation (`Session::checked_folder`) it is
+  checked against what the node offers now: a session whose mode is gone
+  (bubblewrap removed, `host` turned off) runs nothing and says why. The
+  node never moves it to another mode on its own, in either direction; its
+  owner may (below). A mode the log names that this build does not know is
+  unreadable and fails closed: nothing runs, and a switch does not repair it.
 * Chat-profile sessions have no mode; a create that asks for one is refused.
-* A sub-agent's session gets its parent's mode (`run_child`).
+* A sub-agent's session is created in its parent's mode as it is then
+  (`run_child`; its `session_created` says so) and keeps it: one rule
+  everywhere, a session's mode is what its own log says, which is also what
+  the master's row and its level checks read. It has no switch. One made
+  BEFORE its chat was switched takes no more turns once its mode differs
+  from that of the chat at the top of its parents (`checked_folder`, every
+  turn, retry, callback, peer call and restore; and the `delegate`
+  follow-up): "this sub-agent ran in the sandbox and this chat's commands now
+  run in the host shell: start a new sub-agent" (and the reverse); it takes
+  turns again if the chat returns to its mode.
 * The backend picks the confinement by the mode (`NativeConfig::
   confinement`): `sandbox` sessions get the node's contained sandbox, which
   refuses a shell command when it has no containment rather than run it
@@ -154,6 +167,95 @@ still shown until the node's next hello.
   `sandbox` session, the only place the values can be kept off the processes before it.
 * The node's `session.create` audit line names the mode asked for (review
   N-d).
+
+## Switching a chat's mode (N.10b)
+
+Decided by the owner on 2026-11-21 ("Yes, build it"; "when chat is
+active/running sandbox change is unavailable but if chat is stopped then no
+problem"), reversing "chosen at creation, never changed" (N.10a).
+
+**Who and when.** The chat's owner, for an existing agentic chat of a
+person, while nothing of it runs: no turn of its own or of a sub-agent of
+it (any depth), no `/compact`, no approval waiting, no background command
+or sub-agent. Nobody else: not an admin, not a
+workspace admin, not the API token on a person's chat (the 404 of a chat
+that does not exist); not a chat without tools, a sub-agent's chat (it
+follows its parent) or a routine's (always `sandbox`); not a chat nobody
+owns.
+
+**The route** `POST /api/sessions/{id}/exec-mode` `{ "mode": "sandbox" |
+"host" }` (`master/src/http/exec_mode.rs`, `Master::set_exec_mode`) makes
+the checks of a create, in the same order, through the same functions: the
+owner's effective level in the chat's workspace allows the mode
+(`workspaces::switch_refusal`, which is `levels::refusal` then the node
+rule, not `work_refusal`: that one asks the mode the chat has NOW, and a
+host chat whose owner was lowered must still be able to leave it); a
+connected node announced the mode (`mode_refusal`) and the switch
+(`CAP_EXEC_SWITCH`; an older node: "update the node"); the log is not
+diverged. Every request for `host` is audited whatever refuses it
+(`session.exec_mode.host`: who, the chat, workspace, node, from, to,
+outcome), a granted switch to `sandbox` too. The master then sends
+`session.set_exec_mode { session_id, mode }`.
+
+**The node decides again** (`node/src/session_exec.rs`), under the turn
+slot as a rewind does: the chat is an agentic chat of a person; the node
+offers the mode (`ExecOffers::choose`, as at create: `host = true`, the
+`[execution]` and `[sandbox] mode = "required"` rules); no turn runs or is
+being stopped, no `/compact`, no background command or sub-agent runs or
+has an end not recorded, no approval waits, no agent of a message waits.
+The refusal says what to stop.
+
+**What it does, in this order, all before the ack:**
+
+1. Stops the chat's MCP servers (node.toml's and the repository's approved
+   ones) and waits until they are gone: they were started under the old
+   confinement, and the next turn starts them under the new one. One that
+   does not die in ten seconds refuses the switch, with nothing recorded.
+2. Drops every chat grant ("allow for this chat"), one `chat_allow_removed`
+   each, so the list shows it: a call allowed in one shell is asked again in
+   the other, and again when the chat comes back. The smallest correct
+   mechanism: the grant key stays as it is (no change to what existing logs
+   hold), and nothing of a mode is in it to forget. A restart between this
+   and step 3 leaves the old mode with fewer grants.
+3. Records `exec_mode_changed { mode, from }` (additive; no account id, as
+   no event has one; the audit line names the person) and applies it.
+
+**What was built under the old mode, and what happens to it:** the MCP
+servers (stopped); the chat grants (dropped); the background table
+(nothing runs at a switch: refused otherwise); sub-agents (none works at a
+switch: refused otherwise; one made before it takes no more turns, one made
+after it is created in the new mode); the per-call
+confinement, the bash tool's description and the approval card's wording
+(read from the session's mode at each call and turn: nothing kept); the
+environment line of the next turn (it names the mode and, once, the
+change: "ran in the sandbox until this turn and now run in the host shell",
+recorded in `turn_started.environment`, so the model's history rebuilds
+byte for byte). Not dropped, because both modes share them: the chat's
+folder and its session temp folder (the residual below: what one mode
+writes, the other may run). The provider's prompt cache of the tool
+descriptions is lost once per switch.
+
+**The approval mode is the person's and stays.** In `auto` the next turn
+(a message, a callback, a peer's) runs host commands unasked; the web
+warning says so.
+
+**Switching back does not undo the host's side effects.** What host
+commands started outside their own process group (a tmux server, a
+service, a container) keeps running uncontained after the chat is back in
+the sandbox, and what a sandbox turn wrote in the folder runs with the
+host's rights once a host command executes it (a script, a `Makefile`,
+`.git/hooks`).
+
+**State, not conversation.** A rewind does not move the mode back (as it
+never moves the approval mode back; the divider in the conversation is
+hidden with its turns, the mode is not). A fork starts in the mode its
+parent has NOW: its copied events carry the changes up to its cut, and when
+the parent was switched after the cut the node appends an
+`exec_mode_changed` of the fork's own, after the events the fork begins with, so its
+log, fold and mirror say the truth (the fork route's level check reads the
+parent's row, which is that mode). The master's mirror
+(`sessions.exec_mode`) follows the latest event; a mode it cannot read stays
+as written and fails closed (`MODE_UNKNOWN`).
 
 ## The master: levels (part 2)
 
@@ -321,6 +423,16 @@ a host chat's reach (`cli/tests/exec_modes.rs`
   `the_sandbox_modes_shell_is_never_landlock_alone`.
 * `node/src/exec.rs` (the choice, the refusals, the hello), `node/src/policy.rs`
   (`[execution]` parsing; `[sandbox] contain` refused).
+* The switch (N.10b): `core/src/exec_mode.rs` (the one rule), `core/src/view.rs`
+  `the_latest_exec_mode_change_is_the_chats_mode`, `store/tests/event_log.rs`
+  `the_exec_mode_on_the_row_follows_the_latest_change`, `node/tests/exec_switch.rs`
+  (an idle chat switches both ways; refused while a turn or an approval
+  waits, for a routine, a chat, a mode not offered; a chat grant does not
+  carry; MCP servers stop and restart under the new mode; the model is told;
+  restart and fork; an unknown mode runs nothing; a sub-agent after a switch;
+  a rewind across a switch; nothing a model writes switches),
+  `master/tests/it/exec_switch_http.rs`, `web/src/components/execswitch.test.tsx`,
+  `web/e2e/exec-switch.cjs`.
 * `node/tests/exec_modes.rs`: a node offering nothing; a test master asking
   for a mode the node does not offer; recorded and never changed; a mode
   gone after a restart runs nothing (both directions); a sub-agent's mode;

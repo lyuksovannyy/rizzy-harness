@@ -572,23 +572,62 @@ pub async fn work_refusal(m: &Master, row: &SessionRow) -> Option<String> {
     standing_refusal(m, &owner, row).await
 }
 
-/// `owner`'s answer for `row`: their access to its workspace, the node
-/// rule, and the level.
-async fn standing_refusal(m: &Master, owner: &Principal, row: &SessionRow) -> Option<String> {
-    let ws = match &row.workspace_id {
-        None => None,
+/// `owner`'s access to the workspace of `row`, or why there is none.
+async fn row_access(
+    m: &Master,
+    owner: &Principal,
+    row: &SessionRow,
+) -> Result<Option<Access>, String> {
+    match &row.workspace_id {
+        None => Ok(None),
         Some(id) => match access(m, owner, id).await {
-            Ok(a) => Some(a),
+            Ok(a) => Ok(Some(a)),
             Err(WsError::Store(e)) => {
                 tracing::warn!(session = %row.session_id, error = %e, "could not check workspace access");
-                return Some("could not check your access to this workspace; try again".into());
+                Err("could not check your access to this workspace; try again".into())
             }
             // The chat's workspace is one its owner is not in: never theirs
             // to drive.
-            Err(_) => return Some("this chat is in a workspace you are not a member of".into()),
+            Err(_) => Err("this chat is in a workspace you are not a member of".into()),
         },
+    }
+}
+
+/// `owner`'s answer for `row`: their access to its workspace, the node
+/// rule, and the level.
+async fn standing_refusal(m: &Master, owner: &Principal, row: &SessionRow) -> Option<String> {
+    let ws = match row_access(m, owner, row).await {
+        Ok(ws) => ws,
+        Err(why) => return Some(why),
     };
     node_refusal(m, owner, &row.node_id).or_else(|| row_refusal(owner, ws.as_ref(), row))
+}
+
+/// Why the owner of agentic chat `row` may not have its commands switched
+/// to `mode` (N.10b), or `None`: the checks of a create for that mode, in
+/// the same order and through the same functions: the owner's effective
+/// level in the chat's workspace allows `mode` (`levels::refusal`), then
+/// the node rule. Not [`work_refusal`]: that one asks the chat's mode NOW,
+/// and a chat on `host` whose owner was lowered must still be able to leave
+/// it. A chat without an owner has no level to check and is refused.
+pub async fn switch_refusal(m: &Master, row: &SessionRow, mode: ExecMode) -> Option<String> {
+    let Some(owner) = row.owner_id.clone() else {
+        return Some("a chat nobody owns has no level to check, so it cannot be switched".into());
+    };
+    let owner = match m.inner.mirror.call(move |s| s.user_by_id(&owner)).await {
+        Ok(Some(u)) if !u.disabled => Principal::from_user(u),
+        Ok(_) => return Some("the account is disabled or gone".into()),
+        Err(e) => {
+            tracing::warn!(session = %row.session_id, error = %e, "could not load a chat's owner");
+            return Some("could not check your level; try again".into());
+        }
+    };
+    let ws = match row_access(m, &owner, row).await {
+        Ok(ws) => ws,
+        Err(why) => return Some(why),
+    };
+    crate::levels::refusal(&owner, ws.as_ref(), mode)
+        .or_else(|| node_refusal(m, &owner, &row.node_id))
 }
 
 /// The mode a new agentic chat owned by `owner` (`None`: the API token's)

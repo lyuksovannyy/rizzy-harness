@@ -628,6 +628,8 @@ export function Shell(props: {
               voice={voice}
               gutter={gutter}
               projects={projects}
+              hostRight={hostRightOf(me)}
+              subAgentRunning={sessions.some((x) => x.parent_id === route.id && x.running)}
             />
           ) : route.kind === "project" ? (
             <Project

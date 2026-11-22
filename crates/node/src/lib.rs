@@ -134,6 +134,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Compact { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
         | MasterToNode::SetApprovalMode { session_id, .. }
+        | MasterToNode::SetExecMode { session_id, .. }
         | MasterToNode::RevokeAllow { session_id, .. }
         | MasterToNode::SetStepLimit { session_id, .. }
         | MasterToNode::ArtifactStage { session_id, .. }
@@ -914,6 +915,8 @@ impl NodeRuntime {
                     p.effective_mode(None).id()
                 ));
                 capabilities.push(harness_protocol::CAP_ANSWERS.into());
+                // The owner's switch of a chat's execution mode (N.10b).
+                capabilities.push(harness_protocol::CAP_EXEC_SWITCH.into());
                 // Its step limit (X.14): the most a chat's own may be.
                 capabilities.push(format!(
                     "{}{}",
@@ -1130,6 +1133,18 @@ impl NodeRuntime {
 
     fn session(&self, sid: SessionId) -> Option<Arc<Session>> {
         self.inner.session(sid)
+    }
+
+    /// For tests: raise or lower the mark a chat carries while its
+    /// execution mode is being switched, as `set_exec_mode` does around its
+    /// own work (the window a real switch holds open only while MCP
+    /// servers stop). Not an API.
+    #[cfg(feature = "testing")]
+    pub fn hold_exec_switch(&self, sid: SessionId, on: bool) {
+        if let Some(s) = self.inner.session(sid) {
+            s.exec_switching
+                .store(on, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     /// Queue `msg` on its session's lane, starting the lane if there is
@@ -1936,6 +1951,24 @@ impl NodeRuntime {
                 self.audit("session.set_approval_mode", session_id).await;
                 match self.session(session_id) {
                     Some(s) => s.set_mode(mode, lowering).await.map(|_| ()),
+                    None => Err("unknown session".into()),
+                }
+            }
+            // In the session's lane, which a running turn does not hold: the
+            // session itself refuses while anything of the chat runs, and
+            // decides again what this node offers (N.10b). Audited like the
+            // create that asked for the mode.
+            MasterToNode::SetExecMode {
+                session_id, mode, ..
+            } => {
+                self.audit_with(
+                    "session.set_exec_mode",
+                    session_id,
+                    serde_json::json!({ "exec_mode": mode.id() }),
+                )
+                .await;
+                match self.session(session_id) {
+                    Some(s) => s.set_exec_mode(mode).await,
                     None => Err("unknown session".into()),
                 }
             }

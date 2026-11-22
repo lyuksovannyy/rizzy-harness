@@ -37,7 +37,11 @@ export function Select(props: {
   stacked?: boolean;
   /** Not changeable now. */
   disabled?: boolean;
+  /** With `disabled`: the button stays reachable (`aria-disabled`, not
+   * `disabled`) and a click or Enter calls this, so the page can say why. */
+  onBlocked?: () => void;
 }) {
+  const blocked = !!props.disabled && !!props.onBlocked;
   const id = useId();
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
@@ -66,9 +70,17 @@ export function Select(props: {
         aria-expanded={open}
         aria-controls={`${id}-list`}
         aria-label={`${props.label}: ${current?.label ?? "none"}`}
-        disabled={props.disabled}
-        onClick={() => setOpen((v) => !v)}
+        disabled={props.disabled && !blocked}
+        aria-disabled={blocked || undefined}
+        onClick={() => (blocked ? props.onBlocked?.() : setOpen((v) => !v))}
         onKeyDown={(e) => {
+          if (blocked) {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              props.onBlocked?.();
+            }
+            return;
+          }
           if (!open && (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ")) {
             e.preventDefault();
             setOpen(true);

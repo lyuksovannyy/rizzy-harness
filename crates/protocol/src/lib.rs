@@ -629,6 +629,13 @@ pub fn exec_capability(mode: harness_core::policy::ExecMode) -> String {
     format!("{CAP_EXEC_PREFIX}{}", mode.id())
 }
 
+/// The node capability that announces `session.set_exec_mode` (N.10b): the
+/// owner's switch of an existing agentic chat between `sandbox` and `host`
+/// while nothing of the chat runs. The master sends it only to a node whose
+/// hello listed it (an older node would drop the link on an unknown
+/// message): "update the node".
+pub const CAP_EXEC_SWITCH: &str = "exec-switch";
+
 /// The node capabilities that announce `session.set_approval_mode` and say
 /// its approval modes (T50): `approval-max:<mode>`, the loosest mode
 /// node.toml allows any chat there (`max_approval_mode`), and
@@ -1400,6 +1407,18 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         lowering: bool,
     },
+    /// Switch the chat's execution mode (N.10b). A request only: the node
+    /// decides again (it offers the mode, the chat is a person's agentic
+    /// chat and not a sub-agent's or a routine's, and nothing of the chat
+    /// runs: a turn, a `/compact`, a background command or sub-agent, an
+    /// approval) and records `exec_mode_changed`. Only to nodes whose hello
+    /// listed [`CAP_EXEC_SWITCH`].
+    #[serde(rename = "session.set_exec_mode")]
+    SetExecMode {
+        req_id: String,
+        session_id: SessionId,
+        mode: harness_core::policy::ExecMode,
+    },
     /// Change the chat's step limit (X.14). A request only: the node
     /// clamps it to `1..=` its own `[limits] max_steps`, refuses it for a
     /// sub-agent's or a routine's chat, and records the result as
@@ -1637,6 +1656,7 @@ impl MasterToNode {
             | MasterToNode::SetAgent { req_id, .. }
             | MasterToNode::SetApprovalMode { req_id, .. }
             | MasterToNode::SetStepLimit { req_id, .. }
+            | MasterToNode::SetExecMode { req_id, .. }
             | MasterToNode::Cancel { req_id, .. }
             | MasterToNode::StopBackground { req_id, .. }
             | MasterToNode::Delete { req_id, .. }
@@ -2115,6 +2135,19 @@ mod tests {
             v,
             json!({"type": "session.set_approval_mode", "req_id": "r",
                    "session_id": "0193f2a0-0000-7000-8000-000000000001", "mode": "accept_edits"})
+        );
+        assert_eq!(m.req_id(), Some("r"));
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), m);
+        let m = MasterToNode::SetExecMode {
+            req_id: "r".into(),
+            session_id: sid,
+            mode: harness_core::policy::ExecMode::Host,
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(
+            v,
+            json!({"type": "session.set_exec_mode", "req_id": "r",
+                   "session_id": "0193f2a0-0000-7000-8000-000000000001", "mode": "host"})
         );
         assert_eq!(m.req_id(), Some("r"));
         assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), m);

@@ -373,6 +373,71 @@ async fn a_host_session_gets_a_background_command_under_the_guard() {
     assert_eq!(alive(), 0, "bash_stop left the command running");
 }
 
+/// N.10b on the real confinements: switching a chat moves its commands
+/// between bubblewrap and the node's own namespace, both ways, and a
+/// switch is refused while the chat's background command runs (it waits for
+/// the end, then goes through).
+#[tokio::test]
+async fn a_switch_moves_the_real_confinement_and_waits_for_background_work() {
+    let Some(mut n) = node().await else { return };
+    let ours = own_pid_ns();
+    let cmd = "run: echo pid=$$ ns=$(readlink /proc/self/ns/pid)";
+    let sid = n.create(ExecMode::Sandbox).await;
+    let out = n.run(sid, cmd).await.pop().unwrap();
+    assert!(out.contains("pid=2 ") && !out.contains(&ours), "{out}");
+    let switch = |n: &mut Node, sid, mode| {
+        n.link
+            .to_node
+            .try_send(MasterToNode::SetExecMode {
+                req_id: format!("x-{}", harness_core::new_id()),
+                session_id: sid,
+                mode,
+            })
+            .unwrap();
+    };
+    switch(&mut n, sid, ExecMode::Host);
+    n.ack().await.unwrap();
+    // The next command runs beside the node, and now (Auto, the creation's
+    // mode stays) unasked: no card.
+    let out = n.run(sid, cmd).await.pop().unwrap();
+    assert!(
+        !out.contains("pid=2 ") && out.contains(&format!("ns={ours}")),
+        "{out}"
+    );
+    switch(&mut n, sid, ExecMode::Sandbox);
+    n.ack().await.unwrap();
+    let out = n.run(sid, cmd).await.pop().unwrap();
+    assert!(out.contains("pid=2 ") && !out.contains(&ours), "{out}");
+
+    // A background command runs: the switch is refused, naming what to
+    // stop; once it is stopped and its end recorded, it goes through.
+    let mark = Mark(976_377);
+    let text = format!(
+        r#"script: [{{"tool": "bash", "input": {{"command": "sleep {mark}", "background": true, "timeout_secs": 600}}}}]"#
+    );
+    n.run(sid, &text).await;
+    switch(&mut n, sid, ExecMode::Host);
+    let e = n.ack().await.unwrap_err();
+    assert!(e.contains("background"), "{e}");
+    n.run(
+        sid,
+        r#"script: [{"tool": "bash_stop", "input": {"id": "bg-1"}}]"#,
+    )
+    .await;
+    let by = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        switch(&mut n, sid, ExecMode::Host);
+        match n.ack().await {
+            Ok(()) => break,
+            Err(e) => assert!(
+                e.contains("background") && std::time::Instant::now() < by,
+                "the switch never went through: {e}"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Review of PR 186 (the card of a host background start): with
 /// `[sandbox] network = "off"` the node's gaps say what THIS machine's
 /// Landlock does to a host command's TCP, and the card's sentence about

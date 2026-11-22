@@ -606,6 +606,19 @@ impl SessionMcp {
         }
     }
 
+    /// Order every server to stop now, whether a call is in flight or not
+    /// (the chat's commands are switched between the sandbox and the host
+    /// shell, N.10b: nothing of the chat runs then, and a server started
+    /// under the old confinement must not serve the new one). Unlike
+    /// [`Self::close`] the table stays usable: a server starts again, in
+    /// the confinement then in force, when a turn needs it, and this does
+    /// not count as a failure. Not waited for ([`Self::wait_gone`]).
+    pub fn stop_all(&self) {
+        for s in &self.all() {
+            s.kill();
+        }
+    }
+
     /// Wait until every server's process is gone, at most `bound`. True
     /// when they are.
     pub async fn wait_gone(&self, bound: Duration) -> bool {

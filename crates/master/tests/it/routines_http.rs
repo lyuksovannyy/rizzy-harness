@@ -1654,6 +1654,17 @@ async fn a_routines_chat_is_always_in_the_sandbox() {
         .find(|e| e["kind"] == "session_created")
         .unwrap();
     assert_eq!(created["payload"]["exec_mode"], "sandbox", "{created}");
+    // N.10b: a routine's chat is not switchable, not even by its owner.
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/exec-mode"),
+        Some(json!({"mode": "host"})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(v.to_string().contains("routine"), "{v}");
 }
 
 /// Also re-check RN-2: the node announced no mode before it went away;

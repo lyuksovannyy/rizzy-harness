@@ -39,7 +39,7 @@ export interface SessionCreated {
   parent_session?: string;
   /** Never resumed by a background command's end (a routine's chat). */
   no_callbacks?: boolean;
-  /** How its commands run; absent for a chat (no commands). */
+  /** How its commands run now (the creation's, then the latest `exec_mode_changed`); absent for a chat (no commands). */
   exec_mode?: ExecMode;
   /** A sub-agent that can change files: where it works (the chat's folder, or a copy of its own); absent for a reader and for a chat. */
   sub_folder?: "shared" | "own";
@@ -290,6 +290,8 @@ export type ItemKind =
   | { type: "agent_changed"; agent: AgentRef; model?: string }
   /** The owner changed the approval mode; `requested` when the node gave less. */
   | { type: "approval_mode_changed"; mode: ApprovalMode; requested?: ApprovalMode }
+  /** The owner switched the chat's commands between the sandbox and the host shell (N.10b). */
+  | { type: "exec_mode_changed"; mode: ExecMode; from: ExecMode }
   | { type: "step_limit_changed"; max_steps: number; requested?: number }
   /** `manual`: made at the person's /compact (X.20), with their `focus`. */
   | { type: "summary"; through_seq: number; text: string; manual?: boolean; focus?: string }
@@ -370,6 +372,8 @@ export interface SessionView {
   max_steps?: number;
   /** A model call waits to be sent again (`model_retry`); absent otherwise. */
   retry?: ModelRetry;
+  /** The chat's log names an execution mode this page does not read (an `exec_mode_changed` with an unknown or missing `mode`): the node runs nothing in it; `meta.exec_mode` is then absent. */
+  exec_mode_unknown?: true;
   /** The latest turn's limits (`turn_ended.usage`): the window of the model it
    * started on, and the history size at which the next summary is written
    * (0: never). Absent when not known. */
@@ -981,6 +985,8 @@ export interface NodeInfo {
   projects?: boolean;
   /** It forks a chat at a finished turn (C.2); absent: an older node. */
   fork?: boolean;
+  /** It switches a chat's execution mode between turns (N.10b); absent: an older node. */
+  exec_switch?: boolean;
 }
 
 /** A server-wide account role (Settings → Users), not a workspace role. */

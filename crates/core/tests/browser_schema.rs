@@ -242,7 +242,11 @@ fn enums() -> Vec<(&'static [&'static str], Vec<String>)> {
             variants!(Profile::Chat, Profile::Agentic),
         ),
         (
-            &["session_created.exec_mode"],
+            &[
+                "session_created.exec_mode",
+                "exec_mode_changed.mode",
+                "exec_mode_changed.from",
+            ],
             variants!(ExecMode::Sandbox, ExecMode::Host),
         ),
         (

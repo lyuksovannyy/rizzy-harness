@@ -36,6 +36,7 @@ mod compact_http;
 mod deny_always_http;
 mod exec_levels_http;
 mod exec_mode_http;
+mod exec_switch_http;
 mod favicon_http;
 mod files_http;
 mod fork_http;

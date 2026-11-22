@@ -15,6 +15,7 @@ pub mod config;
 pub mod connectors;
 pub mod diff;
 pub mod env;
+mod exec_switch;
 mod favicon;
 pub mod files;
 pub mod forge;
@@ -215,6 +216,10 @@ pub struct NodeInfo {
     /// Whether it forks a chat at a finished turn (`fork`, C.2): what the
     /// UI offers; the master and the node refuse whatever this says.
     pub fork: bool,
+    /// Whether it switches a chat's execution mode (`exec-switch`, N.10b):
+    /// what the UI offers; the master and the node refuse whatever this
+    /// says.
+    pub exec_switch: bool,
 }
 
 /// The approval modes in a hello's capabilities (T50): its ceiling and its
@@ -709,6 +714,10 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         // `Master::set_approval_mode` checks a raise itself: a lowering,
         // like a denial, is never refused for the owner's level.
         | MasterToNode::SetApprovalMode { .. }
+        // `Master::set_exec_mode` checks the TARGET mode against the owner's
+        // level (what a create checks): the chat's mode now is the one the
+        // switch may be leaving, so `work_refusal` is not asked.
+        | MasterToNode::SetExecMode { .. }
         // `Master::set_step_limit` checks a raise itself, as the mode.
         | MasterToNode::SetStepLimit { .. }
         | MasterToNode::Delete { .. }
@@ -1371,6 +1380,7 @@ impl Master {
                     max_steps: None,
                     projects: false,
                     fork: false,
+                    exec_switch: false,
                 },
                 tx: None,
                 resuming: HashSet::new(),
@@ -1394,6 +1404,9 @@ impl Master {
                 .iter()
                 .any(|c| c == harness_protocol::CAP_PROJECTS);
             entry.info.fork = capabilities.iter().any(|c| c == harness_protocol::CAP_FORK);
+            entry.info.exec_switch = capabilities
+                .iter()
+                .any(|c| c == harness_protocol::CAP_EXEC_SWITCH);
             entry.capabilities = capabilities;
             entry.tx = Some(link.to_node.clone());
             entry.resuming.clear();

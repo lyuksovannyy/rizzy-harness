@@ -12,6 +12,9 @@ const HostWarning = lazy(() => import("./HostWarning"));
 export function ExecChoice(props: {
   /** The person may pick `host` on this node (`mayPickHost`); else a label. */
   pickable?: boolean;
+  /** The person's level is `host` but this node offers no host shell: the
+   * label then says how its admin turns it on (N.10b). */
+  hostOff?: boolean;
   node: string;
   /** What the node offers, most confined first. */
   offered: ExecMode[];
@@ -22,12 +25,19 @@ export function ExecChoice(props: {
   const [asking, setAsking] = useState(false);
   if (props.pickable === false)
     return (
-      <label>
-        Commands
-        <span className="exec-only" aria-label="How this chat's commands run">
-          {props.offered.includes("sandbox") ? MODE_LABEL.sandbox : "no sandbox on this node"}
-        </span>
-      </label>
+      <>
+        <label>
+          Commands
+          <span className="exec-only" aria-label="How this chat's commands run">
+            {props.offered.includes("sandbox") ? MODE_LABEL.sandbox : "no sandbox on this node"}
+          </span>
+        </label>
+        {props.hostOff && (
+          <span className="muted small exec-hint" role="note">
+            the host shell is off on this node: set <code>host = true</code> under <code>[execution]</code> in its node.toml and restart it
+          </span>
+        )}
+      </>
     );
   return (
     <>

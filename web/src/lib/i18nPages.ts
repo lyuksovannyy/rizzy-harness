@@ -90,6 +90,8 @@ export const pages = {
   "conv.compacting": "Summarising the chat for the model…",
   "conv.unshown": "{n} of this chat's events could not be shown: this page does not know them, or they came malformed.",
   "conv.handoff": "Hand-off note for the next chat, written by {model}",
+  "conv.execHost": "Commands run on the host shell from here",
+  "conv.execSandbox": "Commands run in the sandbox from here",
   "conv.handoffFixed": "Hand-off note: the next chat gets the facts from this chat's log only ({why})",
   "conv.shortened": "Context shortened for the model ({what}): about {before} to {after} tokens. Everything stays shown here.",
   "conv.shortCleared": "older tool results cleared",

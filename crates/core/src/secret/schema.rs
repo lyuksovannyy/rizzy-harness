@@ -179,6 +179,7 @@ pub const KEPT: &[(&str, &[&str])] = &[
     ("queued_delivered", &["turn_id"]),
     ("todo_updated", &["turn_id"]),
     ("approval_mode_changed", &[]),
+    ("exec_mode_changed", &[]),
     ("context_sent", &["turn_id", "sections[].digest"]),
     ("chat_allow_added", &["grant_id", "approval_id", "key"]),
     ("chat_allow_removed", &["grant_id"]),

@@ -180,7 +180,8 @@ impl ExecOffers {
     /// Before every turn, callback, restore and delegation of an agentic
     /// session: its recorded mode is still offered. A session whose mode is
     /// no longer offered (bubblewrap gone since, `host` turned off) runs
-    /// nothing; it is never moved to another mode, in either direction.
+    /// nothing; the node never moves it to another mode on its own (its
+    /// owner may, while nothing of the chat runs: N.10b).
     pub fn check_session(&self, recorded: Option<ExecMode>) -> Result<(), String> {
         let Some(m) = recorded else {
             return Err(
@@ -193,7 +194,8 @@ impl ExecOffers {
             None => Ok(()),
             Some(why) => Err(format!(
                 "this chat runs in the {} mode, which this node no longer offers ({why}). It \
-                 runs nothing here, and its mode is never changed: start a new chat, or ask the \
+                 runs nothing here until its owner switches its commands to a mode this node offers \
+                 (the chat's own control), or you start a new chat, or ask the \
                  node's admin",
                 m.id()
             )),

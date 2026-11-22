@@ -30,6 +30,7 @@ With the same `seq`s nothing is renumbered and nothing has a second reader.
 
 - It costs nothing: the view folds (Rust and TypeScript) and `store/usage.rs` skip it; the meter still shows the context the model will be sent.
 - It grants nothing: grants are bound to the parent's folder, so the node and the view take them from the fork's own events only (`Session::load`; `a_chat_grant_is_not_inherited_by_the_fork` runs the same command in both chats).
+- The execution mode is the parent's NOW, not at the cut (N.10b): the copied events carry the changes up to the cut, and when the parent was switched after it the node appends `exec_mode_changed {mode: parent's now, from: the cut's}` to the fork, right after `session_forked`; so a fork of an earlier turn comes back in the mode its chat has, never silently in the old one. The route's level check reads the parent's row, which says that mode, so a fork that would be `host` for an owner below `host` stays refused; the node checks it offers the mode as at any create.
 - The approval mode is the parent's at the cut (the copied `session_created` and `approval_mode_changed` events fold to it), clamped by `node.toml` as at any create.
 - Its checkpoints cannot be restored in the fork (the refs are the parent's): the view marks them `inherited`, `Session::restore` refuses, the page shows "changed N files (before the fork)".
 - Its reads are not the fork's: the seen table starts empty.

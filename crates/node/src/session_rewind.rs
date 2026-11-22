@@ -34,7 +34,7 @@ use super::{RunningTurn, Session};
 
 /// What the operation holds from the claim of the turn slot to its end:
 /// the slot is released on every path, also on a panic's unwind.
-struct Slot<'a> {
+pub(super) struct Slot<'a> {
     session: &'a Session,
     turn_id: String,
 }
@@ -145,7 +145,7 @@ impl Session {
     /// Claim the turn slot for an operation of this kind: no turn runs,
     /// none is being stopped, no `/compact` runs. Held until the returned
     /// guard drops.
-    fn take_slot(&self) -> Result<Slot<'_>, String> {
+    pub(super) fn take_slot(&self) -> Result<Slot<'_>, String> {
         let turn_id = new_id();
         self.claim_turn(RunningTurn {
             turn_id: turn_id.clone(),
@@ -173,6 +173,19 @@ impl Session {
     /// `restore` looks at commands only; a sub-agent's work writes into the
     /// folder as well.
     fn refuse_background_work(&self) -> Result<(), String> {
+        match self.background_work() {
+            None => Ok(()),
+            Some(what) => Err(format!(
+                "{REWIND_REFUSED}: this chat's background work is running or its end is not \
+                 recorded yet ({what}). Stop it, or wait for it to end, then rewind"
+            )),
+        }
+    }
+
+    /// What of this chat's background work is running or has an end not
+    /// recorded yet, in words; `None` when nothing is. Also read by the
+    /// switch of the execution mode (`session_exec.rs`).
+    pub(super) fn background_work(&self) -> Option<String> {
         let mut running: Vec<String> = Vec::new();
         if let Some(bg) = &self.bg {
             running.extend(bg.running());
@@ -192,17 +205,13 @@ impl Session {
                 .unwrap_or_else(|p| p.into_inner())
                 .is_empty();
         if running.is_empty() && !unrecorded {
-            return Ok(());
+            return None;
         }
-        Err(format!(
-            "{REWIND_REFUSED}: this chat's background work is running or its end is not \
-             recorded yet ({}). Stop it, or wait for it to end, then rewind",
-            if running.is_empty() {
-                "an end is waiting".to_string()
-            } else {
-                running.join(", ")
-            }
-        ))
+        Some(if running.is_empty() {
+            "an end is waiting".to_string()
+        } else {
+            running.join(", ")
+        })
     }
 
     pub(super) async fn read_log(&self) -> Result<Vec<RawEvent>, String> {
