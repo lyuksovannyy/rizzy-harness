@@ -623,7 +623,7 @@ export function Composer(props: {
   const folder = home ? mode === "agentic" : !!props.filesOf;
   const addFiles = async (list: File[]) => {
     const picked = list.slice(0, Math.max(0, MAX_ATTACHMENTS - files.length - pictures.length));
-    setErr(picked.length < list.length ? t("composer.tooMany") : null);
+    setErr(picked.length < list.length ? t("composer.tooManyFiles") : null);
     for (const f of picked) {
       setUploading((n) => n + 1);
       try {

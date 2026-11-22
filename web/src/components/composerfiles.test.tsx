@@ -106,4 +106,14 @@ describe("attaching any file", () => {
     await pick([zip()]);
     expect(host.querySelector(".error-text")?.textContent).toContain("10 MB");
   });
+
+  test("at most 10 files and images go with one message, and the box says so", async () => {
+    show({ where: "session", filesOf: "sid-1" });
+    let n = 0;
+    upload.mockImplementation(async () => ({ attachment_id: `a${n++}`, name: `f${n}.zip`, mime: "application/zip", bytes: 5, saved: true }));
+    await pick(Array.from({ length: 12 }, (_, i) => new File([new Uint8Array(3)], `f${i}.zip`)));
+    expect(upload).toHaveBeenCalledTimes(10);
+    expect(host.querySelector(".error-text")?.textContent).toContain("At most 10 files and images");
+    expect(host.querySelector<HTMLButtonElement>('button[aria-label="Attach files"]')?.disabled).toBe(true);
+  });
 });
