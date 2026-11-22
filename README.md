@@ -1449,7 +1449,8 @@ Each account dictates one recording at a time (a second one at once gets
 starts the day afresh.
 
 Files attached to a message (`+` in the composer) are read on the server:
-text, code, Markdown, CSV, JSON, and PDFs with a text layer. A file is a PDF
+text, code, Markdown, CSV, JSON, PDFs with a text layer, and Office documents
+(next paragraph). A file is a PDF
 only when its first bytes are `%PDF-`, whatever its name (`notes.pdf` with
 plain text in it is text). PDFs are never parsed inside the server: it
 starts its own binary as `rizzy-harness pdf-text`, which locks itself out of
@@ -1461,20 +1462,47 @@ read PDFs safely", and text files still work. Each account can hold 20
 uploaded files not yet sent (8 MiB of text); unsent files are deleted after
 the incognito TTL (`[chat] incognito_ttl_minutes`, a day by default).
 
+**Office documents.** Word (`.docx`), Excel (`.xlsx`), PowerPoint (`.pptx`) and
+OpenDocument (`.odt`, `.ods`, `.odp`) files are read as text, in every chat,
+the way a PDF is, and the file is kept as well: in a coding chat it is saved
+into the chat's folder under `attachments/`, in a plain chat it is kept for
+`attached_file` when the agent has "Read attached files" (without it, only the
+text goes and nothing is refused). The chip is one chip, as for a PDF, and the
+sent message shows one chip per document. What the model gets: paragraphs in
+order, headings as `# `, list items as `- `, tables as rows of cells joined
+with ` | `; for a workbook, per sheet `## Sheet: <name>` and its rows with the
+cells joined by tabs, values as stored (a formula shows its stored result, a
+date is its number; hidden sheets are left out; a sheet is cut at 10,000
+rows and 256 columns, and the text says so); for a presentation, per slide
+`## Slide n`, its text and its notes. Comments, footnotes, headers, tracked
+deletions, charts, pictures and embedded objects are not read. A file is a
+document by what is inside it, never by its name (a zip called `.docx` is a
+plain file, a document called `.bin` is read), and an encrypted file, an old
+`.doc`, `.xls` or `.ppt`, and a zip that is not a document stay what they are:
+a file. The text is cut at the same 100,000 characters as a PDF's. Reading
+runs in the confined helper `rizzy-harness doc-text`, the twin of `pdf-text`
+(same Landlock lock-out, memory limit, 20 second kill and two-at-a-time
+queue; a file that starts like a zip is passed to it, which costs a process
+start), and needs the same Linux 6.7 or newer. A document that cannot be read
+(damaged, too deep, too large, too slow, no text) is kept as a plain file
+where files are kept, with a line under its chip saying its text could not be
+read, and refused with the same sentence where they are not.
+
 **Any other file.** In a coding chat (one with a folder) you can attach any
-file: a zip, a docx, an xlsx, a binary, a PDF without a text layer.
+file: a zip, a binary, a PDF without a text layer, an old `.doc` or `.xls`.
 The model cannot read those as text, so the file is saved into the chat's
 folder, in `attachments/`, and the agent is told its path and size in one
 line after your message (it opens the file with its own tools). The chip in
 the composer says "saved to the folder" before you send, and the sent message
-shows the file with its size. Text, Markdown, code, CSV, JSON and PDFs are read
-as text and images go to the model, as before; they are not saved. A chat
+shows the file with its size. Text, Markdown, code, CSV, JSON, PDFs and Office
+documents are read as text and images go to the model; they are not saved
+(except an Office document, whose file is kept as well). A chat
 without tools (a plain chat) keeps such a file for the agent to read, never
 change (next section), when its agent has the switch "Read attached files";
 otherwise it refuses the file when you attach it and says which switch, or,
 for a server or node that predates the switch, "this chat's agent cannot open
 files; switch to Agentic (next to Ask under the box) to attach any file, or
-attach text, a PDF or an image".
+attach text, a PDF, an Office document or an image".
 
 - **Where.** `attachments/<name>` in the chat's folder, made if missing. The name is
   your file's name reduced to one safe component (no folders, no leading dot
@@ -1510,7 +1538,7 @@ attach text, a PDF or an image".
   secret of the node's.
 
 **Files in a chat without a folder.** In a plain chat you can attach any file
-too: a zip, a tar, a gzip, a binary, a spreadsheet. The server keeps it as your
+too: a zip, a tar, a gzip, a binary. The server keeps it as your
 own stored file (encrypted at rest, counted in your storage quota) and the
 agent reads it, read-only, through the tool `attached_file`; nothing is written
 to any folder and the file cannot be changed. The chip in the composer says
@@ -1521,9 +1549,9 @@ the type the first bytes say, sha256), `list` (the entries of a zip, tar,
 tar.gz or gz: path, size and whether each is a folder, a link or a device, 500
 a call, at most 20,000 read) and `read` (the file, or one archive entry by its
 listed path (or `#` and its number, when two share a path): text as numbered lines, anything else as a hex dump of at most
-4 KiB, or its printable runs). Its calls show as tool blocks in the chat. Word,
-OpenDocument and spreadsheet files are not unpacked into text for the model; it
-can list them and read their XML entries.
+4 KiB, or its printable runs). Its calls show as tool blocks in the chat. An
+Office document is read as text when you attach it (above) and its file is
+kept here too; the tool can still list it and read its XML entries.
 
 - **The switch.** "Read attached files" is a per-agent switch on the agent's
   page, on for the built-in Assistant and off for every other agent and for a

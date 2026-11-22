@@ -93,9 +93,29 @@ describe("attaching any file", () => {
     expect(chips()).toEqual(["notes.md", "x.zip (10 B, saved to the folder)"]);
   });
 
+  test("a document is one chip, as a PDF is; one that cannot be read says so (T96)", async () => {
+    show({ where: "session", filesOf: "sid-1" });
+    const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    upload.mockResolvedValueOnce({ attachment_id: "d1", name: "plan.docx", mime: docx, chars: 1234, truncated: false });
+    upload.mockResolvedValueOnce({
+      attachment_id: "d2",
+      name: "bad.docx",
+      mime: "application/octet-stream",
+      bytes: 10,
+      saved: true,
+      note: "this document could not be read: a part of the document is missing",
+    });
+    await pick([new File(["x"], "plan.docx")]);
+    await pick([new File(["y"], "bad.docx")]);
+    expect(chips()).toEqual(["plan.docx", "bad.docx (10 B, saved to the folder)", "this document could not be read: a part of the document is missing"]);
+    type("read them");
+    await send();
+    expect(sent[0]!.attachments).toEqual(["d1", "d2"]);
+  });
+
   test("a plain box names no folder, and shows the server's reason", async () => {
     show({ where: "home" });
-    upload.mockRejectedValue(new Error("unsupported file: this chat's agent cannot open files; switch to Agentic (next to Ask under the box) to attach any file, or attach text, a PDF or an image"));
+    upload.mockRejectedValue(new Error("unsupported file: this chat's agent cannot open files; switch to Agentic (next to Ask under the box) to attach any file, or attach text, a PDF, an Office document or an image"));
     await pick([zip()]);
     expect(upload).toHaveBeenCalledWith(expect.anything(), { session: undefined, folder: false });
     expect(host.querySelector(".error-text")?.textContent).toContain("cannot open files");

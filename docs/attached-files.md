@@ -28,3 +28,9 @@ The owner chose: readable, never changeable, through a tool the agent calls on d
 ## Limits
 
 Per file 10 MiB, 10 files and images a message, 20 unsent; a read shows at most 30,000 characters of text, 4 KiB of hex or runs; a listing shows 500 entries and reads 20,000; 60 calls a turn; two parses at once and 8 seconds each.
+
+## Office documents (X.55, T96)
+
+Word, Excel, PowerPoint and OpenDocument files are also read as text when attached (the owner, 2026-11-22), in every chat, by the confined `doc-text` helper (`docs/threats/T96.md`), and the file is kept as well as described above: the text is `user_message.attachments`, the file is `uploads` (a coding chat) or `attached` (a plain chat whose agent has the switch).
+The two are paired by an id derived from the text attachment's (`attachments::file_id_of`); the send takes the file with its text and drops it without a word where the chat cannot keep it.
+The reason for keeping both: a later row creates and edits such files, and an agent that only had the text could not.

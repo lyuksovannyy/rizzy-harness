@@ -453,6 +453,19 @@ describe("media", () => {
     expect(host.querySelector(".bubble-images .chip")!.textContent).toBe("p2.webp: removed from Media");
   });
 
+  test("a document read as text and kept as a file is one chip in the sent message (T96)", async () => {
+    const docx: Item = {
+      type: "user",
+      turn_id: "t1",
+      text: "summarise",
+      attachments: ["plan.docx", "notes.md"],
+      attached: [{ file_id: "f1", name: "plan.docx", bytes: 2048 }],
+    };
+    await show([docx], sessionRow());
+    const chips = [...host.querySelectorAll(".msg.user ul.chips li")].map((li) => li.textContent?.trim());
+    expect(chips).toEqual(["notes.md", "plan.docx (2.0 KB, read-only)"]);
+  });
+
   test("the bar takes images where the server does", async () => {
     features.mockResolvedValue(FEATURES(true, true));
     await show([], sessionRow());

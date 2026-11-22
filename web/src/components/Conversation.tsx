@@ -873,11 +873,14 @@ export default function Conversation(props: {
                         )}
                         {(it.attachments || it.files || it.uploads || it.attached) && (
                           <ul className="chips">
-                            {it.attachments?.map((n, j) => (
-                              <li key={j} className="chip">
-                                <FileText size={14} /> {n}
-                              </li>
-                            ))}
+                            {it.attachments?.map((n, j) =>
+                              /* A document is read as text and kept as a file: one chip. */
+                              it.attached?.some((a) => a.name === n) || it.uploads?.some((u) => u.name === n) ? null : (
+                                <li key={j} className="chip">
+                                  <FileText size={14} /> {n}
+                                </li>
+                              ),
+                            )}
                             {it.files?.map((p, j) => (
                               <li key={`f${j}`} className="chip" title={t("conv.mentioned")}>
                                 <AtSign size={14} /> {p}
