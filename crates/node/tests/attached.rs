@@ -335,3 +335,36 @@ async fn the_nodes_checks_decide() {
     assert!(e.contains("saves attached files there"), "{e}");
     a.rt.stop(Duration::from_secs(10)).await;
 }
+
+/// What the model reads and what the log keeps go through the node's
+/// scrubber like any tool result: a secret inside a text entry the master
+/// sent back is not in the event, nor in a listed path.
+#[tokio::test]
+async fn a_secret_inside_a_read_entry_is_scrubbed_in_the_event() {
+    let mut n = node(Profile::Chat, true, &[]).await;
+    let sid = n.create(Profile::Chat).await;
+    n.prompt(
+        sid,
+        r#"script: [{"tool": "attached_file", "input": {"op": "read", "file_id": "f-1", "entry": "a.txt"}}]"#,
+        vec![aref("f-1", "x.zip", 5)],
+    )
+    .await
+    .unwrap();
+    let leak = || {
+        Ok(AttachedAnswer::Read {
+            mode: "text".into(),
+            text: format!("1\tkey={SECRET}\n2\tfine"),
+            from: 1,
+            shown: 2,
+            next: None,
+            size: Some(40),
+            note: Some(format!("see {SECRET}")),
+        })
+    };
+    let (_, _, results) = n.until_end(sid, &leak).await;
+    let (ok, out) = &results[0];
+    assert!(ok, "{out}");
+    assert!(!out.contains(SECRET), "the event holds the secret: {out}");
+    assert!(out.contains("| 2\tfine"), "{out}");
+    n.rt.stop(Duration::from_secs(10)).await;
+}

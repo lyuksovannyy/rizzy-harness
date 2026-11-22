@@ -871,7 +871,7 @@ export default function Conversation(props: {
                             <Mentioned text={it.text} agents={props.agents} triggers={it.triggers} />
                           </div>
                         )}
-                        {(it.attachments || it.files || it.uploads) && (
+                        {(it.attachments || it.files || it.uploads || it.attached) && (
                           <ul className="chips">
                             {it.attachments?.map((n, j) => (
                               <li key={j} className="chip">
@@ -881,6 +881,11 @@ export default function Conversation(props: {
                             {it.files?.map((p, j) => (
                               <li key={`f${j}`} className="chip" title={t("conv.mentioned")}>
                                 <AtSign size={14} /> {p}
+                              </li>
+                            ))}
+                            {it.attached?.map((a, j) => (
+                              <li key={`a${j}`} className="chip" title={t("composer.keptHint")}>
+                                <FileText size={14} /> {a.name} <span className="muted">({bytes(a.bytes)}, {t("composer.kept")})</span>
                               </li>
                             ))}
                             {it.uploads?.map((u, j) => (
@@ -1402,6 +1407,7 @@ export default function Conversation(props: {
             // `@path` mentions and their completion (T63): a chat with a
             // folder that this person may write to.
             filesOf={meta?.profile === "agentic" && !blocked ? sessionId : undefined}
+            chatId={sessionId}
             agentState={running ? undefined : face}
             sessionModel={meta?.model}
             agenticBlocked={null}

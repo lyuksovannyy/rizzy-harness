@@ -214,8 +214,9 @@ export const api = {
   ) => call("POST", `/api/sessions/${id}/prompt`, { text, ...opts }),
   /** `to`: the chat it is for, or a coding chat to come (a file the model
    * cannot read is saved into that chat's folder, T94). */
-  upload: async (file: File, to: { session?: string; folder?: boolean } = {}): Promise<UploadedAttachment> => {
-    const where = to.session ? `&session=${to.session}` : to.folder ? "&agentic=1" : "";
+  upload: async (file: File, to: { session?: string; folder?: boolean; agent?: string } = {}): Promise<UploadedAttachment> => {
+    // `agent`: a chat without a folder keeps a file only for an agent that reads attached files (T95).
+    const where = (to.session ? `&session=${to.session}` : to.folder ? "&agentic=1" : "") + (to.agent && !to.folder ? `&agent=${encodeURIComponent(to.agent)}` : "");
     const res = await reach(
       fetch(`/api/attachments?name=${encodeURIComponent(file.name)}${where}&type=${encodeURIComponent(file.type)}`, {
         method: "POST",

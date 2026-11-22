@@ -163,6 +163,8 @@ export function Composer(props: {
   /** Session, the owner's chat with a folder: its id, for `@path`
    * completion and mentions (T63). Absent: no files are offered. */
   filesOf?: string;
+  /** Session: this chat's id, for a file a chat without a folder keeps for the agent to read (T95). */
+  chatId?: string;
   /** Session: `/compact [focus]` summarises the chat now instead of sending a message (X.20). */
   compact?: (focus: string) => Promise<unknown>;
   /** Session: a call waits for approval and its choice is shown in the
@@ -627,7 +629,7 @@ export function Composer(props: {
     for (const f of picked) {
       setUploading((n) => n + 1);
       try {
-        const up = await api.upload(f, { session: home ? undefined : props.filesOf, folder: folder });
+        const up = await api.upload(f, { session: home ? undefined : (props.filesOf ?? props.chatId), folder: folder, agent: folder ? undefined : props.agentId || undefined });
         setFiles((prev) => [...prev, up]);
       } catch (x) {
         setErr(`${f.name}: ${x instanceof Error ? x.message : String(x)}`);
@@ -820,9 +822,10 @@ export function Composer(props: {
               </li>
             ))}
             {files.map((f) => (
-              <li key={f.attachment_id} className={f.saved ? "chip saved" : "chip"} title={f.saved ? t("composer.savedHint") : `${(f.chars ?? 0).toLocaleString()} ${t("composer.chars")}`}>
+              <li key={f.attachment_id} className={f.saved || f.kept ? "chip saved" : "chip"} title={f.saved ? t("composer.savedHint") : f.kept ? t("composer.keptHint") : `${(f.chars ?? 0).toLocaleString()} ${t("composer.chars")}`}>
                 <FileText size={14} /> <span className="chip-name">{f.name}</span>
                 {f.saved && <span className="muted chip-note"> ({bytes(f.bytes ?? 0)}, {t("composer.saved")})</span>}
+                {f.kept && <span className="muted chip-note"> ({bytes(f.bytes ?? 0)}, {t("composer.kept")})</span>}
                 {f.truncated && <span className="muted"> ({t("composer.truncated")})</span>}
                 <button
                   type="button"

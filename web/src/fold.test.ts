@@ -49,6 +49,21 @@ describe("fold", () => {
     expect(v.unknown_events).toBe(0);
   });
 
+  it("shows the files kept for the agent to read on the message that brought them (T95)", () => {
+    const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
+    const f = { file_id: "f1", name: "x.zip", bytes: 1234, sha256: "ab".repeat(32), mime: "application/zip" };
+    const v = fold([
+      ev(1, "turn_started", { turn_id: "t" }),
+      ev(2, "user_message", { turn_id: "t", text: "look", attached: [f] }),
+      ev(3, "turn_ended", { turn_id: "t", reason: "completed" }),
+      ev(4, "turn_started", { turn_id: "u" }),
+      ev(5, "user_message", { turn_id: "u", text: "again" }),
+    ]);
+    expect(v.items[0]).toMatchObject({ type: "user", attached: [{ file_id: "f1", name: "x.zip", bytes: 1234 }] });
+    expect(v.items.find((i) => i.type === "user" && i.turn_id === "u")).not.toHaveProperty("attached");
+    expect(v.unknown_events).toBe(0);
+  });
+
   it("keeps the latest task list only, and drops a cleared one", () => {
     const sid = "11111111-1111-1111-1111-111111111111";
     const ev = (seq: number, items: unknown[]): RawEvent => ({

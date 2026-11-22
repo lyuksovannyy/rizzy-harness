@@ -125,6 +125,12 @@ pub fn deny(spec: &mut harness_core::agent::AgentSpec) {
 /// Answer a node's `attached.request` from a task of its own (a read never
 /// holds up the node's events). The answer goes to that node only.
 pub fn handle(m: &Master, node_id: &str, req_id: String, sid: SessionId, r: AttachedRequest) {
+    // `attached.result` goes only to a node that announced the capability: a
+    // request from one that did not is dropped, not answered.
+    if !m.node_has(node_id, harness_protocol::CAP_ATTACHED) {
+        tracing::warn!(node = %node_id, "attached.request from a node without the capability");
+        return;
+    }
     let (m, node_id) = (m.clone(), node_id.to_string());
     tokio::spawn(async move {
         let res = answer(&m, &node_id, sid, r).await;
