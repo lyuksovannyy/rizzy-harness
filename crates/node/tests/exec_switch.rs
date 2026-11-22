@@ -1116,7 +1116,9 @@ async fn a_switch_is_refused_while_a_sub_agents_turn_waits() {
 
 /// While the chat above it is being switched, a sub-agent's chat takes no
 /// turn (second review, N1): a message that arrived in that window would
-/// run a whole turn in the mode the chat is leaving.
+/// run a whole turn in the mode the chat is leaving. The window is raised
+/// by a test hook, so this runs only where the hook is built.
+#[cfg(feature = "testing")]
 #[tokio::test]
 async fn a_sub_agents_chat_takes_no_turn_while_its_chat_is_being_switched() {
     let dir = tempfile::tempdir().unwrap();
