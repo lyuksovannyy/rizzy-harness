@@ -130,6 +130,26 @@ impl Store {
         Ok(Put::Added { new_blob })
     }
 
+    /// Which of `ids` are upload rows (not text attachments): a send names
+    /// both in one list. Whatever their owner or state.
+    pub fn chat_uploads_among(&self, ids: &[String]) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut out = Vec::new();
+        for id in ids {
+            let has: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM chat_uploads WHERE upload_id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if has.is_some() {
+                out.push(id.clone());
+            }
+        }
+        Ok(out)
+    }
+
     /// Hold the given uploads for a send, all or nothing: each must exist,
     /// not be held already, and belong to `owner` (`None`, the API token,
     /// may take any). `Ok(None)` when any does not.
