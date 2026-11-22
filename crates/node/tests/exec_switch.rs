@@ -1113,3 +1113,94 @@ async fn a_switch_is_refused_while_a_sub_agents_turn_waits() {
     // Its turn over, the switch goes through.
     n.switch(parent, ExecMode::Host).await.unwrap();
 }
+
+/// While the chat above it is being switched, a sub-agent's chat takes no
+/// turn (second review, N1): a message that arrived in that window would
+/// run a whole turn in the mode the chat is leaving.
+#[tokio::test]
+async fn a_sub_agents_chat_takes_no_turn_while_its_chat_is_being_switched() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = ws(dir.path());
+    std::fs::write(ws.join("keep.txt"), "hello\n").unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), offers(true, true)),
+        Profile::Agentic,
+    )
+    .await;
+    let parent = n
+        .create(&ws, ApprovalMode::Auto, Some(ExecMode::Host))
+        .await;
+    n.lead(parent, "delegate: scout=read: keep.txt").await;
+    let child = n.child_of(parent);
+    let turns = |n: &N| {
+        n.log(child)
+            .iter()
+            .filter(|e| e.kind == "turn_started")
+            .count()
+    };
+    let before = turns(&n);
+    n.node.hold_exec_switch(parent, true);
+    n.send(prompt(child, "read: keep.txt"));
+    let e = n.ack().await.unwrap_err();
+    assert!(e.contains("being switched right now"), "{e}");
+    assert_eq!(turns(&n), before, "nothing started in the child's chat");
+    // The mark is the chat's own: once it is lowered the same message runs.
+    n.node.hold_exec_switch(parent, false);
+    n.send(prompt(child, "read: keep.txt"));
+    n.ack().await.unwrap();
+}
+
+/// A chat whose mode is not known runs nothing, and neither do its
+/// sub-agents' chats, whatever mode they were made in (second review, N2).
+#[tokio::test]
+async fn a_sub_agent_of_a_chat_with_an_unknown_mode_runs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("node.db");
+    let ws = ws(dir.path());
+    std::fs::write(ws.join("keep.txt"), "hello\n").unwrap();
+    let (parent, child) = {
+        let mut n = start(
+            &db,
+            policy(dir.path(), offers(true, true)),
+            Profile::Agentic,
+        )
+        .await;
+        let parent = n
+            .create(&ws, ApprovalMode::Auto, Some(ExecMode::Sandbox))
+            .await;
+        n.lead(parent, "delegate: scout=read: keep.txt").await;
+        (parent, n.child_of(parent))
+    };
+    {
+        let store = Store::open(&db, Durability::Full).unwrap();
+        let head = store.events_after(parent, 0, 100_000).unwrap().len() as u64;
+        store
+            .append(
+                "n",
+                &RawEvent {
+                    session_id: parent,
+                    seq: head + 1,
+                    ts_ms: harness_core::now_ms(),
+                    kind: "exec_mode_changed".into(),
+                    payload: json!({"mode": "quantum", "from": "sandbox"}),
+                },
+            )
+            .unwrap();
+    }
+    let mut n = start(
+        &db,
+        policy(dir.path(), offers(true, true)),
+        Profile::Agentic,
+    )
+    .await;
+    assert_eq!(n.mode(child), InForce::Mode(ExecMode::Sandbox));
+    let marker = dir.path().join("ran.txt");
+    n.send(prompt(
+        child,
+        &format!("run: echo ran > {}", marker.display()),
+    ));
+    let e = n.ack().await.unwrap_err();
+    assert!(e.contains("not known here"), "{e}");
+    assert!(!marker.exists());
+}

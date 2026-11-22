@@ -1135,6 +1135,18 @@ impl NodeRuntime {
         self.inner.session(sid)
     }
 
+    /// For tests: raise or lower the mark a chat carries while its
+    /// execution mode is being switched, as `set_exec_mode` does around its
+    /// own work (the window a real switch holds open only while MCP
+    /// servers stop). Not an API.
+    #[cfg(feature = "testing")]
+    pub fn hold_exec_switch(&self, sid: SessionId, on: bool) {
+        if let Some(s) = self.inner.session(sid) {
+            s.exec_switching
+                .store(on, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     /// Queue `msg` on its session's lane, starting the lane if there is
     /// none. A full lane refuses the command at once (a nack, never a
     /// silent drop, never a wait that would hold up other sessions).

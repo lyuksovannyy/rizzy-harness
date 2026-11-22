@@ -92,6 +92,11 @@ impl Session {
                 Some(m) if self.profile == Profile::Agentic => {
                     harness_core::exec_mode::InForce::Mode(m)
                 }
+                // A chat whose mode is not known runs nothing: its fork
+                // does not get a readable mode from an earlier cut.
+                None if self.profile == Profile::Agentic => {
+                    harness_core::exec_mode::InForce::Unreadable
+                }
                 _ => at_cut,
             })
             .map_err(refused)?;

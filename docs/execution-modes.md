@@ -251,7 +251,7 @@ never moves the approval mode back; the divider in the conversation is
 hidden with its turns, the mode is not). A fork starts in the mode its
 parent has NOW: its copied events carry the changes up to its cut, and when
 the parent was switched after the cut the node appends an
-`exec_mode_changed` of the fork's own, right after `session_forked`, so its
+`exec_mode_changed` of the fork's own, after the events the fork begins with, so its
 log, fold and mirror say the truth (the fork route's level check reads the
 parent's row, which is that mode). The master's mirror
 (`sessions.exec_mode`) follows the latest event; a mode it cannot read stays

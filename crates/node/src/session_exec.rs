@@ -45,6 +45,8 @@ pub(crate) const EXEC_SUB_AGENT: &str =
     "a sub-agent runs in the execution mode of the chat that started it; switch that chat";
 pub(crate) const EXEC_ROUTINE: &str =
     "a routine's chat always runs in the sandbox; the mode is not switchable";
+pub(crate) const EXEC_SWITCHING: &str =
+    "this chat's commands are being switched right now: try again in a moment";
 pub(crate) const EXEC_UNREADABLE: &str = "this chat's execution mode is not known here (its log \
      names none this node reads), so it runs nothing and cannot be switched: start a new chat";
 
@@ -73,6 +75,17 @@ impl Session {
         if self.node.is_stopping() {
             return Err(harness_protocol::NODE_STOPPING.into());
         }
+        // Raised before the sub-agents are looked at and lowered when this
+        // returns: a sub-agent's chat that takes its slot after the look
+        // reads the flag (or the new mode) and is refused (`claim_turn`).
+        self.exec_switching.store(true, Ordering::SeqCst);
+        struct Lower<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Lower<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _switching = Lower(&self.exec_switching);
         if self.peers_pending() {
             return Err(format!(
                 "the commands cannot be switched: {}",

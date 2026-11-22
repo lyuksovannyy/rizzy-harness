@@ -249,6 +249,11 @@ pub(crate) struct Session {
     /// sub-agent's chat in whose log no turn has ever started takes a first
     /// turn only with this id: see [`Self::guard_first_turn`].
     delegation_turn: Mutex<Option<String>>,
+    /// Set while this chat's execution mode is being switched
+    /// (`set_exec_mode`): a sub-agent's chat under it takes no turn
+    /// meanwhile (`sub_agent_mode_mismatch`), so none starts in the mode the
+    /// chat is leaving.
+    pub(super) exec_switching: AtomicBool,
     /// Ends that came while a turn ran: recorded at its next step boundary
     /// (`delivered`), or after its end.
     bg_queue: Mutex<Vec<harness_tools::background::Ended>>,
@@ -620,6 +625,7 @@ impl Session {
             identity: Mutex::new(None),
             looked: AtomicBool::new(false),
             delegation_turn: Mutex::new(None),
+            exec_switching: AtomicBool::new(false),
         });
         Self::record_ends(&s, ends);
         s.append(EventKind::SessionCreated(SessionCreated {
@@ -787,6 +793,7 @@ impl Session {
             identity: Mutex::new(None),
             looked: AtomicBool::new(false),
             delegation_turn: Mutex::new(None),
+            exec_switching: AtomicBool::new(false),
         });
         Self::record_ends(&s, ends);
         Ok(s)
@@ -4481,6 +4488,14 @@ impl Session {
             return Err(harness_protocol::COMPACTING.into());
         }
         *t = Some(turn);
+        // Asked again with the slot held (N.10b): the chat above either saw
+        // this slot taken and refused its switch, or has raised its flag or
+        // applied the new mode by now, which this reads. A check made
+        // before the slot was taken could be stale by one switch.
+        if let Err(e) = self.sub_agent_mode_mismatch() {
+            *t = None;
+            return Err(e);
+        }
         drop(t);
         // The person (or a callback) goes first: a note being written is
         // dropped, and the next idle stretch writes it (X.16).
@@ -5651,7 +5666,9 @@ impl Session {
         *self.exec_mode.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// A sub-agent's chat takes no turn once its recorded mode differs from
+    /// A sub-agent's chat takes no turn while the chat above it is being
+    /// switched, nor when that chat's mode is not known. And:
+    /// a sub-agent's chat takes no turn once its recorded mode differs from
     /// the mode of the chat at the top of its parents (N.10b): the chat was
     /// switched after the sub-agent was made, and what the sub-agent was
     /// started to do was decided for the other shell. The sentence is for
@@ -5666,6 +5683,9 @@ impl Session {
         for _ in 0..8 {
             match self.node.session(up) {
                 Some(p) if p.id != self.id => {
+                    if p.exec_switching.load(Ordering::SeqCst) {
+                        return Err(exec_op::EXEC_SWITCHING.into());
+                    }
                     root = Some(p.clone());
                     match p.parent_session {
                         Some(next) => up = next,
@@ -5676,9 +5696,12 @@ impl Session {
             }
         }
         let Some(root) = root else { return Ok(()) };
-        let (Some(m), Some(r)) = (mine, root.exec_mode_now()) else {
-            return Ok(());
+        // A chat whose mode is not known runs nothing, and neither do
+        // its sub-agents.
+        let Some(r) = root.exec_mode_now() else {
+            return Err(exec_op::EXEC_UNREADABLE.into());
         };
+        let Some(m) = mine else { return Ok(()) };
         if m == r {
             return Ok(());
         }
