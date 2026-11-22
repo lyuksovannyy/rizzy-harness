@@ -191,6 +191,15 @@ layer, over 20 s, no Landlock on the server), 503 (two PDFs already being read a
 within 10 s), 429 (20 unsent files or 8 MiB of unsent text for this account). Unsent uploads
 expire with the incognito TTL.
 
+A file the model cannot read as text is the exception (T94, `docs/plan/X.53.md`): in a coding
+chat (`?session=<id>`, or `?agentic=1` from the home bar) `POST /api/attachments` streams it into
+this blob store as the owner's file (table `chat_uploads`, at most 10 unsent per account, under
+the node's `upload-max` number, 50 MiB by default) and answers `{attachment_id, name, mime,
+bytes, saved: true}`; at send the master pushes it to the node, which saves it into the chat's
+folder. A plain chat answers 422 with the reason, an upload over the limit 413 with the number.
+The row keeps its blob out of the unreferenced sweep until it is sent or purged with the unsent
+text after the incognito TTL.
+
 **What the model is sent (T41).** The person's text as they wrote it, then each file under one
 line the harness wrote, every line of the file's text behind `| `:
 

@@ -491,13 +491,26 @@ pub async fn receive(
     content_length: Option<u64>,
     body: Body,
 ) -> Result<Written, Refusal> {
+    receive_capped(m, owner, content_length, body, config(m).max_file()).await
+}
+
+/// [`receive`] with a limit of its own, at most the configured one: files
+/// the node saves into a chat's folder are bounded by the node's number
+/// (PLAN.md T94).
+pub async fn receive_capped(
+    m: &Master,
+    owner: Option<&str>,
+    content_length: Option<u64>,
+    body: Body,
+    cap: u64,
+) -> Result<Written, Refusal> {
     let st = get(m).ok_or((StatusCode::NOT_FOUND, "file storage is off".into()))?;
     let cfg = config(m);
-    let max = cfg.max_file();
+    let max = cap.min(cfg.max_file());
     let too_large = || {
         (
             StatusCode::PAYLOAD_TOO_LARGE,
-            format!("Files are at most {} MB.", cfg.max_file_mb),
+            format!("Files are at most {} MB.", max.div_ceil(MB)),
         )
     };
     let room = room(m, &cfg, owner).await?;

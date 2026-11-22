@@ -15,6 +15,7 @@ use memory::{memory_err, memory_store};
 mod agent_edits;
 mod approval_mode;
 mod artifacts;
+mod attachments;
 mod background;
 mod chat_allows;
 mod compact;
@@ -202,12 +203,6 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
                 .delete(agent_edits::delete_agent),
         )
         .route("/api/agent-summary", post(agent_edits::generate_summary))
-        .route(
-            "/api/attachments",
-            post(upload).layer(axum::extract::DefaultBodyLimit::max(
-                crate::attachments::MAX_UPLOAD,
-            )),
-        )
         .route("/api/features", get(features))
         .route(
             "/api/transcribe",
@@ -240,6 +235,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(memory::routes())
         .merge(routines::routes())
         .merge(hooks::routes())
+        .merge(attachments::routes())
         .merge(media::routes())
         .merge(artifacts::routes())
         .merge(background::routes())
@@ -1290,52 +1286,20 @@ struct PromptBody {
     files: Vec<String>,
 }
 
-#[derive(Deserialize)]
-struct UploadQuery {
-    name: String,
-}
-
-/// Raw file body, name in the query. Returns the extracted size for the chip.
-async fn upload(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Query(q): Query<UploadQuery>,
-    body: axum::body::Bytes,
-) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
-    use crate::attachments::{MAX_UNSENT, MAX_UNSENT_BYTES};
-    let a = crate::attachments::extract(&q.name, body.to_vec(), m.pdf_reader())
-        .await
-        .map_err(|e| {
-            let code = if e.busy() {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::UNPROCESSABLE_ENTITY
-            };
-            ApiError(code, e.to_string())
-        })?;
-    let id = harness_core::new_id();
-    let (aid, owner, att) = (id.clone(), who.user_id.clone(), a.clone());
-    let stored = m
+/// The files for the folder a refused message held can be sent again.
+async fn give_back_files(m: &Master, ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
+    let ids = ids.to_vec();
+    if let Err(e) = m
         .inner
         .mirror
-        .call(move |s| s.attachment_put(&aid, owner.as_deref(), &att, MAX_UNSENT, MAX_UNSENT_BYTES))
-        .await?;
-    if !stored {
-        return Err(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "too many files waiting to be sent (at most {MAX_UNSENT}); send or remove some first"
-            ),
-        ));
+        .call(move |s| s.chat_uploads_give_back(&ids))
+        .await
+    {
+        tracing::warn!(error = %e, "could not give a refused message's files back");
     }
-    Ok(Json(json!({
-        "attachment_id": id,
-        "name": a.name,
-        "mime": a.mime,
-        "chars": a.text.chars().count(),
-        "truncated": a.truncated,
-    })))
 }
 
 async fn prompt(
@@ -1371,22 +1335,59 @@ async fn prompt(
     // every turn the owner sends there.
     let flags = crate::routines::on_owner_prompt(&m, row.session_id).await;
     let sid = row.session_id;
-    let attachments = if b.attachments.is_empty() {
+    // The ids name text attachments and files for the folder alike; the
+    // files are held (not consumed) until the node has taken the message.
+    let (file_ids, text_ids): (Vec<String>, Vec<String>) = if b.attachments.is_empty() {
+        (vec![], vec![])
+    } else {
+        let ids = b.attachments.clone();
+        let files = m
+            .inner
+            .mirror
+            .call(move |s| s.chat_uploads_among(&ids))
+            .await?;
+        let text = b
+            .attachments
+            .iter()
+            .filter(|i| !files.contains(i))
+            .cloned()
+            .collect();
+        (files, text)
+    };
+    let unknown = || {
+        ApiError(
+            StatusCode::BAD_REQUEST,
+            "unknown or already used attachment; upload it again".into(),
+        )
+    };
+    let files = if file_ids.is_empty() {
         Vec::new()
     } else {
-        let (ids, owner) = (b.attachments.clone(), who.user_id.clone());
+        let (ids, owner) = (file_ids.clone(), who.user_id.clone());
         m.inner
             .mirror
-            .call(move |s| s.attachments_take_owned(&ids, owner.as_deref()))
+            .call(move |s| s.chat_uploads_take(&ids, owner.as_deref()))
             .await?
-            .ok_or_else(|| {
-                ApiError(
-                    StatusCode::BAD_REQUEST,
-                    "unknown or already used attachment; upload it again".into(),
-                )
-            })?
+            .ok_or_else(unknown)?
     };
-    let taken = (!attachments.is_empty()).then(|| (b.attachments.clone(), attachments.clone()));
+    let attachments = if text_ids.is_empty() {
+        Vec::new()
+    } else {
+        let (ids, owner) = (text_ids.clone(), who.user_id.clone());
+        let taken = m
+            .inner
+            .mirror
+            .call(move |s| s.attachments_take_owned(&ids, owner.as_deref()))
+            .await?;
+        match taken {
+            Some(t) => t,
+            None => {
+                give_back_files(&m, &file_ids).await;
+                return Err(unknown());
+            }
+        }
+    };
+    let taken = (!attachments.is_empty()).then(|| (text_ids.clone(), attachments.clone()));
     let attachments = attachments.into_iter().map(|(a, _)| a).collect();
     let sent = m
         .prompt(
@@ -1415,6 +1416,7 @@ async fn prompt(
                 // Never from a request: only the routine runner sets it.
                 routine_run: None,
                 files: b.files,
+                uploads: files,
                 retry: None,
                 retry_images: false,
             },
@@ -1425,15 +1427,35 @@ async fn prompt(
     // a turn already running) or one never sent (the node away, too
     // large). Not after a timeout: the node may have taken it and only its
     // answer was lost, and giving them back could let one file go twice.
-    if let (Err(e), Some((ids, atts))) = (&sent, taken)
-        && !matches!(e, CommandError::Timeout)
-        && let Err(e) = m
-            .inner
-            .mirror
-            .call(move |s| s.attachments_give_back(&ids, &atts))
-            .await
-    {
-        tracing::warn!(error = %e, "could not give a refused message's uploads back");
+    // The files for the folder follow the same rule; once the node took
+    // the message they are done.
+    match &sent {
+        Ok(()) => {
+            if !file_ids.is_empty() {
+                let ids = file_ids.clone();
+                if let Err(e) = m
+                    .inner
+                    .mirror
+                    .call(move |s| s.chat_uploads_done(&ids))
+                    .await
+                {
+                    tracing::warn!(error = %e, "could not clear the files a message carried");
+                }
+            }
+        }
+        Err(e) if !matches!(e, CommandError::Timeout) => {
+            give_back_files(&m, &file_ids).await;
+            if let Some((ids, atts)) = taken
+                && let Err(e) = m
+                    .inner
+                    .mirror
+                    .call(move |s| s.attachments_give_back(&ids, &atts))
+                    .await
+            {
+                tracing::warn!(error = %e, "could not give a refused message's uploads back");
+            }
+        }
+        Err(_) => {}
     }
     sent?;
     Ok(Json(json!({ "ok": true })))

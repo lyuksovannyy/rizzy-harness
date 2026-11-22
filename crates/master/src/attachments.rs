@@ -24,9 +24,13 @@ pub const MAX_UNSENT_BYTES: usize = 8 * 1024 * 1024;
 /// Why an upload gives no attachment. `Display` is the user's message.
 #[derive(Debug, thiserror::Error)]
 pub enum ExtractError {
-    /// Not a file we read (422).
+    /// Empty (422).
     #[error("{0}")]
     Unsupported(String),
+    /// Not text and not a PDF (422): a coding chat may save it into the
+    /// chat's folder instead (PLAN.md T94, `crate::uploads`).
+    #[error("{}", unsupported())]
+    Binary,
     /// The PDF reader's answer (`PdfError::Busy` is 503, the rest 422).
     #[error("{0}")]
     Pdf(crate::pdf::PdfError),
@@ -57,10 +61,9 @@ pub async fn extract(
     } else {
         let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
         if body.contains(&0) {
-            return Err(ExtractError::Unsupported(unsupported()));
+            return Err(ExtractError::Binary);
         }
-        let text = String::from_utf8(body.to_vec())
-            .map_err(|_| ExtractError::Unsupported(unsupported()))?;
+        let text = String::from_utf8(body.to_vec()).map_err(|_| ExtractError::Binary)?;
         // The name only picks a text type; `.pdf` is not one.
         let mime = mime_guess::from_path(&name)
             .first()
@@ -81,6 +84,11 @@ pub async fn extract(
 fn unsupported() -> String {
     "unsupported file: text, Markdown, code, CSV, JSON and PDF work".into()
 }
+
+/// Why a chat without tools takes no other file (T94): said at attach
+/// time, in the words of the plan.
+pub const NO_TOOLS: &str = "unsupported file: this chat's agent cannot open files; start a coding \
+     chat, or attach text, a PDF or an image";
 
 fn cap(text: String) -> (String, bool) {
     if text.chars().count() <= MAX_TEXT_CHARS {
@@ -124,7 +132,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(a.text, "fn main() {}");
-        assert!(extract("x.bin", vec![0, 1, 2], None).await.is_err());
+        assert!(matches!(
+            extract("x.bin", vec![0, 1, 2], None).await,
+            Err(ExtractError::Binary)
+        ));
         assert!(
             extract("x.txt", vec![0xff, 0xfe, 0x41], None)
                 .await

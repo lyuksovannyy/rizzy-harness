@@ -53,6 +53,7 @@ pub mod serve;
 pub mod sniff;
 pub mod storage;
 pub mod stored_skills;
+pub mod uploads;
 pub mod voice;
 pub mod workspaces;
 mod ws;
@@ -463,6 +464,10 @@ pub struct PromptOpts {
     /// Paths the person mentioned with `@path` (PLAN.md T63): names only,
     /// which the node reads under its own `read` rules.
     pub files: Vec<String>,
+    /// Files for this message the model cannot read as text (PLAN.md
+    /// T94), held by the send that took them (`uploads::check` and
+    /// `uploads::push` decide whether they go).
+    pub uploads: Vec<harness_store::chat_uploads::TakenUpload>,
     /// The person's Retry of this failed turn (X.21, `http/retry.rs`): the
     /// node runs it again with the message its log holds. The text is that
     /// message's, for what is looked up by it (recall, project facts, a
@@ -1103,6 +1108,13 @@ impl Master {
             "node {node_id} does not offer the {} mode: {offers}. To have it, {remedy}",
             mode.id()
         ))
+    }
+
+    /// The capabilities `node_id`'s latest hello announced.
+    pub fn node_capabilities(&self, node_id: &str) -> Option<Vec<String>> {
+        lock(&self.inner.nodes)
+            .get(node_id)
+            .map(|n| n.capabilities.clone())
     }
 
     /// Whether `node_id`'s latest hello announced `cap`.
@@ -2348,6 +2360,7 @@ impl Master {
             by_owner,
             routine_run,
             files,
+            uploads,
             retry,
             retry_images,
         } = opts;
@@ -2358,7 +2371,8 @@ impl Master {
                 || !compare.is_empty()
                 || reply.is_some()
                 || !images.is_empty()
-                || !files.is_empty())
+                || !files.is_empty()
+                || !uploads.is_empty())
         {
             return Err(CommandError::Rejected(
                 "a retry carries no attachment, image, file, answer or parallel answers".into(),
@@ -2372,7 +2386,8 @@ impl Master {
                 || reply.is_some()
                 || untrusted
                 || !images.is_empty()
-                || !files.is_empty())
+                || !files.is_empty()
+                || !uploads.is_empty())
         {
             return Err(CommandError::Rejected(
                 "a callback turn carries no message, attachment, image or context".into(),
@@ -2388,6 +2403,16 @@ impl Master {
             .call(move |s| s.session(sid))
             .await?
             .ok_or(CommandError::UnknownSession)?;
+        // Files the model cannot read as text: whether this chat and its
+        // node take them, before anything else is decided or sent.
+        if !uploads.is_empty() {
+            uploads::check(self, &row, &uploads)?;
+            if reply.is_some() || !compare.is_empty() {
+                return Err(CommandError::Rejected(
+                    "an answer or parallel answers carry no attached files".into(),
+                ));
+            }
+        }
         let ms = self
             .inner
             .dispatch_delay_ms
@@ -2789,6 +2814,15 @@ impl Master {
                 uploads: vec![],
             }),
         };
+        // The files go ahead of the prompt that names them, once nothing
+        // else can refuse it here: the node holds them until that prompt
+        // takes them (or its staging expires).
+        if !uploads.is_empty() {
+            let refs = uploads::push(self, &row.node_id, sid, &uploads).await?;
+            if let MasterToNode::Prompt(p) = &mut msg {
+                p.uploads = refs;
+            }
+        }
         // The link drops a frame over 8 MiB; the margin covers the request
         // id and the framing.
         if json_len(&msg) > harness_protocol::MAX_PROMPT_JSON {
@@ -3408,6 +3442,20 @@ impl Master {
         n
     }
 
+    /// Drop what people attached and never sent, created before
+    /// `before_ms`: text attachments and files for the folder (their
+    /// blobs go with the hourly storage sweep).
+    pub async fn purge_unsent(&self, before_ms: i64) {
+        let _ = self
+            .inner
+            .mirror
+            .call(move |s| {
+                s.purge_attachments(before_ms)?;
+                s.chat_uploads_purge(before_ms)
+            })
+            .await;
+    }
+
     pub fn start_incognito_purge(&self, ttl: Duration) {
         let this = self.clone();
         let every = (ttl / 10).clamp(Duration::from_secs(1), Duration::from_secs(300));
@@ -3415,11 +3463,7 @@ impl Master {
             loop {
                 this.purge_incognito(ttl).await;
                 // Uploads never sent with a message expire with the same TTL.
-                let before = harness_core::now_ms() - ttl.as_millis() as i64;
-                let _ = this
-                    .inner
-                    .mirror
-                    .call(move |s| s.purge_attachments(before))
+                this.purge_unsent(harness_core::now_ms() - ttl.as_millis() as i64)
                     .await;
                 tokio::time::sleep(every).await;
             }
