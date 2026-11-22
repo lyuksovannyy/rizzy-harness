@@ -1520,7 +1520,7 @@ ids and the tool's name. The tool has three operations: `info` (name, size,
 the type the first bytes say, sha256), `list` (the entries of a zip, tar,
 tar.gz or gz: path, size and whether each is a folder, a link or a device, 500
 a call, at most 20,000 read) and `read` (the file, or one archive entry by its
-listed path: text as numbered lines, anything else as a hex dump of at most
+listed path (or `#` and its number, when two share a path): text as numbered lines, anything else as a hex dump of at most
 4 KiB, or its printable runs). Its calls show as tool blocks in the chat. Word,
 OpenDocument and spreadsheet files are not unpacked into text for the model; it
 can list them and read their XML entries.
@@ -1541,8 +1541,10 @@ can list them and read their XML entries.
   most 16 MiB deep per call, an archive that claims far more than it holds is
   refused with a sentence, an archive inside an archive is read as bytes, a
   link or a device is listed and never followed, and a call stops after 8
-  seconds; two calls run at once on the server and the rest wait. A turn can
-  look into files 60 times.
+  seconds; two calls run at once on the server and the rest wait. A chat has
+  one call at a time, a turn can look into files 60 times and a chat 240 times in
+  10 minutes. A zip entry read whole is checked against its checksum, and a
+  mismatch is noted, not refused.
 - **Whose file.** The server answers only for a file your own chat's log names,
   in the chat the call runs in: never another chat's, another person's, or an id
   the model made up.
