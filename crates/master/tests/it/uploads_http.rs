@@ -146,6 +146,8 @@ fn fake(id: &str, caps: &[String], chat_runtime: bool) -> (NodeLink, Fake) {
         knobs.clone(),
     );
     tokio::spawn(async move {
+        // The chat created before this one: a "child" chat is its sub-agent's.
+        let mut last: Option<harness_core::SessionId> = None;
         loop {
             tokio::select! {
                 msg = commands.recv() => {
@@ -153,7 +155,9 @@ fn fake(id: &str, caps: &[String], chat_runtime: bool) -> (NodeLink, Fake) {
                     keep.lock().unwrap().push(msg.clone());
                     let mut error: Option<String> = None;
                     match &msg {
-                        MasterToNode::Create { session_id, profile, exec_mode, .. } => {
+                        MasterToNode::Create { session_id, profile, exec_mode, title, .. } => {
+                            let parent_of_this = last;
+                            last = Some(*session_id);
                             let (kind, payload) = EventKind::SessionCreated(SessionCreated {
                                 forked: None,
                                 exec_mode: *exec_mode,
@@ -167,7 +171,11 @@ fn fake(id: &str, caps: &[String], chat_runtime: bool) -> (NodeLink, Fake) {
                                 profile: profile.unwrap_or(Profile::Agentic),
                                 agent_id: None,
                                 incognito: false,
-                                parent_session: None,
+                                parent_session: if title.as_str() == "child" {
+                                    parent_of_this
+                                } else {
+                                    None
+                                },
                                 sub_folder: None,
                             })
                             .into_parts();
@@ -811,4 +819,26 @@ async fn an_account_holds_a_bounded_number_of_unsent_files() {
     }
     assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
     let _ = t.node.chunks.load(Ordering::SeqCst);
+}
+
+/// A sub-agent's chat takes no file: no composer there, and the API says
+/// so too (a person could still call it).
+#[tokio::test]
+async fn a_sub_agents_chat_takes_no_files() {
+    let t = start().await;
+    let _parent = chat(&t, &t.alex, "big", "agentic").await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"cwd": "/w", "title": "child", "node_id": "big", "profile": "agentic"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let sid = v["session_id"].as_str().unwrap();
+    let (st, v) = upload(&t, &t.alex, "x.zip", &format!("&session={sid}"), zip(500)).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("sub-agent"), "{v}");
+    assert_eq!(blob_files(&t), 0);
 }
