@@ -1474,6 +1474,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "harness-attached"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "harness-core",
+ "infer",
+ "tar",
+]
+
+[[package]]
 name = "harness-codemap"
 version = "0.1.0"
 dependencies = [
