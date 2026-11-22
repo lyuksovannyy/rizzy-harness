@@ -1786,6 +1786,7 @@ mod tests {
                 triggers: vec![],
                 tags: vec![],
                 files: vec![],
+                uploads: vec![],
             })
         };
         let evs = vec![ev(sid, 1, msg(Some(reply.clone()))), ev(sid, 2, msg(None))];

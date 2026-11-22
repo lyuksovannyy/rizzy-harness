@@ -41,6 +41,23 @@ pub const CAP_ARTIFACTS: &str = "artifacts";
 /// sends images only to nodes whose hello listed it.
 pub const CAP_IMAGES: &str = "images";
 
+/// The node capability that announces `session.upload` and
+/// `session.prompt.uploads` (PLAN.md T94): files the model cannot read as
+/// text, saved by the node into the chat's folder. The master sends them
+/// only to nodes whose hello listed it ("update the node" otherwise).
+pub const CAP_UPLOADS: &str = "uploads";
+/// `upload-max:<MiB>`: the largest file this node saves (node.toml
+/// `[limits] upload_max_mb`). What the master refuses a bigger upload with.
+pub const CAP_UPLOAD_MAX_PREFIX: &str = "upload-max:";
+/// `uploads-per-message:<n>`: the most files one message of a chat there
+/// may bring (node.toml `[limits] uploads_per_message`).
+pub const CAP_UPLOADS_PER_MESSAGE_PREFIX: &str = "uploads-per-message:";
+/// `[limits] upload_max_mb` by default, and what the master allows an
+/// upload before it knows the chat's node (the home composer).
+pub const DEFAULT_UPLOAD_MAX_MB: u64 = 50;
+/// `[limits] uploads_per_message` by default.
+pub const DEFAULT_UPLOADS_PER_MESSAGE: usize = 5;
+
 /// The node capability that announces `session.stop_background` (T.8d,
 /// docs/background-commands.md). The master sends it only to nodes whose
 /// hello listed it.
@@ -1065,6 +1082,13 @@ pub struct PromptMsg {
     /// among its own delegates in that turn's opening. Never a call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Files for this message that the model cannot read as text, already
+    /// pushed with `session.upload` (only to nodes with [`CAP_UPLOADS`];
+    /// PLAN.md T94). References only: the node saves each staged file
+    /// into the chat's folder under its own name rules and limits, and
+    /// records what it saved in `user_message.uploads`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uploads: Vec<UploadRef>,
 }
 
 /// The body of `session.callback`. Every field is named by every sender: there is no `Default`,
@@ -1142,6 +1166,20 @@ pub struct RetryMsg {
     pub identity: Option<harness_core::identity::CommitIdentity>,
 }
 
+/// A file pushed with `session.upload`, as a prompt names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadRef {
+    pub upload_id: String,
+    /// The person's file name (the node reduces it to a safe one).
+    pub name: String,
+    /// As the browser said; informational only.
+    pub mime: String,
+    pub size: u64,
+    /// Hex sha256 of the bytes (the node checked it when the last chunk
+    /// came, and checks it again as it saves).
+    pub sha256: String,
+}
+
 /// Test constructors: every field but the ones named is at its empty value
 /// (`None`, no items, `false`). Only for tests (`test-support` feature of
 /// this crate, enabled by the dev-dependencies of the crates whose tests
@@ -1167,6 +1205,7 @@ impl PromptMsg {
             identity: None,
             peers: vec![],
             tags: vec![],
+            uploads: vec![],
         }
     }
 }
@@ -1507,6 +1546,26 @@ pub enum MasterToNode {
         /// At most `MAX_CHUNK`; the node clamps it.
         len: u32,
     },
+    /// One chunk of a file the person attached (PLAN.md T94), pushed ahead
+    /// of the prompt that names it (`session.prompt.uploads`). Acked: one
+    /// chunk in flight, so the link's queue is never filled by a file. In
+    /// the session's lane, so chunks and the prompt arrive in order. The
+    /// node keeps the bytes in its own staging folder (never the chat's)
+    /// until the prompt takes them; `offset` must be the bytes received so
+    /// far (a restart at 0 begins again), `data` at most [`MAX_CHUNK`]
+    /// bytes, and the last chunk must complete `size` bytes of `sha256`.
+    #[serde(rename = "session.upload")]
+    UploadChunk {
+        req_id: String,
+        session_id: SessionId,
+        upload_id: String,
+        offset: u64,
+        /// The whole file's size and hex sha256, on every chunk.
+        size: u64,
+        sha256: String,
+        /// Base64.
+        data: String,
+    },
     /// The master has the file (or gave up): the node deletes the stage.
     #[serde(rename = "artifact.release")]
     ArtifactRelease {
@@ -1664,6 +1723,7 @@ impl MasterToNode {
             | MasterToNode::SelectVariant { req_id, .. }
             | MasterToNode::ApprovalRespond { req_id, .. }
             | MasterToNode::RevokeAllow { req_id, .. }
+            | MasterToNode::UploadChunk { req_id, .. }
             | MasterToNode::ArtifactRelease { req_id, .. }
             | MasterToNode::ArtifactStage { req_id, .. } => Some(req_id),
             // A fetch is answered by its chunk, never acked.
@@ -2161,6 +2221,35 @@ mod tests {
         assert_eq!(v["type"], "session.set_step_limit");
         assert_eq!(v["max_steps"], 30);
         assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), m);
+    }
+
+    /// `session.upload` (PLAN.md T94): one acked chunk of a person's file,
+    /// in the session's lane, ahead of the prompt that names it.
+    #[test]
+    fn upload_chunk_wire_shape() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let m = MasterToNode::UploadChunk {
+            req_id: "r1".into(),
+            session_id: sid,
+            upload_id: "u1".into(),
+            offset: 262_144,
+            size: 300_000,
+            sha256: "ab".repeat(32),
+            data: "aGk=".into(),
+        };
+        assert_eq!(m.req_id(), Some("r1"));
+        assert_eq!(
+            serde_json::to_value(&m).unwrap(),
+            json!({"type": "session.upload", "req_id": "r1",
+                   "session_id": "0193f2a0-0000-7000-8000-000000000001",
+                   "upload_id": "u1", "offset": 262_144, "size": 300_000,
+                   "sha256": "ab".repeat(32), "data": "aGk="})
+        );
+        let back: MasterToNode = serde_json::from_value(serde_json::to_value(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+        assert!(
+            CAP_UPLOADS_PER_MESSAGE_PREFIX.ends_with(':') && CAP_UPLOAD_MAX_PREFIX.ends_with(':')
+        );
     }
 
     #[test]

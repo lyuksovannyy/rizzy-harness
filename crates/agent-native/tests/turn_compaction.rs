@@ -61,6 +61,7 @@ impl TurnHost for Host {
                 triggers: vec![],
                 tags: vec![],
                 files: vec![],
+                uploads: vec![],
             })
             .collect())
     }
@@ -460,6 +461,7 @@ fn logged(
         triggers: vec![],
         tags: vec![],
         files: vec![],
+        uploads: vec![],
     }));
     for k in emitted {
         // A turn id the loop wrote as "now" is this turn's.

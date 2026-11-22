@@ -822,6 +822,7 @@ fn scrubbing_twice_is_scrubbing_once() {
             queued: false,
             triggers: vec![],
             tags: vec![],
+            uploads: vec![],
         })
         .into_parts();
         set.scrub_event(&kind, &mut once);

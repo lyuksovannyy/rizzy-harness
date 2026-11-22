@@ -174,6 +174,7 @@ impl Plain for UserMessage {
             queued: false,
             triggers: vec![],
             tags: vec![],
+            uploads: vec![],
         }
     }
 }

@@ -260,6 +260,7 @@ async fn run(
             triggers: vec![],
             tags: vec![],
             files: vec![],
+            uploads: vec![],
         }));
     }
     let out = b
@@ -396,6 +397,7 @@ async fn run_spec(
             triggers: vec![],
             tags: vec![],
             files: vec![],
+            uploads: vec![],
         }));
     }
     let out = b

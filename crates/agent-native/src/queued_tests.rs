@@ -28,6 +28,7 @@ fn msg(text: &str) -> UserMessage {
         triggers: vec![],
         tags: vec![],
         files: vec![],
+        uploads: vec![],
     }
 }
 

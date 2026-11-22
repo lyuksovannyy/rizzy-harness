@@ -482,6 +482,7 @@ mod tests {
                         triggers: vec![],
                         tags: vec![],
                         files: vec![],
+                        uploads: vec![],
                     };
                     let mut msgs = vec![user_msg(m.model_text(), &m.images)];
                     attach(&mut msgs, &[]);

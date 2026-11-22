@@ -274,6 +274,7 @@ mod tests {
                 queued: false,
                 triggers: vec![],
                 tags: vec![],
+                uploads: vec![],
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 turn_id: id.into(),

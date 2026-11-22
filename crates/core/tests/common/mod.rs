@@ -152,6 +152,7 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             queued: true,
             triggers: vec![s()],
             tags: vec![s()],
+            uploads: vec![],
         }),
         EventKind::AssistantDelta(AssistantDelta {
             turn_id: s(),

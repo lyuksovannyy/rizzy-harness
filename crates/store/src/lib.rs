@@ -13,6 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 // module path (`routines::RoutineMark`), so no `pub use` lines are added.
 pub mod artifacts;
 pub mod blobs;
+pub mod chat_uploads;
 pub mod connections;
 pub mod custom_connectors;
 mod handoff;
@@ -520,7 +521,7 @@ CREATE INDEX IF NOT EXISTS session_workspaces_ws ON session_workspaces(workspace
 /// last one leaves, as recorded (`schema/<n>.sql`, n = `MIGRATIONS.len()`).
 pub const DB_SCHEMA: migrate::Schema<'static> = migrate::Schema {
     steps: MIGRATIONS,
-    recorded: include_str!("../schema/3.sql"),
+    recorded: include_str!("../schema/4.sql"),
 };
 
 /// The schema of `master.db`, `chat.db` and `node.db`, one entry per version.
@@ -548,6 +549,8 @@ pub const MIGRATIONS: &[migrate::Migration] = &[
     &[project_clones::SCHEMA],
     // 3: the lineage of forked chats (ADOPTION_PLAN C.2).
     &[session_forks::SCHEMA],
+    // 4: files attached to a message not yet sent (PLAN.md T94).
+    &[chat_uploads::SCHEMA],
 ];
 
 /// A session's effective workspace: its `session_workspaces` row while the

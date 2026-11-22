@@ -424,6 +424,7 @@ fn an_open_message_names_the_agent_that_wrote_it() {
             triggers: vec![],
             tags: vec![],
             files: vec![],
+            uploads: vec![],
         }),
     );
     for e in [

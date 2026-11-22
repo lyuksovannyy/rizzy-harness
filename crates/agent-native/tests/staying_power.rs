@@ -333,6 +333,7 @@ fn a_call_cut_off_by_a_restart_reads_as_unknown() {
                 triggers: vec![],
                 tags: vec![],
                 files: vec![],
+                uploads: vec![],
             }),
         ),
         ev(
@@ -637,6 +638,7 @@ async fn the_next_turn_rebuilds_this_turns_requests_byte_for_byte() {
             triggers: vec![],
             tags: vec![],
             files: vec![],
+            uploads: vec![],
         }),
     ];
     kinds.extend(host.0.lock().unwrap().iter().cloned());
