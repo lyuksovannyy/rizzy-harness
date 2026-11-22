@@ -1137,7 +1137,7 @@ async fn plant(t: &T, owner: &str, sid: SessionId, size: Option<u64>) -> String 
     let mut taken = t
         .master
         .inner_mirror()
-        .chat_uploads_take(&[id.clone()], Some(&uid))
+        .chat_uploads_take(std::slice::from_ref(&id), Some(&uid))
         .unwrap()
         .unwrap();
     if let Some(n) = size {
