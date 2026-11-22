@@ -139,12 +139,17 @@ async function choose(p, word) {
     // A turn runs: the control is disabled and says why.
     await p.fill('.composer textarea', 'again');
     await p.keyboard.press('Enter');
-    await p.waitForSelector(`${CONTROL}[disabled]`, { timeout: 5000 });
+    await p.waitForSelector(`${CONTROL}[aria-disabled="true"]`, { timeout: 5000 });
     const why = await p.getAttribute('.exec-switch', 'title');
     check(why && why.includes('Stop the agent'), `the reason: ${why}`);
+    // Nothing moves until it is asked for; a click says why, in words, over the controls.
+    check(!(await p.$('[data-testid=exec-busy-note]')), 'no note before a click');
+    await p.click(CONTROL);
+    await p.waitForSelector('[data-testid=exec-busy-note]');
+    check((await p.innerText('[data-testid=exec-busy-note]')).includes('Stop the agent'), 'the note says why');
     await p.screenshot({ path: `${d1}/shots/4-running-1440.png` });
     await turnsEnded(p, sid, 2);
-    await p.waitForSelector(`${CONTROL}:not([disabled])`);
+    await p.waitForSelector(`${CONTROL}:not([aria-disabled])`);
     log('while a turn runs: disabled with its reason;', why);
 
     // An approval waits (Ask): disabled again.
@@ -153,13 +158,21 @@ async function choose(p, word) {
     await p.fill('.composer textarea', script([['bash', { command: 'echo asked' }]]));
     await p.keyboard.press('Enter');
     await p.waitForSelector('.approval-choice', { timeout: 10000 });
-    check(await p.isDisabled(CONTROL), 'an approval waits: disabled');
+    check((await p.getAttribute(CONTROL, 'aria-disabled')) === 'true', 'an approval waits: disabled');
     const why2 = await p.getAttribute('.exec-switch', 'title');
     check(why2 && (why2.includes('Answer the approval') || why2.includes('Stop the agent')), `the reason: ${why2}`);
+    await p.click(CONTROL);
+    await p.waitForSelector('[data-testid=exec-busy-note]');
+    const note2 = await p.innerText('[data-testid=exec-busy-note]');
+    check(note2.includes('Answer the approval'), `while an approval waits the reason is the approval: ${note2}`);
     await p.screenshot({ path: `${d1}/shots/5-approval-1440.png` });
+    await p.setViewportSize({ width: 390, height: 844 });
+    await sleep(300);
+    await p.screenshot({ path: `${d1}/shots/5-approval-390.png` });
+    await p.setViewportSize({ width: 1440, height: 900 });
     await p.click('.approval-choice button.primary');
     await turnsEnded(p, sid, 3);
-    await p.waitForSelector(`${CONTROL}:not([disabled])`);
+    await p.waitForSelector(`${CONTROL}:not([aria-disabled])`);
     log('while an approval waits: disabled with its reason;', why2);
 
     // The sandbox again: no warning, a divider.
@@ -171,6 +184,20 @@ async function choose(p, word) {
     check(dividers[1].includes('Commands run in the sandbox from here'), 'the second divider');
     check(JSON.stringify(await changes(p, sid)) === '["sandbox>host","host>sandbox"]', `recorded ${await changes(p, sid)}`);
     await p.screenshot({ path: `${d1}/shots/6-back-1440.png` });
+
+    // A fork of the second turn (in the host shell), made after the chat came back, is in the mode its chat has now.
+    // Turn 2 ran in the host shell; the chat is in the sandbox again.
+    const first = (await events(p, sid)).filter((e) => e.kind === 'turn_ended')[1].payload.turn_id;
+    const forked = await p.evaluate(async ([id, t]) => (await (await fetch(`/api/sessions/${id}/fork`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ turn_id: t }) })).json()).session_id, [sid, first]);
+    await p.goto(`${URL_}#/s/${forked}`);
+    await p.waitForSelector(CONTROL);
+    check((await label(p)) === 'Commands: sandbox', `the fork follows its parent's mode: ${await label(p)}`);
+    check((await p.innerText('.chat-suffix')).includes('sandbox'), 'the fork header');
+    check((await changes(p, forked)).slice(-1)[0] === 'host>sandbox', `the fork's own change: ${await changes(p, forked)}`);
+    await p.screenshot({ path: `${d1}/shots/6b-fork-1440.png` });
+    log('fork of the first turn after the switches:', await label(p), JSON.stringify(await changes(p, forked)));
+    await p.goto(`${URL_}#/s/${sid}`);
+    await p.waitForSelector(CONTROL);
 
     // The narrow screen.
     await p.setViewportSize({ width: 390, height: 844 });
