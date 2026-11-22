@@ -2310,7 +2310,7 @@ mod tests {
             ])),
             Some(UploadLimits {
                 max_mb: 10,
-                per_message: 5
+                per_message: 10
             })
         );
         // Announced without numbers (a first version of a node): the defaults.
