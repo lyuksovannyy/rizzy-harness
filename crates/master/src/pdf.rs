@@ -1,4 +1,5 @@
-//! PDF text, out of process (FIX_PLAN 3.4, AUDIT S7).
+//! PDF text, out of process (FIX_PLAN 3.4, AUDIT S7); office documents ride
+//! the same supervisor and the same confinement (`crate::doc`, X.55, T96).
 //!
 //! The parser (`pdf-extract` → `lopdf` → `ttf-parser`) never runs inside the
 //! server: the process that holds every provider key and controls every node.
@@ -29,6 +30,9 @@ use tokio::sync::Semaphore;
 
 /// The helper's subcommand.
 pub const SUBCOMMAND: &str = "pdf-text";
+/// The same binary's subcommand for Word, Excel, PowerPoint and
+/// OpenDocument files (`crate::doc`): same confinement, same limits.
+pub const DOC_SUBCOMMAND: &str = "doc-text";
 /// Helpers running at once, server-wide.
 pub const CONCURRENT: usize = 2;
 /// How long a request waits for a free helper slot.
@@ -51,6 +55,9 @@ const MAX_MESSAGE: usize = 300;
 /// Helper exit codes.
 pub const EXIT_UNREADABLE: i32 = 3;
 pub const EXIT_BAD_INPUT: i32 = 4;
+/// `doc-text`: a zip that is not a readable office document (by its parts,
+/// never by a name), or an encrypted one: nothing to say about it.
+pub const EXIT_NOT_DOCUMENT: i32 = 5;
 /// Same as `sandbox-exec`: it could not confine itself, nothing was parsed.
 pub const EXIT_UNCONFINED: i32 = harness_tools::sandbox::EXIT_UNCONFINED;
 
@@ -87,6 +94,8 @@ pub enum PdfError {
 pub struct PdfReader {
     program: PathBuf,
     args: Vec<OsString>,
+    /// The arguments of an office document's helper (`doc-text`).
+    doc_args: Vec<OsString>,
     slots: Arc<Semaphore>,
     timeout: Duration,
     queue_wait: Duration,
@@ -95,13 +104,16 @@ pub struct PdfReader {
 impl PdfReader {
     /// The real helper: `exe pdf-text`.
     pub fn new(exe: PathBuf) -> Self {
-        Self::with_command(exe, vec![SUBCOMMAND.into()])
+        let mut r = Self::with_command(exe, vec![SUBCOMMAND.into()]);
+        r.doc_args = vec![DOC_SUBCOMMAND.into()];
+        r
     }
 
     /// Any command speaking the helper's protocol (tests use stand-ins).
     pub fn with_command(program: PathBuf, args: Vec<OsString>) -> Self {
         Self {
             program,
+            doc_args: args.clone(),
             args,
             slots: Arc::new(Semaphore::new(CONCURRENT)),
             timeout: TIMEOUT,
@@ -123,13 +135,37 @@ impl PdfReader {
 
     /// The text of `pdf`, at most [`HELPER_CHARS`] characters.
     pub async fn extract(&self, pdf: Vec<u8>) -> Result<String, PdfError> {
+        let (code, out) = self.run(&self.args, pdf).await?;
+        match code {
+            Some(0) => {
+                let text = String::from_utf8(out).map_err(|_| PdfError::Crashed)?;
+                if text.trim().is_empty() {
+                    Err(PdfError::NoText)
+                } else {
+                    Ok(text)
+                }
+            }
+            Some(EXIT_UNREADABLE) => Err(PdfError::Unreadable(message(&out))),
+            Some(EXIT_UNCONFINED) => Err(PdfError::Unconfined),
+            _ => Err(PdfError::Crashed),
+        }
+    }
+
+    /// The helper, bounded: one of [`CONCURRENT`] slots (waiting at most
+    /// the queue bound), its own process group, no environment, stdout
+    /// capped, a wall-time limit. Returns its exit code and its stdout.
+    pub(crate) async fn run(
+        &self,
+        args: &[OsString],
+        input: Vec<u8>,
+    ) -> Result<(Option<i32>, Vec<u8>), PdfError> {
         // The permit is released when this future ends or is dropped.
         let _slot = tokio::time::timeout(self.queue_wait, self.slots.clone().acquire_owned())
             .await
             .map_err(|_| PdfError::Busy)?
             .map_err(|_| PdfError::Busy)?;
         let mut cmd = tokio::process::Command::new(&self.program);
-        cmd.args(&self.args)
+        cmd.args(args)
             .env_clear()
             .current_dir("/")
             .stdin(std::process::Stdio::piped())
@@ -147,7 +183,7 @@ impl PdfReader {
                 // A helper that stops reading makes this fail or block; the
                 // timeout (or an error from `read`) ends the block, a broken
                 // pipe is fine.
-                let _ = stdin.write_all(&pdf).await;
+                let _ = stdin.write_all(&input).await;
                 drop(stdin);
                 Ok::<(), PdfError>(())
             };
@@ -175,18 +211,69 @@ impl PdfReader {
             .map_err(|_| PdfError::Timeout)??;
         // Reaped: the group id may be reused from here on.
         group.0 = None;
-        match status.code() {
+        Ok((status.code(), out))
+    }
+
+    /// An office document's text through `doc-text`: `(mime, text)`, or why
+    /// not. `Ok(None)`: the helper found it is not a document (not by its
+    /// parts, or encrypted): it is whatever it was before.
+    pub async fn extract_doc(&self, bytes: Vec<u8>) -> Result<Option<(String, String)>, DocError> {
+        let (code, out) = self.run(&self.doc_args, bytes).await?;
+        match code {
             Some(0) => {
-                let text = String::from_utf8(out).map_err(|_| PdfError::Crashed)?;
-                if text.trim().is_empty() {
-                    Err(PdfError::NoText)
-                } else {
-                    Ok(text)
+                // The first line is the type the helper found; the rest is
+                // the text. Anything else is a misbehaving helper.
+                let text = String::from_utf8(out).map_err(|_| DocError::Crashed)?;
+                let (mime, body) = text.split_once('\n').ok_or(DocError::Crashed)?;
+                if crate::doc::Format::from_mime(mime).is_none() {
+                    return Err(DocError::Crashed);
                 }
+                if body.trim().is_empty() {
+                    return Err(DocError::NoText);
+                }
+                Ok(Some((mime.to_string(), body.to_string())))
             }
-            Some(EXIT_UNREADABLE) => Err(PdfError::Unreadable(message(&out))),
-            Some(EXIT_UNCONFINED) => Err(PdfError::Unconfined),
-            _ => Err(PdfError::Crashed),
+            Some(EXIT_NOT_DOCUMENT) => Ok(None),
+            Some(EXIT_UNREADABLE) => Err(DocError::Unreadable(message(&out))),
+            Some(EXIT_UNCONFINED) => Err(DocError::Unconfined),
+            _ => Err(DocError::Crashed),
+        }
+    }
+}
+
+/// Why a document's text did not come back. `Display` is the sentence for
+/// the user.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DocError {
+    #[error("this server cannot read documents (the reader is not set up)")]
+    NotSetUp,
+    #[error(
+        "this server cannot read documents safely: the reader needs Linux 6.7 or newer with \
+         Landlock enabled on the server"
+    )]
+    Unconfined,
+    #[error("the server is busy reading other files; try again in a minute")]
+    Busy,
+    #[error("this document took too long to read (over {} s)", TIMEOUT.as_secs())]
+    Timeout,
+    #[error("this document could not be read: {0}")]
+    Unreadable(String),
+    #[error("this document could not be read (it is malformed, or too large to read)")]
+    Crashed,
+    #[error("this document has no text")]
+    NoText,
+}
+
+impl From<PdfError> for DocError {
+    fn from(e: PdfError) -> Self {
+        match e {
+            PdfError::NotSetUp => Self::NotSetUp,
+            PdfError::Unconfined => Self::Unconfined,
+            PdfError::Busy => Self::Busy,
+            PdfError::Timeout => Self::Timeout,
+            PdfError::Unreadable(m) => Self::Unreadable(m),
+            PdfError::Crashed => Self::Crashed,
+            PdfError::NoText => Self::NoText,
         }
     }
 }
@@ -221,10 +308,24 @@ fn message(out: &[u8]) -> String {
     }
 }
 
-/// `rizzy-harness pdf-text`: confine, limit memory, read the PDF from stdin,
-/// write its text to stdout. Returns the exit code. Must run before any other
+/// What a helper's reader decides about its input.
+#[derive(Debug)]
+pub(crate) enum Verdict {
+    /// Write this to stdout, exit 0.
+    Text(Vec<u8>),
+    /// Exit [`EXIT_UNREADABLE`] with this one line.
+    Unreadable(String),
+    /// Exit [`EXIT_NOT_DOCUMENT`].
+    NotDocument,
+    /// Exit [`EXIT_BAD_INPUT`].
+    BadInput,
+}
+
+/// The helpers' common start: confine, limit memory, read at most
+/// [`crate::attachments::MAX_UPLOAD`] bytes of stdin, hand them to `read`,
+/// write what it says. Returns the exit code. Must run before any other
 /// thread exists (Landlock confines the calling thread only).
-pub fn helper_main() -> i32 {
+pub(crate) fn confined_helper(read: impl FnOnce(&[u8]) -> Verdict) -> i32 {
     use std::io::{Read, Write};
     // What is mapped now (the binary, its libraries), read before /proc is
     // closed by the sandbox.
@@ -239,37 +340,54 @@ pub fn helper_main() -> i32 {
     if limit_memory(baseline.saturating_add(MEMORY_HEADROOM)).is_err() {
         return EXIT_UNCONFINED;
     }
-    let mut pdf = Vec::new();
+    let mut input = Vec::new();
     let max = crate::attachments::MAX_UPLOAD as u64;
     if std::io::stdin()
         .lock()
         .take(max + 1)
-        .read_to_end(&mut pdf)
+        .read_to_end(&mut input)
         .is_err()
-        || pdf.len() as u64 > max
-        || !is_pdf(&pdf)
+        || input.len() as u64 > max
     {
         return EXIT_BAD_INPUT;
     }
     let mut out = std::io::stdout().lock();
-    match pdf_extract::extract_text_from_mem(&pdf) {
-        Ok(text) => {
-            let end = text
-                .char_indices()
-                .nth(HELPER_CHARS)
-                .map_or(text.len(), |(i, _)| i);
-            if out.write_all(&text.as_bytes()[..end]).is_err() || out.flush().is_err() {
+    match read(&input) {
+        Verdict::Text(t) => {
+            if out.write_all(&t).is_err() || out.flush().is_err() {
                 return EXIT_BAD_INPUT;
             }
             0
         }
-        Err(e) => {
-            let msg: String = e.to_string().chars().take(MAX_MESSAGE).collect();
+        Verdict::Unreadable(msg) => {
+            let msg: String = msg.chars().take(MAX_MESSAGE).collect();
             let _ = out.write_all(msg.as_bytes());
             let _ = out.flush();
             EXIT_UNREADABLE
         }
+        Verdict::NotDocument => EXIT_NOT_DOCUMENT,
+        Verdict::BadInput => EXIT_BAD_INPUT,
     }
+}
+
+/// `rizzy-harness pdf-text`: read the PDF from stdin, write its text to
+/// stdout. Returns the exit code.
+pub fn helper_main() -> i32 {
+    confined_helper(|pdf| {
+        if !is_pdf(pdf) {
+            return Verdict::BadInput;
+        }
+        match pdf_extract::extract_text_from_mem(pdf) {
+            Ok(text) => {
+                let end = text
+                    .char_indices()
+                    .nth(HELPER_CHARS)
+                    .map_or(text.len(), |(i, _)| i);
+                Verdict::Text(text.as_bytes()[..end].to_vec())
+            }
+            Err(e) => Verdict::Unreadable(e.to_string()),
+        }
+    })
 }
 
 /// Virtual memory mapped by this process now (`VmSize`), 0 if unknown.
@@ -402,6 +520,66 @@ mod tests {
                 "helper survived cancel"
             );
         }
+    }
+
+    const DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+    /// The document mode speaks one more thing: the type on the first line.
+    #[tokio::test]
+    async fn a_document_helper_is_read_and_its_type_checked() {
+        let r = sh(&format!("cat >/dev/null; printf '{DOCX}\\nhello\\n'"));
+        assert_eq!(
+            r.extract_doc(b"PK".to_vec()).await,
+            Ok(Some((DOCX.to_string(), "hello\n".to_string())))
+        );
+        // Not a document: the helper says so by its exit code.
+        let r = sh("cat >/dev/null; exit 5");
+        assert_eq!(r.extract_doc(b"PK".to_vec()).await, Ok(None));
+        let r = sh("cat >/dev/null; printf 'a part is missing'; exit 3");
+        assert_eq!(
+            r.extract_doc(b"PK".to_vec()).await,
+            Err(DocError::Unreadable("a part is missing".into()))
+        );
+        let r = sh("exit 125");
+        assert_eq!(
+            r.extract_doc(b"PK".to_vec()).await,
+            Err(DocError::Unconfined)
+        );
+        // A type the server does not know, or none, is a misbehaving helper.
+        for out in ["text/evil\\nhello", "hello"] {
+            let r = sh(&format!("cat >/dev/null; printf '{out}'"));
+            assert_eq!(r.extract_doc(b"PK".to_vec()).await, Err(DocError::Crashed));
+        }
+        // A type and no text.
+        let r = sh(&format!("cat >/dev/null; printf '{DOCX}\\n  \\n'"));
+        assert_eq!(r.extract_doc(b"PK".to_vec()).await, Err(DocError::NoText));
+        assert_eq!(r.free_slots(), CONCURRENT);
+    }
+
+    /// The same bounds as a PDF's: time, output and slots.
+    #[tokio::test]
+    async fn a_document_helper_has_the_same_bounds() {
+        let r = sh("yes 'ab'").with_limits(Duration::from_secs(10), Duration::from_secs(1));
+        assert_eq!(
+            r.extract_doc(vec![b'P'; 1 << 20]).await,
+            Err(DocError::Crashed)
+        );
+        let r = sh("sleep 300").with_limits(Duration::from_millis(300), Duration::from_millis(300));
+        assert_eq!(r.extract_doc(b"PK".to_vec()).await, Err(DocError::Timeout));
+        assert_eq!(r.free_slots(), CONCURRENT);
+        let r = std::sync::Arc::new(
+            sh("sleep 300").with_limits(Duration::from_secs(60), Duration::from_millis(300)),
+        );
+        let (a, b) = (r.clone(), r.clone());
+        let ha = tokio::spawn(async move { a.extract_doc(b"PK".to_vec()).await });
+        let hb = tokio::spawn(async move { b.extract_doc(b"PK".to_vec()).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(r.extract_doc(b"PK".to_vec()).await, Err(DocError::Busy));
+        ha.abort();
+        hb.abort();
+        let _ = ha.await;
+        let _ = hb.await;
+        assert_eq!(r.free_slots(), CONCURRENT);
     }
 
     #[tokio::test]

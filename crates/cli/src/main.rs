@@ -149,6 +149,11 @@ enum Cmd {
     /// network, limited memory). The server starts it for PDF attachments.
     #[command(hide = true)]
     PdfText,
+    /// Read a Word, Excel, PowerPoint or OpenDocument file on stdin, write
+    /// its type and text on stdout, confined like `pdf-text`. The server
+    /// starts it for such attachments.
+    #[command(hide = true)]
+    DocText,
 }
 
 #[derive(Subcommand)]
@@ -427,7 +432,8 @@ async fn serve(
     harness_master::storage::open(&master, dir)?;
     harness_master::forge::open(&master, dir);
     master.set_provider_runtime(runtime);
-    // PDF attachments are read by this binary's `pdf-text`, never in here.
+    // PDF and office-document attachments are read by this binary's
+    // `pdf-text` and `doc-text`, never in here.
     match std::env::current_exe().and_then(|e| e.canonicalize()) {
         Ok(exe) => master.set_pdf_reader(harness_master::pdf::PdfReader::new(exe)),
         Err(e) => tracing::warn!("PDF attachments are off: cannot find this binary: {e}"),
@@ -1562,6 +1568,10 @@ fn main() -> anyhow::Result<()> {
     if std::env::args_os().nth(1).as_deref() == Some(harness_master::pdf::SUBCOMMAND.as_ref()) {
         std::process::exit(harness_master::pdf::helper_main());
     }
+    // And its twin for office documents (X.55).
+    if std::env::args_os().nth(1).as_deref() == Some(harness_master::pdf::DOC_SUBCOMMAND.as_ref()) {
+        std::process::exit(harness_master::doc::helper_main());
+    }
     let loaded = load_dotenv()?;
     init_tracing();
     let cli = Cli::parse();
@@ -1749,6 +1759,10 @@ async fn async_main(cli: Cli, dir: PathBuf, dotenv_names: Vec<String>) -> anyhow
         Cmd::PdfText => bail!(
             "{} must be the first argument",
             harness_master::pdf::SUBCOMMAND
+        ),
+        Cmd::DocText => bail!(
+            "{} must be the first argument",
+            harness_master::pdf::DOC_SUBCOMMAND
         ),
         Cmd::Node {
             cmd:

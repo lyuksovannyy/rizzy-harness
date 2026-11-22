@@ -15,6 +15,7 @@ mod callbacks;
 pub mod config;
 pub mod connectors;
 pub mod diff;
+pub mod doc;
 pub mod env;
 mod exec_switch;
 mod favicon;
@@ -471,6 +472,11 @@ pub struct PromptOpts {
     /// T94), held by the send that took them (`uploads::check` and
     /// `uploads::push` decide whether they go).
     pub uploads: Vec<harness_store::chat_uploads::TakenUpload>,
+    /// The kept files of office documents whose text this message carries
+    /// (X.55, T96): sent along where this chat can keep files (the same
+    /// checks as `uploads`), dropped without a word where it cannot, so the
+    /// document's text is never refused for its file's sake.
+    pub optional_uploads: Vec<harness_store::chat_uploads::TakenUpload>,
     /// The person's Retry of this failed turn (X.21, `http/retry.rs`): the
     /// node runs it again with the message its log holds. The text is that
     /// message's, for what is looked up by it (recall, project facts, a
@@ -2388,6 +2394,7 @@ impl Master {
             routine_run,
             files,
             uploads,
+            optional_uploads,
             retry,
             retry_images,
         } = opts;
@@ -2598,6 +2605,23 @@ impl Master {
         let features = r.agents().get(&agent.agent_id).map(|a| a.features);
         // Files for a plain chat (T95): kept here for `attached_file`, and
         // only an agent with the switch is sent the message that names them.
+        let uploads = {
+            let mut all = uploads;
+            if !optional_uploads.is_empty()
+                && reply.is_none()
+                && compare.is_empty()
+                && !resume
+                && (uploads::lane(&row) != uploads::Lane::Attached
+                    || features.is_some_and(|f| f.attached_files))
+            {
+                let mut with = all.clone();
+                with.extend(optional_uploads);
+                if uploads::check(self, &row, &with).is_ok() {
+                    all = with;
+                }
+            }
+            all
+        };
         let attached_lane = !uploads.is_empty() && uploads::lane(&row) == uploads::Lane::Attached;
         if attached_lane && !features.is_some_and(|f| f.attached_files) {
             return Err(CommandError::Rejected(uploads::switch_off(&agent.name)));

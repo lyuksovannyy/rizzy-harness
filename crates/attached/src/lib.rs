@@ -17,8 +17,13 @@
 //! ([`clean_path`]) and are only ever compared with a path the model gives
 //! back, never used as a path of any disk.
 
+mod parts;
 mod tarball;
+#[doc(hidden)]
+pub mod testkit;
 mod zip;
+
+pub use parts::{PACKAGE_CEILING, Package, PartError};
 
 use std::cell::Cell;
 use std::io::{self, Read};
