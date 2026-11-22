@@ -22,9 +22,9 @@
 //! ([`QUEUE`]); a turn may ask at most [`PER_TURN`] times. Decompression is
 //! capped by `harness_attached` and nothing is held between calls.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use harness_attached::{self as peek, EntryKind};
@@ -49,39 +49,145 @@ pub const WAIT: Duration = Duration::from_secs(10);
 pub const TIME_LIMIT: Duration = Duration::from_secs(8);
 /// Calls one turn may make (a listing in pages and a few reads).
 pub const PER_TURN: u32 = 60;
+/// Calls one chat may make in [`WINDOW`], whatever its turns: a node that
+/// writes new `turn_started` events cannot reset this one.
+pub const PER_WINDOW: usize = 240;
+pub const WINDOW: Duration = Duration::from_secs(600);
+/// Calls one node may have in progress or waiting at once.
+pub const PER_NODE: usize = 4;
 /// The largest copy served: the upload limit.
 pub const MAX_FILE: u64 = 10 << 20;
-/// Chats whose counts are kept; past it the oldest go.
+/// Chats whose counts are kept; past it the oldest go, one at a time.
 const KEPT: usize = 4096;
 
-/// Calls waiting and parsing, and the calls of each chat's open turn.
+/// A map of per-chat values that forgets the oldest chat when it is full.
+struct Recent<V> {
+    map: HashMap<SessionId, V>,
+    order: VecDeque<SessionId>,
+}
+
+impl<V> Default for Recent<V> {
+    fn default() -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+}
+
+impl<V> Recent<V> {
+    fn entry(&mut self, sid: SessionId, cap: usize, new: impl FnOnce() -> V) -> &mut V {
+        if !self.map.contains_key(&sid) {
+            while self.map.len() >= cap {
+                match self.order.pop_front() {
+                    Some(old) => {
+                        self.map.remove(&old);
+                    }
+                    None => break,
+                }
+            }
+            self.order.push_back(sid);
+        }
+        self.map.entry(sid).or_insert_with(new)
+    }
+
+    fn remove(&mut self, sid: SessionId) {
+        if self.map.remove(&sid).is_some() {
+            self.order.retain(|o| *o != sid);
+        }
+    }
+}
+
+/// Calls waiting and parsing, and what each chat and node has used.
 pub struct Grants {
-    slots: std::sync::Arc<tokio::sync::Semaphore>,
+    slots: Arc<tokio::sync::Semaphore>,
     waiting: AtomicUsize,
-    turns: Mutex<HashMap<SessionId, (String, u32)>>,
+    wait: Duration,
+    turns: Mutex<Recent<(String, u32)>>,
+    window: Mutex<Recent<VecDeque<Instant>>>,
+    busy: Mutex<HashSet<SessionId>>,
+    nodes: Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>,
 }
 
 impl Default for Grants {
     fn default() -> Self {
-        Self {
-            slots: std::sync::Arc::new(tokio::sync::Semaphore::new(AT_ONCE)),
-            waiting: AtomicUsize::new(0),
-            turns: Mutex::default(),
-        }
+        Self::with_wait(WAIT)
+    }
+}
+
+/// One call of a chat in flight; the chat may start another when it drops.
+pub struct ChatGuard<'a> {
+    grants: &'a Grants,
+    sid: SessionId,
+}
+
+impl std::fmt::Debug for ChatGuard<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ChatGuard({})", self.sid)
+    }
+}
+
+impl Drop for ChatGuard<'_> {
+    fn drop(&mut self) {
+        lock(&self.grants.busy).remove(&self.sid);
     }
 }
 
 impl Grants {
-    pub fn forget(&self, sid: SessionId) {
-        lock(&self.turns).remove(&sid);
+    fn with_wait(wait: Duration) -> Self {
+        Self {
+            slots: Arc::new(tokio::sync::Semaphore::new(AT_ONCE)),
+            waiting: AtomicUsize::new(0),
+            wait,
+            turns: Mutex::default(),
+            window: Mutex::default(),
+            busy: Mutex::default(),
+            nodes: Mutex::default(),
+        }
     }
 
-    fn take(&self, sid: SessionId, turn: &str) -> Result<(), String> {
-        let mut t = lock(&self.turns);
-        if t.len() >= KEPT && !t.contains_key(&sid) {
-            t.clear();
+    pub fn forget(&self, sid: SessionId) {
+        lock(&self.turns).remove(sid);
+        lock(&self.window).remove(sid);
+    }
+
+    /// The one call a chat may have in flight, or why not. An honest model
+    /// asks one at a time (the tool is not parallel-safe).
+    fn chat(&self, sid: SessionId) -> Result<ChatGuard<'_>, String> {
+        if !lock(&self.busy).insert(sid) {
+            return Err("one file read at a time in this chat: wait for the one before".into());
         }
-        let e = t.entry(sid).or_insert_with(|| (turn.to_string(), 0));
+        Ok(ChatGuard { grants: self, sid })
+    }
+
+    /// The node's room for calls (taken before a task is spawned).
+    fn node(&self, node_id: &str) -> Arc<tokio::sync::Semaphore> {
+        let mut n = lock(&self.nodes);
+        if n.len() >= KEPT && !n.contains_key(node_id) {
+            n.clear();
+        }
+        n.entry(node_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(PER_NODE)))
+            .clone()
+    }
+
+    /// Count one call of chat `sid`'s turn `turn`: [`PER_TURN`] a turn, and
+    /// [`PER_WINDOW`] in [`WINDOW`] whatever the turns say.
+    fn take(&self, sid: SessionId, turn: &str) -> Result<(), String> {
+        let mut w = lock(&self.window);
+        let q = w.entry(sid, KEPT, VecDeque::new);
+        let now = Instant::now();
+        while q.front().is_some_and(|t| now.duration_since(*t) > WINDOW) {
+            q.pop_front();
+        }
+        if q.len() >= PER_WINDOW {
+            return Err(format!(
+                "this chat looked into attached files {PER_WINDOW} times in the last {} minutes; try again later",
+                WINDOW.as_secs() / 60
+            ));
+        }
+        let mut t = lock(&self.turns);
+        let e = t.entry(sid, KEPT, || (turn.to_string(), 0));
         if e.0 != turn {
             *e = (turn.to_string(), 0);
         }
@@ -91,7 +197,20 @@ impl Grants {
             ));
         }
         e.1 += 1;
+        q.push_back(now);
         Ok(())
+    }
+
+    /// Give back the count of a call that was refused for lack of room.
+    fn give_back(&self, sid: SessionId, turn: &str) {
+        if let Some(e) = lock(&self.turns).map.get_mut(&sid)
+            && e.0 == turn
+        {
+            e.1 = e.1.saturating_sub(1);
+        }
+        if let Some(q) = lock(&self.window).map.get_mut(&sid) {
+            q.pop_back();
+        }
     }
 
     /// A place to parse in, or why not.
@@ -100,7 +219,7 @@ impl Grants {
             self.waiting.fetch_sub(1, Ordering::SeqCst);
             return Err("too many file reads are waiting; try again in a moment".into());
         }
-        let got = tokio::time::timeout(WAIT, self.slots.clone().acquire_owned()).await;
+        let got = tokio::time::timeout(self.wait, self.slots.clone().acquire_owned()).await;
         self.waiting.fetch_sub(1, Ordering::SeqCst);
         match got {
             Ok(Ok(p)) => Ok(p),
@@ -131,13 +250,28 @@ pub fn handle(m: &Master, node_id: &str, req_id: String, sid: SessionId, r: Atta
         tracing::warn!(node = %node_id, "attached.request from a node without the capability");
         return;
     }
+    // The node's room first, as `recall` and the board do: a flood from one
+    // node is refused here, before a task or a store read.
+    let Ok(permit) = m.inner.attached.node(node_id).try_acquire_owned() else {
+        m.send_unacked(
+            node_id,
+            MasterToNode::AttachedResult {
+                req_id,
+                answer: None,
+                error: Some("too many file reads from this node at once; try again".into()),
+            },
+        );
+        return;
+    };
     let (m, node_id) = (m.clone(), node_id.to_string());
     tokio::spawn(async move {
         let res = answer(&m, &node_id, sid, r).await;
+        drop(permit);
         let (answer, error) = match res {
             Ok(a) => (Some(a), None),
             Err(e) => {
-                tracing::debug!(node = %node_id, session = %sid, why = %e, "attached_file refused");
+                // Lengths only: a refusal may carry text the model wrote.
+                tracing::debug!(node = %node_id, session = %sid, len = e.len(), "attached_file refused");
                 (None, Some(harness_core::text::clean_line(&e, 400)))
             }
         };
@@ -255,6 +389,9 @@ pub async fn answer(
     if !m.node_has(node_id, harness_protocol::CAP_ATTACHED) {
         return Err("this node does not offer attached files".into());
     }
+    // One call in flight per chat, refused at once: the master-wide queue is
+    // every user's, and one chat must not fill it.
+    let _one = m.inner.attached.chat(sid)?;
     let (row, _top) = crate::recall::sessions(m, node_id, sid).await?;
     if row.parent_id.is_some() {
         return Err("a sub-agent's chat has no attached files".into());
@@ -285,11 +422,23 @@ pub async fn answer(
         return Err(format!("`entry` is at most {MAX_ENTRY_CHARS} characters"));
     }
     let file = file_of(m, &row, &q.file_id).await?;
-    let _slot = m.inner.attached.slot().await?;
+    // A refusal for lack of room is not a call: it gives its count back.
+    let slot = match m.inner.attached.slot().await {
+        Ok(s) => s,
+        Err(e) => {
+            m.inner.attached.give_back(sid, &open.turn_id);
+            return Err(e);
+        }
+    };
     let started = Instant::now();
     let bytes = bytes_of(m, &file).await?;
     let deadline = started + TIME_LIMIT;
-    let work = tokio::task::spawn_blocking(move || run(&file, &bytes, &q, deadline));
+    // The place is held until the work really ends, also when the call
+    // above gave up waiting for it.
+    let work = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        run(&file, &bytes, &q, deadline)
+    });
     match tokio::time::timeout(TIME_LIMIT + Duration::from_secs(2), work).await {
         Ok(Ok(r)) => r,
         Ok(Err(_)) => Err("reading the file failed".into()),
@@ -381,5 +530,130 @@ pub fn run(
                 note: o.note,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sid() -> SessionId {
+        SessionId::new()
+    }
+
+    /// The queue is bounded: with every place taken and [`QUEUE`] calls
+    /// waiting, the next is refused at once with its own sentence.
+    #[tokio::test]
+    async fn the_queue_is_bounded() {
+        let g = Arc::new(Grants::with_wait(Duration::from_millis(400)));
+        let mut held = Vec::new();
+        for _ in 0..AT_ONCE {
+            held.push(g.slot().await.unwrap());
+        }
+        let waiters: Vec<_> = (0..QUEUE)
+            .map(|_| {
+                let g = g.clone();
+                tokio::spawn(async move { g.slot().await.map(|_| ()) })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let started = Instant::now();
+        let e = g.slot().await.unwrap_err();
+        assert!(e.contains("too many file reads are waiting"), "{e}");
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "refused at once"
+        );
+        // The ones in the queue give up with the busy sentence, not the queue's.
+        for w in waiters {
+            let e = w.await.unwrap().unwrap_err();
+            assert!(e.contains("busy"), "{e}");
+        }
+        // A place that frees up is taken again.
+        drop(held);
+        assert!(g.slot().await.is_ok());
+    }
+
+    /// One call in flight per chat; another chat is not held up.
+    #[test]
+    fn a_chat_has_one_call_at_a_time() {
+        let g = Grants::default();
+        let (a, b) = (sid(), sid());
+        let one = g.chat(a).unwrap();
+        assert!(g.chat(a).unwrap_err().contains("one file read at a time"));
+        assert!(g.chat(b).is_ok());
+        drop(one);
+        assert!(g.chat(a).is_ok());
+    }
+
+    /// The node's room: [`PER_NODE`] at once, then refused; another node's
+    /// is its own.
+    #[test]
+    fn a_node_has_its_own_room() {
+        let g = Grants::default();
+        let held: Vec<_> = (0..PER_NODE)
+            .map(|_| g.node("n1").try_acquire_owned().unwrap())
+            .collect();
+        assert!(g.node("n1").try_acquire_owned().is_err());
+        assert!(g.node("n2").try_acquire_owned().is_ok());
+        drop(held);
+        assert!(g.node("n1").try_acquire_owned().is_ok());
+    }
+
+    /// 60 a turn, and 240 a window whatever the turns: a node that writes a
+    /// new `turn_started` each time resets the first and not the second. A
+    /// call refused for lack of room is given back.
+    #[test]
+    fn counts_per_turn_and_per_window_hold() {
+        let g = Grants::default();
+        let s = sid();
+        for i in 0..PER_TURN {
+            g.take(s, "t1").unwrap_or_else(|e| panic!("{i}: {e}"));
+        }
+        assert!(g.take(s, "t1").unwrap_err().contains("60 times"));
+        // A new turn starts the turn's count again...
+        let mut n = PER_TURN as usize;
+        // ...but the window counts all of them.
+        let mut last = Ok(());
+        for i in 0..PER_WINDOW {
+            last = g.take(s, &format!("turn{i}"));
+            if last.is_err() {
+                break;
+            }
+            n += 1;
+        }
+        assert_eq!(n, PER_WINDOW, "{last:?}");
+        assert!(last.unwrap_err().contains("240 times"));
+        // Another chat is not charged.
+        assert!(g.take(sid(), "t").is_ok());
+        // Giving back frees one.
+        let s2 = sid();
+        g.take(s2, "t").unwrap();
+        g.give_back(s2, "t");
+        for _ in 0..PER_TURN {
+            g.take(s2, "t").unwrap();
+        }
+        assert!(g.take(s2, "t").is_err());
+    }
+
+    /// Past [`KEPT`] chats the oldest is forgotten, one at a time: the
+    /// others keep their counts.
+    #[test]
+    fn the_oldest_chat_is_forgotten_first() {
+        let g = Grants::default();
+        let first = sid();
+        for _ in 0..PER_TURN {
+            g.take(first, "t").unwrap();
+        }
+        let second = sid();
+        for _ in 0..PER_TURN {
+            g.take(second, "t").unwrap();
+        }
+        for _ in 0..KEPT - 1 {
+            g.take(sid(), "t").unwrap();
+        }
+        // `first` went; `second` is still full.
+        assert!(g.take(second, "t").is_err());
+        assert!(g.take(first, "t").is_ok());
     }
 }

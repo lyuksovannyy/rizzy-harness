@@ -371,3 +371,21 @@ fn the_row_records_whose_blob_it_is() {
         Some("u2")
     );
 }
+
+/// The tool is offered only for a chat that has a file its log names: a row
+/// held by a send and never logged offers nothing.
+#[test]
+fn a_held_but_unlogged_row_does_not_offer_the_tool() {
+    let s = store();
+    let mut l = Log::new();
+    append_all(&s, NODE, &l.events);
+    let sid = l.sid.to_string();
+    assert!(!s.session_files_any(&sid).unwrap());
+    s.session_files_hold(&sid, &[taken(&s, "f1", "u1", "aa")])
+        .unwrap();
+    assert!(!s.session_files_any(&sid).unwrap(), "held, not logged");
+    let from = l.events.len();
+    l.turn("t1", &[("f1", "aa")]);
+    append_all(&s, NODE, &l.events[from..]);
+    assert!(s.session_files_any(&sid).unwrap());
+}

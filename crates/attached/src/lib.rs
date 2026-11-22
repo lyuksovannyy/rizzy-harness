@@ -24,6 +24,7 @@ use std::cell::Cell;
 use std::io::{self, Read};
 use std::time::Instant;
 
+use harness_core::event::shown_name;
 use harness_core::text::clean_line;
 
 /// Entries one `list` call shows, at most.
@@ -119,11 +120,22 @@ impl Listing {
     }
 }
 
+/// The most raw bytes of a name taken from an archive that are looked at:
+/// what [`PATH_CHARS`] characters can need, with room for characters that
+/// cleaning drops. Everything past it is cut before it is converted or
+/// copied, so a name of 30 MiB costs as much as one of 2 KiB.
+pub const PATH_RAW: usize = PATH_CHARS * 4 + 1024;
+
 /// An entry path as shown: one clean line of at most [`PATH_CHARS`]
 /// characters, cut with `…`. Cleaning twice gives the same string, so a
-/// path the model copies from a listing finds its entry.
+/// path the model copies from a listing finds its entry. Text longer than
+/// [`PATH_RAW`] bytes is cut first.
 pub fn clean_path(s: &str) -> String {
-    let c = clean_line(s, usize::MAX >> 4);
+    let mut end = s.len().min(PATH_RAW);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let c = clean_line(&s[..end], usize::MAX >> 4);
     if c.chars().count() > PATH_CHARS {
         let mut t: String = c.chars().take(PATH_CHARS - 1).collect();
         t.push('\u{2026}');
@@ -131,6 +143,12 @@ pub fn clean_path(s: &str) -> String {
     } else {
         c
     }
+}
+
+/// [`clean_path`] of raw archive bytes: cut to [`PATH_RAW`] bytes before the
+/// lossy conversion, so nothing hostile is ever copied whole.
+pub fn clean_path_bytes(b: &[u8]) -> String {
+    clean_path(&String::from_utf8_lossy(&b[..b.len().min(PATH_RAW)]))
 }
 
 /// What `info` says.
@@ -338,7 +356,7 @@ fn gz_entry(bytes: &[u8]) -> Result<(Entry, Option<String>), String> {
     let name = d
         .header()
         .and_then(|h| h.filename())
-        .map(|n| String::from_utf8_lossy(n).into_owned())
+        .map(clean_path_bytes)
         .unwrap_or_default();
     let declared = bytes
         .len()
@@ -350,7 +368,7 @@ fn gz_entry(bytes: &[u8]) -> Result<(Entry, Option<String>), String> {
     Ok((
         Entry {
             index: 0,
-            path: clean_path(&name),
+            path: name,
             size: declared,
             kind: EntryKind::File,
         },
@@ -416,29 +434,32 @@ pub fn read(bytes: &[u8], req: &ReadReq<'_>, deadline: Instant) -> Result<Out, S
         return consume(Src::Raw(bytes), Some(bytes.len() as u64), req, 0, None);
     };
     let want = clean_path(entry);
+    // `#<n>`: the entry the listing numbered n (two entries can share a path).
+    let index = entry
+        .trim()
+        .strip_prefix('#')
+        .and_then(|n| n.parse::<usize>().ok());
+    let is = |e: &Entry| index.map_or(e.path == want, |i| e.index == i);
+    // What a sentence may say of it: model text, made one quoted-safe line.
+    let shown = shown_name(entry);
     match kind {
         Kind::Plain => Err("this file is not an archive: read it without `entry`".into()),
         Kind::Zip => {
             let mut found: Option<zip::Raw> = None;
-            let mut dup = false;
-            let (_, _, _) = zip::walk(bytes, LIST_TOTAL, |r| {
-                if r.entry.path == want {
-                    if found.is_some() {
-                        dup = true;
-                        return false;
-                    }
+            zip::walk(bytes, LIST_TOTAL, |r| {
+                if is(&r.entry) {
                     found = Some(r);
+                    return false;
                 }
                 true
             })?;
-            let raw = found.ok_or_else(|| not_found(&want))?;
-            let _ = dup;
+            let raw = found.ok_or_else(|| not_found(&shown))?;
             read_zip_entry(bytes, &raw, req, deadline)
         }
         Kind::Gz => {
             let (e, _) = gz_entry(bytes)?;
-            if e.path != want {
-                return Err(not_found(&want));
+            if !is(&e) {
+                return Err(not_found(&shown));
             }
             let b = Budget::new(deadline, READ_CEILING);
             let mut r = Metered {
@@ -451,7 +472,7 @@ pub fn read(bytes: &[u8], req: &ReadReq<'_>, deadline: Instant) -> Result<Out, S
         Kind::Tar | Kind::TarGz => {
             let mut result: Option<Result<Out, String>> = None;
             let (_, _, note) = tarball::walk(bytes, kind, LIST_TOTAL, deadline, |e, data| {
-                if e.path != want {
+                if !is(&e) {
                     return true;
                 }
                 result = Some(match &e.kind {
@@ -469,21 +490,21 @@ pub fn read(bytes: &[u8], req: &ReadReq<'_>, deadline: Instant) -> Result<Out, S
                             finish(out, &b)
                         }
                     }
-                    EntryKind::Dir => Err(format!("{want} is a folder: list the archive")),
-                    EntryKind::Link(to) => Err(format!(
-                        "{want} is a link to \"{}\": links are never followed",
-                        clean_path(to)
-                    )),
+                    EntryKind::Dir => Err(format!("\"{shown}\" is a folder: list the archive")),
+                    // The target is in the listing, quoted; not here.
+                    EntryKind::Link(_) => {
+                        Err(format!("\"{shown}\" is a link: links are never followed"))
+                    }
                     EntryKind::Other(what) => Err(format!(
-                        "{want} is a {what}: only regular files can be read"
+                        "\"{shown}\" is a {what}: only regular files can be read"
                     )),
                 });
                 false
             });
             result.unwrap_or_else(|| {
                 Err(match note {
-                    Some(n) => format!("{} ({n})", not_found(&want)),
-                    None => not_found(&want),
+                    Some(n) => format!("{} ({n})", not_found(&shown)),
+                    None => not_found(&shown),
                 })
             })
         }
@@ -491,7 +512,9 @@ pub fn read(bytes: &[u8], req: &ReadReq<'_>, deadline: Instant) -> Result<Out, S
 }
 
 fn not_found(path: &str) -> String {
-    format!("no entry \"{path}\" in this archive: use a path from `list`")
+    format!(
+        "no entry \"{path}\" in this archive: use a path from `list`, or `#` and the number it shows"
+    )
 }
 
 fn too_big(size: u64) -> String {
@@ -507,18 +530,15 @@ fn read_zip_entry(
     req: &ReadReq<'_>,
     deadline: Instant,
 ) -> Result<Out, String> {
+    let shown = shown_name(&raw.entry.path);
     match &raw.entry.kind {
-        EntryKind::Dir => return Err(format!("{} is a folder: list the archive", raw.entry.path)),
+        EntryKind::Dir => return Err(format!("\"{shown}\" is a folder: list the archive")),
         EntryKind::Link(_) => {
-            return Err(format!(
-                "{} is a link: links are never followed",
-                raw.entry.path
-            ));
+            return Err(format!("\"{shown}\" is a link: links are never followed"));
         }
         EntryKind::Other(what) => {
             return Err(format!(
-                "{} is a {what}: only regular files can be read",
-                raw.entry.path
+                "\"{shown}\" is a {what}: only regular files can be read"
             ));
         }
         EntryKind::File => {}
@@ -532,7 +552,9 @@ fn read_zip_entry(
             if raw.comp != raw.size {
                 return Err("this entry's sizes disagree; it is not read".into());
             }
-            consume(Src::Raw(data), Some(raw.size), req, 0, None)
+            let mut r = CrcRead::new(data);
+            let out = consume(Src::Stream(&mut r), Some(raw.size), req, 0, None);
+            r.checked(out, raw.crc)
         }
         8 => {
             // Deflate cannot give more than about 1032 bytes for one; an
@@ -548,12 +570,58 @@ fn read_zip_entry(
                 inner: flate2::read::DeflateDecoder::new(data),
                 budget: &b,
             };
-            let out = consume(Src::Stream(&mut r), Some(raw.size), req, 0, Some(&b));
+            let mut c = CrcRead::new(&mut r);
+            let out = consume(Src::Stream(&mut c), Some(raw.size), req, 0, Some(&b));
+            let out = c.checked(out, raw.crc);
             finish(out, &b)
         }
         m => Err(format!(
             "this entry uses compression method {m}, which is not supported (only stored and deflate)"
         )),
+    }
+}
+
+/// A reader that sums the CRC-32 of what passes and notes whether the end
+/// was reached: only a read from the first byte to the last can be checked.
+struct CrcRead<R> {
+    inner: R,
+    crc: flate2::Crc,
+    eof: bool,
+}
+
+impl<R: Read> CrcRead<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            crc: flate2::Crc::new(),
+            eof: false,
+        }
+    }
+
+    /// `out`, with a note when the whole entry went through and its checksum
+    /// is not the one the directory states (not a refusal: the bytes are the
+    /// person's, and may only be damaged).
+    fn checked(&self, out: Result<Out, String>, want: u32) -> Result<Out, String> {
+        let mut o = out?;
+        if self.eof && self.crc.sum() != want {
+            let n = "the entry's checksum does not match: it may be damaged";
+            o.note = Some(match o.note.take() {
+                Some(x) => format!("{x}; {n}"),
+                None => n.into(),
+            });
+        }
+        Ok(o)
+    }
+}
+
+impl<R: Read> Read for CrcRead<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n == 0 && !buf.is_empty() {
+            self.eof = true;
+        }
+        self.crc.update(&buf[..n]);
+        Ok(n)
     }
 }
 
@@ -910,5 +978,7 @@ fn read_text(r: &mut dyn Read, req: &ReadReq<'_>) -> io::Result<Out> {
     })
 }
 
+#[cfg(test)]
+mod fuzz;
 #[cfg(test)]
 mod tests;

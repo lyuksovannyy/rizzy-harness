@@ -195,6 +195,41 @@ impl Fake {
         panic!("no attached.result for {req_id}");
     }
 
+    /// Send `n` requests at once for `sid` and wait for every answer.
+    async fn ask_at_once(
+        &self,
+        sid: SessionId,
+        n: usize,
+        request: AttachedRequest,
+    ) -> Vec<Result<AttachedAnswer, String>> {
+        let ids: Vec<String> = (0..n).map(|_| harness_core::new_id()).collect();
+        for id in &ids {
+            self.tx
+                .send(NodeToMaster::Attached {
+                    req_id: id.clone(),
+                    session_id: sid,
+                    request: request.clone(),
+                })
+                .await
+                .unwrap();
+        }
+        let mut out = Vec::new();
+        for id in &ids {
+            for _ in 0..500 {
+                if let Some((a, e)) = self.answers.lock().unwrap().get(id) {
+                    out.push(match e {
+                        Some(e) => Err(e.clone()),
+                        None => Ok(a.clone().expect("an answer")),
+                    });
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        assert_eq!(out.len(), n, "every request is answered");
+        out
+    }
+
     /// Whether any answer came for a request that was sent.
     async fn nothing_came(&self, sid: SessionId, request: AttachedRequest) -> bool {
         let before = self.answers.lock().unwrap().len();
@@ -1085,4 +1120,247 @@ async fn the_account_quota_counts_a_kept_file() {
     let (st, v) = upload(&t, &alex, "b.zip", &q, big).await;
     assert_eq!(st, StatusCode::INSUFFICIENT_STORAGE, "{v}");
     assert_eq!(blob_files(&t), 1);
+}
+
+// -- the independent review's guards (PLAN.md T95): each has a test that fails
+// when the guard is taken out -----------------------------------------------------
+
+/// A row of `sid` for a file of `owner`'s own upload, the way a send holds
+/// it, then logged by a message that names it (the fake node writes it). `size`
+/// overrides the row's size.
+async fn plant(t: &T, owner: &str, sid: SessionId, size: Option<u64>) -> String {
+    let src = chat(t, owner, json!({})).await;
+    let (st, v) = upload(t, owner, "p.zip", &format!("&session={src}"), zip()).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let id = v["attachment_id"].as_str().unwrap().to_string();
+    let uid = owner_of(t, src);
+    let mut taken = t
+        .master
+        .inner_mirror()
+        .chat_uploads_take(&[id.clone()], Some(&uid))
+        .unwrap()
+        .unwrap();
+    if let Some(n) = size {
+        taken[0].size = n;
+    }
+    t.master
+        .inner_mirror()
+        .session_files_hold(&sid.to_string(), &taken)
+        .unwrap();
+    t.chat
+        .emit(
+            sid,
+            "user_message",
+            json!({"turn_id": "t0", "text": "planted", "attached": [{
+                "file_id": id, "name": "p.zip", "bytes": taken[0].size,
+                "sha256": taken[0].sha256, "mime": "application/zip"}]}),
+        )
+        .await;
+    landed(t, sid).await;
+    id
+}
+
+/// The agent record a plain chat's honest turn carries (the switch on).
+fn honest_agent(t: &T, from: SessionId) -> Value {
+    serde_json::to_value(t.chat.last_prompt(from).agent.unwrap().agent_ref()).unwrap()
+}
+
+/// The owner check in the service is the only thing between one account and
+/// another's file once a fork row exists: the chat runtime writes a fork of
+/// Bob's chat, claimed by Alex, and Alex's fork reads nothing.
+#[tokio::test]
+async fn a_fork_of_another_persons_chat_reads_nothing() {
+    let t = start().await;
+    let [alex, bob] = users(&t).await;
+    let (p, id) = with_file(&t, &bob, "t1").await;
+    t.chat
+        .emit(
+            p,
+            "assistant_message",
+            json!({"turn_id": "t1", "message_id": "m1", "text": "ok"}),
+        )
+        .await;
+    t.chat
+        .emit(
+            p,
+            "turn_ended",
+            json!({"turn_id": "t1", "reason": "completed"}),
+        )
+        .await;
+    landed(&t, p).await;
+    let events = t.master.inner_mirror().events_after(p, 0, 100).unwrap();
+    let through = events.len() as u64;
+    let f = SessionId::new();
+    t.chat.seqs.lock().unwrap().insert(f, 0);
+    t.chat
+        .emit(
+            f,
+            "session_created",
+            json!({"title": "c (fork)", "cwd": "/w", "model": "m", "backend": "native",
+                   "node_id": "master", "profile": "chat", "approval_mode": "ask",
+                   "forked": {"parent": p.to_string(), "through_seq": through}}),
+        )
+        .await;
+    for e in events.iter().skip(1) {
+        t.chat.emit(f, &e.kind, e.payload.clone()).await;
+    }
+    landed(&t, f).await;
+    let alex_chat = chat(&t, &alex, json!({})).await;
+    let alex_uid = owner_of(&t, alex_chat);
+    assert_ne!(alex_uid, owner_of(&t, p));
+    t.master
+        .inner_mirror()
+        .claim_session(f, Some(&alex_uid), None)
+        .unwrap();
+    send(&t, &alex, f, &[], json!({})).await;
+    t.chat.take_prompt(f, "t3").await;
+    landed(&t, f).await;
+    // The store gave the fork a row of its own (same node, logged): only the
+    // owner check stops the read.
+    assert!(
+        t.master
+            .inner_mirror()
+            .session_file(&f.to_string(), &id)
+            .unwrap()
+            .is_some()
+    );
+    let got = t.chat.ask(f, ask(AttachedOp::Info, &id)).await;
+    let e = got.expect_err("Alex's fork read Bob's file");
+    assert!(e.contains("no such file in this chat"), "{e}");
+}
+
+/// A turn looks into attached files at most 60 times; the 61st is refused
+/// with the number, and a call that is refused for lack of room is not
+/// counted (`counts_per_turn_and_per_window_hold` in the service).
+#[tokio::test]
+async fn the_sixty_first_call_of_a_turn_is_refused() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let (sid, id) = with_file(&t, &alex, "t1").await;
+    for i in 0..60 {
+        t.chat
+            .ask(sid, ask(AttachedOp::Info, &id))
+            .await
+            .unwrap_or_else(|e| panic!("call {i}: {e}"));
+    }
+    let e = t
+        .chat
+        .ask(sid, ask(AttachedOp::Info, &id))
+        .await
+        .unwrap_err();
+    assert!(e.contains("60 times"), "{e}");
+}
+
+/// A temporary chat keeps no attached file: even a row planted for one is
+/// refused, whatever the turn's agent says.
+#[tokio::test]
+async fn a_temporary_chat_is_refused_even_with_a_row() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let (honest, _) = with_file(&t, &alex, "t1").await;
+    let temp = chat(&t, &alex, json!({"incognito": true})).await;
+    let id = plant(&t, &alex, temp, None).await;
+    t.chat
+        .emit(
+            temp,
+            "turn_started",
+            json!({"turn_id": "t1", "agent": honest_agent(&t, honest)}),
+        )
+        .await;
+    landed(&t, temp).await;
+    let e = t
+        .chat
+        .ask(temp, ask(AttachedOp::Info, &id))
+        .await
+        .unwrap_err();
+    assert!(e.contains("temporary chat"), "{e}");
+}
+
+/// A callback turn (one the harness started, not the person) is refused,
+/// though its agent has the switch.
+#[tokio::test]
+async fn a_callback_turn_is_refused() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let (sid, id) = with_file(&t, &alex, "t1").await;
+    assert!(t.chat.ask(sid, ask(AttachedOp::Info, &id)).await.is_ok());
+    t.chat
+        .emit(
+            sid,
+            "turn_ended",
+            json!({"turn_id": "t1", "reason": "completed"}),
+        )
+        .await;
+    t.chat
+        .emit(
+            sid,
+            "turn_started",
+            json!({"turn_id": "cb", "agent": honest_agent(&t, sid), "cause": {"callback": ["bg1"]}}),
+        )
+        .await;
+    landed(&t, sid).await;
+    let e = t
+        .chat
+        .ask(sid, ask(AttachedOp::Info, &id))
+        .await
+        .unwrap_err();
+    assert!(e.contains("not available in this turn"), "{e}");
+}
+
+/// The size check in the service: a row over the upload limit is refused
+/// before the copy is read.
+#[tokio::test]
+async fn a_row_over_ten_mib_is_refused() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let (honest, _) = with_file(&t, &alex, "t1").await;
+    let big = chat(&t, &alex, json!({})).await;
+    let id = plant(&t, &alex, big, Some((10 << 20) + 1)).await;
+    t.chat
+        .emit(
+            big,
+            "turn_started",
+            json!({"turn_id": "t1", "agent": honest_agent(&t, honest)}),
+        )
+        .await;
+    landed(&t, big).await;
+    let e = t
+        .chat
+        .ask(big, ask(AttachedOp::Info, &id))
+        .await
+        .unwrap_err();
+    assert!(e.contains("larger than attached files may be"), "{e}");
+}
+
+/// Fairness (S5): a chat has one call in flight, and a node has room for
+/// four; the rest are refused at once with their own sentences, and the
+/// answers that do come are right.
+#[tokio::test]
+async fn a_chat_and_a_node_cannot_flood_the_service() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let (sid, id) = with_file(&t, &alex, "t1").await;
+    let got = t.chat.ask_at_once(sid, 4, ask(AttachedOp::Info, &id)).await;
+    assert!(got.iter().any(|r| r.is_ok()), "{got:?}");
+    assert!(
+        got.iter().any(|r| r
+            .as_ref()
+            .is_err_and(|e| e.contains("one file read at a time"))),
+        "{got:?}"
+    );
+    // Twelve at once from one node: four fit, the rest are the node's refusal.
+    let got = t
+        .chat
+        .ask_at_once(sid, 12, ask(AttachedOp::Info, &id))
+        .await;
+    let node_full = got
+        .iter()
+        .filter(|r| {
+            r.as_ref()
+                .is_err_and(|e| e.contains("too many file reads from this node"))
+        })
+        .count();
+    assert_eq!(node_full, 8, "{got:?}");
+    // A moment later the chat reads again.
+    assert!(t.chat.ask(sid, ask(AttachedOp::Info, &id)).await.is_ok());
 }

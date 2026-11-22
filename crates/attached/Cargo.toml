@@ -13,6 +13,8 @@ workspace = true
 flate2.workspace = true
 harness-core.workspace = true
 infer.workspace = true
-tar.workspace = true
+# tar is only used by the tests to build archives (the walker is our own).
+
 
 [dev-dependencies]
+tar.workspace = true

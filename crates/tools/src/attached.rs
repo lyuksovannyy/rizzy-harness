@@ -40,7 +40,7 @@ impl Tool for AttachedFileTool {
         "Look into a file the person attached to this chat, read-only (the message names the file \
          and its id). `info`: name, size, type from its first bytes, sha256. `list`: the entries \
          of a zip, tar, tar.gz or gz (paths and sizes; 500 a call, `offset` for the next). \
-         `read`: the file, or one archive entry by its listed path in `entry`: text comes back as \
+         `read`: the file, or one archive entry by its listed path in `entry` (`#` and its number from `list` when two share a path): text comes back as \
          numbered lines (`offset` is the first line, `limit` the lines), anything else as a hex \
          dump of at most 4 KiB (`offset` and `limit` in bytes) or, with `mode` strings, its \
          printable runs. Nothing is unpacked or saved anywhere and an archive inside an archive is \
@@ -64,8 +64,9 @@ impl Tool for AttachedFileTool {
     fn risk(&self) -> ToolRisk {
         ToolRisk::ReadOnly
     }
+    /// One call at a time in a chat: the master refuses a second in flight.
     fn parallel_safe(&self) -> bool {
-        true
+        false
     }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
         let Some(source) = ctx.attached.clone() else {

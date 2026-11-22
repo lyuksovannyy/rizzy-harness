@@ -160,12 +160,13 @@ impl Store {
         Ok(())
     }
 
-    /// Whether chat `sid` holds any file, logged or still held by a send:
-    /// the tool is offered to a turn only then.
+    /// Whether chat `sid` has a file its own log names: the tool is offered
+    /// to a turn only then (a row held by a send whose answer was lost, and
+    /// never logged, offers nothing: the chat can never read it).
     pub fn session_files_any(&self, sid: &str) -> Result<bool> {
         let conn = self.lock();
         Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_files WHERE session_id = ?1)",
+            "SELECT EXISTS(SELECT 1 FROM session_files WHERE session_id = ?1 AND logged = 1)",
             params![sid],
             |r| r.get(0),
         )?)
