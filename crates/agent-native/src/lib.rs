@@ -373,6 +373,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.recall()
     }
 
+    fn attached(&self) -> Option<Arc<dyn harness_core::attached::AttachedSource>> {
+        self.host.attached()
+    }
+
     fn history(&self) -> Option<Arc<dyn harness_core::history::HistorySource>> {
         self.host.history()
     }
@@ -1373,6 +1377,7 @@ impl NativeBackend {
         let usable = |name: &str| {
             name != "remember"
                 && name != "recall"
+                && name != harness_core::attached::TOOL
                 && name != history::NAME
                 && d.allows_tool(name)
                 && !host.tool_denied(name)
@@ -6159,6 +6164,7 @@ impl NativeBackend {
             skills: ctx.extra.skills.clone(),
             seen: self.seen.session(ctx.session_id),
             recall: host.recall(),
+            attached: host.attached(),
             history: host.history(),
             board: host.board(),
             stored_skills: host.stored_skills(),
@@ -8479,6 +8485,7 @@ mod tests {
                     tags: vec![],
                     files: vec![],
                     uploads: vec![],
+                    attached: vec![],
                 }),
             ),
             mk(
@@ -8511,6 +8518,7 @@ mod tests {
                     tags: vec![],
                     files: vec![],
                     uploads: vec![],
+                    attached: vec![],
                 }),
             ),
         ];
@@ -8578,6 +8586,7 @@ mod tests {
                 tags: vec![],
                 files: vec![],
                 uploads: vec![],
+                attached: vec![],
             }),
             &mut out,
         );
@@ -8664,6 +8673,7 @@ mod tests {
                 tags: vec![],
                 files: vec![],
                 uploads: vec![],
+                attached: vec![],
             }));
             for e in host.events.lock().unwrap().drain(..) {
                 push(e);
@@ -9943,6 +9953,7 @@ mod background_tests {
                     tags: vec![],
                     files: vec![],
                     uploads: vec![],
+                    attached: vec![],
                 }),
             ),
         ];

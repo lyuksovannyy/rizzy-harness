@@ -593,6 +593,7 @@ async fn a_callback_turn_and_a_queued_message_run_in_plan_mode() {
         tags: vec![],
         files: vec![],
         uploads: vec![],
+        attached: vec![],
     };
     for extra in [
         harness_core::backend::TurnExtra {

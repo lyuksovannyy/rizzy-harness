@@ -218,6 +218,7 @@ fn fake_with(
                                            tags: vec![],
                                            files: vec![],
                                            uploads: vec![],
+                                           attached: vec![],
                                        }), now);
                                        if !*held.lock().unwrap() {
                                            send(&mut seqs, *session_id, EventKind::TurnEnded(TurnEnded {

@@ -55,6 +55,7 @@ const NO_WRITES: &[&str] = &[
     "remember",
     "skill",
     "history",
+    "attached_file",
 ];
 
 /// The file tools whose result records what they wrote.

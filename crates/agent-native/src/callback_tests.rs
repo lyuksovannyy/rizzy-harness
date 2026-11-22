@@ -167,6 +167,7 @@ fn history(sid: SessionId) -> Vec<RawEvent> {
                 tags: vec![],
                 files: vec![],
                 uploads: vec![],
+                attached: vec![],
             }),
         ),
         ev(

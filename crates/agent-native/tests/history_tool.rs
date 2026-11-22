@@ -142,6 +142,7 @@ impl Host {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         }));
         self.push(EventKind::AssistantMessage(AssistantMessage {
             turn_id: turn.clone(),
@@ -355,6 +356,7 @@ async fn turn(
         tags: vec![],
         files: vec![],
         uploads: vec![],
+        attached: vec![],
     }));
     b.run_turn(TurnCtx {
         session_id: host.sid,

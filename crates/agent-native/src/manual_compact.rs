@@ -275,6 +275,7 @@ mod tests {
                 triggers: vec![],
                 tags: vec![],
                 uploads: vec![],
+                attached: vec![],
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 turn_id: id.into(),

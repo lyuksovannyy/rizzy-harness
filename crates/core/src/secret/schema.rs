@@ -83,6 +83,9 @@ use crate::event::EventKind;
 /// - `seen.sha256`, `seen.base`: undo's changed-since check (`others.rs`).
 /// - images' `media_id`, `sha256`: the loop attaches the bytes by hash
 ///   (`agent-native/src/images.rs`).
+/// - `user_message.attached[].file_id`: the id the model gives
+///   `attached_file`, which the master looks up in the chat's own record
+///   (`master/src/attached.rs`, T95).
 /// - `artifact_staged` `stage_id`, `sha256`: the master's artifact pull
 ///   (`master/src/artifacts.rs`).
 /// - `agent.agent_id`, `agent_changed.model`: the agent switch.
@@ -117,6 +120,7 @@ pub const KEPT: &[(&str, &[&str])] = &[
             "files[].seen.base",
             "images[].media_id",
             "images[].sha256",
+            "attached[].file_id",
             "triggers[]",
             "tags[]",
         ],

@@ -159,6 +159,13 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
                 sha256: s(),
                 mime: s(),
             }],
+            attached: vec![AttachedFile {
+                file_id: s(),
+                name: s(),
+                bytes: 1,
+                sha256: s(),
+                mime: s(),
+            }],
         }),
         EventKind::AssistantDelta(AssistantDelta {
             turn_id: s(),

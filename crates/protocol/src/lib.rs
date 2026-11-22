@@ -557,6 +557,14 @@ pub const CAP_REMEMBER: &str = "remember";
 /// one (PLAN.md T55).
 pub const CAP_RECALL: &str = "recall";
 
+/// The node capability that says it offers `attached_file` to its sessions
+/// (registered there and not in its `denied_tools`), records
+/// `session.prompt.attached` in `user_message.attached` and speaks
+/// `attached.request` (PLAN.md T95). The master accepts a file for a plain
+/// chat only on such a node, answers requests only from one, and sends
+/// `attached.result` only to one.
+pub const CAP_ATTACHED: &str = "attached-file";
+
 /// The node capability that says it enforces `AgentSpec::deny_skills` and
 /// `AgentSpec::deny_mcp_servers` (ADOPTION_PLAN X.34, PLAN.md T80). To a
 /// node without it the master withholds the whole `skill` tool or `mcp`
@@ -937,6 +945,16 @@ pub enum NodeToMaster {
         session_id: SessionId,
         query: harness_core::recall::RecallQuery,
     },
+    /// An `attached_file` call of a session this node runs (PLAN.md T95):
+    /// what to do and the file's id, nothing else. The master finds the
+    /// file only among those recorded for `session_id`'s own chat and
+    /// answers with one `attached.result`.
+    #[serde(rename = "attached.request")]
+    Attached {
+        req_id: String,
+        session_id: SessionId,
+        request: harness_core::attached::AttachedRequest,
+    },
     /// A `board` or `board_edit` call of a session this node runs (PLAN.md
     /// T78): what to do and nothing else. The master finds the project,
     /// the person and whether they may change the board from `session_id`
@@ -1131,6 +1149,27 @@ pub struct PromptMsg {
     /// records what it saved in `user_message.uploads`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uploads: Vec<UploadRef>,
+    /// Files for this message in a chat without a folder, kept on the
+    /// master and read only through `attached_file` (only to nodes with
+    /// [`CAP_ATTACHED`]; PLAN.md T95). References only: no bytes travel and
+    /// nothing is written on the node. The node records them in
+    /// `user_message.attached` after its own checks (count, size, name).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attached: Vec<AttachedRef>,
+}
+
+/// A file kept on the master for a plain chat, as a prompt names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachedRef {
+    /// The id the tool will be given; the master recorded it for this chat.
+    pub file_id: String,
+    /// The person's file name (the node cleans and scrubs it).
+    pub name: String,
+    /// As the browser said; informational only.
+    pub mime: String,
+    pub size: u64,
+    /// Hex sha256 of the bytes.
+    pub sha256: String,
 }
 
 /// The body of `session.callback`. Every field is named by every sender: there is no `Default`,
@@ -1248,6 +1287,7 @@ impl PromptMsg {
             peers: vec![],
             tags: vec![],
             uploads: vec![],
+            attached: vec![],
         }
     }
 }
@@ -1636,6 +1676,16 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The answer to an `attached.request`: what was looked up, or why not.
+    /// Only to nodes whose hello listed [`CAP_ATTACHED`]; never acked.
+    #[serde(rename = "attached.result")]
+    AttachedResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<harness_core::attached::AttachedAnswer>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// The answer to a `board.request`: the board or what was changed, or
     /// why not. Only to nodes whose hello listed `CAP_BOARD`; never acked.
     #[serde(rename = "board.result")]
@@ -1773,6 +1823,7 @@ impl MasterToNode {
             | MasterToNode::Resume { .. }
             | MasterToNode::ArtifactFetch { .. }
             | MasterToNode::RecallResult { .. }
+            | MasterToNode::AttachedResult { .. }
             | MasterToNode::BoardResult { .. }
             | MasterToNode::SkillResult { .. }
             | MasterToNode::ConnectorResult { .. }
@@ -2050,6 +2101,55 @@ mod tests {
                    "answer": {"kind": "done", "card_id": "c", "said": "noted"}})
         );
         assert_eq!(a.req_id(), None, "never acked");
+    }
+
+    /// `attached.request` carries what to do and the file's id only: a field
+    /// naming a user, a workspace or a chat does not parse, so a node cannot
+    /// point the master at another chat's file (PLAN.md T95).
+    #[test]
+    fn attached_messages_name_no_place() {
+        use harness_core::attached::{AttachedAnswer, AttachedOp, AttachedRequest};
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let r = NodeToMaster::Attached {
+            req_id: "r".into(),
+            session_id: sid,
+            request: AttachedRequest {
+                op: AttachedOp::List,
+                file_id: "f1".into(),
+                entry: None,
+                offset: Some(0),
+                limit: None,
+                mode: None,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({"type": "attached.request", "req_id": "r", "session_id": sid,
+                   "request": {"op": "list", "file_id": "f1", "offset": 0}})
+        );
+        for extra in ["user_id", "owner", "workspace_id", "session_id"] {
+            let v = json!({"type": "attached.request", "req_id": "r", "session_id": sid,
+                           "request": {"op": "info", "file_id": "f1", extra: "x"}});
+            assert!(serde_json::from_value::<NodeToMaster>(v).is_err(), "{extra}");
+        }
+        let a = MasterToNode::AttachedResult {
+            req_id: "r".into(),
+            answer: Some(AttachedAnswer::Info {
+                name: "x.zip".into(),
+                bytes: 5,
+                sha256: "ab".into(),
+                label: "ZIP archive".into(),
+                mime: None,
+                archive: true,
+            }),
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&a).unwrap()["answer"]["kind"],
+            "info"
+        );
+        assert_eq!(a.req_id(), None, "never acked");
+        assert_eq!(CAP_ATTACHED, "attached-file");
     }
 
     /// `skill.request` carries a name only: the master reads the workspace,

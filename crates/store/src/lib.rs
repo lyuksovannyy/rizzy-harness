@@ -14,6 +14,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub mod artifacts;
 pub mod blobs;
 pub mod chat_uploads;
+pub mod session_files;
 pub mod connections;
 pub mod custom_connectors;
 mod handoff;
@@ -521,7 +522,7 @@ CREATE INDEX IF NOT EXISTS session_workspaces_ws ON session_workspaces(workspace
 /// last one leaves, as recorded (`schema/<n>.sql`, n = `MIGRATIONS.len()`).
 pub const DB_SCHEMA: migrate::Schema<'static> = migrate::Schema {
     steps: MIGRATIONS,
-    recorded: include_str!("../schema/4.sql"),
+    recorded: include_str!("../schema/5.sql"),
 };
 
 /// The schema of `master.db`, `chat.db` and `node.db`, one entry per version.
@@ -551,7 +552,14 @@ pub const MIGRATIONS: &[migrate::Migration] = &[
     &[session_forks::SCHEMA],
     // 4: files attached to a message not yet sent (PLAN.md T94).
     &[chat_uploads::SCHEMA],
+    // 5: files a chat without a folder may read through `attached_file`
+    // (PLAN.md T95).
+    &[session_files::SCHEMA],
 ];
+
+/// The most files one message may name in `user_message.attached` (the
+/// per-message limit on every attachment).
+pub const MAX_ATTACHED_PER_MESSAGE: usize = 10;
 
 /// A session's effective workspace: its `session_workspaces` row while the
 /// owner is still a member of that workspace (or the chat has no owner),
@@ -961,6 +969,11 @@ impl Store {
                  WHERE session_id = ?1",
                 params![sid, e.seq as i64, e.ts_ms, e.kind],
             )?;
+        }
+        if e.kind == "user_message" {
+            // Files kept for `attached_file` (T95): readable from the
+            // message that names them on.
+            session_files::on_message(tx, &sid, owner, e, copy)?;
         }
         match e.kind.as_str() {
             "session_created" => {
@@ -1499,6 +1512,7 @@ impl Store {
         routines::on_session_deleted(&tx, &id)?;
         media::on_session_deleted(&tx, &id)?;
         session_images::on_session_deleted(&tx, &id)?;
+        session_files::on_session_deleted(&tx, &id)?;
         session_forks::on_session_deleted(&tx, &id)?;
         custom_connectors::on_session_deleted(&tx, &id)?;
         tx.commit()?;

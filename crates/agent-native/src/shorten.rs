@@ -70,7 +70,7 @@ const SKILL_TOOL: &str = "skill";
 /// Tools whose call reads and changes nothing: the stub says to call it
 /// again. Any other tool's says it ran once and not to run it again only
 /// to see its output.
-const READ_ONLY: [&str; 13] = [
+const READ_ONLY: [&str; 14] = [
     "read",
     "grep",
     "glob",
@@ -79,6 +79,7 @@ const READ_ONLY: [&str; 13] = [
     "web_search",
     "web_fetch",
     "recall",
+    "attached_file",
     "history",
     "board",
     "tool_output",

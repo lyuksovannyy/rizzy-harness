@@ -199,6 +199,9 @@ const COMMAND_TOOLS: &[&str] = &["bash", "bash_output", "bash_stop", "tool_outpu
 const MEMORY_TOOL: &str = "remember";
 /// Searching earlier chats and memory: its own switch.
 const RECALL_TOOL: &str = "recall";
+/// Reading the files the person attached to a chat without a folder: its own
+/// switch, off when absent ("Read attached files").
+const ATTACHED_TOOL: &str = harness_core::attached::TOOL;
 /// Reading this chat's own earlier messages in full: its own switch, on
 /// when absent (it shows an agent only what it was sent once, in the one
 /// chat it is in).
@@ -265,6 +268,11 @@ pub struct Features {
     /// (PLAN.md T55). Its own switch, off when absent.
     #[serde(default)]
     pub recall: bool,
+    /// `attached_file`: reads, never changes, the files the person attached
+    /// to a chat without a folder (PLAN.md T95). Its own switch, off when
+    /// absent, on for the built-in Assistant.
+    #[serde(default)]
+    pub attached_files: bool,
     /// The project's task board, in a project's chats (PLAN.md T78):
     /// `board` lists it, `board_edit` adds, moves and notes cards (never
     /// deletes or overwrites). An agent that changes nothing else and has
@@ -321,6 +329,7 @@ impl Features {
             // The master offers it per turn only for the memory it may write.
             (self.memory || self.project_memory, &[MEMORY_TOOL][..]),
             (self.recall, &[RECALL_TOOL][..]),
+            (self.attached_files, &[ATTACHED_TOOL][..]),
             (self.history, &[HISTORY_TOOL][..]),
             (self.web, WEB_TOOLS),
             (self.read_files, READ_TOOLS),
@@ -566,6 +575,7 @@ fn build(id: &str, mut fm: Frontmatter, body: &str, origin: Origin) -> Result<Ag
         // with no tools has no history tool either.
         history: fm.history && fm.tools.allows(HISTORY_TOOL),
         recall: fm.tools.allows(RECALL_TOOL),
+        attached_files: fm.tools.allows(ATTACHED_TOOL),
         board: fm.tools.allows(BOARD_TOOL),
         web: any(WEB_TOOLS),
         read_files: any(READ_TOOLS),

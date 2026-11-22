@@ -51,6 +51,10 @@ pub enum Item {
         /// (`user_message.uploads`, T94): shown as chips with their size.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         uploads: Vec<crate::event::UploadedFile>,
+        /// Files kept for the agent to read through `attached_file`
+        /// (`user_message.attached`, T95): shown as chips with their size.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attached: Vec<crate::event::AttachedFile>,
         /// The answer to an input block, when this message is one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply: Option<FormReply>,
@@ -766,6 +770,7 @@ impl SessionView {
                     attachments: m.attachments.into_iter().map(|a| a.name).collect(),
                     files: m.files.into_iter().map(|f| f.path).collect(),
                     uploads: m.uploads,
+                    attached: m.attached,
                     reply: m.reply,
                     images: m.images,
                     queued: m.queued.then_some(Queued { seq, read: false }),
@@ -1789,6 +1794,7 @@ mod tests {
                 tags: vec![],
                 files: vec![],
                 uploads,
+                attached: vec![],
             })
         };
         let up = crate::event::UploadedFile {
@@ -1805,6 +1811,41 @@ mod tests {
         assert_eq!(first["uploads"][0]["bytes"], 1234);
         let second = serde_json::to_value(&v.items[1]).unwrap();
         assert!(second.get("uploads").is_none(), "{second}");
+    }
+
+    /// Files kept for `attached_file` ride on the user item for the chips.
+    #[test]
+    fn user_items_carry_the_files_kept_for_the_tool() {
+        let sid = SessionId::new();
+        let msg = |attached| {
+            EventKind::UserMessage(UserMessage {
+                turn_id: "t".into(),
+                text: "look".into(),
+                attachments: vec![],
+                reply: None,
+                images: vec![],
+                queued: false,
+                triggers: vec![],
+                tags: vec![],
+                files: vec![],
+                uploads: vec![],
+                attached,
+            })
+        };
+        let f = crate::event::AttachedFile {
+            file_id: "f1".into(),
+            name: "x.zip".into(),
+            bytes: 1234,
+            sha256: "ab".repeat(32),
+            mime: "application/zip".into(),
+        };
+        let evs = vec![ev(sid, 1, msg(vec![f])), ev(sid, 2, msg(vec![]))];
+        let v = SessionView::fold(&evs).unwrap();
+        let first = serde_json::to_value(&v.items[0]).unwrap();
+        assert_eq!(first["attached"][0]["file_id"], "f1");
+        assert_eq!(first["attached"][0]["bytes"], 1234);
+        let second = serde_json::to_value(&v.items[1]).unwrap();
+        assert!(second.get("attached").is_none(), "{second}");
     }
 
     #[test]
@@ -1827,6 +1868,7 @@ mod tests {
                 tags: vec![],
                 files: vec![],
                 uploads: vec![],
+                attached: vec![],
             })
         };
         let evs = vec![ev(sid, 1, msg(Some(reply.clone()))), ev(sid, 2, msg(None))];

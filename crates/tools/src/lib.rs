@@ -7,6 +7,7 @@ pub mod approval;
 pub mod args;
 pub mod background;
 mod bash;
+mod attached;
 mod board;
 pub mod connector;
 pub mod contain;
@@ -69,6 +70,7 @@ pub use bash::{
     Bash, ENDED_MS_LEAD, FOREGROUND_DESCRIPTION, HOST_DESCRIPTION, KEPT_OUTPUT_LEAD,
     STILL_ALIVE_TAIL, ShellChild, foreground_schema, read_only_note,
 };
+pub use attached::AttachedFileTool;
 pub use board::{Board, BoardEdit, render as render_board};
 pub use edit::Edit;
 pub use env::ToolEnv;
@@ -240,6 +242,9 @@ pub struct ToolCtx {
     /// Where `recall` sends its query: the session's link to the master
     /// (`TurnHost::recall`); `None` where there is none.
     pub recall: Option<Arc<dyn harness_core::recall::RecallSource>>,
+    /// Where `attached_file` sends its requests: the session's link to the
+    /// master (`TurnHost::attached`); `None` where there is none.
+    pub attached: Option<Arc<dyn harness_core::attached::AttachedSource>>,
     /// Where `history` reads the session's own chat (`TurnHost::history`);
     /// `None` where there is none.
     pub history: Option<Arc<dyn harness_core::history::HistorySource>>,
@@ -341,6 +346,7 @@ impl ToolCtx {
             skills: None,
             seen: Default::default(),
             recall: None,
+            attached: None,
             history: None,
             board: None,
             stored_skills: None,

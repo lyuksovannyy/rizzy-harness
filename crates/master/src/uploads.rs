@@ -34,17 +34,48 @@ pub fn limits(m: &Master, node_id: &str) -> Option<harness_protocol::UploadLimit
         .and_then(|c| harness_protocol::upload_limits_of(&c))
 }
 
-/// Why this chat takes no file the model cannot read as text, or `None`
-/// when it may: an agentic chat of its own (never a plain chat, never a
-/// sub-agent's chat).
-pub fn refusal(row: &SessionRow) -> Option<String> {
-    if row.profile.as_deref() == Some("chat") {
-        return Some(crate::attachments::NO_TOOLS.into());
-    }
+/// Where a file the model cannot read as text goes in this chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    /// A coding chat: the node saves it into the chat's folder (T94).
+    Folder,
+    /// A plain chat: the master keeps it, the agent reads it through
+    /// `attached_file`, and nothing is written to any folder (T95,
+    /// `crate::attached`). Only for an agent with the switch.
+    Attached,
+    /// A sub-agent's chat: none.
+    Refused,
+}
+
+/// The lane of `row`: a sub-agent's chat takes none, a plain chat keeps the
+/// file for the tool, any other chat has a folder.
+pub fn lane(row: &SessionRow) -> Lane {
     if row.parent_id.is_some() {
-        return Some("a sub-agent's chat takes no attached files".into());
+        Lane::Refused
+    } else if row.profile.as_deref() == Some("chat") {
+        Lane::Attached
+    } else {
+        Lane::Folder
     }
-    None
+}
+
+/// Why this chat takes no file for a folder, or `None` when it may: a
+/// coding chat of its own (never a sub-agent's chat). A plain chat has its
+/// own lane ([`lane`]).
+pub fn refusal(row: &SessionRow) -> Option<String> {
+    match lane(row) {
+        Lane::Refused => Some("a sub-agent's chat takes no attached files".into()),
+        _ => None,
+    }
+}
+
+/// The sentence for a plain chat whose agent cannot read attached files:
+/// which switch to turn on, or the other way to have the file read.
+pub fn switch_off(agent: &str) -> String {
+    format!(
+        "{agent} cannot read attached files: turn on \"Read attached files\" for it on the Agents \
+         page, or pick an agent that has it. A coding chat saves the file in its folder instead."
+    )
 }
 
 /// The checks a send makes before anything is pushed: the chat may take
@@ -53,6 +84,9 @@ pub fn refusal(row: &SessionRow) -> Option<String> {
 pub fn check(m: &Master, row: &SessionRow, ups: &[TakenUpload]) -> Result<(), CommandError> {
     if let Some(why) = refusal(row) {
         return Err(CommandError::Rejected(why));
+    }
+    if lane(row) == Lane::Attached {
+        return check_attached(m, row, ups);
     }
     let Some(l) = limits(m, &row.node_id) else {
         return Err(CommandError::Rejected(
@@ -75,6 +109,52 @@ pub fn check(m: &Master, row: &SessionRow, ups: &[TakenUpload]) -> Result<(), Co
         )));
     }
     Ok(())
+}
+
+/// The checks a send to a plain chat makes: the chat is not temporary, its
+/// node offers `attached_file`, and the number and sizes are within the
+/// limits (the node checks again and decides).
+fn check_attached(m: &Master, row: &SessionRow, ups: &[TakenUpload]) -> Result<(), CommandError> {
+    if row.incognito {
+        return Err(CommandError::Rejected(
+            "a temporary chat keeps no attached files".into(),
+        ));
+    }
+    if !m.node_has(&row.node_id, harness_protocol::CAP_ATTACHED) {
+        return Err(CommandError::Rejected(
+            "this chat's node cannot keep attached files for the agent to read: update the node \
+             (it does not announce the `attached-file` capability)"
+                .into(),
+        ));
+    }
+    if ups.len() > crate::attachments::MAX_PER_MESSAGE {
+        return Err(CommandError::Rejected(format!(
+            "at most {} files and images per message",
+            crate::attachments::MAX_PER_MESSAGE
+        )));
+    }
+    if let Some(u) = ups.iter().find(|u| u.size > crate::attached::MAX_FILE) {
+        return Err(CommandError::Rejected(format!(
+            "{}: files are at most 10 MB",
+            u.name
+        )));
+    }
+    Ok(())
+}
+
+/// The references a prompt names the files of a plain chat by: the upload
+/// id is the file's id in the chat (`user_message.attached`), and nothing
+/// of the bytes travels.
+pub fn attached_refs(ups: &[TakenUpload]) -> Vec<harness_protocol::AttachedRef> {
+    ups.iter()
+        .map(|u| harness_protocol::AttachedRef {
+            file_id: u.upload_id.clone(),
+            name: crate::attachments::clean_name(&u.name),
+            mime: u.mime.clone(),
+            size: u.size,
+            sha256: u.sha256.clone(),
+        })
+        .collect()
 }
 
 /// One chunk of a stored file: `len` plaintext bytes at `offset`, read

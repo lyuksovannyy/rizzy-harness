@@ -445,6 +445,7 @@ fn history(sid: SessionId, turns: usize, chars: usize) -> Vec<RawEvent> {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         }));
         kinds.push(EventKind::AssistantMessage(AssistantMessage {
             author: None,

@@ -110,6 +110,7 @@ fn events() -> Vec<RawEvent> {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         }),
         EventKind::AssistantDelta(AssistantDelta {
             author: None,
@@ -346,6 +347,7 @@ fn events() -> Vec<RawEvent> {
                 seen: None,
             }],
             uploads: vec![],
+            attached: vec![],
         }),
         EventKind::HistorySummarized(HistorySummarized {
             turn_id: "t2".into(),
@@ -412,6 +414,7 @@ fn events() -> Vec<RawEvent> {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         }),
         EventKind::UserMessage(UserMessage {
             turn_id: "t2".into(),
@@ -424,6 +427,7 @@ fn events() -> Vec<RawEvent> {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         }),
         EventKind::QueuedDelivered(QueuedDelivered {
             turn_id: "t2".into(),
@@ -465,6 +469,7 @@ fn events() -> Vec<RawEvent> {
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         }),
         // A `publish` call and the file the node staged for it, then a
         // file the user saved, and one that could not be saved.
@@ -855,6 +860,7 @@ fn events() -> Vec<RawEvent> {
             triggers: vec![],
             tags: vec![],
             uploads: vec![],
+            attached: vec![],
         }),
         EventKind::Error(ErrorEvent {
             notice: false,
@@ -1083,6 +1089,7 @@ fn events() -> Vec<RawEvent> {
                 triggers: vec!["coder".into(), "writer".into(), "editor".into()],
                 tags: vec!["advisor".into()],
                 uploads: vec![],
+                attached: vec![],
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 author: None,
@@ -1226,6 +1233,7 @@ fn events() -> Vec<RawEvent> {
                 tags: vec![],
                 files: vec![],
                 uploads: vec![],
+                attached: vec![],
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 turn_id: id.into(),

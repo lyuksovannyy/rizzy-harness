@@ -39,11 +39,13 @@ CREATE TABLE IF NOT EXISTS blob_previews (
 "#;
 
 /// A blob nothing references any more: no Media item, no artifact
-/// version, no profile picture and no unsent chat upload. Needs `blobs b`.
+/// version, no profile picture, no unsent chat upload and no chat that may
+/// read it through `attached_file`. Needs `blobs b`.
 const UNREFERENCED: &str = "NOT EXISTS (SELECT 1 FROM media_items r WHERE r.blob_id = b.blob_id)
      AND NOT EXISTS (SELECT 1 FROM artifact_versions v WHERE v.blob_id = b.blob_id)
      AND NOT EXISTS (SELECT 1 FROM profile_images p WHERE p.blob_id = b.blob_id)
-     AND NOT EXISTS (SELECT 1 FROM chat_uploads c WHERE c.blob_id = b.blob_id)";
+     AND NOT EXISTS (SELECT 1 FROM chat_uploads c WHERE c.blob_id = b.blob_id)
+     AND NOT EXISTS (SELECT 1 FROM session_files f WHERE f.blob_id = b.blob_id)";
 
 const BLOB_COLS: &str =
     "b.blob_id, b.owner_id, b.sha256, b.size, b.kind, b.format, b.mime, b.display, b.created_ms";

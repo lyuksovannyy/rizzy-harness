@@ -367,6 +367,7 @@ fn features() -> harness_agents::Features {
         personalisation: true,
         history: true,
         recall: false,
+        attached_files: false,
         board: false,
         web: true,
         read_files: true,
@@ -998,6 +999,59 @@ fn recall_is_its_own_switch() {
     )
     .unwrap();
     assert!(!old.features.recall);
+}
+
+/// "Read attached files" is its own switch (the owner, 2026-11-22; PLAN.md
+/// T95): on for the built-in Assistant only, off for every other built-in
+/// and for a new page agent; a file agent has it only from its own list; a
+/// page agent asks for `attached_file` only with it; a page agent saved
+/// before the switch reads with it off. Other switches do not bring it.
+#[test]
+fn reading_attached_files_is_its_own_switch() {
+    for a in builtins() {
+        let want = a.id == "general";
+        assert_eq!(a.features.attached_files, want, "{}", a.id);
+        assert_eq!(a.spec.allows_tool("attached_file"), want, "{}", a.id);
+    }
+    let make = |attached_files: bool| {
+        harness_agents::custom(
+            "r",
+            "R",
+            "",
+            "r",
+            harness_agents::Features {
+                attached_files,
+                ..features()
+            },
+            vec![],
+        )
+        .unwrap()
+    };
+    let file = parse(
+        "other",
+        "---\nname: O\ntools: [web_search, remember]\n---\nhi\n",
+        false,
+    )
+    .unwrap();
+    assert!(!file.features.attached_files, "a file agent's list decides");
+    let listed = parse(
+        "other",
+        "---\nname: O\ntools: [attached_file]\n---\nhi\n",
+        false,
+    )
+    .unwrap();
+    assert!(listed.features.attached_files);
+    assert!(!make(false).spec.allows_tool("attached_file"));
+    assert!(make(true).spec.allows_tool("attached_file") && make(true).features.attached_files);
+    // Reading files and memory on do not bring it.
+    assert!(features().read_files && !make(false).features.attached_files);
+    let old: harness_agents::edits::Custom = serde_json::from_str(
+        r#"{"name":"Old","summary":"","prompt":"p","features":{"memory":true,"web":false,
+        "read_files":true,"edit_files":false,"commands":false,"delegate":false,
+        "as_agent":true,"as_subagent":true}}"#,
+    )
+    .unwrap();
+    assert!(!old.features.attached_files);
 }
 
 /// `budget:` was parsed and never read (research 07 §6: a setting that

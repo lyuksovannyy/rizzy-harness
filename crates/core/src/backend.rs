@@ -200,6 +200,13 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
+    /// Where this session's `attached_file` calls go (the node's link to
+    /// the master, bound to this session); `None` where there is none
+    /// (tests, a runtime without a master).
+    fn attached(&self) -> Option<std::sync::Arc<dyn crate::attached::AttachedSource>> {
+        None
+    }
+
     /// Where this session's loads of a stored skill go (X.34 step B: the
     /// node's link to the master, bound to this session); `None` where
     /// there is none (tests, a runtime without a master).

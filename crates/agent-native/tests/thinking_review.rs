@@ -261,6 +261,7 @@ async fn run(
             tags: vec![],
             files: vec![],
             uploads: vec![],
+            attached: vec![],
         }));
     }
     let out = b
@@ -488,6 +489,7 @@ async fn r5_with(window: Option<u64>, signed: bool) -> (usize, usize, usize) {
         tags: vec![],
         files: vec![],
         uploads: vec![],
+        attached: vec![],
     }));
     let o = b
         .run_turn(TurnCtx {
@@ -1036,6 +1038,7 @@ async fn turn_with(
         tags: vec![],
         files: vec![],
         uploads: vec![],
+        attached: vec![],
     }));
     let out = b
         .run_turn(TurnCtx {

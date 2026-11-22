@@ -138,6 +138,7 @@ fn message(turn: &str, text: &str, attachments: Vec<Attachment>) -> UserMessage 
         tags: vec![],
         files: vec![],
         uploads: vec![],
+        attached: vec![],
     }
 }
 

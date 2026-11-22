@@ -5,7 +5,10 @@
 //! other file (a zip, docx, xlsx, a binary), and a text file or PDF over
 //! that size, is kept as the owner's blob for a coding chat: the node
 //! saves it into the chat's folder when the message is sent (PLAN.md T94,
-//! `crate::uploads`). A chat without tools refuses it with the reason. The
+//! `crate::uploads`). A chat without tools keeps it too when its agent has
+//! the switch "Read attached files": the master holds it, the agent reads
+//! it through `attached_file`, and nothing is written to any folder (T95,
+//! `crate::attached`); otherwise it is refused with the reason. The
 //! body is streamed: only the first 10 MiB is ever held, to see whether it
 //! is text, and a file for the folder goes to disk as it arrives, under
 //! the node's size limit.
@@ -52,14 +55,67 @@ struct UploadQuery {
     /// a coding chat. Checked again at send.
     #[serde(default)]
     agentic: Option<String>,
+    /// The agent the next message goes to (a plain chat keeps a file only
+    /// for an agent with the switch); the chat's own when absent. Checked
+    /// again at send.
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 /// Where a file the model cannot read may go.
 enum Target {
-    /// A chat without tools, or no word of a folder.
-    Plain,
-    /// A coding chat: its node's limit when the chat is known.
-    Folder { max: u64, session: Option<String> },
+    /// Nowhere: the reason it is refused with.
+    Plain(String),
+    /// A coding chat: its node's limit when the chat is known. `kept`: a
+    /// plain chat keeps it for `attached_file` (T95) instead of a folder.
+    Folder {
+        max: u64,
+        session: Option<String>,
+        kept: bool,
+    },
+}
+
+/// A plain chat (or one to come) keeps the file when the agent it goes to
+/// has the switch. An agent the server's own list does not know (one of a
+/// workspace) is let through: the send decides.
+async fn kept_or_plain(
+    m: &Master,
+    row: Option<&harness_store::SessionRow>,
+    agent: Option<&str>,
+) -> Target {
+    let plain = || Target::Plain(attachments::NO_TOOLS.into());
+    if let Some(row) = row {
+        if row.incognito {
+            return Target::Plain("a temporary chat keeps no attached files".into());
+        }
+        if !m.node_has(&row.node_id, harness_protocol::CAP_ATTACHED) {
+            return plain();
+        }
+    }
+    if storage::get(m).is_none() {
+        return plain();
+    }
+    let r = m
+        .resolver_for(row.and_then(|r| r.workspace_id.as_deref()))
+        .await;
+    let id = agent
+        .map(str::to_string)
+        .or_else(|| row.and_then(|r| r.agent_id.clone()))
+        .or_else(|| {
+            r.default_for(harness_core::event::Profile::Chat)
+                .ok()
+                .map(str::to_string)
+        });
+    if let Some(a) = id.as_deref().and_then(|id| r.agents().get(id))
+        && !a.features.attached_files
+    {
+        return Target::Plain(uploads::switch_off(&a.name));
+    }
+    Target::Folder {
+        max: crate::attached::MAX_FILE,
+        session: row.map(|r| r.session_id.to_string()),
+        kept: true,
+    }
 }
 
 fn too_large(max: u64) -> ApiError {
@@ -75,9 +131,10 @@ async fn target(m: &Master, who: &crate::auth::Principal, q: &UploadQuery) -> Ap
             Target::Folder {
                 max: uploads::DEFAULT_MAX,
                 session: None,
+                kept: false,
             }
         } else {
-            Target::Plain
+            kept_or_plain(m, None, q.agent.as_deref()).await
         });
     };
     let row = super::acting_session(m, who, id).await?;
@@ -87,8 +144,8 @@ async fn target(m: &Master, who: &crate::auth::Principal, q: &UploadQuery) -> Ap
             "a sub-agent's chat takes no attached files".into(),
         ));
     }
-    if uploads::refusal(&row).is_some() {
-        return Ok(Target::Plain);
+    if uploads::lane(&row) == uploads::Lane::Attached {
+        return Ok(kept_or_plain(m, Some(&row), q.agent.as_deref()).await);
     }
     // The node's own number; the default for one that announces none (the
     // send refuses a node that cannot save files, and says to update it).
@@ -97,6 +154,7 @@ async fn target(m: &Master, who: &crate::auth::Principal, q: &UploadQuery) -> Ap
     Ok(Target::Folder {
         max,
         session: Some(row.session_id.to_string()),
+        kept: false,
     })
 }
 
@@ -111,7 +169,7 @@ async fn upload(
     let text_max = MAX_UPLOAD as u64;
     let ceiling = match &target {
         Target::Folder { max, .. } => *max,
-        Target::Plain => text_max,
+        Target::Plain(_) => text_max,
     };
     let length = headers
         .get(header::CONTENT_LENGTH)
@@ -159,14 +217,13 @@ async fn upload(
         // Not text, or a PDF that cannot be read: a coding chat keeps it
         // as a file (never an empty one: the node saves none).
         Err(e @ (ExtractError::Binary | ExtractError::Pdf(_))) => match (target, keep_copy) {
-            (Target::Folder { max, session }, Some(bytes)) => {
+            (Target::Folder { max, session, kept }, Some(bytes)) => {
                 let len = bytes.len() as u64;
-                keep(&m, &who, &q, session, Some(len), Body::from(bytes), max).await
+                keep(&m, &who, &q, session, Some(len), Body::from(bytes), max, kept).await
             }
-            _ if matches!(e, ExtractError::Binary) => Err(ApiError(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                attachments::NO_TOOLS.into(),
-            )),
+            (Target::Plain(why), _) if matches!(e, ExtractError::Binary) => {
+                Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, why))
+            }
             _ => Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string())),
         },
         Err(e) => Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string())),
@@ -216,6 +273,7 @@ async fn keep(
     length: Option<u64>,
     body: Body,
     max: u64,
+    kept: bool,
 ) -> ApiResult<Json<Value>> {
     let refused = |(code, msg): storage::Refusal| ApiError(code, msg);
     let st = storage::get(m).ok_or_else(|| {
@@ -278,6 +336,13 @@ async fn keep(
     .await
     .map_err(refused)?;
     match put {
+        Put::Added { .. } if kept => Ok(Json(json!({
+            "attachment_id": id,
+            "name": name,
+            "mime": mime,
+            "bytes": size,
+            "kept": true,
+        }))),
         Put::Added { .. } => Ok(Json(json!({
             "attachment_id": id,
             "name": name,

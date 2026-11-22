@@ -5,6 +5,7 @@ pub mod agent_edits;
 pub mod artifact_pull;
 pub mod artifacts;
 mod assets;
+pub mod attached;
 pub mod attachments;
 pub mod auth;
 pub mod avatars;
@@ -343,6 +344,8 @@ pub struct MasterInner {
     notes: memory::Notes,
     /// `recall`'s counts per turn and hour, and its searches per node.
     recall: recall::Grants,
+    /// `attached_file`'s places to parse in and counts per turn.
+    attached: attached::Grants,
     /// The board tools' counts per turn, calls per node and recent request
     /// ids (PLAN.md T78).
     board: board::Grants,
@@ -734,6 +737,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::UploadChunk { .. }
         // An answer to the node's own search: nothing is written.
         | MasterToNode::RecallResult { .. }
+        // An answer to the node's own file read: nothing is written there.
+        | MasterToNode::AttachedResult { .. }
         // An answer to the node's own board call: nothing is run there.
         | MasterToNode::BoardResult { .. }
         // A stored skill's text for the node's own load: nothing is run.
@@ -840,6 +845,7 @@ impl Master {
                 turn_memory: Mutex::new(HashMap::new()),
                 notes: Default::default(),
                 recall: Default::default(),
+                attached: Default::default(),
                 board: Default::default(),
                 stored_skills: Default::default(),
                 routines: OnceLock::new(),
@@ -1660,6 +1666,11 @@ impl Master {
                 session_id,
                 query,
             } => recall::handle(self, node_id, req_id, session_id, query),
+            NodeToMaster::Attached {
+                req_id,
+                session_id,
+                request,
+            } => attached::handle(self, node_id, req_id, session_id, request),
             NodeToMaster::Board {
                 req_id,
                 session_id,
@@ -2576,6 +2587,12 @@ impl Master {
         let mut standing: Vec<harness_core::backend::StandingPart> = Vec::new();
         // The agent's memory switches (on the Agents page).
         let features = r.agents().get(&agent.agent_id).map(|a| a.features);
+        // Files for a plain chat (T95): kept here for `attached_file`, and
+        // only an agent with the switch is sent the message that names them.
+        let attached_lane = !uploads.is_empty() && uploads::lane(&row) == uploads::Lane::Attached;
+        if attached_lane && !features.is_some_and(|f| f.attached_files) {
+            return Err(CommandError::Rejected(uploads::switch_off(&agent.name)));
+        }
         // The chat owner's Personalisation (PLAN.md T74): the owner's
         // settings whoever sends (a routine runs as its owner), never in an
         // untrusted turn, not for an agent whose switch is off. A standing
@@ -2645,6 +2662,27 @@ impl Master {
         // (`AgentRef::withheld` in `turn_started`), which is what a later
         // search is checked against: no flag is kept here.
         let recalls = may_recall && agent.allows_tool("recall");
+        // `attached_file` (T95): only in a plain chat that has a file (this
+        // message's own, or an earlier one's), on a node that offers it; not
+        // in a temporary chat, an untrusted turn or a callback turn. Withheld
+        // here, so the turn's log says so (`AgentRef::withheld`), which every
+        // request is checked against.
+        let may_attach = row.profile.as_deref() == Some("chat")
+            && row.parent_id.is_none()
+            && !row.incognito
+            && !untrusted
+            && !resume
+            && self.node_has(&row.node_id, harness_protocol::CAP_ATTACHED)
+            && (attached_lane || {
+                let id = sid.to_string();
+                self.inner
+                    .mirror
+                    .call(move |s| s.session_files_any(&id))
+                    .await?
+            });
+        if !may_attach {
+            attached::deny(&mut agent);
+        }
         // The project board tools (PLAN.md T78): only in a project chat
         // whose owner's turn runs it, on a node that offers them; not in an
         // untrusted or a callback turn (text nobody wrote could steer
@@ -2819,12 +2857,13 @@ impl Master {
                 peers: peer_specs,
                 tags,
                 uploads: vec![],
+                attached: vec![],
             }),
         };
         // The files go ahead of the prompt that names them, once nothing
         // else can refuse it here: the node holds them until that prompt
         // takes them (or its staging expires).
-        if !uploads.is_empty() {
+        if !uploads.is_empty() && !attached_lane {
             let refs = uploads::push(self, &row.node_id, sid, &uploads).await?;
             if let MasterToNode::Prompt(p) = &mut msg {
                 p.uploads = refs;
@@ -2836,6 +2875,22 @@ impl Master {
             return Err(CommandError::TooLarge(
                 "Too much attached to one message".into(),
             ));
+        }
+        // A plain chat's files stay here: the prompt names them and no byte
+        // travels. Held before the prompt goes (a chat may read them from the
+        // message that names them on) and given back when the node certainly
+        // did not take it.
+        let held = attached_lane;
+        if attached_lane {
+            let id = sid.to_string();
+            let ups = uploads.clone();
+            self.inner
+                .mirror
+                .call(move |s| s.session_files_hold(&id, &ups))
+                .await?;
+            if let MasterToNode::Prompt(p) = &mut msg {
+                p.attached = uploads::attached_refs(&uploads);
+            }
         }
         // What this turn may write, for the `remember` calls it makes,
         // recorded only now that nothing but the node can refuse the
@@ -2870,11 +2925,27 @@ impl Master {
         if let Err(e) = &sent
             && !matches!(e, CommandError::Timeout)
         {
-            let mut tm = lock(&self.inner.turn_memory);
-            match before {
-                Some(b) => tm.insert(sid, b),
-                None => tm.remove(&sid),
-            };
+            {
+                let mut tm = lock(&self.inner.turn_memory);
+                match before {
+                    Some(b) => tm.insert(sid, b),
+                    None => tm.remove(&sid),
+                };
+            }
+            if held {
+                let (id, ids) = (
+                    sid.to_string(),
+                    uploads.iter().map(|u| u.upload_id.clone()).collect::<Vec<_>>(),
+                );
+                if let Err(e) = self
+                    .inner
+                    .mirror
+                    .call(move |s| s.session_files_release(&id, &ids))
+                    .await
+                {
+                    tracing::warn!(error = %e, "could not release a refused message's files");
+                }
+            }
         }
         sent?;
         // The notes rode on this turn: do not repeat them (review M5).
@@ -3364,6 +3435,7 @@ impl Master {
     /// Drop the mirror copy of a session and refuse its events from now on.
     async fn forget(&self, sid: SessionId) {
         self.inner.recall.forget(sid);
+        self.inner.attached.forget(sid);
         self.inner.board.forget(sid);
         self.inner.stored_skills.forget(sid);
         self.inner.connectors.calls.forget(sid);

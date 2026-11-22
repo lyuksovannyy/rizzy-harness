@@ -2213,6 +2213,41 @@
     ],
     "user_message": [
       {
+        "path": "attached",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "attached[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "attached[].bytes",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "attached[].file_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "attached[].mime",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "attached[].name",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "attached[].sha256",
+        "required": true,
+        "type": "string"
+      },
+      {
         "path": "attachments",
         "required": false,
         "type": "array"
