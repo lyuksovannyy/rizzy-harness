@@ -10,7 +10,8 @@
 //! Parts: `[Content_Types].xml`, `_rels/.rels`, `word/document.xml`,
 //! `word/styles.xml` (a fixed style set), `word/numbering.xml` (bullets, and
 //! one numbering per ordered list so each restarts), `word/_rels/
-//! document.xml.rels` (the hyperlinks) and `docProps/core.xml`.
+//! document.xml.rels` (the hyperlinks), `word/settings.xml` (which Word the
+//! file is for) and `docProps/core.xml`.
 
 use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
@@ -100,6 +101,9 @@ struct Cell {
     header: bool,
     align: Option<&'static str>,
     chars: usize,
+    /// Its longest word, in characters, and where the word being read stands.
+    word: usize,
+    run: usize,
 }
 
 struct Table {
@@ -348,6 +352,10 @@ impl Gen {
             && let Some(c) = t.rows.last_mut().and_then(|r| r.last_mut())
         {
             c.chars += s.chars().count();
+            for ch in s.chars() {
+                c.run = if ch.is_whitespace() { 0 } else { c.run + 1 };
+                c.word = c.word.max(c.run);
+            }
         }
         // `push_inline` counts what is added; the room is what is left.
         match runs(s, f, self.room()) {
@@ -485,6 +493,8 @@ impl Gen {
                             header,
                             align,
                             chars: 0,
+                            word: 0,
+                            run: 0,
                         });
                     }
                 }
@@ -635,20 +645,38 @@ impl Gen {
         // Column widths: by the longest text, within bounds, summing to the
         // content width exactly (Word lays a fixed table out by these).
         let mut weights = vec![4usize; cols];
+        let mut words = vec![1usize; cols];
         for r in &t.rows {
             for (i, c) in r.iter().enumerate() {
                 weights[i] = weights[i].max(c.chars.clamp(4, 40));
+                words[i] = words[i].max(c.word);
             }
         }
-        let total: usize = weights.iter().sum();
-        let mut widths: Vec<u32> = weights
-            .iter()
-            .map(|w| (content as usize * w / total) as u32)
-            .collect();
+        // Every column first gets what its longest word needs, so that a
+        // short column beside a long one does not break "Owner" in two;
+        // what is left of the page is shared by the lengths of the texts.
+        // When the words alone are wider than the page, by the words.
+        let floors: Vec<u32> = words.iter().map(|w| word_width(*w)).collect();
+        let floor_sum: u32 = floors.iter().sum();
+        let mut widths: Vec<u32> = if floor_sum <= content {
+            let spare = (content - floor_sum) as usize;
+            let total: usize = weights.iter().sum();
+            floors
+                .iter()
+                .zip(&weights)
+                .map(|(f, w)| f + (spare * w / total) as u32)
+                .collect()
+        } else {
+            floors
+                .iter()
+                .map(|f| ((content as u64 * *f as u64 / floor_sum as u64) as u32).max(1))
+                .collect()
+        };
         let used: u32 = widths.iter().sum();
         if let Some(last) = widths.last_mut() {
-            *last += content - used;
+            *last = (*last + content).saturating_sub(used).max(1);
         }
+        let content: u32 = widths.iter().sum();
         let mut s = String::from("<w:tbl><w:tblPr><w:tblStyle w:val=\"TableGrid\"/>");
         s.push_str(&format!(
             "<w:tblW w:w=\"{content}\" w:type=\"dxa\"/><w:tblLayout w:type=\"fixed\"/>\
@@ -691,6 +719,24 @@ impl Gen {
     }
 }
 
+/// The width, in twentieths of a point, a table column needs for a word of
+/// `chars` characters: about 0.6 em of the 11 pt bold header per character,
+/// plus the cell's side margins. At most a third of a page, so that one long
+/// address does not take the table.
+pub(crate) fn word_width(chars: usize) -> u32 {
+    (chars.min(24) as u32) * 135 + 240
+}
+
+/// `word/settings.xml`: without the compatibility setting Word opens the
+/// file in "compatibility mode" (as if written by Word 2007).
+fn settings_xml() -> String {
+    format!(
+        "{DECL}<w:settings xmlns:w=\"{W}\"><w:compat>\
+         <w:compatSetting w:name=\"compatibilityMode\" w:uri=\"http://schemas.microsoft.com/office/word\" w:val=\"15\"/>\
+         </w:compat></w:settings>"
+    )
+}
+
 fn styles_xml() -> String {
     let mut s = String::from(DECL);
     s.push_str(&format!("<w:styles xmlns:w=\"{W}\">"));
@@ -722,9 +768,9 @@ fn styles_xml() -> String {
     s.push_str(
         "<w:style w:type=\"paragraph\" w:styleId=\"Code\"><w:name w:val=\"Code\"/><w:basedOn w:val=\"Normal\"/><w:qFormat/>\
          <w:pPr><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"F2F2F2\"/><w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/></w:pPr>\
-         <w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/><w:sz w:val=\"20\"/><w:szCs w:val=\"20\"/></w:rPr></w:style>\
+         <w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/><w:noProof/><w:sz w:val=\"20\"/><w:szCs w:val=\"20\"/></w:rPr></w:style>\
          <w:style w:type=\"character\" w:styleId=\"InlineCode\"><w:name w:val=\"Inline Code\"/><w:basedOn w:val=\"DefaultParagraphFont\"/><w:qFormat/>\
-         <w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/><w:sz w:val=\"20\"/><w:szCs w:val=\"20\"/><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"F2F2F2\"/></w:rPr></w:style>\
+         <w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/><w:noProof/><w:sz w:val=\"20\"/><w:szCs w:val=\"20\"/><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"F2F2F2\"/></w:rPr></w:style>\
          <w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:qFormat/>\
          <w:pPr><w:pBdr><w:left w:val=\"single\" w:sz=\"18\" w:space=\"8\" w:color=\"A6A6A6\"/></w:pBdr><w:ind w:left=\"720\"/></w:pPr>\
          <w:rPr><w:i/><w:iCs/><w:color w:val=\"404040\"/></w:rPr></w:style>\
@@ -899,6 +945,10 @@ pub fn build(markdown: &str, o: &DocOptions) -> Result<Built> {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml",
     );
     ct.part(
+        "word/settings.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml",
+    );
+    ct.part(
         "docProps/core.xml",
         "application/vnd.openxmlformats-package.core-properties+xml",
     );
@@ -924,6 +974,12 @@ pub fn build(markdown: &str, o: &DocOptions) -> Result<Built> {
             true,
         ));
     }
+    drels.push((
+        "rIdSettings".to_string(),
+        format!("{REL_BASE}/settings"),
+        "settings.xml".to_string(),
+        false,
+    ));
     let root_rels = vec![
         (
             "rId1".to_string(),
@@ -945,6 +1001,7 @@ pub fn build(markdown: &str, o: &DocOptions) -> Result<Built> {
     z.add("word/_rels/document.xml.rels", xml::rels(&drels).as_bytes())?;
     z.add("word/styles.xml", styles_xml().as_bytes())?;
     z.add("word/numbering.xml", numbering_xml(&g.ordered).as_bytes())?;
+    z.add("word/settings.xml", settings_xml().as_bytes())?;
     z.add(
         "docProps/core.xml",
         xml::core_props(title.as_deref(), &crate::iso_utc(o.created)).as_bytes(),
