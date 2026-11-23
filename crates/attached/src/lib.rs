@@ -19,6 +19,7 @@
 
 mod parts;
 mod tarball;
+#[cfg(any(test, feature = "testkit"))]
 #[doc(hidden)]
 pub mod testkit;
 mod zip;

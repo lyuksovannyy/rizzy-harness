@@ -340,6 +340,19 @@ pub(crate) fn confined_helper(read: impl FnOnce(&[u8]) -> Verdict) -> i32 {
     if limit_memory(baseline.saturating_add(MEMORY_HEADROOM)).is_err() {
         return EXIT_UNCONFINED;
     }
+    // No core dump of an uploaded file: the host's core pattern often pipes
+    // to a handler outside every sandbox (systemd-coredump) that stores the
+    // process image. Soft and hard limit 0 so nothing can raise it, and not
+    // dumpable at all (as `sandbox-exec` does for a contained command).
+    if nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0).is_err()
+        || nix::sys::prctl::set_dumpable(false).is_err()
+    {
+        return EXIT_UNCONFINED;
+    }
+    #[cfg(feature = "helper-probe")]
+    if let Some(port) = std::env::var_os("HARNESS_HELPER_PROBE") {
+        return probe(&port);
+    }
     let mut input = Vec::new();
     let max = crate::attachments::MAX_UPLOAD as u64;
     if std::io::stdin()
@@ -368,6 +381,29 @@ pub(crate) fn confined_helper(read: impl FnOnce(&[u8]) -> Verdict) -> i32 {
         Verdict::NotDocument => EXIT_NOT_DOCUMENT,
         Verdict::BadInput => EXIT_BAD_INPUT,
     }
+}
+
+/// What a confined helper can still do, for the test that proves the
+/// confinement (`crates/cli/tests/helper_confinement.rs`): after everything
+/// above it tries to open a file that exists and to connect to the port it
+/// was given, and says what it found and which limits it holds. Compiled
+/// only with the `helper-probe` feature, which no shipped build has.
+#[cfg(feature = "helper-probe")]
+fn probe(port: &std::ffi::OsStr) -> i32 {
+    use std::io::Write;
+    let opened = std::fs::File::open("/etc/passwd").is_ok();
+    let port: u16 = port.to_str().and_then(|p| p.parse().ok()).unwrap_or(1);
+    let connected = std::net::TcpStream::connect(("127.0.0.1", port)).is_ok();
+    let (soft, hard) =
+        nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_CORE).unwrap_or((9, 9));
+    let dumpable = nix::sys::prctl::get_dumpable().map_or(9, u8::from);
+    let report = format!(
+        "open {}\nconnect {}\ncore {soft} {hard}\ndumpable {dumpable}\n",
+        if opened { "opened" } else { "refused" },
+        if connected { "connected" } else { "refused" },
+    );
+    let _ = std::io::stdout().write_all(report.as_bytes());
+    0
 }
 
 /// `rizzy-harness pdf-text`: read the PDF from stdin, write its text to

@@ -9,6 +9,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The document and PDF helpers answer a confinement probe when asked by
+# environment (tests/helper_confinement.rs); off in every shipped build.
+helper-probe = []
+
 [dependencies]
 anyhow.workspace = true
 harness-agent-native.workspace = true
@@ -67,6 +72,7 @@ toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+harness-attached = { workspace = true, features = ["testkit"] }
 # The tests build turn messages with `PromptMsg::test` and friends.
 harness-protocol = { workspace = true, features = ["test-support"] }
 # The fake MCP server of tests/logs/custom_connectors_http.rs speaks TLS (the
