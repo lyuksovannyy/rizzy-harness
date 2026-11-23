@@ -146,7 +146,7 @@ fn it_is_the_text_the_view_shows() {
                 l.split_once(' ').unwrap().1
             };
             let rest = rest
-                .trim_start_matches(|c| c == ' ')
+                .trim_start_matches(' ')
                 .trim_start_matches("[heading 1] ")
                 .trim_start_matches("[list paragraph] ")
                 .trim_start_matches("[list] ");
