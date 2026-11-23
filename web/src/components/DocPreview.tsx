@@ -11,7 +11,7 @@
 import { PanelRightClose } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { call } from "../api";
-import type { PBlock, PCell, PreviewAnswer, PreviewTarget, PRow, PRun } from "../lib/docPreview";
+import { type PBlock, type PCell, type PreviewAnswer, type PreviewTarget, type PRow, type PRun, previewUrl, targetKey } from "../lib/docPreview";
 import { showHidden } from "../md/hidden";
 import { LinkedA } from "./Linked";
 import "./docPreview.css";
@@ -155,6 +155,7 @@ function Grid({ rows }: { rows: PRow[] }) {
 
 export default function DocPreview(props: { target: PreviewTarget; onClose: () => void }) {
   const { session, fileId, name } = props.target;
+  const key = targetKey(props.target);
   const [data, setData] = useState<PreviewAnswer | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
@@ -171,8 +172,7 @@ export default function DocPreview(props: { target: PreviewTarget; onClose: () =
     setErr(null);
     // The sheet on screen is never under another sheet's tab or error.
     setData(null);
-    const q = sheet === undefined ? "" : `?sheet=${sheet}`;
-    call<PreviewAnswer>("GET", `/api/sessions/${encodeURIComponent(session)}/files/${encodeURIComponent(fileId)}/preview${q}`, undefined, ac.signal)
+    call<PreviewAnswer>("GET", previewUrl(props.target, sheet), undefined, ac.signal)
       .then((a) => {
         setData(a);
         if (a.preview.kind === "sheet") setTabs(a.preview.sheets);
@@ -184,12 +184,14 @@ export default function DocPreview(props: { target: PreviewTarget; onClose: () =
         setBusy(false);
       });
     return () => ac.abort();
-  }, [session, fileId, sheet, tries]);
+    // The target is the key: a new file remounts the panel (Conversation).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, sheet, tries]);
 
   // Focus moves into the panel when it opens; Escape inside it closes it.
   useEffect(() => {
     head.current?.focus();
-  }, [fileId]);
+  }, [key]);
 
   const p = data?.preview;
   return (
@@ -204,9 +206,12 @@ export default function DocPreview(props: { target: PreviewTarget; onClose: () =
         <h2 className="pv-title small" tabIndex={-1} ref={head}>
           {showHidden(name)}
         </h2>
-        <LinkedA className="link small" url={`/api/sessions/${encodeURIComponent(session)}/made/${encodeURIComponent(fileId)}`} download={name}>
-          Download
-        </LinkedA>
+        {/* Only the server's own copy has a link; a file of a folder has none here. */}
+        {fileId !== undefined && (
+          <LinkedA className="link small" url={`/api/sessions/${encodeURIComponent(session)}/made/${encodeURIComponent(fileId)}`} download={name}>
+            Download
+          </LinkedA>
+        )}
         <button type="button" className="icon small" aria-label="Close the preview" title="Close (Esc)" onClick={props.onClose}>
           <PanelRightClose size={16} aria-hidden />
         </button>

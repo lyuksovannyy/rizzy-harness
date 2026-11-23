@@ -5,11 +5,21 @@
 // outside React, so no screen has to hold it.
 import { useSyncExternalStore } from "react";
 
-/** A file of a chat without a folder: the id its message or its call names. */
-export interface PreviewTarget {
-  session: string;
-  fileId: string;
-  name: string;
+/**
+ * The file to show: of a chat without a folder, the id its message or its call
+ * names (the server keeps a copy); of a chat with a folder, its path in the
+ * folder (the node reads it). Exactly one of the two.
+ */
+export type PreviewTarget = { session: string; name: string } & ({ fileId: string; path?: undefined } | { path: string; fileId?: undefined });
+
+/** What tells one target from another (the panel restarts on a change). */
+export const targetKey = (t: PreviewTarget) => `${t.session}:${t.fileId ?? `path:${t.path}`}`;
+
+/** The route that answers for a target, `sheet` being the place among the visible sheets. */
+export function previewUrl(t: PreviewTarget, sheet?: number): string {
+  const s = encodeURIComponent(t.session);
+  if (t.fileId !== undefined) return `/api/sessions/${s}/files/${encodeURIComponent(t.fileId)}/preview${sheet === undefined ? "" : `?sheet=${sheet}`}`;
+  return `/api/sessions/${s}/folder-preview?path=${encodeURIComponent(t.path)}${sheet === undefined ? "" : `&sheet=${sheet}`}`;
 }
 
 /** A stretch of text with its own formatting. */

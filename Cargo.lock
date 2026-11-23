@@ -1643,6 +1643,7 @@ dependencies = [
  "harness-agent-native",
  "harness-agents",
  "harness-core",
+ "harness-docs",
  "harness-link",
  "harness-memory",
  "harness-protocol",

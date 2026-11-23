@@ -157,6 +157,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::ConnectorResult { .. }
         | MasterToNode::Diff { .. }
         | MasterToNode::Files { .. }
+        | MasterToNode::DocPreview { .. }
         | MasterToNode::ProjectCreate { .. }
         | MasterToNode::ProjectClone { .. }
         | MasterToNode::ProjectMcp { .. } => None,
@@ -266,6 +267,10 @@ pub(crate) struct Inner {
     diffs: Arc<tokio::sync::Semaphore>,
     /// Room for `@` completions being walked (T63), as many as diffs.
     file_lists: Arc<tokio::sync::Semaphore>,
+    /// Room for one page preview at a time (X.59, T99): the helper has two
+    /// places, and a person's previews take at most one, so they cannot
+    /// starve the agent's own `doc_view`.
+    previews: Arc<tokio::sync::Semaphore>,
     /// New project folders made in the last hour (T77), and room for the
     /// ones being made (one at a time).
     projects_made: projects::Made,
@@ -688,6 +693,7 @@ impl NodeRuntime {
             connectors: Default::default(),
             diffs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             file_lists: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
+            previews: Arc::new(tokio::sync::Semaphore::new(1)),
             projects_made: Default::default(),
             project_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             clone_slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -976,6 +982,11 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_DIFF.into());
                 // `@` file mentions and their completion (T63).
                 capabilities.push(harness_protocol::CAP_FILES.into());
+                // A Word or Excel file of a folder for the page's panel
+                // (X.59): only where the helper can be started.
+                if docs::shared_helper().is_some() {
+                    capabilities.push(harness_protocol::CAP_DOC_PREVIEW.into());
+                }
                 // New project folders (X.26, T77): only where node.toml's
                 // projects folder passed its checks at start. Never the path.
                 if self.inner.cfg.policy.projects.located.is_some()
@@ -1129,6 +1140,14 @@ impl NodeRuntime {
                         session_id,
                         query,
                     } => this.files(req_id, session_id, query),
+                    // A file for the page's panel (X.59): a task of its own,
+                    // answered by one `session.doc_preview_result`; no event.
+                    MasterToNode::DocPreview {
+                        req_id,
+                        session_id,
+                        path,
+                        sheet,
+                    } => this.doc_preview(req_id, session_id, path, sheet),
                     // A new project's folder (T77): no session, its own
                     // task, answered by one `project.created`.
                     MasterToNode::ProjectCreate { req_id, name } => {
@@ -1456,6 +1475,45 @@ impl NodeRuntime {
                     req_id,
                     paths: vec![],
                     error: Some(e),
+                },
+            };
+            inner.publish_wait(msg).await;
+        });
+    }
+
+    /// Answer `session.doc_preview` (X.59, T99) from a task of its own; never
+    /// acked, nothing logged but the node's audit line (the session id only,
+    /// never the path), no event. One at a time on the node.
+    fn doc_preview(&self, req_id: String, sid: SessionId, path: String, sheet: Option<u32>) {
+        use harness_protocol::PreviewRefusal as R;
+        self.audit_inline("session.doc_preview", sid);
+        let refuse = |inner: &Arc<Inner>, req_id: String, r: R| {
+            inner.publish(NodeToMaster::DocPreviewResult {
+                req_id,
+                preview: None,
+                refusal: Some(r),
+            })
+        };
+        let Ok(permit) = self.inner.previews.clone().try_acquire_owned() else {
+            return refuse(&self.inner, req_id, R::Busy);
+        };
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let res = match inner.session(sid) {
+                Some(s) => s.preview_folder_file(&path, sheet).await,
+                None => Err(R::NotFound),
+            };
+            let msg = match res {
+                Ok(v) => NodeToMaster::DocPreviewResult {
+                    req_id,
+                    preview: Some(v),
+                    refusal: None,
+                },
+                Err(r) => NodeToMaster::DocPreviewResult {
+                    req_id,
+                    preview: None,
+                    refusal: Some(r),
                 },
             };
             inner.publish_wait(msg).await;
@@ -2238,6 +2296,15 @@ impl NodeRuntime {
                 query,
             } => {
                 self.files(req_id, session_id, query);
+                Ok(())
+            }
+            MasterToNode::DocPreview {
+                req_id,
+                session_id,
+                path,
+                sheet,
+            } => {
+                self.doc_preview(req_id, session_id, path, sheet);
                 Ok(())
             }
             MasterToNode::ProjectCreate { req_id, name } => {

@@ -39,6 +39,8 @@ harness-protocol = { workspace = true, features = ["test-support"] }
 harness-agent-native.workspace = true
 # The built-in agents' definitions in `tests/personal_subagents.rs` (X.31).
 harness-agents.workspace = true
+# A real document to point the preview at, in `tests/folder_preview.rs`.
+harness-docs.workspace = true
 # The real link under the node in `tests/control_over_link.rs` (A.21).
 harness-link.workspace = true
 # `recall`, the tool, in `tests/recall.rs`.

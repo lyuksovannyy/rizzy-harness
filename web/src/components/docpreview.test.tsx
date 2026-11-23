@@ -9,7 +9,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { linked } from "../lib/links.setup";
-import type { PreviewAnswer } from "../lib/docPreview";
+import type { PreviewAnswer, PreviewTarget } from "../lib/docPreview";
 
 const call = vi.fn<(...a: unknown[]) => Promise<unknown>>();
 vi.mock("../api", () => ({ call: (...a: unknown[]) => call(...a) }));
@@ -37,7 +37,7 @@ afterEach(() => {
 const target = { session: "s1", fileId: "f1", name: "plan.docx" };
 const flush = () => act(async () => {});
 
-async function show(answer: PreviewAnswer | Error, t = target, onClose = () => {}) {
+async function show(answer: PreviewAnswer | Error, t: PreviewTarget = target, onClose = () => {}) {
   call.mockImplementation(() => (answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer)));
   await act(async () => root.render(<DocPreview target={t} onClose={onClose} />));
   await flush();
@@ -218,9 +218,50 @@ test("a made file's chip has Preview only in a chat that keeps a copy", async ()
   await act(async () => root.render(<MadeChip sessionId="s1" made={{ ...made, file_id: "a".repeat(32) }} />));
   expect(host.textContent).toContain("Preview");
   expect(host.textContent).toContain("Download");
-  // A chat with a folder: the file is there, no copy to read.
+  // A chat with a folder: the file is there; the node reads it by its path.
   await act(async () => root.render(<MadeChip sessionId="s1" made={{ ...made, path: "out/plan.docx" }} />));
+  expect(host.textContent).toContain("Preview");
+  expect(host.textContent).not.toContain("Download");
+  let seen: unknown = null;
+  function Probe() {
+    seen = store.usePreview();
+    return null;
+  }
+  await act(async () => root.render(<><MadeChip sessionId="s1" made={{ ...made, path: "out/plan.docx" }} /><Probe /></>));
+  await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+  expect(seen).toEqual({ session: "s1", path: "out/plan.docx", name: "plan.docx" });
+  // Neither a copy nor a path: nothing to ask for.
+  await act(async () => root.render(<MadeChip sessionId="s1" made={made} />));
   expect(host.textContent).not.toContain("Preview");
+});
+
+test("a file of the folder is asked for by its path, the path carried as data, with no download of it", async () => {
+  const t = { session: "s 1", path: "docs/Q1 report & plan.docx", name: "Q1 report & plan.docx" };
+  await show(doc, t);
+  expect(call).toHaveBeenCalledWith(
+    "GET",
+    "/api/sessions/s%201/folder-preview?path=docs%2FQ1%20report%20%26%20plan.docx",
+    undefined,
+    expect.anything(),
+  );
+  expect(host.querySelector("a[href]")).toBeNull();
+  expect(host.textContent).toContain("Preview: text and structure, not the page layout");
+  // The same failure sentences, with the same way to try again.
+  await act(async () => root.render(null));
+  await show(new Error("unknown file"), t);
+  expect(host.querySelector("[role=alert]")?.textContent).toContain("unknown file");
+  expect(host.querySelector("[role=alert] button")?.textContent).toBe("Try again");
+});
+
+test("a sheet of a folder file is asked for by its place beside the path", async () => {
+  const two: PreviewAnswer = {
+    name: "b.xlsx",
+    preview: { kind: "sheet", sheets: ["One", "Two"], at: 0, more: false, notes: [], rows: [{ n: 1, c: [{ a: "A1", v: "x" }] }] },
+  };
+  await show(two, { session: "s1", path: "b.xlsx", name: "b.xlsx" });
+  await act(async () => host.querySelectorAll<HTMLButtonElement>(".pv-tabs button")[1]!.click());
+  await flush();
+  expect(call).toHaveBeenLastCalledWith("GET", "/api/sessions/s1/folder-preview?path=b.xlsx&sheet=1", undefined, expect.anything());
 });
 
 test("tabs go by place: names that look alike are two tabs, and a failed switch shows the error under the chosen tab, not the old sheet", async () => {

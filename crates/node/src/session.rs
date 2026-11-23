@@ -3274,6 +3274,45 @@ impl Session {
         }
     }
 
+    /// The page's preview of a Word or Excel file of this chat's folder
+    /// (X.59, T99): the path is resolved as `read` resolves it (the pinned
+    /// folder, a sub-agent's own, the protected places) but never outside
+    /// the folder, whatever `allow_outside_workspace` says; a node that
+    /// denies `read` shows nothing; a sandboxed and a host chat are read the
+    /// same way (the sandbox confines the agent's shell, not the node's own
+    /// read). Every refusal to read is the one `NotFound`.
+    pub(crate) async fn preview_folder_file(
+        &self,
+        path: &str,
+        sheet: Option<u32>,
+    ) -> Result<serde_json::Value, harness_protocol::PreviewRefusal> {
+        use harness_protocol::PreviewRefusal as R;
+        if self.profile != Profile::Agentic
+            || self.node.cfg.policy.denies("read")
+            || self.check_cwd_still_allowed().is_err()
+        {
+            return Err(R::NotFound);
+        }
+        let helper = crate::docs::shared_helper().ok_or(R::NotAvailable)?;
+        let mut ctx = self.read_ctx();
+        ctx.allow_outside_workspace = false;
+        use harness_tools::folder_preview::Refusal as F;
+        harness_tools::folder_preview::preview(&ctx, helper.as_ref(), path, sheet)
+            .await
+            .map_err(|r| match r {
+                F::NotFound => R::NotFound,
+                F::FileTooLarge => R::FileTooLarge,
+                F::TooLarge => R::TooLarge,
+                F::Empty => R::Empty,
+                F::NotOffice => R::NotOffice,
+                F::Protected => R::Protected,
+                F::Damaged => R::Damaged,
+                F::NoSheet => R::NoSheet,
+                F::Busy => R::Busy,
+                F::NotAvailable => R::NotAvailable,
+            })
+    }
+
     /// Free the turn slot if `turn_id` still holds it.
     fn release(&self, turn_id: &str) {
         let mut t = self.turn.lock().unwrap_or_else(|p| p.into_inner());

@@ -226,8 +226,8 @@ export function MadeChip({ sessionId, made }: { sessionId: string; made: MadeFil
           Download
         </LinkedA>
       )}
-      {/* A chat without a folder: the server's copy opens in the side panel. */}
-      <PreviewButton sessionId={sessionId} fileId={madeId(made.file_id)} name={made.name} />
+      {/* The server's copy (a chat without a folder) or the file's path in the folder (the node reads it) opens in the side panel. */}
+      <PreviewButton sessionId={sessionId} fileId={madeId(made.file_id)} path={made.path} name={made.name} />
     </div>
   );
 }

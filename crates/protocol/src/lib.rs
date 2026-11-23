@@ -105,6 +105,41 @@ pub const CAP_DIFF: &str = "diff";
 /// a node whose hello did not list it.
 pub const CAP_FILES: &str = "files";
 
+/// The node capability that announces `session.doc_preview` (ADOPTION_PLAN
+/// X.59, PLAN.md T99): a Word or Excel file of a chat's folder read by the
+/// node's confined helper for the page's side panel. The master sends it only
+/// to nodes whose hello listed it; an older one is told to update.
+pub const CAP_DOC_PREVIEW: &str = "doc-preview";
+
+/// The longest path a `session.doc_preview` may carry, in bytes.
+pub const MAX_PREVIEW_PATH_BYTES: usize = 1024;
+
+/// The largest serialized preview a node answers with, in bytes: the
+/// helper's own bound is about 200 KB; the master refuses more than this.
+pub const MAX_PREVIEW_JSON: usize = 512 * 1024;
+
+/// Why a node shows no preview: one word each, never text from the file or
+/// the folder. `not_found` is the one answer for a path that is outside the
+/// folder, missing, a directory, a device, behind a link that leads out, in
+/// `.git`, or one the node's own rules refuse to read: nothing about the
+/// target is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewRefusal {
+    NotFound,
+    /// The file is over the 10 MB the tools read.
+    FileTooLarge,
+    /// The helper refused a part or a count as too large.
+    TooLarge,
+    Empty,
+    NotOffice,
+    Protected,
+    Damaged,
+    NoSheet,
+    Busy,
+    NotAvailable,
+}
+
 /// The node capability that announces `project.create` (ADOPTION_PLAN
 /// X.26, PLAN.md T77): its node.toml names a projects folder in which it
 /// makes a new project's folder on request. Never the folder's path: the
@@ -1047,6 +1082,17 @@ pub enum NodeToMaster {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The answer to `session.doc_preview` (pull only): the preview (the
+    /// helper's `Preview`, as JSON, at most [`MAX_PREVIEW_JSON`]) or why
+    /// there is none.
+    #[serde(rename = "session.doc_preview_result")]
+    DocPreviewResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refusal: Option<PreviewRefusal>,
+    },
     /// What the node has for the Plugins screen (X.34), sent unasked after
     /// `node.hello` once the node has read it. The master keeps the first
     /// one of each link, bounded ([`NodePlugins::bounded`]), and ignores a
@@ -1770,6 +1816,21 @@ pub enum MasterToNode {
         session_id: SessionId,
         query: String,
     },
+    /// Read a Word or Excel file of the chat's folder for the page's side
+    /// panel (X.59, T99): answered by one `session.doc_preview_result`,
+    /// never by an ack, handled outside the node's command loop, appends
+    /// no event. `path` is text for the node to resolve under its own read
+    /// rules (it widens nothing); `sheet` is the place among the visible
+    /// sheets. Only to nodes with [`CAP_DOC_PREVIEW`]. A later `edit`
+    /// sibling takes the same target.
+    #[serde(rename = "session.doc_preview")]
+    DocPreview {
+        req_id: String,
+        session_id: SessionId,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<u32>,
+    },
     /// Make a new project's folder (ADOPTION_PLAN X.26, PLAN.md T77): a
     /// display name and nothing else. The node makes the folder's name
     /// from it (`<slug>-<4 random characters>`) inside the projects folder
@@ -1858,6 +1919,7 @@ impl MasterToNode {
             | MasterToNode::ConnectorResult { .. }
             | MasterToNode::Diff { .. }
             | MasterToNode::Files { .. }
+            | MasterToNode::DocPreview { .. }
             | MasterToNode::ProjectCreate { .. }
             | MasterToNode::ProjectClone { .. }
             | MasterToNode::ProjectMcp { .. } => None,

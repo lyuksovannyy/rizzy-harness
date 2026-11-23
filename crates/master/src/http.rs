@@ -26,6 +26,7 @@ mod diff;
 mod doc_preview;
 mod exec_mode;
 mod files;
+mod folder_preview;
 mod fork;
 mod hooks;
 mod levels;
@@ -245,6 +246,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(files::routes())
         .merge(made_files::routes())
         .merge(doc_preview::routes())
+        .merge(folder_preview::routes())
         .merge(approval_mode::routes())
         .merge(exec_mode::routes())
         .merge(chat_allows::routes())

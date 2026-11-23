@@ -42,6 +42,7 @@ mod exec_mode_http;
 mod exec_switch_http;
 mod favicon_http;
 mod files_http;
+mod folder_preview_http;
 mod fork_http;
 mod handoff_http;
 mod hardening_http;

@@ -31,6 +31,11 @@ pub const TIMEOUT: Duration = Duration::from_secs(20);
 pub const MAX_OUTPUT: usize =
     harness_docs::limits::MAX_OUTPUT_BYTES + harness_docs::edit::serve::MAX_HEADER_BYTES + 4096;
 const EXIT_UNREADABLE: i32 = 3;
+/// The sentence of a call that found no free place; callers that must tell
+/// "busy" from a damaged file compare with it, not with a guess.
+pub const BUSY: &str = "this node is busy editing other files; try again in a minute";
+/// The sentence of a node that cannot confine the helper.
+pub const UNCONFINED: &str = "this node cannot edit documents safely: the editor needs Linux 6.7 or newer with Landlock enabled";
 
 pub struct ExeHelper {
     program: PathBuf,
@@ -101,10 +106,8 @@ impl EditHelper for ExeHelper {
     async fn run(&self, input: Vec<u8>) -> Result<Vec<u8>, String> {
         let _slot = tokio::time::timeout(self.queue_wait, self.slots.clone().acquire_owned())
             .await
-            .map_err(|_| {
-                "this node is busy editing other files; try again in a minute".to_string()
-            })?
-            .map_err(|_| "this node is busy editing other files".to_string())?;
+            .map_err(|_| BUSY.to_string())?
+            .map_err(|_| BUSY.to_string())?;
         let mut cmd = tokio::process::Command::new(&self.program);
         cmd.args(&self.args)
             .env_clear()
@@ -163,9 +166,7 @@ impl EditHelper for ExeHelper {
         match status.code() {
             Some(0) => Ok(out),
             Some(EXIT_UNREADABLE) => Err(message(&out)),
-            Some(crate::sandbox::EXIT_UNCONFINED) => Err(
-                "this node cannot edit documents safely: the editor needs Linux 6.7 or newer with Landlock enabled".into(),
-            ),
+            Some(crate::sandbox::EXIT_UNCONFINED) => Err(UNCONFINED.into()),
             _ => Err("this file could not be edited (it is malformed, or too large)".into()),
         }
     }
