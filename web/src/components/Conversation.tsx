@@ -46,7 +46,7 @@ import { Composer, type ComposerHandle, type Submission } from "./Composer";
 import type { Picture } from "../lib/downscale";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import { ChatArtifactsCtx, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
-import { closePreview, usePreview } from "../lib/docPreview";
+import { closePreview, targetKey, usePreview } from "../lib/docPreview";
 import { PreviewButton } from "./PreviewButton";
 import { BubbleImages } from "./ChatImages";
 import { HeadNote, LaterNotes } from "./HeadNote";
@@ -905,7 +905,8 @@ export default function Conversation(props: {
                             ))}
                             {it.uploads?.map((u, j) => (
                               <li key={`u${j}`} className="chip" title={u.path}>
-                                <FileText size={14} /> {u.path.split("/").pop() || u.name} <span className="muted">({bytes(u.bytes)})</span>
+                                <FileText size={14} /> {u.path.split("/").pop() || u.name} <span className="muted">({bytes(u.bytes)})</span>{" "}
+                                <PreviewButton sessionId={sessionId} path={u.path} name={u.name} />
                               </li>
                             ))}
                           </ul>
@@ -1479,7 +1480,7 @@ export default function Conversation(props: {
           })()}
         {previewHere && (
           <Suspense fallback={null}>
-            <DocPreview key={`${sessionId}:${previewHere.fileId}`} target={previewHere} onClose={closePreview} />
+            <DocPreview key={targetKey(previewHere)} target={previewHere} onClose={closePreview} />
           </Suspense>
         )}
         {sideFor.current === sessionId && (

@@ -19,6 +19,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use harness_docs::edit::preview::{Preview, Why};
 use harness_docs::edit::serve::{Request, frame_request, parse_reply};
+use harness_protocol::PreviewRefusal;
 use serde::{Deserialize, Serialize};
 
 use super::{ApiError, ApiResult, require, visible_session};
@@ -27,10 +28,10 @@ use crate::{Master, attached};
 
 /// The largest answer the route forwards, in bytes: the helper's own bound
 /// is under 256 KB, so this is a helper that misbehaves.
-const MAX_ANSWER_BYTES: usize = 512 * 1024;
+pub(super) const MAX_ANSWER_BYTES: usize = 512 * 1024;
 /// The most the master reads from the helper for a preview: that, a header
 /// and room for the framing. More is a failed helper.
-const MAX_HELPER_BYTES: usize = MAX_ANSWER_BYTES + 128 * 1024;
+pub(super) const MAX_HELPER_BYTES: usize = MAX_ANSWER_BYTES + 128 * 1024;
 
 pub(super) fn routes() -> Router<Master> {
     Router::new().route("/api/sessions/{id}/files/{file_id}/preview", get(preview))
@@ -43,10 +44,10 @@ struct PreviewQuery {
 }
 
 #[derive(Serialize)]
-struct Answer {
+pub(super) struct Answer {
     /// The file's name as the chat has it (text for the page).
-    name: String,
-    preview: Preview,
+    pub(super) name: String,
+    pub(super) preview: Preview,
 }
 
 fn unknown() -> ApiError {
@@ -63,7 +64,7 @@ fn office_name(name: &str) -> bool {
     })
 }
 
-fn sentence(e: DocError) -> ApiError {
+pub(super) fn sentence(e: DocError) -> ApiError {
     match e {
         DocError::NotSetUp | DocError::Unconfined | DocError::Busy | DocError::Timeout => {
             ApiError(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
@@ -109,16 +110,10 @@ async fn preview(
         return Err(not_office());
     }
     if file.size == 0 {
-        return Err(ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "this file is empty".into(),
-        ));
+        return Err(refusal(PreviewRefusal::Empty, false));
     }
     if file.size > attached::MAX_FILE {
-        return Err(ApiError(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "this file is too large to preview; download it to open it".into(),
-        ));
+        return Err(refusal(PreviewRefusal::FileTooLarge, false));
     }
     let reader = m.pdf_reader().ok_or_else(|| sentence(DocError::NotSetUp))?;
     // The caller's place, as attachments take it: the API token has one of
@@ -163,7 +158,7 @@ async fn preview(
     Ok(Json(answer))
 }
 
-fn not_office() -> ApiError {
+pub(super) fn not_office() -> ApiError {
     ApiError(
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
         "this is not a Word or Excel document that can be previewed".into(),
@@ -171,7 +166,7 @@ fn not_office() -> ApiError {
 }
 
 /// What the helper said it could not do, as one sentence of ours each.
-fn why(w: Why) -> ApiError {
+pub(super) fn why(w: Why) -> ApiError {
     let (code, text) = match w {
         Why::NotOffice => return not_office(),
         Why::Protected => (
@@ -192,4 +187,47 @@ fn why(w: Why) -> ApiError {
         ),
     };
     ApiError(code, text.into())
+}
+
+/// What a node said it could not show (the folder route), in the sentences
+/// of this route, so a person meets the same words in both kinds of chat.
+/// `folder`: the file is in a chat's folder, where the panel has no
+/// download, so the two "too large" sentences send the person to Word or
+/// Excel instead.
+pub(super) fn refusal(r: PreviewRefusal, folder: bool) -> ApiError {
+    if folder && matches!(r, PreviewRefusal::FileTooLarge | PreviewRefusal::TooLarge) {
+        let code = if r == PreviewRefusal::FileTooLarge {
+            StatusCode::PAYLOAD_TOO_LARGE
+        } else {
+            StatusCode::UNPROCESSABLE_ENTITY
+        };
+        return ApiError(
+            code,
+            "this file is too large to preview; open it in Word or Excel".into(),
+        );
+    }
+    match r {
+        PreviewRefusal::NotFound => unknown(),
+        PreviewRefusal::FileTooLarge => ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "this file is too large to preview; download it to open it".into(),
+        ),
+        PreviewRefusal::Empty => ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this file is empty".into(),
+        ),
+        PreviewRefusal::TooLarge => why(Why::TooLarge),
+        PreviewRefusal::NotOffice => why(Why::NotOffice),
+        PreviewRefusal::Protected => why(Why::Protected),
+        PreviewRefusal::Damaged => why(Why::Damaged),
+        PreviewRefusal::NoSheet => why(Why::NoSheet),
+        PreviewRefusal::Busy => ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the node is busy reading other files; try again in a minute".into(),
+        ),
+        PreviewRefusal::NotAvailable => ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this chat's node cannot read documents safely: its reader needs Linux 6.7 or newer with Landlock enabled".into(),
+        ),
+    }
 }

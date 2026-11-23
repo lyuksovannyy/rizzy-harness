@@ -70,6 +70,8 @@ fn limit(method: &Method, template: &str) -> Limit {
         ("POST", "/api/admin/providers/test" | "/api/admin/providers/models/test")
         | ("POST", "/api/admin/providers/{id}/models/refresh")
         | ("GET", "/api/admin/providers/{id}/models")
+        // A node's helper: up to 10 s for its place and 20 s to run (T99).
+        | ("GET", "/api/sessions/{id}/folder-preview")
         | ("POST", "/api/agent-summary") => Limit::Long,
         _ => Limit::Short,
     }

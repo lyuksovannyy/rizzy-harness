@@ -1633,9 +1633,14 @@ chat shows the file as a chip with its name and size.
   machine without Linux 6.7 or newer and Landlock cannot edit. These files have
   not been opened in Word or Excel by the program's tests: look at the result
   before you rely on it.
-- **Looking at a file.** In a chat without a folder, a Word or Excel file the
-  agent made, and one you attached, has a **Preview** button next to its name
-  (a made file's chip, a sent message's chip). It opens the file in the panel on
+- **Looking at a file.** A Word or Excel file the agent made, and one you
+  attached, has a **Preview** button next to its name (a made file's chip, a
+  sent message's chip), in a chat without a folder and in a coding chat alike.
+  In a coding chat the file is in the chat's folder and the node that owns it
+  reads it, by the rules its `read` tool has: a file outside the folder, inside
+  `.git`, or on a node that denies `read` says "unknown file"; one over 10 MB
+  says it is too large to preview and to open it in Word or Excel; an older node
+  says it must be updated. Preview opens the file in the panel on
   the right: a Word file as headings, paragraphs (bold, italic and strike-through
   as the file has them), lists and tables; an Excel file as a grid with column
   letters and row numbers, one sheet at a time with a tab for each, and a
@@ -1647,15 +1652,14 @@ chat shows the file as a chip with its name and size.
   can draw, and the panel says so; a file too big to be read at all (a part of
   it over 8 MB once unpacked, more than 200,000 paragraphs or 300,000 rows) is
   not previewed, and the panel says "too large to preview; download it". A
-  file protected with a password says so. **Download** is in the panel's top bar.
+  file protected with a password says so. **Download** is in the panel's top bar (not for
+  a file of a folder).
   Everything in it is plain text: a link, a script or a picture inside a
   file is shown as the characters it is, and a formula such as `=HYPERLINK(...)`
   is only text. The file is read by the same separate, confined process as the
   editing tools, one at a time per account, so a machine without Linux 6.7 or
   newer and Landlock cannot preview. Only you can preview your chat's files
-  (the server's API token can, as it can download them). A
-  file in a chat's folder is not previewed yet; you can only edit it through the
-  agent.
+  (the server's API token can, as it can download them).
 - **In a folder chat without `write`.** The Assistant has no `write` tool, but
   with this switch it can now create new Word and Excel files in a chat's
   folder (never over an existing file). A node turns the two tools off with

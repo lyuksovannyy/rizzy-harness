@@ -53,10 +53,7 @@ async fn complete(
     match crate::files::complete(&m, &user, row.session_id, q.q).await {
         Ok(paths) => Ok(Json(json!({ "paths": paths }))),
         Err(e) => Err(match e {
-            FilesError::Away(_) => ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("the node {node} that holds this chat's folder is away"),
-            ),
+            FilesError::Away(_) => away(&node),
             FilesError::TooOld => ApiError(
                 StatusCode::CONFLICT,
                 "this chat's node is older than this server and cannot list its files; update \
@@ -75,6 +72,14 @@ async fn complete(
             FilesError::Unknown => ApiError(StatusCode::NOT_FOUND, "unknown session".into()),
         }),
     }
+}
+
+/// The answer for a node that is not connected, in words for the person.
+pub(super) fn away(node: &str) -> ApiError {
+    ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!("the node {node} that holds this chat's folder is away"),
+    )
 }
 
 /// A prompt's `files`: at most [`MAX_PROMPT_FILES`] paths of at most

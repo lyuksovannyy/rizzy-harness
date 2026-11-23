@@ -21,6 +21,7 @@ pub mod env;
 mod exec_switch;
 mod favicon;
 pub mod files;
+pub mod folder_preview;
 pub mod forge;
 pub mod forge_repos;
 mod forks;
@@ -368,6 +369,8 @@ pub struct MasterInner {
     diffs: diff::Waiting,
     /// `@` completions waiting for their node's answer (T63).
     files: files::Waiting,
+    /// Folder-file previews waiting for their node's answer (X.59, T99).
+    pub(crate) previews: folder_preview::Waiting,
     /// New project folders waiting for their node's answer (X.26, T77).
     project_folders: project_folder::Waiting,
     /// Requests about project folders' `.mcp.json` waiting for nodes (X.36).
@@ -763,6 +766,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Diff { .. }
         // A listing of names for the composer: no event.
         | MasterToNode::Files { .. }
+        // A file read for the page's panel: no event.
+        | MasterToNode::DocPreview { .. }
         // A new project's folder: no session at all.
         | MasterToNode::ProjectCreate { .. }
         // A new project's folder cloned from a forge: no session at all.
@@ -868,6 +873,7 @@ impl Master {
                 pulls: Default::default(),
                 diffs: Default::default(),
                 files: Default::default(),
+                previews: Default::default(),
                 project_folders: Default::default(),
                 project_mcp: Default::default(),
                 artifact_throttle: Default::default(),
@@ -1526,6 +1532,7 @@ impl Master {
                 artifact_pull::node_down(&this, &nid);
                 diff::node_down(&this, &nid);
                 files::node_down(&this, &nid);
+                folder_preview::node_down(&this, &nid);
                 project_folder::node_down(&this, &nid);
                 project_mcp::node_down(&this, &nid);
             }
@@ -1761,6 +1768,20 @@ impl Master {
                 match error {
                     None => Ok(paths),
                     Some(e) => Err(e),
+                },
+            ),
+            NodeToMaster::DocPreviewResult {
+                req_id,
+                preview,
+                refusal,
+            } => folder_preview::on_answer(
+                self,
+                node_id,
+                req_id,
+                match (preview, refusal) {
+                    (Some(p), None) => Ok(p),
+                    (_, Some(r)) => Err(r),
+                    (None, None) => Err(harness_protocol::PreviewRefusal::NotAvailable),
                 },
             ),
             NodeToMaster::ProjectCreated {

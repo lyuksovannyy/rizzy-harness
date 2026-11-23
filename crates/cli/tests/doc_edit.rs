@@ -386,3 +386,87 @@ async fn the_helper_previews_a_document_a_workbook_and_nothing_else() {
     let r = parse_reply(&out).unwrap().0;
     assert!(r.preview.is_none() && r.why == Some(harness_docs::edit::preview::Why::NotOffice));
 }
+
+/// A file of a folder, previewed the way the node does it for the page
+/// (`harness_tools::folder_preview`, T99, X.59): the node's confined helper,
+/// the real one. A hostile document is a sentence-less refusal word, never
+/// the helper's own text; a good one is structure and strings.
+#[tokio::test]
+async fn a_folder_file_is_previewed_through_the_node_helper_and_a_hostile_one_is_refused() {
+    use harness_tools::doc_helper::ExeHelper;
+    use harness_tools::folder_preview::{Refusal, preview};
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().canonicalize().unwrap();
+    let ctx = harness_tools::ToolCtx::new(&ws);
+    let helper = ExeHelper::new(EXE.into());
+    std::fs::write(
+        ws.join("ok.docx"),
+        docx_bytes("# Title\n\njavascript:alert(1) and =HYPERLINK(\"http://x\") and \u{202e}rtl\n"),
+    )
+    .unwrap();
+    let got = preview(&ctx, &helper, "ok.docx", None).await;
+    if got == Err(Refusal::NotAvailable) {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "doc-edit cannot confine itself on this CI kernel"
+        );
+        eprintln!("skipped: doc-edit cannot confine itself here (Landlock ABI 4 needed)");
+        return;
+    }
+    let v = got.unwrap();
+    assert_eq!(v["kind"], "doc");
+    // Text, nothing else: the script-looking words are strings, and the
+    // direction character is dropped by the helper.
+    let text = v.to_string();
+    assert!(
+        text.contains("javascript:alert(1)") && text.contains("=HYPERLINK"),
+        "{v}"
+    );
+    assert!(!text.contains('\u{202e}'), "{v}");
+    std::fs::write(ws.join("book.xlsx"), xlsx_bytes()).unwrap();
+    let v = preview(&ctx, &helper, "book.xlsx", Some(0)).await.unwrap();
+    assert_eq!(v["kind"], "sheet");
+    assert_eq!(
+        preview(&ctx, &helper, "book.xlsx", Some(7)).await,
+        Err(Refusal::NoSheet)
+    );
+    // A DOCTYPE (an external entity), a renamed PDF, a file that is no zip.
+    let base = docx_bytes("one\n");
+    let p =
+        harness_attached::Package::open(&base, Instant::now() + Duration::from_secs(5)).unwrap();
+    let mut w = ZipWriter::new(10 << 20);
+    for en in p.raw_entries().unwrap() {
+        let n = std::str::from_utf8(en.name).unwrap();
+        if n == "word/document.xml" {
+            w.add(n, b"<?xml version=\"1.0\"?><!DOCTYPE d [<!ENTITY x SYSTEM \"file:///etc/passwd\">]><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>&x;</w:t></w:r></w:p></w:body></w:document>").unwrap();
+        } else {
+            w.put_raw(
+                n,
+                en.method,
+                en.crc,
+                en.comp as u32,
+                en.size as u32,
+                en.time,
+                en.date,
+                en.data,
+            )
+            .unwrap();
+        }
+    }
+    std::fs::write(ws.join("xxe.docx"), w.finish().unwrap()).unwrap();
+    std::fs::write(ws.join("pdf.docx"), b"%PDF-1.4\n").unwrap();
+    std::fs::write(ws.join("junk.xlsx"), vec![0x41u8; 5000]).unwrap();
+    assert_eq!(
+        preview(&ctx, &helper, "xxe.docx", None).await,
+        Err(Refusal::Damaged)
+    );
+    assert_eq!(
+        preview(&ctx, &helper, "pdf.docx", None).await,
+        Err(Refusal::NotOffice)
+    );
+    assert_eq!(
+        preview(&ctx, &helper, "junk.xlsx", None).await,
+        Err(Refusal::NotOffice)
+    );
+    assert_eq!(helper.free_slots(), harness_tools::doc_helper::CONCURRENT);
+}

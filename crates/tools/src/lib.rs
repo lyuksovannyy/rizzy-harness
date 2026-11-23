@@ -12,6 +12,7 @@ mod board;
 pub mod connector;
 pub mod contain;
 pub mod doc_helper;
+pub mod folder_preview;
 pub mod guard;
 mod office;
 mod office_edit;

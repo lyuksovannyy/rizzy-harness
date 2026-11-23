@@ -4,8 +4,10 @@
 // chip opens the right side panel with the document's headings, list and
 // table (the hostile text as text, no link, no image, no script), the
 // workbook as a grid with a formula marked and its sheet tabs; Escape closes
-// it and the chip's Preview has the focus again; a chat with a folder has no
-// Preview. The helper is the binary's own confined `doc-edit`: on a machine
+// it and the chip's Preview has the focus again; in a coding chat (X.59) the made
+// file's chip and the sent message's attached .docx chip have the same Preview,
+// read by the node by path, no Download, and a vanished file is "unknown file".
+// The helper is the binary's own confined `doc-edit`: on a machine
 // without Landlock the preview says so and this script says so and stops.
 // Usage: node web/e2e/doc-preview.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
@@ -31,6 +33,7 @@ let PAGE = null;
 const events = (p, sid) => p.evaluate(async (id) => (await (await fetch(`/api/sessions/${id}/events`)).json()).events, sid);
 const part = (file, name) => execFileSync('python3', ['-I', '-c', 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); assert z.testzip() is None; sys.stdout.write(z.read(sys.argv[2]).decode())', file, name]).toString();
 
+const FOLDER_DOC = JSON.stringify([{ tool: 'doc_create', input: { path: 'reports/plan', markdown: '# Plan\n\ntext' } }]);
 const DOC = JSON.stringify([{ tool: 'doc_create', input: { path: 'Plan', markdown: '# Plan\n\nShip the **document tools** before *Friday* and ~~never~~ always.\n\n- reader\n- writer\n\n| Who | What |\n|---|---|\n| Ann | review |\n\n<script>alert(1)</script> [click](javascript:alert(1)) <img src=x onerror=alert(2)>\n' } }]);
 const SHEET = JSON.stringify([{ tool: 'sheet_create', input: { path: 'budget', sheets: [{ name: 'Budget', columns: [{ header: 'Item' }, { header: 'Cost', format: 'currency' }], rows: [['Coffee beans', 42.5], ['=cmd|calc', 1], ['Total', { f: 'SUM(B2:B3)' }]] }, { name: 'Notes', columns: [{ header: 'Note' }], rows: [['second sheet']] }] } }]);
 
@@ -142,7 +145,55 @@ const SHEET = JSON.stringify([{ tool: 'sheet_create', input: { path: 'budget', s
     check(!(await p.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)), 'no horizontal scroll at 390 px');
     await p.screenshot({ path: `${S}/docpreview-3-phone.png` });
 
+    // 4. A coding chat: the same Preview on the made file's chip and on the
+    // sent message's chip of an attached .docx (saved into the folder); the
+    // node reads the file by its path; no Download for a folder file; a path
+    // the node refuses is the one plain sentence.
+    await p.setViewportSize({ width: 1440, height: 900 });
+    await p.goto(URL_);
+    await p.waitForSelector('h1.greeting');
+    await p.click('.mode-switch button:has-text("Agentic")');
+    await pickFolder(p, R);
+    await pickAgent(p, 'Assistant');
+    fs.mkdirSync(`${S}/in`, { recursive: true });
+    const memo = `${S}/in/memo.docx`;
+    execFileSync('python3', ['-I', '-c', `
+import sys, zipfile
+W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+with zipfile.ZipFile(sys.argv[1], 'w') as z:
+    z.writestr('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+    z.writestr('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
+    z.writestr('word/document.xml', '<?xml version="1.0"?><w:document xmlns:w="' + W + '"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Plan</w:t></w:r></w:p><w:p><w:r><w:t>Attached by the person.</w:t></w:r></w:p></w:body></w:document>')
+`, memo]);
+    await p.setInputFiles('.composer input[type=file]', memo);
+    await p.fill('.composer textarea', 'script: ' + FOLDER_DOC);
+    await p.click('.composer .send');
+    await p.waitForSelector('.artifact-card:has-text("plan.docx")');
+    await p.waitForFunction(() => !document.querySelector('.send.stop'));
+    const folderOpen = p.locator('.artifact-card:has-text("plan.docx") button:has-text("Preview")');
+    await folderOpen.click();
+    await p.waitForSelector('aside.doc-preview .pv-body h3');
+    check((await p.locator('.doc-preview .pv-body h3').first().textContent()) === 'Plan', 'the folder file heading');
+    check((await p.locator('.doc-preview a[href]').count()) === 0, 'no download link for a folder file');
+    check((await p.locator('.doc-preview .pv-body a, .doc-preview .pv-body img').count()) === 0, 'no link or image');
+    await p.screenshot({ path: `${S}/docpreview-4-coding-made.png` });
+    await p.keyboard.press('Escape');
+    await p.waitForSelector('aside.doc-preview', { state: 'detached' });
+    const sent = p.locator('.msg.user .chip:has-text("memo.docx") button:has-text("Preview")');
+    await sent.click();
+    await p.waitForSelector('aside.doc-preview .pv-body h3');
+    check((await p.locator('.doc-preview .pv-body h3').first().textContent()) === 'Plan', 'the attached file heading');
+    await p.screenshot({ path: `${S}/docpreview-5-coding-attached.png` });
+    // A file the node will not show: the same sentence a missing one gets.
+    fs.unlinkSync(`${R}/attachments/memo.docx`);
+    await p.keyboard.press('Escape');
+    await p.waitForSelector('aside.doc-preview', { state: 'detached' });
+    await sent.click();
+    await p.waitForSelector('.doc-preview [role=alert]');
+    check((await p.locator('.doc-preview [role=alert]').textContent()).includes('unknown file'), 'a missing file is "unknown file"');
+    await p.screenshot({ path: `${S}/docpreview-6-coding-gone.png` });
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
+    log('coding chat preview ok');
     log('screenshots in', S);
     await b.close();
   } catch (e) {

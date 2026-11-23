@@ -105,6 +105,37 @@ pub const CAP_DIFF: &str = "diff";
 /// a node whose hello did not list it.
 pub const CAP_FILES: &str = "files";
 
+/// The node capability that announces `session.doc_preview` (ADOPTION_PLAN
+/// X.59, PLAN.md T99): a Word or Excel file of a chat's folder read by the
+/// node's confined helper for the page's side panel. The master sends it only
+/// to nodes whose hello listed it; an older one is told to update.
+pub const CAP_DOC_PREVIEW: &str = "doc-preview";
+
+/// The longest path a `session.doc_preview` may carry, in bytes.
+pub const MAX_PREVIEW_PATH_BYTES: usize = 1024;
+
+/// Why a node shows no preview: one word each, never text from the file or
+/// the folder. `not_found` is the one answer for a path that is outside the
+/// folder, missing, a directory, a device, behind a link that leads out, in
+/// `.git`, or one the node's own rules refuse to read: nothing about the
+/// target is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewRefusal {
+    NotFound,
+    /// The file is over the 10 MB the tools read.
+    FileTooLarge,
+    /// The helper refused a part or a count as too large.
+    TooLarge,
+    Empty,
+    NotOffice,
+    Protected,
+    Damaged,
+    NoSheet,
+    Busy,
+    NotAvailable,
+}
+
 /// The node capability that announces `project.create` (ADOPTION_PLAN
 /// X.26, PLAN.md T77): its node.toml names a projects folder in which it
 /// makes a new project's folder on request. Never the folder's path: the
@@ -1047,6 +1078,17 @@ pub enum NodeToMaster {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The answer to `session.doc_preview` (pull only): the preview (the
+    /// helper's `Preview`, as JSON, at most 512 KB: the node and the master
+    /// each check it) or why there is none.
+    #[serde(rename = "session.doc_preview_result")]
+    DocPreviewResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refusal: Option<PreviewRefusal>,
+    },
     /// What the node has for the Plugins screen (X.34), sent unasked after
     /// `node.hello` once the node has read it. The master keeps the first
     /// one of each link, bounded ([`NodePlugins::bounded`]), and ignores a
@@ -1770,6 +1812,21 @@ pub enum MasterToNode {
         session_id: SessionId,
         query: String,
     },
+    /// Read a Word or Excel file of the chat's folder for the page's side
+    /// panel (X.59, T99): answered by one `session.doc_preview_result`,
+    /// never by an ack, handled outside the node's command loop, appends
+    /// no event. `path` is text for the node to resolve under its own read
+    /// rules (it widens nothing); `sheet` is the place among the visible
+    /// sheets. Only to nodes with [`CAP_DOC_PREVIEW`]. A later `edit`
+    /// sibling takes the same target.
+    #[serde(rename = "session.doc_preview")]
+    DocPreview {
+        req_id: String,
+        session_id: SessionId,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<u32>,
+    },
     /// Make a new project's folder (ADOPTION_PLAN X.26, PLAN.md T77): a
     /// display name and nothing else. The node makes the folder's name
     /// from it (`<slug>-<4 random characters>`) inside the projects folder
@@ -1858,6 +1915,7 @@ impl MasterToNode {
             | MasterToNode::ConnectorResult { .. }
             | MasterToNode::Diff { .. }
             | MasterToNode::Files { .. }
+            | MasterToNode::DocPreview { .. }
             | MasterToNode::ProjectCreate { .. }
             | MasterToNode::ProjectClone { .. }
             | MasterToNode::ProjectMcp { .. } => None,
@@ -2586,6 +2644,68 @@ mod tests {
         assert_eq!(v["diff"]["files"][0]["hunks"][0]["lines"][1], "+two");
         assert!(v["diff"].get("cut").is_none(), "{v}");
         assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), ans);
+    }
+
+    /// X.59: the wire shape of the folder preview pair.
+    #[test]
+    fn doc_preview_wire_shape() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let ask = MasterToNode::DocPreview {
+            req_id: "r".into(),
+            session_id: sid,
+            path: "docs/a.docx".into(),
+            sheet: Some(2),
+        };
+        let v = serde_json::to_value(&ask).unwrap();
+        assert_eq!(v["type"], "session.doc_preview");
+        assert_eq!(v["path"], "docs/a.docx");
+        assert_eq!(v["sheet"], 2);
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), ask);
+        // No sheet: omitted when sent, and a message without one is read.
+        let first = MasterToNode::DocPreview {
+            req_id: "r".into(),
+            session_id: sid,
+            path: "a.docx".into(),
+            sheet: None,
+        };
+        let v = serde_json::to_value(&first).unwrap();
+        assert!(v.get("sheet").is_none(), "{v}");
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), first);
+        // A preview: the refusal is omitted.
+        let ok = NodeToMaster::DocPreviewResult {
+            req_id: "r".into(),
+            preview: Some(json!({"kind": "doc"})),
+            refusal: None,
+        };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["type"], "session.doc_preview_result");
+        assert!(v.get("refusal").is_none(), "{v}");
+        assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), ok);
+        // Every refusal is one snake_case word, the preview omitted.
+        for (r, word) in [
+            (PreviewRefusal::NotFound, "not_found"),
+            (PreviewRefusal::FileTooLarge, "file_too_large"),
+            (PreviewRefusal::TooLarge, "too_large"),
+            (PreviewRefusal::Empty, "empty"),
+            (PreviewRefusal::NotOffice, "not_office"),
+            (PreviewRefusal::Protected, "protected"),
+            (PreviewRefusal::Damaged, "damaged"),
+            (PreviewRefusal::NoSheet, "no_sheet"),
+            (PreviewRefusal::Busy, "busy"),
+            (PreviewRefusal::NotAvailable, "not_available"),
+        ] {
+            let no = NodeToMaster::DocPreviewResult {
+                req_id: "r".into(),
+                preview: None,
+                refusal: Some(r),
+            };
+            let v = serde_json::to_value(&no).unwrap();
+            assert_eq!(v["refusal"], word);
+            assert!(v.get("preview").is_none(), "{v}");
+            assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), no);
+        }
+        // The message is never acked.
+        assert_eq!(ask.req_id(), None);
     }
 
     #[test]

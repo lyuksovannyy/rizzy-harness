@@ -117,6 +117,15 @@ pub(crate) fn shared_helper() -> Option<Arc<dyn harness_core::docs::EditHelper>>
         std::sync::OnceLock::new();
     HELPER
         .get_or_init(|| {
+            #[cfg(feature = "testing")]
+            if let Some(script) = crate::testing::DOC_HELPER_SCRIPT.get() {
+                return Some(Arc::new(
+                    harness_tools::doc_helper::ExeHelper::with_command(
+                        "/bin/sh".into(),
+                        vec!["-c".into(), script.into(), "sh".into()],
+                    ),
+                ));
+            }
             std::env::current_exe()
                 .and_then(|e| e.canonicalize())
                 .ok()
