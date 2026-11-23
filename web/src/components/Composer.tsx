@@ -449,7 +449,7 @@ export function Composer(props: {
   const [found, setFound] = useState<string[]>([]);
   const [dropped, setDropped] = useState<string[]>([]);
   const known = useRef(new Map<string, { ok: boolean; at: number }>());
-  const hasPathToken = !!filesOf && /(^|[\s([{'"])@[^\s@]*[/.]/.test(text);
+  const hasPathToken = !!filesOf && /(^|[\s([{'"])@(?:"[^"\n@]+"|[^\s@]*[/.])/.test(text);
   useEffect(() => {
     if (!filesOf || !hasPathToken) {
       setFound([]);

@@ -126,3 +126,64 @@
     box-shadow: var(--shadow-1);
   }
 }
+
+/* Changing text (X.60): the places are buttons that look like the text; the
+   field replaces the place; a changed place is marked, and says so to a
+   screen reader too. Rizzy Glass tokens only. */
+.pv-place {
+  all: unset;
+  display: inline;
+  cursor: text;
+  white-space: inherit;
+  overflow-wrap: anywhere;
+  border-radius: var(--r-sm, 3px);
+}
+.pv-place:hover {
+  background: var(--hover, color-mix(in srgb, var(--accent) 10%, transparent));
+}
+.pv-place:focus-visible,
+.pv-field:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.pv-cell {
+  display: block;
+  min-width: 3em;
+  min-height: 1.4em;
+}
+.pv-changed {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.pv-field {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm, 3px);
+  padding: 2px 4px;
+  resize: vertical;
+}
+.pv-place-error,
+.pv-place-warn {
+  display: block;
+  margin: 2px 0 6px;
+}
+.pv-editbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px 12px 0;
+  flex-wrap: wrap;
+}
+.pv-editbar span {
+  flex: 1;
+  font-weight: var(--w-semibold);
+}
+.pv-saved,
+.pv-fail {
+  margin: 0;
+  padding: 6px 12px 0;
+}

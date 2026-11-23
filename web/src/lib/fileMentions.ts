@@ -14,10 +14,16 @@ export const MAX_FILE_MENTIONS = 64;
  * (`existing`). */
 export function fileMentions(text: string): string[] {
   const out: string[] = [];
-  for (const m of text.matchAll(/(^|[\s([{'"])@([^\s@]+)/g)) {
-    let p = m[2]!.replace(/[,;:!?)\]}'"]+$/, "");
-    if (p.length > 1 && p.endsWith(".") && !p.endsWith("..") && !p.endsWith("/.")) p = p.slice(0, -1);
-    if (isPathToken(p) && !out.includes(p)) out.push(p);
+  // `@path`, or `@"a path with spaces"` (what the panel puts in after it saves
+  // a copy: the name of a copy is `<name> (edited).docx`).
+  for (const m of text.matchAll(/(^|[\s([{'"])@(?:"([^"\n@]+)"|([^\s@]+))/g)) {
+    if (m[2] !== undefined) {
+      if (isPathToken(m[2]) && !out.includes(m[2])) out.push(m[2]);
+    } else {
+      let p = m[3]!.replace(/[,;:!?)\]}'"]+$/, "");
+      if (p.length > 1 && p.endsWith(".") && !p.endsWith("..") && !p.endsWith("/.")) p = p.slice(0, -1);
+      if (isPathToken(p) && !out.includes(p)) out.push(p);
+    }
     if (out.length >= MAX_FILE_MENTIONS) break;
   }
   return out;
