@@ -45,18 +45,25 @@ pub enum Block {
     H {
         l: u8,
         r: Vec<Run>,
+        /// The tag `doc_view` prints and `doc_edit` takes (`p2#00a1`), set
+        /// only where the paragraph can be changed from the page: a body
+        /// paragraph the preview shows whole. Empty: not editable here.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        at: String,
     },
     P {
         r: Vec<Run>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        at: String,
     },
     /// A list item.
     Li {
         r: Vec<Run>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        at: String,
     },
     /// A table: rows of cells, a cell its lines joined with `\n`.
-    T {
-        rows: Vec<Vec<String>>,
-    },
+    T { rows: Vec<Vec<String>> },
 }
 
 /// One cell with something in it.
@@ -70,6 +77,10 @@ pub struct Cell {
     /// The formula as `doc_view` prints it (`=B2*2`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub f: Option<String>,
+    /// Not editable here: the shown text or formula is cut, or is only a
+    /// stand-in (a shared formula).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub x: bool,
 }
 
 /// A row of a sheet that has cells.
@@ -116,6 +127,9 @@ pub enum Why {
     Damaged,
     /// A workbook with no sheet at that place (or none visible).
     NoSheet,
+    /// Protected against editing (a document with protection on, a
+    /// protected sheet): only a page edit says so.
+    Locked,
 }
 
 /// The preview of a Word or Excel file, or why there is none. `sheet` is the
@@ -140,7 +154,7 @@ pub fn preview(file: &[u8], sheet: Option<u32>) -> std::result::Result<Preview, 
 }
 
 /// A refusal of the reader as a kind: a limit, or damage.
-fn why_of(e: &str) -> Why {
+pub(super) fn why_of(e: &str) -> Why {
     if crate::edit::LIMIT_REFUSALS.contains(&e) {
         Why::TooLarge
     } else {
@@ -149,7 +163,7 @@ fn why_of(e: &str) -> Why {
 }
 
 /// A part, unpacked: past the ceiling is too large, anything else damage.
-fn read(src: &Source<'_>, name: &str) -> std::result::Result<Vec<u8>, Why> {
+pub(super) fn read(src: &Source<'_>, name: &str) -> std::result::Result<Vec<u8>, Why> {
     if src
         .part_size(name)
         .is_some_and(|n| n > MAX_EDIT_PART_BYTES as u64)
@@ -317,6 +331,7 @@ fn doc(src: &Source<'_>) -> std::result::Result<Preview, Why> {
             .map_err(|e| why_of(&e))?;
         let mut left = MAX_PREVIEW_PARA_CHARS;
         let mut runs: Vec<Run> = vec![];
+        let mut whole = true;
         for sp in ps.spans() {
             let (text, cut) = clean(&sp.text, left);
             left = left.saturating_sub(text.chars().count());
@@ -334,6 +349,7 @@ fn doc(src: &Source<'_>) -> std::result::Result<Preview, Why> {
             }
             if cut {
                 more = true;
+                whole = false;
                 break;
             }
         }
@@ -346,10 +362,16 @@ fn doc(src: &Source<'_>) -> std::result::Result<Preview, Why> {
                 .cloned()
                 .unwrap_or_else(|| sid.to_lowercase())
         });
+        // The address the edit tools take, only for a body paragraph shown
+        // whole (a cut one would lose its end if its text were set).
+        let at = match (&p.tag, whole) {
+            (Some(docx::Tag::P(_)), true) => docx::tag_text(p).unwrap_or_default(),
+            _ => String::new(),
+        };
         blocks.push(match name.as_deref().and_then(heading_level) {
-            Some(l) => Block::H { l, r: runs },
-            None if p.list => Block::Li { r: runs },
-            None => Block::P { r: runs },
+            Some(l) => Block::H { l, r: runs, at },
+            None if p.list => Block::Li { r: runs, at },
+            None => Block::P { r: runs, at },
         });
     }
     flush(&mut tbl, &mut blocks, &mut more);
@@ -397,19 +419,35 @@ fn sheet_of(src: &Source<'_>, sheet: Option<u32>) -> std::result::Result<Preview
             if matches!(c.val, Val::Empty) || ix.col_hidden(c.col) {
                 continue;
             }
+            let mut x = false;
             let (v, f) = match &c.val {
                 Val::Empty => continue,
-                Val::Text(t) => (
-                    harness_core::text::clean_line(t, MAX_PREVIEW_CELL_CHARS),
-                    None,
-                ),
+                Val::Text(t) => {
+                    let mut v = harness_core::text::clean_line(t, MAX_PREVIEW_CELL_CHARS + 1);
+                    if v.chars().count() > MAX_PREVIEW_CELL_CHARS {
+                        v = v.chars().take(MAX_PREVIEW_CELL_CHARS).collect();
+                        x = true;
+                    }
+                    (v, None)
+                }
                 Val::Formula(f) if f.is_empty() && c.shared_si.is_some() => {
+                    x = true;
                     (String::new(), Some("=(shared formula)".to_string()))
                 }
-                Val::Formula(f) => (
-                    String::new(),
-                    Some(format!("={}", harness_core::text::clean_line(f, 300))),
-                ),
+                Val::Formula(f) => {
+                    let shown = harness_core::text::clean_line(f, MAX_PREVIEW_FORMULA_CHARS + 1);
+                    x = shown.chars().count() > MAX_PREVIEW_FORMULA_CHARS;
+                    (
+                        String::new(),
+                        Some(format!(
+                            "={}",
+                            shown
+                                .chars()
+                                .take(MAX_PREVIEW_FORMULA_CHARS)
+                                .collect::<String>()
+                        )),
+                    )
+                }
                 other => {
                     let date =
                         c.s.as_deref()
@@ -440,7 +478,7 @@ fn sheet_of(src: &Source<'_>, sheet: Option<u32>) -> std::result::Result<Preview
                 more = true;
                 break 'rows;
             }
-            cells.push(Cell { a, v, f });
+            cells.push(Cell { a, v, f, x });
         }
         if cells.is_empty() {
             continue;

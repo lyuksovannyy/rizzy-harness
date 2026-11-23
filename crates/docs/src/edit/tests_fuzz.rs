@@ -298,3 +298,96 @@ fn docx_real_types() -> String {
         "{DECL}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/></Types>"
     )
 }
+
+/// Random documents and workbooks times random page changes (arbitrary
+/// places and texts): never a panic; one item per change; a file only when
+/// every item is ok, and then it reads back.
+#[test]
+fn random_page_changes_never_panic_and_never_hand_out_a_bad_file() {
+    use super::page::{Change, apply};
+    use super::preview::{Block, Preview, preview};
+    let mut r = Rng(0x9E37_79B9_7F4A_7C15);
+    let (mut made, mut refused) = (0, 0);
+    let texts = [
+        "",
+        "=SUM(A1:A3)",
+        "=WEBSERVICE(\"x\")",
+        "12",
+        "1e999",
+        "007",
+        "plain",
+        "a\tb\nc",
+        "<&>\"'",
+        "\u{200b}\u{202e}x\u{0}",
+        "é\u{1F469}\u{200D}\u{1F4BB}",
+    ];
+    for _ in 0..400 {
+        let word = r.below(2) == 0;
+        let file = if word {
+            let body: String = (0..1 + r.below(6)).map(|_| para_xml(&mut r)).collect();
+            docx_with(
+                &format!(
+                    "{DECL}<w:document {W_NS}><w:body>{body}<w:sectPr/></w:body></w:document>"
+                ),
+                &[],
+            )
+        } else {
+            xlsx_with(&random_sheet(&mut r), "", &[])
+        };
+        // The places the preview names, and ones it does not.
+        let known: Vec<String> = match preview(&file, None) {
+            Ok(Preview::Doc { blocks, .. }) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    Block::H { at, .. } | Block::P { at, .. } | Block::Li { at, .. }
+                        if !at.is_empty() =>
+                    {
+                        Some(at.clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => vec![],
+        };
+        let wild = [
+            "",
+            "p1",
+            "p1#zzzz",
+            "B",
+            "A0",
+            "ZZ99",
+            "t1r1c1#0000",
+            "../x",
+            "A1:B2",
+            "\u{0}",
+        ];
+        let changes: Vec<Change> = (0..1 + r.below(5))
+            .map(|_| Change {
+                at: match r.below(4) {
+                    0 => (*r.pick(&wild)).to_string(),
+                    1 if !known.is_empty() => r.pick(&known).clone(),
+                    _ => format!("{}{}", ["A", "B", "C", "D"][r.below(4)], 1 + r.below(6)),
+                },
+                text: (*r.pick(&texts)).to_string(),
+            })
+            .collect();
+        match apply(&file, Some(r.below(2) as u32), &changes) {
+            Err(_) => refused += 1,
+            Ok(o) => {
+                assert_eq!(o.items.len(), changes.len());
+                match o.bytes {
+                    None => {
+                        refused += 1;
+                        assert!(o.items.iter().any(|i| !i.ok), "no file needs a refusal");
+                    }
+                    Some(out) => {
+                        made += 1;
+                        assert!(o.items.iter().all(|i| i.ok && i.why.is_none()));
+                        assert!(preview(&out, None).is_ok(), "the output reads back");
+                    }
+                }
+            }
+        }
+    }
+    assert!(made > 20 && refused > 20, "made {made}, refused {refused}");
+}

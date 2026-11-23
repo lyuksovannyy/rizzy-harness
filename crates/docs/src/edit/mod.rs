@@ -9,6 +9,7 @@
 
 pub mod check;
 pub mod docx;
+pub mod page;
 pub mod para;
 pub mod pkg;
 pub mod preview;
@@ -29,6 +30,8 @@ mod tests_fix;
 #[cfg(test)]
 mod tests_fuzz;
 #[cfg(test)]
+mod tests_page;
+#[cfg(test)]
 mod tests_preview;
 #[cfg(test)]
 mod tests_xlsx;
@@ -44,6 +47,10 @@ pub(crate) const E_SHEETS: &str = "the workbook has too many sheets to be edited
 pub(crate) const E_STRINGS: &str = "the workbook's strings are too large to be read";
 pub(crate) const E_ROWS: &str = "the sheet has too many rows to be edited";
 pub(crate) const E_PARTS: &str = "the file has too many parts to be edited";
+// Protection that forbids editing (the page edit tells it from damage).
+pub(crate) const E_DOC_LOCKED: &str =
+    "this document is protected against editing (document protection is on); it is not edited";
+pub(crate) const E_SHEET_LOCKED: &str = "this sheet is protected; it is not edited";
 pub(crate) const LIMIT_REFUSALS: [&str; 8] = [
     E_EVENTS,
     E_PARAS,

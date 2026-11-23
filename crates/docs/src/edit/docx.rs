@@ -328,7 +328,7 @@ pub fn index(part: &[u8]) -> Result<Index> {
     })
 }
 
-fn tag_text(p: &Para) -> Option<String> {
+pub(crate) fn tag_text(p: &Para) -> Option<String> {
     p.tag
         .as_ref()
         .map(|t| format!("{}#{:04x}", t.key(), p.hash))
@@ -1133,7 +1133,7 @@ pub fn edit(bytes: &[u8], ops: &[DocOp]) -> Result<Outcome> {
         return Err("this is not a Word document".into());
     }
     if protected(&src)? {
-        return Err("this document is protected against editing (document protection is on); it is not edited".into());
+        return Err(super::E_DOC_LOCKED.into());
     }
     let part = src.read(DOC, MAX_EDIT_PART_BYTES)?;
     let idx = index(&part)?;

@@ -368,7 +368,7 @@ async fn the_helper_previews_a_document_a_workbook_and_nothing_else() {
     };
     assert!(matches!(&blocks[0], Block::H { l: 1, .. }), "{blocks:?}");
     assert!(
-        matches!(&blocks[1], Block::P { r } if r.iter().any(|x| x.t == "quick" && x.b)),
+        matches!(&blocks[1], Block::P { r, .. } if r.iter().any(|x| x.t == "quick" && x.b)),
         "{blocks:?}"
     );
     let out = call(&r, &req, &xlsx_bytes()).await.unwrap().unwrap();

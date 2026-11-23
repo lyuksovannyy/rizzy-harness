@@ -1668,7 +1668,7 @@ pub fn edit(bytes: &[u8], sheet: &str, ops: &[SheetOp]) -> Result<Outcome> {
     let part = src.read(&sh.path, MAX_EDIT_PART_BYTES)?;
     let ix = index(&part)?;
     if ix.protected {
-        return Err("this sheet is protected; it is not edited".into());
+        return Err(super::E_SHEET_LOCKED.into());
     }
     let sst = shared_strings(&src)?;
     let ex = extras(&src, &sh.path)?;

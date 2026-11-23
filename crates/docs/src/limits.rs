@@ -114,3 +114,12 @@ pub const MAX_PREVIEW_SHEETS: usize = 100;
 /// writes it, plus the keys and brackets around it): the reply stays under
 /// 256 KB.
 pub const MAX_PREVIEW_BYTES: usize = 200_000;
+
+/// Characters of a formula a preview shows (a longer one is cut, and its
+/// cell is marked not editable from the page).
+pub const MAX_PREVIEW_FORMULA_CHARS: usize = 300;
+
+// Changing text from the page (ADOPTION_PLAN X.60, PLAN.md T99/T100).
+
+/// Changes in one page edit (the edit tools' own bound).
+pub const MAX_PAGE_CHANGES: usize = MAX_EDITS;

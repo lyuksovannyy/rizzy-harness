@@ -19,8 +19,29 @@ fn blocks(b: &[u8]) -> (Vec<Block>, bool, Vec<String>) {
             blocks,
             more,
             notes,
-        } => (blocks, more, notes),
+        } => (blocks.into_iter().map(untagged).collect(), more, notes),
         other => panic!("{other:?}"),
+    }
+}
+
+/// The block without its tag: these tests are about the text; the tags are
+/// `tests_page.rs`'s.
+fn untagged(b: Block) -> Block {
+    match b {
+        Block::H { l, r, .. } => Block::H {
+            l,
+            r,
+            at: String::new(),
+        },
+        Block::P { r, .. } => Block::P {
+            r,
+            at: String::new(),
+        },
+        Block::Li { r, .. } => Block::Li {
+            r,
+            at: String::new(),
+        },
+        t => t,
     }
 }
 
@@ -80,7 +101,8 @@ fn a_document_is_blocks_with_the_formatting_of_its_runs() {
         bl[0],
         Block::H {
             l: 1,
-            r: vec![plain("Quarterly report")]
+            r: vec![plain("Quarterly report")],
+            at: String::new()
         }
     );
     // Split runs keep their own bold and italic; the spelling marks vanish.
@@ -91,27 +113,29 @@ fn a_document_is_blocks_with_the_formatting_of_its_runs() {
                 run("The qu", true, false, false),
                 run("ick bro", false, true, false),
                 plain("wn fox jumps")
-            ]
+            ],
+            at: String::new()
         }
     );
     // A hyperlink is its text and nothing else.
     assert_eq!(
         bl[2],
         Block::P {
-            r: vec![plain("Visit our site today")]
+            r: vec![plain("Visit our site today")],
+            at: String::new()
         }
     );
     // A field shows its result.
-    assert!(matches!(&bl[3], Block::P { r } if text(r) == "Page 3 of the report"));
+    assert!(matches!(&bl[3], Block::P { r, .. } if text(r) == "Page 3 of the report"));
     // Inserted text is shown, deleted text is not.
-    assert!(matches!(&bl[4], Block::P { r } if text(r) == "Keep added end"));
+    assert!(matches!(&bl[4], Block::P { r, .. } if text(r) == "Keep added end"));
     // Hidden text is left out, and the line says so in a fixed sentence.
-    assert!(matches!(&bl[5], Block::P { r } if text(r) == "Visible "));
+    assert!(matches!(&bl[5], Block::P { r, .. } if text(r) == "Visible "));
     // An object is a mark, and the text box inside it is not text.
-    assert!(matches!(&bl[6], Block::P { r } if text(r) == "Picture: [obj] after"));
-    assert!(matches!(&bl[7], Block::Li { r } if text(r) == "first item"));
-    assert!(matches!(&bl[8], Block::Li { r } if text(r) == "second item"));
-    assert!(matches!(&bl[9], Block::P { r } if text(r) == "End of section one"));
+    assert!(matches!(&bl[6], Block::P { r, .. } if text(r) == "Picture: [obj] after"));
+    assert!(matches!(&bl[7], Block::Li { r, .. } if text(r) == "first item"));
+    assert!(matches!(&bl[8], Block::Li { r, .. } if text(r) == "second item"));
+    assert!(matches!(&bl[9], Block::P { r, .. } if text(r) == "End of section one"));
     assert_eq!(
         bl[10],
         Block::T {
@@ -121,8 +145,8 @@ fn a_document_is_blocks_with_the_formatting_of_its_runs() {
             ]
         }
     );
-    assert!(matches!(&bl[11], Block::P { r } if text(r) == "Contents"));
-    assert!(matches!(&bl[12], Block::P { r } if text(r) == "The end."));
+    assert!(matches!(&bl[11], Block::P { r, .. } if text(r) == "Contents"));
+    assert!(matches!(&bl[12], Block::P { r, .. } if text(r) == "The end."));
     assert_eq!(bl.len(), 13, "the empty last paragraph is not a block");
     let all = serde_json::to_string(&bl).unwrap();
     assert!(!all.contains("secret") && !all.contains("removed") && !all.contains("inside the box"));
@@ -161,7 +185,7 @@ fn it_is_the_text_the_view_shows() {
     let got: Vec<String> = bl
         .iter()
         .filter_map(|x| match x {
-            Block::H { r, .. } | Block::P { r } | Block::Li { r } => {
+            Block::H { r, .. } | Block::P { r, .. } | Block::Li { r, .. } => {
                 Some(text(r).replace('\u{FFFC}', "[obj]"))
             }
             Block::T { .. } => None,
@@ -188,19 +212,23 @@ fn title_subtitle_strike_and_deep_headings() {
         [
             Block::H {
                 l: 1,
-                r: vec![plain("T")]
+                r: vec![plain("T")],
+                at: String::new()
             },
             Block::H {
                 l: 2,
-                r: vec![plain("S")]
+                r: vec![plain("S")],
+                at: String::new()
             },
             Block::H {
                 l: 3,
-                r: vec![plain("H3")]
+                r: vec![plain("H3")],
+                at: String::new()
             },
             Block::H {
                 l: 6,
-                r: vec![plain("H9")]
+                r: vec![plain("H9")],
+                at: String::new()
             },
         ]
     );
@@ -210,7 +238,8 @@ fn title_subtitle_strike_and_deep_headings() {
             r: vec![
                 run("gone", false, false, true),
                 run("twice", true, true, true)
-            ]
+            ],
+            at: String::new()
         }
     );
 }
@@ -227,7 +256,7 @@ fn hostile_text_stays_text_and_invisible_characters_are_not_shown() {
             .replace('\u{0}', "")
     ));
     let (bl, _, _) = blocks(&b);
-    let Block::P { r } = &bl[0] else {
+    let Block::P { r, .. } = &bl[0] else {
         panic!("{bl:?}")
     };
     let t = text(r);
@@ -286,7 +315,7 @@ fn big_paragraphs_and_big_tables_are_cut_and_the_worst_case_fits() {
         big.replace('"', "&quot;")
     )));
     assert!(more);
-    let Block::P { r } = &bl[0] else { panic!() };
+    let Block::P { r, .. } = &bl[0] else { panic!() };
     assert!(text(r).chars().count() <= MAX_PREVIEW_PARA_CHARS + 1);
     // Many long paragraphs of quotes: the byte budget holds the reply.
     let para = format!(
@@ -370,7 +399,7 @@ fn a_file_past_a_limit_is_too_large_not_damaged() {
 
 /// A workbook of sheets named as given (`true`: visible), each with `A1` =
 /// its position.
-fn book(names: &[(&str, bool)]) -> Vec<u8> {
+pub(super) fn book(names: &[(&str, bool)]) -> Vec<u8> {
     use crate::zip::ZipWriter;
     let ns = "xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"";
     let mut w = ZipWriter::new(8 << 20);
