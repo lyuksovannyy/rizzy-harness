@@ -1636,7 +1636,7 @@ chat shows the file as a chip with its name and size.
 - **In a folder chat without `write`.** The Assistant has no `write` tool, but
   with this switch it can now create new Word and Excel files in a chat's
   folder (never over an existing file). A node turns the two tools off with
-  `denied_tools = ["doc_create", "sheet_create", "doc_edit", "sheet_edit"]` in its node.toml, and
+  `denied_tools = ["doc_create", "sheet_create", "doc_edit", "sheet_edit"]` in its node.toml (`"doc_view"` turns off looking at a file; `denied_tools = ["read"]` does not cover it), and
   `denied_tools = ["write"]` turns them off too, since they write files there.
 - **The switch.** "Create and edit documents" is a per-agent switch on the
   agent's page, on for the built-in Assistant and off for every other agent and
