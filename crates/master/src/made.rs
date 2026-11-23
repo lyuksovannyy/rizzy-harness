@@ -502,7 +502,7 @@ mod tests {
             assert!(!d.allows_tool("doc_create") && !d.allows_tool("sheet_create"));
         }
         deny_delegates(&mut a);
-        assert_eq!(a.delegates[0].deny_tools.len(), 2, "once each");
+        assert_eq!(a.delegates[0].deny_tools.len(), TOOLS.len(), "once each");
         deny(&mut a);
         assert!(!a.allows_tool("doc_create") && !a.allows_tool("sheet_create"));
     }

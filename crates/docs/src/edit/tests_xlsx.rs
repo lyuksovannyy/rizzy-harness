@@ -507,3 +507,21 @@ fn the_sheet_edit_bounds_hold() {
     assert!(SheetOp::parse(&json!({"op": "nope"})).is_err());
     assert!(xlsx::edit(&b, "Data", &[]).is_err());
 }
+
+/// A cell written and then cleared or written again in one call reads back
+/// as its last state (the self-check must not hold it to the first).
+#[test]
+fn a_cell_written_twice_in_one_call_is_checked_against_the_last_write() {
+    let b = xlsx_real();
+    let out = ok(run(
+        &b,
+        vec![
+            op(json!({"op": "set", "cells": {"F2": "first"}})),
+            op(json!({"op": "set", "cells": {"F2": 7}})),
+            op(json!({"op": "set", "cells": {"G2": "gone"}})),
+            op(json!({"op": "clear", "range": "G2:G2"})),
+        ],
+    ));
+    let v = view(&out);
+    assert!(v.contains("F2=7") && !v.contains("G2="), "{v}");
+}

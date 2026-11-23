@@ -1822,7 +1822,13 @@ pub fn edit(bytes: &[u8], sheet: &str, ops: &[SheetOp]) -> Result<Outcome> {
     let again = index(&out_part).map_err(|e| {
         format!("the edited sheet did not pass its own check ({e}); nothing was written")
     })?;
-    for (col, row, want) in &cx.wrote {
+    // Only the last write of a cell is what the file must say.
+    let mut last: BTreeMap<(u32, u32), &CellVal> = BTreeMap::new();
+    for (col, row, v) in &cx.wrote {
+        last.insert((*col, *row), v);
+    }
+    for ((col, row), want) in last {
+        let (col, row) = (&col, &row);
         let got = match again.rows.binary_search_by_key(row, |x| x.r) {
             Ok(i) => {
                 let rr = &again.rows[i];

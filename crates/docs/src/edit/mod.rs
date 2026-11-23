@@ -18,6 +18,8 @@ pub mod xlsx;
 #[cfg(test)]
 pub(crate) mod fixtures;
 #[cfg(test)]
+mod samples;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_docx;
