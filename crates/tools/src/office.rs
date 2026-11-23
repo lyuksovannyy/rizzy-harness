@@ -363,7 +363,10 @@ async fn in_folder(ctx: &ToolCtx, kind: Kind, path: &str, req: DocRequest) -> To
         None => ("", path),
     };
     let stem = name::stem(base, kind.ext(), kind.fallback());
-    let mut chosen = None;
+    // The first free name, taken by creating it: a name that becomes taken
+    // meanwhile is passed over, never replaced (`create_nofollow` publishes
+    // with a link that fails when the name exists).
+    let mut created = None;
     for k in 1..=999u32 {
         let file = if k == 1 {
             format!("{stem}.{}", kind.ext())
@@ -375,30 +378,25 @@ async fn in_folder(ctx: &ToolCtx, kind: Kind, path: &str, req: DocRequest) -> To
             Ok(p) => p,
             Err(e) => return ToolOutcome::err(e),
         };
-        match tokio::fs::symlink_metadata(&real).await {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                chosen = Some((candidate, real));
+        if let Some(parent) = real.parent()
+            && let Err(e) = tokio::fs::create_dir_all(parent).await
+        {
+            return ToolOutcome::err(format!("{}: {e}", parent.display()));
+        }
+        let key = ctx.seen_key(&real);
+        let _lock = crate::seen::lock_path(&key).await;
+        match crate::fs::create_nofollow(&real, &bytes).await {
+            Ok(true) => {
+                created = Some((candidate, real, key));
                 break;
             }
-            Err(e) => return ToolOutcome::err(format!("{}: {e}", real.display())),
-            Ok(_) => {}
+            Ok(false) => {}
+            Err(e) => return ToolOutcome::err(e),
         }
     }
-    let Some((shown, real)) = chosen else {
+    let Some((shown, real, key)) = created else {
         return ToolOutcome::err("there are already 999 files of that name here; use another name");
     };
-    if let Some(parent) = real.parent()
-        && let Err(e) = tokio::fs::create_dir_all(parent).await
-    {
-        return ToolOutcome::err(format!("{}: {e}", parent.display()));
-    }
-    let key = ctx.seen_key(&real);
-    let _lock = crate::seen::lock_path(&key).await;
-    // The atomic no-follow replace of `write`: a file that appeared since
-    // the check above is not replaced (a new file that now exists refuses).
-    if let Err(e) = crate::fs::write_nofollow(&real, &bytes).await {
-        return ToolOutcome::err(e);
-    }
     let sha = crate::seen::sha256(&bytes);
     let mut seen = ctx.seen.record_hash(&key, sha);
     seen.base = Some(String::new());
@@ -501,6 +499,27 @@ mod tests {
             .run(&c, json!({"path": "report", "markdown": "x"}))
             .await;
         assert_eq!(o.made.unwrap().name, "report (3).docx");
+    }
+
+    /// A name that is taken by a folder or a file is passed over and what
+    /// is there stays as it was; a link that goes nowhere is refused by the
+    /// path policy of `write`, never followed.
+    #[tokio::test]
+    async fn a_name_taken_by_anything_is_passed_over() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ctx(d.path());
+        std::os::unix::fs::symlink(d.path().join("nowhere"), d.path().join("a.docx")).unwrap();
+        std::fs::create_dir(d.path().join("a (2).docx")).unwrap();
+        let o = DocCreate
+            .run(&c, json!({"path": "a", "markdown": "x"}))
+            .await;
+        assert!(o.ok, "{}", o.output);
+        assert_eq!(o.made.unwrap().name, "a (3).docx");
+        assert!(
+            !d.path().join("nowhere").exists(),
+            "the link was not followed"
+        );
+        assert!(d.path().join("a (2).docx").is_dir());
     }
 
     #[tokio::test]
