@@ -23,6 +23,7 @@ futures.workspace = true
 getrandom.workspace = true
 harness-agents.workspace = true
 harness-attached.workspace = true
+harness-docs.workspace = true
 harness-core.workspace = true
 harness-node.workspace = true
 harness-protocol.workspace = true

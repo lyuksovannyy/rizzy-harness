@@ -247,6 +247,7 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
                 height: 2,
                 bytes: 3,
             }),
+            made: None,
         }),
         EventKind::ApprovalRequested(ApprovalRequested {
             approval_id: s(),

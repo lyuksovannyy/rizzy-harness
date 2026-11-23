@@ -894,6 +894,7 @@ fn huge_turn(sid: SessionId, from: u64, turn: &str, steps: usize, chars: usize) 
             truncated: false,
             sources: vec![],
             note: None,
+            made: None,
         }));
     }
     emitted.push(EventKind::AssistantMessage(AssistantMessage {

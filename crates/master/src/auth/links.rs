@@ -47,6 +47,9 @@ pub fn linkable(path: &str) -> bool {
         // A person's profile picture (T74; the handler checks who may see it).
         ["", "api", "users", u, "avatar" | "banner"] => id(u),
         ["", "api", "artifacts", a, "latest", "download"] => id(a),
+        // The Word or Excel file an agent made in a chat without a folder
+        // (T97; the handler checks that the chat is the caller's).
+        ["", "api", "sessions", s, "made", f] => id(s) && id(f),
         [
             "",
             "api",

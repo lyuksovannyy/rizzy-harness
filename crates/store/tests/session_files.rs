@@ -389,3 +389,226 @@ fn a_held_but_unlogged_row_does_not_offer_the_tool() {
     append_all(&s, NODE, &l.events[from..]);
     assert!(s.session_files_any(&sid).unwrap());
 }
+
+// -- files an agent made (PLAN.md T97) -------------------------------------
+
+use harness_store::session_files::{MAX_MADE_PER_CHAT, MadePut, NewMade};
+
+fn made(s: &Store, sid: &str, id: &str, owner: &str, sha: &str, limits: Limits) -> MadePut {
+    let blob = NewBlob {
+        blob_id: format!("b{id}"),
+        owner_id: Some(owner.into()),
+        sha256: sha.into(),
+        size: 100,
+        kind: "other".into(),
+        format: "bin".into(),
+        mime: "application/octet-stream".into(),
+        display: "download".into(),
+        key: vec![7; 32],
+        width: None,
+        height: None,
+    };
+    s.session_file_make(
+        &NewMade {
+            session_id: sid.into(),
+            file_id: id.into(),
+            owner_id: Some(owner.into()),
+            name: format!("{id}.docx"),
+            mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
+        },
+        &blob,
+        limits,
+        MAX_MADE_PER_CHAT,
+    )
+    .unwrap()
+}
+
+const NO_LIMIT: Limits = Limits {
+    account: 0,
+    server: 0,
+};
+
+impl Log {
+    /// A call that made a file, named in its finished event.
+    fn made(&mut self, call: &str, file_id: &str, sha: &str) {
+        self.raw(
+            "tool_call_finished",
+            json!({"call_id": call, "ok": true, "output": "made",
+                   "made": {"name": "x.docx", "size": 100, "sha256": sha, "file_id": file_id}}),
+        );
+    }
+}
+
+/// A made file is the chat's only when the chat's own log names it with the
+/// hash the master recorded: not before, not by another chat's log, not with
+/// another hash, not as a path-only `made` (a coding chat's).
+#[test]
+fn a_made_file_is_the_chats_once_its_own_log_names_it_with_its_hash() {
+    let s = store();
+    let mut l = Log::new();
+    append_all(&s, NODE, &l.events);
+    let sid = l.sid.to_string();
+    assert!(matches!(
+        made(&s, &sid, "m1", "u1", "aa", NO_LIMIT),
+        MadePut::Added { new_blob: true }
+    ));
+    assert!(
+        s.session_file(&sid, "m1").unwrap().is_none(),
+        "not logged yet"
+    );
+    // The wrong hash, a file id the master never made for this chat, a made
+    // line with a path and no id: nothing.
+    let from = l.events.len();
+    l.made("c0", "m1", "wrong");
+    l.made("c1", "invented", "aa");
+    l.raw(
+        "tool_call_finished",
+        json!({"call_id": "c2", "ok": true, "output": "x",
+               "made": {"name": "x.docx", "size": 1, "sha256": "aa", "path": "/w/x.docx"}}),
+    );
+    append_all(&s, NODE, &l.events[from..]);
+    assert!(s.session_file(&sid, "m1").unwrap().is_none());
+    assert!(s.session_file(&sid, "invented").unwrap().is_none());
+    // Another chat's log naming this chat's file id and hash makes nothing.
+    let mut other = Log::new();
+    append_all(&s, NODE, &other.events);
+    other.made("c1", "m1", "aa");
+    append_all(&s, NODE, &other.events[1..]);
+    assert!(
+        s.session_file(&other.sid.to_string(), "m1")
+            .unwrap()
+            .is_none()
+    );
+    assert!(s.session_file(&sid, "m1").unwrap().is_none());
+    // The real line.
+    let from = l.events.len();
+    l.made("c3", "m1", "aa");
+    append_all(&s, NODE, &l.events[from..]);
+    let got = s.session_file(&sid, "m1").unwrap().unwrap();
+    assert_eq!(
+        (
+            got.blob_id.as_str(),
+            got.size,
+            got.owner_id.as_deref(),
+            got.name.as_str()
+        ),
+        ("bm1", 100, Some("u1"), "m1.docx")
+    );
+    // The row lives and goes with the chat, and its blob is then a leftover.
+    assert!(s.blobs_unreferenced(i64::MAX).unwrap().is_empty());
+    assert!(s.delete_session(l.sid, true).unwrap());
+    assert_eq!(
+        s.blobs_unreferenced(i64::MAX).unwrap(),
+        vec!["bm1".to_string()]
+    );
+}
+
+/// A chat keeps at most `MAX_MADE_PER_CHAT` made files, and the owner's
+/// quota counts them; the same bytes made twice share one blob.
+#[test]
+fn made_files_are_counted_and_bounded() {
+    let s = store();
+    let l = Log::new();
+    append_all(&s, NODE, &l.events);
+    let sid = l.sid.to_string();
+    for i in 0..MAX_MADE_PER_CHAT {
+        let r = made(
+            &s,
+            &sid,
+            &format!("m{i}"),
+            "u1",
+            &format!("{i:04}"),
+            NO_LIMIT,
+        );
+        assert!(matches!(r, MadePut::Added { .. }), "{i}");
+    }
+    assert_eq!(
+        made(&s, &sid, "one-more", "u1", "9999", NO_LIMIT),
+        MadePut::TooMany
+    );
+    // Another chat has its own count; the same bytes share their blob.
+    let o = Log::new();
+    append_all(&s, NODE, &o.events);
+    let osid = o.sid.to_string();
+    assert_eq!(
+        made(&s, &osid, "same", "u1", "0001", NO_LIMIT),
+        MadePut::Added { new_blob: false }
+    );
+    // The quota: 100 bytes each, an account limit of 150 holds one more.
+    let q = store();
+    let lq = Log::new();
+    append_all(&q, NODE, &lq.events);
+    let qs = lq.sid.to_string();
+    let lim = Limits {
+        account: 150,
+        server: 0,
+    };
+    assert!(matches!(
+        made(&q, &qs, "a", "u1", "a1", lim),
+        MadePut::Added { .. }
+    ));
+    assert!(matches!(
+        made(&q, &qs, "b", "u1", "b1", lim),
+        MadePut::OverQuota(_)
+    ));
+    // Another account has its own room.
+    assert!(matches!(
+        made(&q, &qs, "c", "u2", "c1", lim),
+        MadePut::Added { .. }
+    ));
+}
+
+/// A fork copies the event that names the file and so gets a row of its own
+/// for the same blob, as it does for a message's attached file.
+#[test]
+fn a_fork_shares_a_made_file() {
+    let s = store();
+    let mut p = Log::new();
+    append_all(&s, NODE, &p.events[..1]);
+    s.claim_session(p.sid, Some("u1"), None).unwrap();
+    let psid = p.sid.to_string();
+    made(&s, &psid, "m1", "u1", "aa", NO_LIMIT);
+    p.raw("turn_started", json!({"turn_id": "t1"}));
+    p.raw("user_message", json!({"turn_id": "t1", "text": "make it"}));
+    p.raw(
+        "tool_call_started",
+        json!({"turn_id": "t1", "call_id": "c1", "tool": "doc_create", "input": {}}),
+    );
+    p.made("c1", "m1", "aa");
+    p.raw(
+        "assistant_message",
+        json!({"turn_id": "t1", "message_id": "m-t1", "text": "done"}),
+    );
+    p.raw(
+        "turn_ended",
+        json!({"turn_id": "t1", "reason": "completed", "usage": {
+            "input_tokens": 10, "output_tokens": 1, "context_tokens": 10}}),
+    );
+    append_all(&s, NODE, &p.events[1..]);
+    assert!(s.session_file(&psid, "m1").unwrap().is_some());
+    let cut = fork::check(&p.events, "t1").unwrap();
+    let f = fork::build(
+        &p.events,
+        &cut,
+        SessionId::new(),
+        "Chat (fork)",
+        "/w",
+        5_000,
+    )
+    .unwrap();
+    s.write_fork(NODE, p.sid, &f).unwrap();
+    let fsid = f[0].session_id.to_string();
+    let got = s
+        .session_file(&fsid, "m1")
+        .unwrap()
+        .expect("the fork's own row");
+    assert_eq!(got.blob_id, "bm1");
+    // Another node's "fork" of this chat gets nothing.
+    let f2 = fork::build(&p.events, &cut, SessionId::new(), "x", "/w", 5_000).unwrap();
+    s.write_fork("evil", p.sid, &f2).unwrap();
+    assert!(
+        s.session_file(&f2[0].session_id.to_string(), "m1")
+            .unwrap()
+            .is_none()
+    );
+}

@@ -1336,3 +1336,112 @@ fn bytes_are_repeatable_and_properties_carry_the_time() {
     assert_eq!(crate::iso_utc(0), "1970-01-01T00:00:00Z");
     assert_eq!(crate::iso_utc(1_795_000_000), "2026-11-18T11:06:40Z");
 }
+
+// ---- samples for opening in Word and Excel ----
+
+/// With `HARNESS_DOCS_SAMPLES=<dir>` set, write one document and one workbook
+/// that use every feature, for a person to open in the real programs (the
+/// tests read every file back with our own reader only). Without it, nothing.
+#[test]
+fn write_the_samples_when_asked() {
+    let Ok(dir) = std::env::var("HARNESS_DOCS_SAMPLES") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    std::fs::create_dir_all(dir).unwrap();
+    let md = "\
+# Quarterly plan
+
+A paragraph with **bold**, *italic*, ***both***, ~~struck~~ text, `inline code` and a [link to the manual](https://example.com/manual?page=1&lang=en). A mail address: <mailto:team@example.com>.
+A hard break follows this line.  
+This line is after it.
+
+## Goals
+
+### Third level
+
+#### Fourth level
+
+- First bullet
+- Second bullet
+  - Nested bullet
+    - Third level bullet
+- Back at the top
+
+1. First step
+2. Second step
+   1. Sub-step a
+   2. Sub-step b
+3. Third step
+
+Text between two numbered lists.
+
+5. A list that starts at five
+6. And goes on
+
+## A table
+
+| Name | Owner | Hours | Status |
+|:-----|:-----:|------:|--------|
+| Reader | Dana | 12 | done |
+| Writer | Sam | 40.5 | in progress |
+| A longer row with a lot of text in the first cell to see how the widths are shared | Ola | 3 | blocked |
+
+> A block quote with **bold** inside.
+> It has two lines.
+
+```
+fn main() {
+    println!(\"a code block\");
+}
+```
+
+---
+
+After the page break: Unicode text, Ünïcødé, 日本語, emoji 🙂, and \"quotes\" & ampersands < angle brackets >.
+
+An image is not embedded: ![the alternative text](https://example.com/x.png), and raw HTML is dropped: <b>gone</b>.
+";
+    let b = docx::build(
+        md,
+        &DocOptions {
+            title: Some("Quarterly plan (sample)".into()),
+            created: crate::now_unix(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(problems(&b.bytes).is_empty());
+    std::fs::write(dir.join("sample-all-features.docx"), &b.bytes).unwrap();
+    let b = docx::build(
+        "# Letter, landscape\n\n| A | B | C | D | E | F |\n|---|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 | 6 |\n",
+        &DocOptions {
+            page: Page::Letter,
+            landscape: true,
+            created: crate::now_unix(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    std::fs::write(dir.join("sample-letter-landscape.docx"), &b.bytes).unwrap();
+    let spec = json!({"currency": "€", "sheets": [
+        {"name": "Budget", "freeze_header": true, "autofilter": true, "bold_last_row": true,
+         "columns": [
+            {"header": "Item", "width": 30}, {"header": "Qty", "format": "integer"},
+            {"header": "Unit price", "format": "currency"}, {"header": "Share", "format": "percent"},
+            {"header": "Due", "format": "date"}, {"header": "At", "format": "datetime"},
+            {"header": "Note"}],
+         "rows": [
+            ["Hosting", 12, 24.5, 0.4, "2026-12-01", "2026-12-01T09:30", "=not a formula"],
+            ["Domain", 1, 12, 0.1, "2027-01-15", "2027-01-15 18:00:30", "+1 text that starts with a plus"],
+            ["Support", 4, 150, 0.5, "2026-12-24", null, "@mention stays text"],
+            ["Total", {"f": "SUM(B2:B4)"}, {"f": "SUMPRODUCT(B2:B4,C2:C4)"}, {"f": "SUM(D2:D4)"}, null, null, true]]},
+        {"name": "Text and numbers", "columns": [{"header": "Number", "format": "number"}, {"header": "Two decimals", "format": "number2"}, {"header": "Text", "format": "text"}],
+         "rows": [[1234567.891, 1234567.891, "007"], [-0.5, -0.5, "a \"quoted\" & <tagged> cell"], [1e-7, 1e15, "日本語 🙂"]]},
+        {"name": "Formulas", "columns": [{"header": "A"}, {"header": "B"}, {"header": "Result"}],
+         "rows": [[3, 4, {"f": "A2*B2"}], [10, 4, {"f": "IF(A3>B3,\"bigger\",\"smaller\")"}],
+                  ["x", "y", {"f": "CONCATENATE(A4,B4)"}], [1, 2, {"f": "HYPERLINK(\"https://example.com/\"&A5,\"open\")"}]]}]});
+    let b = xlsx::build(&spec, crate::now_unix()).unwrap();
+    assert!(problems(&b.bytes).is_empty());
+    std::fs::write(dir.join("sample-all-features.xlsx"), &b.bytes).unwrap();
+}

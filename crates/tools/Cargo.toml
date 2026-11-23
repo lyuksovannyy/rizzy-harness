@@ -15,6 +15,7 @@ futures.workspace = true
 globset.workspace = true
 harness-core.workspace = true
 harness-codemap.workspace = true
+harness-docs.workspace = true
 ignore.workspace = true
 getrandom.workspace = true
 nix.workspace = true

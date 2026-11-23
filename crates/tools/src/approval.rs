@@ -77,7 +77,7 @@ pub fn call_key(cwd: &Path, tool: &str, input: &Value) -> CallKey {
     let base = cwd.canonicalize().unwrap_or_else(|_| crate::normalize(cwd));
     field(&mut h, base.as_os_str().as_encoded_bytes());
     let target = match (tool, input.get("path").and_then(Value::as_str)) {
-        ("write" | "edit", Some(p)) => real_path(&base, p),
+        ("write" | "edit" | "doc_create" | "sheet_create", Some(p)) => real_path(&base, p),
         _ => None,
     };
     match target {

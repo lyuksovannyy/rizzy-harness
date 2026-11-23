@@ -376,3 +376,34 @@ describe("bash's workdir", () => {
     expect(row).toContain("hidden-mark");
   });
 });
+
+describe("files an agent made (T97)", () => {
+  const made = (m: object, ok = true, tool = "doc_create"): Tool =>
+    web(tool, { path: "plan", markdown: "# P" }, { ok, output: "Created", exit_code: null, made: { name: "plan.docx", size: 12345, sha256: "ab", ...m } });
+  const html = (item: Tool) => renderToStaticMarkup(<ToolCard sessionId="s1" item={item} />);
+
+  test("a chat without a folder: a chip with the name, the size and a download", () => {
+    const h = html(made({ file_id: "f1" }));
+    expect(h).toContain("plan.docx");
+    expect(h).toContain("12 KB");
+    expect(h).toContain("Download");
+    expect(h).not.toContain("mono ellipsis");
+  });
+
+  test("a chat with a folder: the saved path and no download", () => {
+    const h = html(made({ path: "/work/plan.docx" }));
+    expect(h).toContain("/work/plan.docx");
+    expect(h).not.toContain("Download");
+  });
+
+  test("a sheet has its own icon; a failed call shows no chip", () => {
+    expect(html(made({ name: "b.xlsx", file_id: "f2" }, true, "sheet_create"))).toContain("b.xlsx");
+    expect(html(made({ file_id: "f1" }, false))).not.toContain("Download");
+  });
+
+  test("a hostile name is text", () => {
+    const h = html(made({ name: '<img src=x onerror=alert(1)>.docx', file_id: "f1" }));
+    expect(h).not.toContain("<img");
+    expect(h).toContain("&lt;img");
+  });
+});

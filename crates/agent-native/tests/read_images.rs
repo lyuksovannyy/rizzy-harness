@@ -498,6 +498,7 @@ fn a_summary_is_told_and_clearing_drops_the_image() {
                 height: 8,
                 bytes: 100,
             }),
+            made: None,
         }));
     }
     let log = host.log();

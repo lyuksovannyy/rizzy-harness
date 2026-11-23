@@ -1116,6 +1116,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
             truncated: false,
             sources: vec![],
             note: None,
+            made: None,
         }));
     }
     // Sent while t1 ran, never read by it.
@@ -3376,6 +3377,7 @@ fn a_retry_is_told_which_calls_ran() {
             truncated: false,
             sources: vec![],
             note: None,
+            made: None,
         }),
     );
     push(

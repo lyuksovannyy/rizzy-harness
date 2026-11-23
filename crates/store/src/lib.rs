@@ -975,6 +975,11 @@ impl Store {
             // message that names them on.
             session_files::on_message(tx, &sid, owner, e, copy)?;
         }
+        if e.kind == "tool_call_finished" {
+            // A file a `doc_create` or `sheet_create` call made (T97): the
+            // chat's own once its log says so.
+            session_files::on_finished(tx, &sid, owner, e, copy)?;
+        }
         match e.kind.as_str() {
             "session_created" => {
                 let s = |k: &str| {

@@ -168,6 +168,7 @@ impl Host {
             note: None,
             seen: None,
             image: None,
+            made: None,
         }));
         self.push(EventKind::AssistantMessage(AssistantMessage {
             turn_id: turn.clone(),

@@ -29,6 +29,7 @@ mod fork;
 mod hooks;
 mod levels;
 mod links;
+mod made_files;
 mod media;
 mod memory;
 mod pins;
@@ -241,6 +242,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(background::routes())
         .merge(diff::routes())
         .merge(files::routes())
+        .merge(made_files::routes())
         .merge(approval_mode::routes())
         .merge(exec_mode::routes())
         .merge(chat_allows::routes())

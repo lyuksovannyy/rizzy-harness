@@ -27,6 +27,7 @@ mod handoff;
 mod http;
 pub mod levels;
 pub mod limits;
+pub mod made;
 pub mod media;
 pub mod memory;
 pub mod model_cache;
@@ -347,6 +348,9 @@ pub struct MasterInner {
     recall: recall::Grants,
     /// `attached_file`'s places to parse in and counts per turn.
     attached: attached::Grants,
+    /// `doc_create` and `sheet_create`: the places to build in and the counts
+    /// per turn, chat and node (`made`, PLAN.md T97).
+    made: attached::Grants,
     /// The board tools' counts per turn, calls per node and recent request
     /// ids (PLAN.md T78).
     board: board::Grants,
@@ -745,6 +749,9 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::RecallResult { .. }
         // An answer to the node's own file read: nothing is written there.
         | MasterToNode::AttachedResult { .. }
+        // The file the node's own tool call asked the master to make: the
+        // node writes nothing and runs nothing for it.
+        | MasterToNode::DocsResult { .. }
         // An answer to the node's own board call: nothing is run there.
         | MasterToNode::BoardResult { .. }
         // A stored skill's text for the node's own load: nothing is run.
@@ -852,6 +859,7 @@ impl Master {
                 notes: Default::default(),
                 recall: Default::default(),
                 attached: Default::default(),
+                made: made::grants(),
                 board: Default::default(),
                 stored_skills: Default::default(),
                 routines: OnceLock::new(),
@@ -1686,6 +1694,11 @@ impl Master {
                 session_id,
                 request,
             } => attached::handle(self, node_id, req_id, session_id, request),
+            NodeToMaster::Docs {
+                req_id,
+                session_id,
+                request,
+            } => made::handle(self, node_id, req_id, session_id, request),
             NodeToMaster::Board {
                 req_id,
                 session_id,
@@ -2725,6 +2738,21 @@ impl Master {
         if !may_attach {
             attached::deny(&mut agent);
         }
+        // `doc_create` and `sheet_create` (T97): in a chat without a folder
+        // the master makes and keeps the file, so only in a plain chat of its
+        // own on a node that offers them, never in a temporary chat, an
+        // untrusted turn or a callback turn. A chat with a folder writes the
+        // file there itself, as `write` does, and is not touched here.
+        // Withheld here so the turn's log says so (`AgentRef::withheld`),
+        // which every request is checked against.
+        let may_make = row.parent_id.is_none()
+            && !row.incognito
+            && !untrusted
+            && !resume
+            && self.node_has(&row.node_id, harness_protocol::CAP_DOCS);
+        if row.profile.as_deref() == Some("chat") && !may_make {
+            made::deny(&mut agent);
+        }
         // The project board tools (PLAN.md T78): only in a project chat
         // whose owner's turn runs it, on a node that offers them; not in an
         // untrusted or a callback turn (text nobody wrote could steer
@@ -3495,6 +3523,7 @@ impl Master {
     async fn forget(&self, sid: SessionId) {
         self.inner.recall.forget(sid);
         self.inner.attached.forget(sid);
+        self.inner.made.forget(sid);
         self.inner.board.forget(sid);
         self.inner.stored_skills.forget(sid);
         self.inner.connectors.calls.forget(sid);

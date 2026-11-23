@@ -327,6 +327,7 @@ mod tests {
                 sources: vec![],
                 note: None,
                 seen: None,
+                made: None,
             }),
             EventKind::TurnEnded(TurnEnded {
                 turn_id: "t1".into(),

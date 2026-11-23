@@ -35,8 +35,15 @@ pub enum ApprovalMode {
 /// T50). No mode is limited by the chat's kind or its execution mode.
 pub const DEFAULT_CHAT_APPROVAL: ApprovalMode = ApprovalMode::Auto;
 
-/// The file tools `AcceptEdits` covers, by their registered names.
-pub const EDIT_TOOLS: [&str; 2] = ["write", "edit"];
+/// The file tools `AcceptEdits` covers, by their registered names: the two
+/// that create Word and Excel files write a new file in the folder as
+/// `write` does (PLAN.md T97).
+pub const EDIT_TOOLS: [&str; 4] = [
+    "write",
+    "edit",
+    crate::docs::DOC_TOOL,
+    crate::docs::SHEET_TOOL,
+];
 
 /// The one tool that changes things plan mode runs: `bash`, in the
 /// read-only shell (ADOPTION_PLAN T.7); where the node has none it is
@@ -396,6 +403,9 @@ mod tests {
             ("write", true),
             ("edit", true),
             ("publish", true),
+            // Word and Excel files are new files in the folder (T97).
+            ("doc_create", true),
+            ("sheet_create", true),
             ("mcp__srv__tool", true),
             ("mcp__srv__read", true),
             ("a_tool_added_later", true),
@@ -419,6 +429,16 @@ mod tests {
         assert!(!Plan.needs_approval(ToolRisk::Mutating));
         assert!(!Plan.needs_approval(ToolRisk::ReadOnly));
         assert!(plan_refusal("write").contains("plan mode: `write` was not run"));
+    }
+
+    /// The two tools that make Word and Excel files are edits inside the
+    /// folder as far as `AcceptEdits` is concerned, like `write` (T97).
+    #[test]
+    fn the_document_tools_are_edit_tools() {
+        for t in ["write", "edit", "doc_create", "sheet_create"] {
+            assert!(EDIT_TOOLS.contains(&t), "{t}");
+        }
+        assert!(!EDIT_TOOLS.contains(&"attached_file"));
     }
 
     /// A tool that writes only the chat's own log (`todo`) is never asked

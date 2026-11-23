@@ -59,7 +59,7 @@ const NO_WRITES: &[&str] = &[
 ];
 
 /// The file tools whose result records what they wrote.
-const RECORDED: &[&str] = &["edit", "write"];
+const RECORDED: &[&str] = &["edit", "write", "doc_create", "sheet_create"];
 
 /// The kinds read of a chat's log.
 pub(crate) const KINDS: &[&str] = &[
@@ -772,6 +772,7 @@ mod tests {
                     sha256: "0".repeat(64),
                     base: None,
                 }),
+                made: None,
             }),
         )
     }

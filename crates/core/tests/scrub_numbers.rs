@@ -108,6 +108,7 @@ fn a_typed_number_with_the_same_digits_stays() {
             note: None,
             seen: None,
             image: None,
+            made: None,
         })
         .into_parts()
     };

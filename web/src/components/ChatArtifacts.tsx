@@ -4,13 +4,13 @@
 // failed) comes from `GET /api/sessions/{id}/artifacts`, asked once per chat
 // for all of its cards, again on `artifacts_changed`, and every 1.5 s while a
 // file is on its way, because upload progress lives in the server's memory.
-import { Package } from "lucide-react";
+import { FileSpreadsheet, FileText, Package } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { artifactsApi, downloadUrl, percent, type SessionArtifact } from "../lib/artifacts";
 import { bytes } from "../lib/bytes";
 import { artifactHash } from "../lib/routes";
 import type { Live } from "../live";
-import type { Item, StagedArtifact } from "../types";
+import type { Item, MadeFile, StagedArtifact } from "../types";
 import { LinkedA } from "./Linked";
 
 const POLL_MS = 1500;
@@ -198,6 +198,26 @@ export function SaveAsArtifact(props: { path?: string; onDone?: () => void; auto
         </button>
       )}
       {status}
+    </div>
+  );
+}
+
+/** The Word or Excel file a `doc_create` or `sheet_create` call made: its name and size, and where it is. In a chat without a folder the server keeps it and this is its download; in a chat with one it is in the folder and the path is shown, as `write` shows it. */
+export function MadeChip({ sessionId, made }: { sessionId: string; made: MadeFile }) {
+  const Icon = /\.xlsx$/i.test(made.name) ? FileSpreadsheet : FileText;
+  return (
+    <div className="artifact-card is-ready">
+      <Icon size={16} aria-hidden="true" />
+      <span className="artifact-card-text">
+        <strong className="ellipsis">{made.name}</strong>
+        <span className="small muted"> · {bytes(made.size)}</span>
+        {made.path && <span className="small muted mono ellipsis"> · {made.path}</span>}
+      </span>
+      {made.file_id && (
+        <LinkedA className="link small" url={`/api/sessions/${sessionId}/made/${made.file_id}`} download={made.name}>
+          Download
+        </LinkedA>
+      )}
     </div>
   );
 }

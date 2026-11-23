@@ -812,6 +812,7 @@ fn forging_history() -> (Vec<RawEvent>, String) {
             truncated: false,
             sources: vec![],
             note: None,
+            made: None,
         }));
     }
     events.push(EventKind::AssistantMessage(AssistantMessage {
@@ -1100,6 +1101,7 @@ async fn a_background_note_and_a_callback_opening_reach_the_summariser_quoted() 
             truncated: false,
             sources: vec![],
             note,
+            made: None,
         }));
     }
     push(answered("t2", "It failed."));
@@ -1250,6 +1252,7 @@ fn history_with_todo(kept: usize) -> Vec<RawEvent> {
         truncated: false,
         sources: vec![],
         note: None,
+        made: None,
     }));
     push(EventKind::TurnEnded(TurnEnded {
         turn_id: "t1".into(),
@@ -1428,6 +1431,7 @@ fn history_with_a_newer_list() -> Vec<RawEvent> {
             truncated: false,
             sources: vec![],
             note: None,
+            made: None,
         }),
         EventKind::TurnEnded(TurnEnded {
             turn_id: "t9".into(),

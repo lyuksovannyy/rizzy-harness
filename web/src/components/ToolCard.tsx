@@ -9,7 +9,7 @@ import { rt } from "../md/strings";
 import type { Item, Source } from "../types";
 import { ApprovalChoice, Held, useShown } from "./ApprovalChoice";
 import { CallInput, useOpenFields } from "./CallInput";
-import { PublishCard, SaveAsArtifact } from "./ChatArtifacts";
+import { MadeChip, PublishCard, SaveAsArtifact } from "./ChatArtifacts";
 import { ChildAnswer, ChildModel } from "./DelegateResult";
 import { MemoryNotice } from "./MemoryNotice";
 
@@ -250,6 +250,7 @@ export function ToolCard({
           )}
         </div>
       )}
+      {status === "ok" && item.result?.made && <MadeChip sessionId={sessionId} made={item.result.made} />}
       {child && item.result && <ChildAnswer output={item.result.output} agent={shownName(asText(item.input?.agent))} />}
       {pending &&
         item.approval &&

@@ -2029,6 +2029,29 @@ pub struct ToolCallFinished {
     /// takes images.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ToolImage>,
+    /// The Word or Excel file a `doc_create` or `sheet_create` call made
+    /// (PLAN.md T97): a reference only, written by the node's loop from the
+    /// tool's outcome. In a chat without a folder its `file_id` is what makes
+    /// the master's kept copy this chat's (`session_files`): a row the master
+    /// made for this very chat, with this hash, is marked logged when this
+    /// event is appended, and served from then on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made: Option<MadeFile>,
+}
+
+/// A file an agent made (`tool_call_finished.made`, PLAN.md T97).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MadeFile {
+    /// The name the file has (cleaned, its extension the tool's).
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+    /// A chat without a folder: the id of the master's kept copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
+    /// A chat with a folder: where the file is, as the folder's tools show it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// The provider refused a request that carried images `read` returned,
@@ -2929,6 +2952,7 @@ mod tests {
                 title: "Tokio".into(),
             }],
             note: None,
+            made: None,
         });
         let (kind, payload) = k.clone().into_parts();
         assert_eq!(

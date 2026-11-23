@@ -99,6 +99,7 @@ mod tests {
                 })
                 .collect(),
             note: None,
+            made: None,
         })
         .into_parts();
         RawEvent {

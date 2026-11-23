@@ -353,6 +353,25 @@ describe("an agent's page", () => {
     );
   });
 
+  test("creating documents is its own switch, off for a new agent (T97)", async () => {
+    expect(NEW_FEATURES.office).toBe(false);
+    api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it." }));
+    await show(admin, "reviewer");
+    expect(sw("Create and edit documents").checked).toBe(false);
+    // Changing files does not bring it.
+    act(() => sw("Change files").click());
+    expect(sw("Create and edit documents").checked).toBe(false);
+    act(() => sw("Change files").click());
+    act(() => sw("Create and edit documents").click());
+    api.updateAgent.mockResolvedValue(detail(reviewer));
+    await act(async () => button("Save")!.click());
+    expect(api.updateAgent).toHaveBeenCalledWith(
+      "reviewer",
+      { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, office: true } },
+      "server",
+    );
+  });
+
   test("the board is its own switch, off for a new agent", async () => {
     expect(NEW_FEATURES.board).toBe(false);
     api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it." }));

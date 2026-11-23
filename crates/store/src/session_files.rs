@@ -18,8 +18,37 @@
 
 use rusqlite::{OptionalExtension, Transaction, params};
 
+use crate::blobs::{BlobInsert, Limits, NewBlob, OverQuota};
 use crate::chat_uploads::TakenUpload;
 use crate::{Result, Store};
+
+/// Files one chat may keep that agents made (`doc_create`, `sheet_create`,
+/// PLAN.md T97), logged or not: the rows are the chat's own and go with it,
+/// so this bounds what a chat the person never deletes can hold.
+pub const MAX_MADE_PER_CHAT: usize = 100;
+
+/// A file the master made for a chat (T97), not yet named by its log.
+#[derive(Debug, Clone)]
+pub struct NewMade {
+    pub session_id: String,
+    pub file_id: String,
+    pub owner_id: Option<String>,
+    pub name: String,
+    pub mime: String,
+}
+
+/// What recording a made file came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MadePut {
+    /// Recorded. `new_blob`: the file written for it is needed (false: the
+    /// owner already held these bytes).
+    Added {
+        new_blob: bool,
+    },
+    /// The chat already holds as many made files as it may.
+    TooMany,
+    OverQuota(OverQuota),
+}
 
 /// Schema version 5 (PLAN.md §0): a database of an older version gets this
 /// table on its next open.
@@ -84,12 +113,42 @@ pub(crate) fn on_message(
     let Some(list) = e.payload.get("attached").and_then(|v| v.as_array()) else {
         return Ok(());
     };
+    let files = list.iter().take(crate::MAX_ATTACHED_PER_MESSAGE);
+    log_files(tx, sid, node, files, copy)
+}
+
+/// Called by `Store::append` for a `tool_call_finished` that names a file
+/// the call made (`made`, PLAN.md T97): the master's row for it, made for
+/// this very chat with this very hash, becomes the chat's. A node cannot
+/// name a file the master did not make for this chat, and a fork's copy of
+/// the event is handled as a message's.
+pub(crate) fn on_finished(
+    tx: &Transaction,
+    sid: &str,
+    node: &str,
+    e: &harness_core::RawEvent,
+    copy: bool,
+) -> Result<()> {
+    let Some(made) = e.payload.get("made").filter(|m| m.is_object()) else {
+        return Ok(());
+    };
+    // `made` carries `file_id` and `sha256` as the attached list does.
+    log_files(tx, sid, node, std::iter::once(made), copy)
+}
+
+fn log_files<'a>(
+    tx: &Transaction,
+    sid: &str,
+    node: &str,
+    files: impl Iterator<Item = &'a serde_json::Value>,
+    copy: bool,
+) -> Result<()> {
     let parent: Option<String> = if copy {
         crate::session_forks::parent(tx, sid)?
     } else {
         None
     };
-    for f in list.iter().take(crate::MAX_ATTACHED_PER_MESSAGE) {
+    for f in files {
         let (Some(id), Some(sha)) = (
             f.get("file_id").and_then(|v| v.as_str()),
             f.get("sha256").and_then(|v| v.as_str()),
@@ -119,6 +178,53 @@ pub(crate) fn on_message(
 }
 
 impl Store {
+    /// Record a file the master made for chat `m.session_id` (T97) and its
+    /// blob in one transaction, with the per-chat count and the quota
+    /// checks, not yet logged: it is served only once the chat's own log
+    /// names it (`tool_call_finished.made`). The same bytes the owner
+    /// already holds share their blob and cost nothing.
+    pub fn session_file_make(
+        &self,
+        m: &NewMade,
+        blob: &NewBlob,
+        limits: Limits,
+        max: usize,
+    ) -> Result<MadePut> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let n: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM session_files WHERE session_id = ?1",
+            params![m.session_id],
+            |r| r.get(0),
+        )?;
+        if n as usize >= max {
+            return Ok(MadePut::TooMany);
+        }
+        let (blob_id, new_blob) = match crate::blobs::blob_insert(&tx, blob, limits)? {
+            BlobInsert::OverQuota(q) => return Ok(MadePut::OverQuota(q)),
+            BlobInsert::Inserted => (blob.blob_id.clone(), true),
+            BlobInsert::Existing(id) => (id, false),
+        };
+        tx.execute(
+            "INSERT INTO session_files
+               (session_id, file_id, blob_id, owner_id, name, mime, size, sha256, logged, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)",
+            params![
+                m.session_id,
+                m.file_id,
+                blob_id,
+                m.owner_id,
+                m.name,
+                m.mime,
+                blob.size as i64,
+                blob.sha256,
+                harness_core::now_ms()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(MadePut::Added { new_blob })
+    }
+
     /// Record the files a send of chat `sid` carries, not yet logged: the
     /// blobs they name are referenced from now on, whatever becomes of the
     /// unsent upload rows.

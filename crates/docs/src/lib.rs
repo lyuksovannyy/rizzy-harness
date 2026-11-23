@@ -22,6 +22,7 @@ pub mod docx;
 pub mod formula;
 pub mod limits;
 pub mod name;
+pub mod notes;
 pub mod xlsx;
 pub mod xml;
 pub mod zip;

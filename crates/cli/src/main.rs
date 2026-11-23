@@ -363,6 +363,10 @@ async fn serve(
     // answers the reads (PLAN.md T95). Only this runtime, which runs plain
     // chats: a coding chat saves its files in its folder.
     web_tools.push(Arc::new(harness_tools::AttachedFileTool));
+    // Word and Excel files in a plain chat: the master makes and keeps them
+    // (PLAN.md T97).
+    web_tools.push(Arc::new(harness_tools::DocCreate));
+    web_tools.push(Arc::new(harness_tools::SheetCreate));
     // The project board tools: the master answers them too (PLAN.md T78).
     web_tools.push(Arc::new(harness_tools::Board));
     web_tools.push(Arc::new(harness_tools::BoardEdit));

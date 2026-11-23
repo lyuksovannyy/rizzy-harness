@@ -52,6 +52,7 @@ mod live_audience_http;
 mod live_audience_projects_http;
 mod local_node_http;
 mod login_limits_http;
+mod made_http;
 mod media_http;
 mod memory_http;
 mod memory_places_http;
