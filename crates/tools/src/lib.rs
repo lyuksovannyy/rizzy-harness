@@ -11,8 +11,10 @@ mod bash;
 mod board;
 pub mod connector;
 pub mod contain;
+pub mod doc_helper;
 pub mod guard;
 mod office;
+mod office_edit;
 pub use bash::{
     DEFAULT_TIMEOUT_MAX_S, MAX_TIMEOUT_MAX_S, MIN_TIMEOUT_MAX_S, workdir as bash_workdir,
 };
@@ -77,6 +79,7 @@ pub use edit::Edit;
 pub use env::ToolEnv;
 pub use fs::{Read, Write, image_of};
 pub use office::{DocCreate, SheetCreate};
+pub use office_edit::{DocEdit, DocView, SheetEdit};
 pub use outline::Outline;
 pub use outputs::{OutputStore, SessionOutputs, ToolOutput};
 pub use publish::Publish;
@@ -251,6 +254,10 @@ pub struct ToolCtx {
     /// without a folder (`TurnHost::docs`); `None` in a chat with one, where
     /// they write into the folder.
     pub docs: Option<Arc<dyn harness_core::docs::DocSource>>,
+    /// How `doc_view`, `doc_edit` and `sheet_edit` run the confined
+    /// `doc-edit` helper in a chat with a folder (`TurnHost::doc_helper`);
+    /// `None` where there is none.
+    pub doc_helper: Option<Arc<dyn harness_core::docs::EditHelper>>,
     /// Where `history` reads the session's own chat (`TurnHost::history`);
     /// `None` where there is none.
     pub history: Option<Arc<dyn harness_core::history::HistorySource>>,
@@ -354,6 +361,7 @@ impl ToolCtx {
             recall: None,
             attached: None,
             docs: None,
+            doc_helper: None,
             history: None,
             board: None,
             stored_skills: None,
@@ -854,6 +862,9 @@ pub fn builtin() -> ToolSet {
         Arc::new(Publish),
         Arc::new(DocCreate),
         Arc::new(SheetCreate),
+        Arc::new(DocView),
+        Arc::new(DocEdit),
+        Arc::new(SheetEdit),
         Arc::new(todo::Todo),
         Arc::new(skills::SkillTool),
     ]

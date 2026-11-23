@@ -352,7 +352,7 @@ pub const NOT_OFFERED: &str =
 
 /// The file `file_id` of chat `sid`, if its own log names it and it is the
 /// chat owner's blob.
-async fn file_of(
+pub(crate) async fn file_of(
     m: &Master,
     row: &harness_store::SessionRow,
     file_id: &str,
@@ -381,7 +381,7 @@ async fn file_of(
 
 /// The copy's bytes, read and decrypted off the async threads. Gone files
 /// (the chat or the blob deleted meanwhile) are a sentence.
-async fn bytes_of(m: &Master, file: &SessionFile) -> Result<Vec<u8>, String> {
+pub(crate) async fn bytes_of(m: &Master, file: &SessionFile) -> Result<Vec<u8>, String> {
     let gone = || "the file is gone: it was removed from the server".to_string();
     let path = storage::get(m)
         .and_then(|st| st.path(&file.blob_id))

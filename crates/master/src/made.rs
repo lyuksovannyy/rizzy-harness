@@ -28,16 +28,14 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use harness_core::SessionId;
-use harness_core::docs::{
-    DOC_TOOL, DOCX_MIME, DocCreated, DocRequest, SHEET_TOOL, TOOLS, XLSX_MIME,
-};
+use harness_core::docs::{DOCX_MIME, DocCreated, DocRequest, TOOLS, XLSX_MIME};
 use harness_docs::limits::{MAX_OUTPUT_BYTES, MAX_SPEC_BYTES};
 use harness_protocol::MasterToNode;
 use harness_store::OpenTurn;
 use harness_store::blobs::NewBlob;
 use harness_store::session_files::{MAX_MADE_PER_CHAT, MadePut, NewMade};
 
-use crate::attached::{Grants, MADE_WORDS, TIME_LIMIT, WAIT};
+use crate::attached::{Grants, MADE_WORDS, TIME_LIMIT, WAIT, bytes_of, file_of};
 use crate::{Master, storage};
 
 /// The grants this service keeps: the places to build in, and what each chat
@@ -108,7 +106,7 @@ pub fn handle(m: &Master, node_id: &str, req_id: String, sid: SessionId, r: DocR
             Err(e) => {
                 // Lengths only: a refusal may carry text the model wrote.
                 tracing::debug!(node = %node_id, session = %sid, len = e.len(), "a document request was refused");
-                (None, Some(harness_core::text::clean_line(&e, 400)))
+                (None, Some(clean_reasons(&e)))
             }
         };
         m.send_unacked(
@@ -121,6 +119,22 @@ pub fn handle(m: &Master, node_id: &str, req_id: String, sid: SessionId, r: DocR
         );
     });
 }
+
+/// A refusal's words for the link: one reason to a line, each cleaned to one
+/// short line, at most [`MAX_REASONS`] of them (a call with many edits has a
+/// reason for each; one `clean_line` over the whole would keep only the
+/// first).
+fn clean_reasons(e: &str) -> String {
+    e.lines()
+        .map(|l| harness_core::text::clean_line(l, 400))
+        .filter(|l| !l.is_empty())
+        .take(MAX_REASONS)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Reasons one refusal may carry (the most edits of a call, and its headline).
+const MAX_REASONS: usize = harness_docs::limits::MAX_EDITS + 2;
 
 /// The open turn of `row`, if it may make files: not a callback turn, the
 /// tool not withheld from it, its agent with the switch.
@@ -176,6 +190,24 @@ pub async fn answer(
     }
     let open = turn_may(m, &row, q.tool()).await?;
     m.inner.made.take(sid, &open.turn_id)?;
+    if matches!(
+        q,
+        DocRequest::View { .. } | DocRequest::DocEdit { .. } | DocRequest::SheetEdit { .. }
+    ) {
+        return match edit_answer(m, &row, q).await {
+            Ok(a) => Ok(a),
+            Err((e, started)) => {
+                // A refusal before the helper starts is not a call and gives
+                // its count back; a helper that ran counts whatever it said,
+                // so a file that takes its full time cannot be retried
+                // without limit.
+                if !started {
+                    m.inner.made.give_back(sid, &open.turn_id);
+                }
+                Err(e)
+            }
+        };
+    }
     // A refusal for lack of room is not a call: it gives its count back.
     let slot = match m.inner.made.slot().await {
         Ok(s) => s,
@@ -197,6 +229,145 @@ pub async fn answer(
         Err(_) => return Err("making the file took too long and was stopped".into()),
     };
     keep(m, &row, built).await
+}
+
+/// `doc_view`, `doc_edit` and `sheet_edit` of a plain chat (ADOPTION_PLAN
+/// X.57, PLAN.md T98): the chat's own file (the id its log names; the
+/// owner's blob) goes to the confined `doc-edit` helper, never parsed in
+/// here, under the account's one helper slot; the result is kept as a made
+/// file like a created one. A refused call (any edit refused: nothing is
+/// written) is an error with each edit's reason.
+async fn edit_answer(
+    m: &Master,
+    row: &harness_store::SessionRow,
+    q: DocRequest,
+) -> Result<DocCreated, (String, bool)> {
+    let mut started = false;
+    edit_inner(m, row, q, &mut started)
+        .await
+        .map_err(|e| (e, started))
+}
+
+async fn edit_inner(
+    m: &Master,
+    row: &harness_store::SessionRow,
+    q: DocRequest,
+    started: &mut bool,
+) -> Result<DocCreated, String> {
+    use harness_docs::edit::serve::{Request, frame_request, parse_reply};
+    let (file_id, req, save_as) = match q {
+        DocRequest::View {
+            file,
+            sheet,
+            from,
+            limit,
+        } => (
+            file,
+            Request::DocView {
+                sheet,
+                from: from as usize,
+                limit: limit as usize,
+            },
+            None,
+        ),
+        DocRequest::DocEdit {
+            file,
+            edits,
+            save_as,
+        } => (file, Request::DocEdit { edits }, save_as),
+        DocRequest::SheetEdit {
+            file,
+            sheet,
+            edits,
+            save_as,
+        } => (file, Request::SheetEdit { sheet, edits }, save_as),
+        _ => return Err("not an edit".into()),
+    };
+    if file_id.is_empty()
+        || file_id.len() > harness_core::attached::MAX_ID_CHARS
+        || !file_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err("no such file in this chat: use the id the message names the file by".into());
+    }
+    let reader = m
+        .pdf_reader()
+        .ok_or("this server cannot edit documents (the editor is not set up)")?;
+    let file = file_of(m, row, &file_id).await?;
+    let who = row
+        .owner_id
+        .clone()
+        .unwrap_or_else(|| format!("chat:{}", row.session_id));
+    let _mine = reader.account_slot(&who).await.map_err(|e| e.to_string())?;
+    let bytes = bytes_of(m, &file).await?;
+    let is_view = matches!(req, Request::DocView { .. });
+    let sheet_tool = matches!(req, Request::SheetEdit { .. });
+    *started = true;
+    let out = reader
+        .edit(frame_request(&req, &bytes))
+        .await
+        .map_err(|e| {
+            // Waiting for a place and not getting one is not a run.
+            if matches!(e, crate::pdf::DocError::Busy) {
+                *started = false;
+            }
+            match e {
+                crate::pdf::DocError::Unreadable(m) => m,
+                other => other.to_string(),
+            }
+        })?;
+    drop(bytes);
+    let (reply, new) =
+        parse_reply(&out).ok_or("the document editor's answer was not understood")?;
+    if is_view {
+        return Ok(DocCreated {
+            file_id: String::new(),
+            name: String::new(),
+            bytes: 0,
+            sha256: String::new(),
+            mime: String::new(),
+            notes: vec![],
+            text: reply.text,
+        });
+    }
+    let mut notes: Vec<String> = reply.results.iter().map(|r| r.msg.clone()).collect();
+    if !reply.file {
+        notes.extend(reply.notes.iter().cloned());
+        return Err(format!("nothing was changed.\n{}", notes.join("\n")));
+    }
+    notes.extend(reply.notes.iter().cloned());
+    let in_ext = file
+        .name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase());
+    let (ext, mime): (&str, &'static str) = match (sheet_tool, in_ext.as_deref()) {
+        (true, Some("xlsm")) => ("xlsm", "application/vnd.ms-excel.sheet.macroEnabled.12"),
+        (true, _) => ("xlsx", XLSX_MIME),
+        (false, Some("docm")) => ("docm", "application/vnd.ms-word.document.macroEnabled.12"),
+        (false, _) => ("docx", DOCX_MIME),
+    };
+    let base = match save_as.as_deref() {
+        Some(n) if !n.trim().is_empty() => n.to_string(),
+        _ => format!(
+            "{} (edited)",
+            file.name
+                .rsplit_once('.')
+                .map_or(file.name.as_str(), |(s, _)| s)
+        ),
+    };
+    let name = harness_docs::name::file_name(&base, ext, "edited");
+    keep(
+        m,
+        row,
+        Built {
+            name,
+            mime,
+            bytes: new.to_vec(),
+            notes,
+        },
+    )
+    .await
 }
 
 /// A finished file, before it is kept.
@@ -258,6 +429,7 @@ pub fn make(q: &DocRequest, deadline: Instant) -> Result<Built, String> {
                 bytes: b.bytes,
             })
         }
+        _ => Err("not a request to make a file".into()),
     }
 }
 
@@ -332,6 +504,7 @@ async fn keep(
             sha256: sha,
             mime: built.mime.to_string(),
             notes: built.notes,
+            text: String::new(),
         }),
         MadePut::TooMany => Err(format!(
             "this chat already keeps {MAX_MADE_PER_CHAT} made files; no more can be made in it"
@@ -341,7 +514,7 @@ async fn keep(
 }
 
 /// The two tools' names, for the page that lists them.
-pub const NAMES: [&str; 2] = [DOC_TOOL, SHEET_TOOL];
+pub const NAMES: [&str; 5] = TOOLS;
 
 #[cfg(test)]
 mod tests {
@@ -369,7 +542,7 @@ mod tests {
             assert!(!d.allows_tool("doc_create") && !d.allows_tool("sheet_create"));
         }
         deny_delegates(&mut a);
-        assert_eq!(a.delegates[0].deny_tools.len(), 2, "once each");
+        assert_eq!(a.delegates[0].deny_tools.len(), TOOLS.len(), "once each");
         deny(&mut a);
         assert!(!a.allows_tool("doc_create") && !a.allows_tool("sheet_create"));
     }

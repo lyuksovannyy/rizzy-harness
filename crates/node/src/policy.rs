@@ -1202,7 +1202,7 @@ impl NodePolicy {
         let prefix = harness_tools::mcp::PREFIX;
         self.denied_tools.iter().any(|t| {
             t == tool
-                || (t == "write" && harness_core::docs::TOOLS.contains(&tool))
+                || (t == "write" && harness_core::docs::WRITE_TOOLS.contains(&tool))
                 || (tool.starts_with(prefix)
                     && (t == harness_core::agent::MCP_ALL
                         || (t.starts_with(prefix)

@@ -11,13 +11,18 @@ workspace = true
 
 [dependencies]
 flate2.workspace = true
+harness-attached.workspace = true
 harness-core.workspace = true
 # Markdown for `doc_create`: parsing only (no HTML renderer), so a model's
 # raw HTML is never rendered anywhere. MIT; its dependencies (bitflags,
 # memchr, unicase) were already in the tree.
 pulldown-cmark.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
-[dev-dependencies]
-harness-attached = { workspace = true }
+# The streaming XML pass of the edit tools (PLAN.md T98): every event it does
+# not change is copied as the bytes it came from. MIT, already in the tree (the
+# document reader of the master uses it).
 quick-xml = "=0.42.0"
+
+[dev-dependencies]

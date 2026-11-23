@@ -201,6 +201,7 @@ fn made(req: &DocRequest) -> Result<DocCreated, String> {
     let (name, mime) = match req {
         DocRequest::Doc { name, .. } => (format!("{name}.docx"), harness_core::docs::DOCX_MIME),
         DocRequest::Sheet { name, .. } => (format!("{name}.xlsx"), harness_core::docs::XLSX_MIME),
+        other => return Err(format!("{other:?} is not made here")),
     };
     Ok(DocCreated {
         file_id: "0123456789abcdef0123456789abcdef".into(),
@@ -209,6 +210,7 @@ fn made(req: &DocRequest) -> Result<DocCreated, String> {
         sha256: "cd".repeat(32),
         mime: mime.into(),
         notes: vec!["1 paragraphs, 0 tables, 0 numbered lists, 0 links.".into()],
+        text: String::new(),
     })
 }
 

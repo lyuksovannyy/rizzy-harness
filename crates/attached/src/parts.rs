@@ -32,6 +32,27 @@ pub enum PartError {
     Failed(String),
 }
 
+/// One entry of the zip as it is stored: the header fields the directory
+/// gives and the entry's data still compressed, never unpacked. What a writer
+/// needs to copy the entry into another zip byte for byte.
+#[derive(Debug, Clone, Copy)]
+pub struct RawEntry<'a> {
+    /// The name exactly as stored (not necessarily UTF-8).
+    pub name: &'a [u8],
+    /// 0 stored, 8 deflate (anything else is not copied: see [`Package::raw_entries`]).
+    pub method: u16,
+    /// The CRC-32 of the unpacked data, as the directory says.
+    pub crc: u32,
+    pub comp: u64,
+    pub size: u64,
+    pub time: u16,
+    pub date: u16,
+    /// The stored data (`comp` bytes).
+    pub data: &'a [u8],
+    /// A directory entry (its name ends in a slash, or it says so).
+    pub dir: bool,
+}
+
 /// A zip opened for reading its parts.
 pub struct Package<'a> {
     bytes: &'a [u8],
@@ -58,6 +79,47 @@ impl<'a> Package<'a> {
             parts,
             budget: Budget::new(deadline, PACKAGE_CEILING),
         })
+    }
+
+    /// Every entry in directory order, as stored. Refuses what a copy cannot
+    /// keep faithfully: an encrypted entry, a compression method other than
+    /// stored and deflate, an entry that is not a file or a directory (a
+    /// link, a special file), sizes of 4 GiB or more (zip64), a stored entry
+    /// whose two sizes differ, and an entry whose data lies outside the file.
+    /// Nothing is unpacked.
+    pub fn raw_entries(&self) -> Result<Vec<RawEntry<'_>>, String> {
+        let mut out = Vec::with_capacity(self.parts.len());
+        for r in &self.parts {
+            let dir = matches!(r.entry.kind, EntryKind::Dir);
+            if !dir && !matches!(r.entry.kind, EntryKind::File) {
+                return Err("the file holds a link or a special file in place of a part".into());
+            }
+            if r.flags & 1 != 0 {
+                return Err("a part of the file is encrypted".into());
+            }
+            if !matches!(r.method, 0 | 8) {
+                return Err("a part uses a compression method that is not supported".into());
+            }
+            if r.comp >= 0xFFFF_FFFF || r.size >= 0xFFFF_FFFF || r.local >= 0xFFFF_FFFF {
+                return Err("the file is too large to be a document here".into());
+            }
+            if r.method == 0 && r.comp != r.size {
+                return Err("a part's sizes disagree".into());
+            }
+            let data = zip::data(self.bytes, r).map_err(|e| e.to_string())?;
+            out.push(RawEntry {
+                name: &r.name,
+                method: r.method,
+                crc: r.crc,
+                comp: r.comp,
+                size: r.size,
+                time: r.time,
+                date: r.date,
+                data,
+                dir,
+            });
+        }
+        Ok(out)
     }
 
     fn find(&self, name: &str) -> Option<&Raw> {

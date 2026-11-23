@@ -810,3 +810,337 @@ async fn the_service_and_the_route_refuse_what_is_not_a_plain_chat() {
         StatusCode::OK
     );
 }
+
+// ---- editing a file of the chat (X.57, T98) -------------------------------
+
+/// A stand-in for the `doc-edit` helper that reads its stdin and answers
+/// with the framed reply in a file (the real helper is tested in
+/// `crates/cli/tests/doc_edit.rs`; here the service is).
+fn helper_says(t: &T, frame: &[u8]) {
+    let path = t.dir.path().join("helper-reply");
+    std::fs::write(&path, frame).unwrap();
+    t.master
+        .set_pdf_reader(harness_master::pdf::PdfReader::with_command(
+            "/bin/sh".into(),
+            vec![
+                "-c".into(),
+                format!("cat >/dev/null; cat '{}'", path.display()).into(),
+            ],
+        ));
+}
+
+fn reply(text: &str, results: &[(bool, &str)], notes: &[&str], file: Option<&[u8]>) -> Vec<u8> {
+    let r = harness_docs::edit::serve::Reply {
+        text: text.into(),
+        results: results
+            .iter()
+            .map(|(ok, m)| harness_docs::edit::serve::Item {
+                ok: *ok,
+                msg: (*m).into(),
+            })
+            .collect(),
+        notes: notes.iter().map(|s| s.to_string()).collect(),
+        file: file.is_some(),
+    };
+    let head = serde_json::to_vec(&r).unwrap();
+    let mut out = (head.len() as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(&head);
+    out.extend_from_slice(file.unwrap_or(&[]));
+    out
+}
+
+fn edit_req(file: &str, save_as: Option<&str>) -> DocRequest {
+    DocRequest::DocEdit {
+        file: file.into(),
+        edits: vec![json!({"op": "delete", "at": "p1#0000"})],
+        save_as: save_as.map(str::to_string),
+    }
+}
+
+/// A view returns the helper's text; an edit's new file is kept as a made
+/// file of this chat (named `name (edited).docx`, or `save_as`), the
+/// original is not touched; a refused edit is an error with each edit's
+/// reason and keeps nothing.
+#[tokio::test]
+async fn an_edit_of_the_chats_own_file_is_kept_as_a_new_made_file() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let sid = open(&t, &alex, "t1", json!({})).await;
+    let made = t
+        .chat
+        .ask_docs(sid, doc("plan", "# Plan\n\ntext"))
+        .await
+        .unwrap();
+    name_in_log(&t, sid, &made).await;
+    let blobs = blob_paths(&t).len();
+    // A view.
+    helper_says(&t, &reply("p1#a3f Plan", &[], &[], None));
+    let v = t
+        .chat
+        .ask_docs(
+            sid,
+            DocRequest::View {
+                file: made.file_id.clone(),
+                sheet: None,
+                from: 0,
+                limit: 0,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(v.text, "p1#a3f Plan");
+    assert!(
+        v.file_id.is_empty() && blob_paths(&t).len() == blobs,
+        "a view keeps nothing"
+    );
+    // An edit: the helper's file is the new made file.
+    let new = harness_docs::docx::build("# Plan\n\nedited", &Default::default())
+        .unwrap()
+        .bytes;
+    helper_says(
+        &t,
+        &reply(
+            "",
+            &[(true, "edit 1 (delete): p2: deleted")],
+            &["a note"],
+            Some(&new),
+        ),
+    );
+    let c = t
+        .chat
+        .ask_docs(sid, edit_req(&made.file_id, None))
+        .await
+        .unwrap();
+    assert_eq!(c.name, "plan (edited).docx");
+    assert_ne!(c.file_id, made.file_id);
+    assert_eq!(c.mime, harness_core::docs::DOCX_MIME);
+    assert_eq!(c.bytes, new.len() as u64);
+    assert_eq!(c.notes, ["edit 1 (delete): p2: deleted", "a note"]);
+    name_in_log(&t, sid, &c).await;
+    let r = download(&t, &alex, sid, &c.file_id).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.bytes().await.unwrap().to_vec(), new);
+    let r = download(&t, &alex, sid, &made.file_id).await;
+    assert_eq!(r.status(), StatusCode::OK, "the original is still there");
+    // save_as; a name is only a name.
+    let c = t
+        .chat
+        .ask_docs(sid, edit_req(&made.file_id, Some("../../etc/Final.DOCX")))
+        .await
+        .unwrap();
+    assert_eq!(c.name, "Final.docx");
+    // Refused: no file, every reason.
+    helper_says(
+        &t,
+        &reply(
+            "",
+            &[
+                (true, "edit 1: ok (not applied)"),
+                (false, "edit 2: no paragraph p9"),
+            ],
+            &[],
+            None,
+        ),
+    );
+    let n = blob_paths(&t).len();
+    let e = t
+        .chat
+        .ask_docs(sid, edit_req(&made.file_id, None))
+        .await
+        .unwrap_err();
+    assert!(
+        e.starts_with("nothing was changed.") && e.contains("edit 2: no paragraph p9"),
+        "{e}"
+    );
+    assert_eq!(blob_paths(&t).len(), n);
+    // A sheet gets xlsx; macros keep their extension.
+    let x = t
+        .chat
+        .ask_docs(sid, sheet("book", json!({"sheets": [{"rows": [[1]]}]})))
+        .await
+        .unwrap();
+    name_in_log(&t, sid, &x).await;
+    helper_says(
+        &t,
+        &reply("", &[(true, "ok")], &[], Some(b"PK\x03\x04 bytes")),
+    );
+    let c = t
+        .chat
+        .ask_docs(
+            sid,
+            DocRequest::SheetEdit {
+                file: x.file_id.clone(),
+                sheet: "Sheet1".into(),
+                edits: vec![json!({"op": "clear", "range": "A1"})],
+                save_as: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (c.name.as_str(), c.mime.as_str()),
+        ("book (edited).xlsx", harness_core::docs::XLSX_MIME)
+    );
+}
+
+/// The id is the chat's own: another chat's file, a made-up id, an id with
+/// odd characters and a file past the cap are refused before any helper.
+#[tokio::test]
+async fn an_edit_names_only_this_chats_own_files() {
+    let t = start().await;
+    let [alex, bea] = users(&t).await;
+    let sid = open(&t, &alex, "t1", json!({})).await;
+    let other = open(&t, &bea, "t1", json!({})).await;
+    let theirs = t.chat.ask_docs(other, doc("secret", "# s")).await.unwrap();
+    name_in_log(&t, other, &theirs).await;
+    // A helper that would say yes to anything: the service must not ask it.
+    let new = harness_docs::docx::build("x", &Default::default())
+        .unwrap()
+        .bytes;
+    helper_says(&t, &reply("leaked", &[(true, "ok")], &[], Some(&new)));
+    let n = blob_paths(&t).len();
+    for id in [
+        theirs.file_id.as_str(),
+        "nope",
+        "../../etc/passwd",
+        "",
+        "a b",
+    ] {
+        let e = t.chat.ask_docs(sid, edit_req(id, None)).await.unwrap_err();
+        assert!(e.contains("no such file"), "{id}: {e}");
+        let e = t
+            .chat
+            .ask_docs(
+                sid,
+                DocRequest::View {
+                    file: id.into(),
+                    sheet: None,
+                    from: 0,
+                    limit: 0,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(e.contains("no such file"), "{id}: {e}");
+    }
+    assert_eq!(blob_paths(&t).len(), n, "nothing was made");
+    // The turn's switch decides: an agent without it has no edit either.
+    let sid = open(&t, &alex, "t1", json!({"agent_id": "researcher"})).await;
+    let e = t.chat.ask_docs(sid, edit_req("x", None)).await.unwrap_err();
+    assert!(e.contains("Create and edit documents"), "{e}");
+}
+
+/// A helper that cannot confine itself, one that crashes, one that answers
+/// nonsense: sentences, nothing kept.
+#[tokio::test]
+async fn a_failing_helper_keeps_nothing_and_says_why() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let sid = open(&t, &alex, "t1", json!({})).await;
+    let made = t.chat.ask_docs(sid, doc("plan", "# Plan")).await.unwrap();
+    name_in_log(&t, sid, &made).await;
+    let n = blob_paths(&t).len();
+    // The reader is set once; what the stand-in does is a script it runs.
+    let script = t.dir.path().join("helper.sh");
+    let says = |body: &str| std::fs::write(&script, body).unwrap();
+    says("exit 125");
+    t.master
+        .set_pdf_reader(harness_master::pdf::PdfReader::with_command(
+            "/bin/sh".into(),
+            vec![script.clone().into_os_string()],
+        ));
+    let e = t
+        .chat
+        .ask_docs(sid, edit_req(&made.file_id, None))
+        .await
+        .unwrap_err();
+    assert!(e.contains("Landlock"), "{e}");
+    says("cat >/dev/null; printf 'a part is damaged'; exit 3");
+    let e = t
+        .chat
+        .ask_docs(sid, edit_req(&made.file_id, None))
+        .await
+        .unwrap_err();
+    assert_eq!(e, "a part is damaged");
+    says("cat >/dev/null; printf 'garbage'");
+    let e = t
+        .chat
+        .ask_docs(sid, edit_req(&made.file_id, None))
+        .await
+        .unwrap_err();
+    assert!(e.contains("not understood"), "{e}");
+    assert_eq!(blob_paths(&t).len(), n);
+}
+
+/// Every refusal of an edit keeps its reason: a call with many edits has one
+/// for each, and all of them reach the node through the real `handle`.
+#[tokio::test]
+async fn a_refused_call_keeps_the_reason_of_every_edit() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let sid = open(&t, &alex, "t1", json!({})).await;
+    let made = t.chat.ask_docs(sid, doc("plan", "# Plan")).await.unwrap();
+    name_in_log(&t, sid, &made).await;
+    let long = |k: u8| format!("edit {k}: {}", format!("reason{k} ").repeat(40));
+    helper_says(
+        &t,
+        &reply(
+            "",
+            &[(false, &long(1)), (false, &long(2)), (false, &long(3))],
+            &["a warning"],
+            None,
+        ),
+    );
+    let e = t
+        .chat
+        .ask_docs(sid, edit_req(&made.file_id, None))
+        .await
+        .unwrap_err();
+    for k in 1..=3 {
+        assert!(e.contains(&format!("reason{k}")), "edit {k} is in: {e}");
+    }
+    assert!(
+        e.lines().count() >= 4 && e.lines().all(|l| l.chars().count() <= 400),
+        "{e}"
+    );
+}
+
+/// A helper that ran counts against the turn whatever it said (a slow
+/// hostile file cannot be retried without limit); a refusal before it starts
+/// gives its count back.
+#[tokio::test]
+async fn a_run_of_the_helper_counts_and_a_refusal_before_it_does_not() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let sid = open(&t, &alex, "t1", json!({})).await;
+    let made = t.chat.ask_docs(sid, doc("plan", "# Plan")).await.unwrap();
+    name_in_log(&t, sid, &made).await;
+    let script = t.dir.path().join("helper.sh");
+    std::fs::write(&script, "cat >/dev/null; printf 'bad part'; exit 3").unwrap();
+    t.master
+        .set_pdf_reader(harness_master::pdf::PdfReader::with_command(
+            "/bin/sh".into(),
+            vec![script.into_os_string()],
+        ));
+    // One call was the creation above; sixty in all are allowed in a turn.
+    // A hundred refusals before the helper starts count for nothing.
+    for _ in 0..100 {
+        let e = t
+            .chat
+            .ask_docs(sid, edit_req("nope", None))
+            .await
+            .unwrap_err();
+        assert!(e.contains("no such file"), "{e}");
+    }
+    let mut ran = 0;
+    let err = loop {
+        match t.chat.ask_docs(sid, edit_req(&made.file_id, None)).await {
+            Err(e) if e == "bad part" => ran += 1,
+            Err(e) => break e,
+            Ok(_) => panic!("the helper failed"),
+        }
+        assert!(ran <= 60, "no limit");
+    };
+    assert_eq!(ran, 59, "the creation and 59 failed runs are the turn's 60");
+    assert!(err.contains("60 times"), "{err}");
+}

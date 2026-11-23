@@ -33,6 +33,9 @@ pub const SUBCOMMAND: &str = "pdf-text";
 /// The same binary's subcommand for Word, Excel, PowerPoint and
 /// OpenDocument files (`crate::doc`): same confinement, same limits.
 pub const DOC_SUBCOMMAND: &str = "doc-text";
+/// And the one that edits Word and Excel files (`crate::doc_edit`, X.57,
+/// T98): a request and a file in, the new file out.
+pub const EDIT_SUBCOMMAND: &str = "doc-edit";
 /// Helpers running at once, server-wide.
 pub const CONCURRENT: usize = 2;
 /// How long a request waits for a free helper slot.
@@ -96,6 +99,8 @@ pub struct PdfReader {
     args: Vec<OsString>,
     /// The arguments of an office document's helper (`doc-text`).
     doc_args: Vec<OsString>,
+    /// The arguments of the editing helper (`doc-edit`).
+    edit_args: Vec<OsString>,
     slots: Arc<Semaphore>,
     /// One helper at a time per account (see [`Self::account_slot`]).
     accounts: std::sync::Mutex<std::collections::HashMap<String, Arc<Semaphore>>>,
@@ -108,6 +113,7 @@ impl PdfReader {
     pub fn new(exe: PathBuf) -> Self {
         let mut r = Self::with_command(exe, vec![SUBCOMMAND.into()]);
         r.doc_args = vec![DOC_SUBCOMMAND.into()];
+        r.edit_args = vec![EDIT_SUBCOMMAND.into()];
         r
     }
 
@@ -116,6 +122,7 @@ impl PdfReader {
         Self {
             program,
             doc_args: args.clone(),
+            edit_args: args.clone(),
             args,
             slots: Arc::new(Semaphore::new(CONCURRENT)),
             accounts: Default::default(),
@@ -185,6 +192,16 @@ impl PdfReader {
         args: &[OsString],
         input: Vec<u8>,
     ) -> Result<(Option<i32>, Vec<u8>), PdfError> {
+        self.run_capped(args, input, MAX_OUTPUT).await
+    }
+
+    /// [`Self::run`] with its own bound on what the helper may write.
+    pub(crate) async fn run_capped(
+        &self,
+        args: &[OsString],
+        input: Vec<u8>,
+        max_output: usize,
+    ) -> Result<(Option<i32>, Vec<u8>), PdfError> {
         // The permit is released when this future ends or is dropped.
         let _slot = tokio::time::timeout(self.queue_wait, self.slots.clone().acquire_owned())
             .await
@@ -221,7 +238,7 @@ impl PdfReader {
                     if n == 0 {
                         return Ok(out);
                     }
-                    if out.len() + n > MAX_OUTPUT {
+                    if out.len() + n > max_output {
                         return Err(PdfError::Crashed);
                     }
                     out.extend_from_slice(&buf[..n]);
@@ -238,6 +255,23 @@ impl PdfReader {
         // Reaped: the group id may be reused from here on.
         group.0 = None;
         Ok((status.code(), out))
+    }
+
+    /// A request and a Word or Excel file through `doc-edit` (X.57): the
+    /// helper's reply, framed (`harness_docs::edit::serve`). The helper has
+    /// its own bounds on what it reads and writes; this one holds the time,
+    /// the output and the slots, as for every file the server reads.
+    pub async fn edit(&self, input: Vec<u8>) -> Result<Vec<u8>, DocError> {
+        let cap = harness_docs::limits::MAX_OUTPUT_BYTES
+            + harness_docs::edit::serve::MAX_HEADER_BYTES
+            + 4096;
+        let (code, out) = self.run_capped(&self.edit_args, input, cap).await?;
+        match code {
+            Some(0) => Ok(out),
+            Some(EXIT_UNREADABLE) => Err(DocError::Unreadable(message(&out))),
+            Some(EXIT_UNCONFINED) => Err(DocError::Unconfined),
+            _ => Err(DocError::Crashed),
+        }
     }
 
     /// An office document's text through `doc-text`: `(mime, text)`, or why
@@ -352,6 +386,11 @@ pub(crate) enum Verdict {
 /// write what it says. Returns the exit code. Must run before any other
 /// thread exists (Landlock confines the calling thread only).
 pub(crate) fn confined_helper(read: impl FnOnce(&[u8]) -> Verdict) -> i32 {
+    confined_helper_cap(crate::attachments::MAX_UPLOAD, read)
+}
+
+/// [`confined_helper`] reading at most `max` bytes of stdin.
+pub(crate) fn confined_helper_cap(max: usize, read: impl FnOnce(&[u8]) -> Verdict) -> i32 {
     use std::io::{Read, Write};
     // What is mapped now (the binary, its libraries), read before /proc is
     // closed by the sandbox.
@@ -380,7 +419,7 @@ pub(crate) fn confined_helper(read: impl FnOnce(&[u8]) -> Verdict) -> i32 {
         return probe(&port);
     }
     let mut input = Vec::new();
-    let max = crate::attachments::MAX_UPLOAD as u64;
+    let max = max as u64;
     if std::io::stdin()
         .lock()
         .take(max + 1)
@@ -662,6 +701,29 @@ mod tests {
         hb.abort();
         let _ = ha.await;
         let _ = hb.await;
+        assert_eq!(r.free_slots(), CONCURRENT);
+    }
+
+    /// The editing helper rides the same supervisor: time, the output cap
+    /// (larger than a text's, a file can come back), the slots, the exit codes.
+    #[tokio::test]
+    async fn an_edit_helper_has_the_same_bounds() {
+        let r = sh("cat >/dev/null; printf 'done'");
+        assert_eq!(r.edit(b"x".to_vec()).await, Ok(b"done".to_vec()));
+        // More than a text may be, less than a file may be: allowed here.
+        let r = sh("cat >/dev/null; head -c 3000000 /dev/zero");
+        assert_eq!(r.edit(b"x".to_vec()).await.map(|o| o.len()), Ok(3_000_000));
+        let r = sh("yes 'ab'").with_limits(Duration::from_secs(10), Duration::from_secs(1));
+        assert_eq!(r.edit(vec![b'P'; 1 << 20]).await, Err(DocError::Crashed));
+        let r = sh("sleep 300").with_limits(Duration::from_millis(300), Duration::from_millis(300));
+        assert_eq!(r.edit(b"x".to_vec()).await, Err(DocError::Timeout));
+        let r = sh("cat >/dev/null; printf 'bad part'; exit 3");
+        assert_eq!(
+            r.edit(b"x".to_vec()).await,
+            Err(DocError::Unreadable("bad part".into()))
+        );
+        let r = sh("exit 125");
+        assert_eq!(r.edit(b"x".to_vec()).await, Err(DocError::Unconfined));
         assert_eq!(r.free_slots(), CONCURRENT);
     }
 

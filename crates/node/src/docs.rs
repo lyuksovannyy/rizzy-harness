@@ -109,3 +109,19 @@ impl DocSource for LinkDocs {
         }
     }
 }
+
+/// This node's one way to run the `doc-edit` helper: its own binary, at most
+/// two at once on the whole node (`None` when the binary cannot be found).
+pub(crate) fn shared_helper() -> Option<Arc<dyn harness_core::docs::EditHelper>> {
+    static HELPER: std::sync::OnceLock<Option<Arc<harness_tools::doc_helper::ExeHelper>>> =
+        std::sync::OnceLock::new();
+    HELPER
+        .get_or_init(|| {
+            std::env::current_exe()
+                .and_then(|e| e.canonicalize())
+                .ok()
+                .map(|e| Arc::new(harness_tools::doc_helper::ExeHelper::new(e)))
+        })
+        .clone()
+        .map(|h| h as Arc<dyn harness_core::docs::EditHelper>)
+}

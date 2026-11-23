@@ -1414,6 +1414,7 @@ dependencies = [
  "harness-agents",
  "harness-attached",
  "harness-core",
+ "harness-docs",
  "harness-link",
  "harness-master",
  "harness-memory",
@@ -1523,6 +1524,7 @@ dependencies = [
  "harness-core",
  "pulldown-cmark",
  "quick-xml",
+ "serde",
  "serde_json",
 ]
 

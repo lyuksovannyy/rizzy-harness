@@ -87,6 +87,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "skill",
     "recall",
     "attached_file",
+    "doc_view",
     "history",
     "board",
     "web_search",

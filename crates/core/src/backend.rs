@@ -215,6 +215,13 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
+    /// How this session's `doc_view`, `doc_edit` and `sheet_edit` calls run
+    /// the confined `doc-edit` helper in a chat with a folder; `None` where
+    /// there is none (tests, a runtime that does not run the helper).
+    fn doc_helper(&self) -> Option<std::sync::Arc<dyn crate::docs::EditHelper>> {
+        None
+    }
+
     /// Where this session's loads of a stored skill go (X.34 step B: the
     /// node's link to the master, bound to this session); `None` where
     /// there is none (tests, a runtime without a master).

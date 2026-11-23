@@ -20,6 +20,8 @@ const DOS_TIME: u16 = 0;
 
 struct Central {
     name: Vec<u8>,
+    time: u16,
+    date: u16,
     method: u16,
     crc: u32,
     comp: u32,
@@ -86,15 +88,96 @@ impl ZipWriter {
 
     /// Add a part, deflated when that is smaller, stored otherwise.
     pub fn add(&mut self, name: &str, data: &[u8]) -> Result<()> {
-        self.put(name, data, true)
+        self.put(name, data, true, DOS_TIME, DOS_DATE)
+    }
+
+    /// [`Self::add`] with the timestamp of the entry it replaces.
+    pub fn add_at(&mut self, name: &str, data: &[u8], time: u16, date: u16) -> Result<()> {
+        self.put(name, data, true, time, date)
     }
 
     /// Add a part stored as it is.
     pub fn add_stored(&mut self, name: &str, data: &[u8]) -> Result<()> {
-        self.put(name, data, false)
+        self.put(name, data, false, DOS_TIME, DOS_DATE)
     }
 
-    fn put(&mut self, name: &str, data: &[u8], deflate: bool) -> Result<()> {
+    /// Copy an entry of another zip as it is stored: its compressed bytes,
+    /// CRC and sizes (as that zip's directory gave them) and its timestamp.
+    /// Nothing is unpacked, so what the entry unpacks to costs nothing here
+    /// and its size is not held to [`MAX_PART_BYTES`]: a part this writer did
+    /// not change is the other file's own. The caller has checked the method
+    /// is 0 or 8 and the sizes fit 32 bits. A directory entry (name ending in
+    /// a slash) is copied too.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_raw(
+        &mut self,
+        name: &str,
+        method: u16,
+        crc: u32,
+        comp: u32,
+        size: u32,
+        time: u16,
+        date: u16,
+        data: &[u8],
+    ) -> Result<()> {
+        check_name(name.strip_suffix('/').unwrap_or(name))?;
+        if !matches!(method, 0 | 8) || data.len() != comp as usize {
+            return Err("a part of the file cannot be copied".into());
+        }
+        if !self.names.insert(name.to_ascii_lowercase()) {
+            return Err("a part of the file would be written twice".into());
+        }
+        if self.projected(name.len()) + data.len() > self.max {
+            return Err(format!(
+                "the file would be larger than {} MiB",
+                self.max >> 20
+            ));
+        }
+        self.push(name, method, crc, comp, size, time, date, data)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push(
+        &mut self,
+        name: &str,
+        method: u16,
+        crc: u32,
+        comp: u32,
+        size: u32,
+        time: u16,
+        date: u16,
+        body: &[u8],
+    ) -> Result<()> {
+        let offset =
+            u32::try_from(self.out.len()).map_err(|_| "the file is too large".to_string())?;
+        let o = &mut self.out;
+        le32(o, 0x0403_4b50);
+        le16(o, 20);
+        le16(o, 0x0800);
+        le16(o, method);
+        le16(o, time);
+        le16(o, date);
+        le32(o, crc);
+        le32(o, comp);
+        le32(o, size);
+        le16(o, name.len() as u16);
+        le16(o, 0);
+        o.extend_from_slice(name.as_bytes());
+        o.extend_from_slice(body);
+        self.entries.push(Central {
+            name: name.as_bytes().to_vec(),
+            time,
+            date,
+            method,
+            crc,
+            comp,
+            size,
+            offset,
+        });
+        Ok(())
+    }
+
+    fn put(&mut self, name: &str, data: &[u8], deflate: bool, time: u16, date: u16) -> Result<()> {
         check_name(name)?;
         if !self.names.insert(name.to_ascii_lowercase()) {
             return Err("a part of the file would be written twice".into());
@@ -130,32 +213,8 @@ impl ZipWriter {
                 self.max >> 20
             ));
         }
-        let offset =
-            u32::try_from(self.out.len()).map_err(|_| "the file is too large".to_string())?;
         let (comp, size) = (body.len() as u32, data.len() as u32);
-        let o = &mut self.out;
-        le32(o, 0x0403_4b50);
-        le16(o, 20);
-        le16(o, 0x0800);
-        le16(o, method);
-        le16(o, DOS_TIME);
-        le16(o, DOS_DATE);
-        le32(o, crc);
-        le32(o, comp);
-        le32(o, size);
-        le16(o, name.len() as u16);
-        le16(o, 0);
-        o.extend_from_slice(name.as_bytes());
-        o.extend_from_slice(body);
-        self.entries.push(Central {
-            name: name.as_bytes().to_vec(),
-            method,
-            crc,
-            comp,
-            size,
-            offset,
-        });
-        Ok(())
+        self.push(name, method, crc, comp, size, time, date, body)
     }
 
     /// Write the central directory and the end record.
@@ -170,8 +229,8 @@ impl ZipWriter {
             le16(o, 20);
             le16(o, 0x0800);
             le16(o, e.method);
-            le16(o, DOS_TIME);
-            le16(o, DOS_DATE);
+            le16(o, e.time);
+            le16(o, e.date);
             le32(o, e.crc);
             le32(o, e.comp);
             le32(o, e.size);

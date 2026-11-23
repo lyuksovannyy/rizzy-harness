@@ -16,6 +16,7 @@ pub mod config;
 pub mod connectors;
 pub mod diff;
 pub mod doc;
+pub mod doc_edit;
 pub mod env;
 mod exec_switch;
 mod favicon;

@@ -381,6 +381,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.docs()
     }
 
+    fn doc_helper(&self) -> Option<Arc<dyn harness_core::docs::EditHelper>> {
+        self.host.doc_helper()
+    }
+
     fn history(&self) -> Option<Arc<dyn harness_core::history::HistorySource>> {
         self.host.history()
     }
@@ -6189,6 +6193,7 @@ impl NativeBackend {
             recall: host.recall(),
             attached: host.attached(),
             docs: host.docs(),
+            doc_helper: host.doc_helper(),
             history: host.history(),
             board: host.board(),
             stored_skills: host.stored_skills(),
@@ -6357,6 +6362,7 @@ impl NativeBackend {
             owned: host.owned_folder(),
             // `doc_create`'s refusal reads whether the chat has a folder.
             docs: host.docs(),
+            doc_helper: host.doc_helper(),
             ..ToolCtx::new(ctx.cwd.clone())
         }
     }

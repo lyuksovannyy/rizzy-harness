@@ -45,6 +45,7 @@ flate2.workspace = true
 futures.workspace = true
 # The test documents of tests/doc_text.rs (zips and office files built in code).
 harness-attached = { workspace = true, features = ["testkit"] }
+harness-docs.workspace = true
 harness-master = { workspace = true, features = ["helper-probe"] }
 harness-core.workspace = true
 harness-node = { workspace = true, features = ["testing"] }
