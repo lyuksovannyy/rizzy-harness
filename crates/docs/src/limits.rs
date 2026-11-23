@@ -62,3 +62,32 @@ pub const MAX_PART_BYTES: usize = 24 << 20;
 pub const MAX_DOC_PART_BYTES: usize = 16 << 20;
 /// Characters of a file name, without its extension.
 pub const MAX_NAME_CHARS: usize = 100;
+
+// The edit tools (PLAN.md T98). Each is tested at its edge and one past it.
+
+/// The part an edit patches (`word/document.xml`, a worksheet), unpacked, in
+/// bytes. A larger part is refused: the whole of it is held, and so is what
+/// the edit makes of it.
+pub const MAX_EDIT_PART_BYTES: usize = 8 << 20;
+/// The same part after the edit, in bytes: counted while it is written.
+pub const MAX_EDIT_OUT_PART_BYTES: usize = 10 << 20;
+/// Edits of one call.
+pub const MAX_EDITS: usize = 200;
+/// Characters of one text of an edit (a `find`, a replacement, a cell's text).
+pub const MAX_EDIT_TEXT_CHARS: usize = 20_000;
+/// The Markdown of one insert, in bytes.
+pub const MAX_EDIT_MARKDOWN_BYTES: usize = 100_000;
+/// Cells of one `set` or rows of one `append_rows`.
+pub const MAX_EDIT_CELLS: usize = 10_000;
+/// Paragraphs a document may have to be edited (each is indexed).
+pub const MAX_EDIT_PARAS: usize = 200_000;
+/// One paragraph's own XML, in bytes, for an edit inside it.
+pub const MAX_EDIT_PARA_BYTES: usize = 1 << 20;
+/// XML events read from one part.
+pub const MAX_EDIT_EVENTS: usize = 4_000_000;
+/// The view of a document, in bytes (the model reads at most this at once).
+pub const MAX_VIEW_BYTES: usize = 30_000;
+/// Items (paragraphs or rows) one view page shows at most.
+pub const MAX_VIEW_ITEMS: usize = 400;
+/// Wall time of one edit or view in the helper.
+pub const EDIT_SECONDS: u64 = 15;

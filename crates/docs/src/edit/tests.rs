@@ -305,3 +305,20 @@ fn the_scan_refuses_what_it_cannot_keep() {
     let many = format!("<w:document {w}>{}</w:document>", "<w:p/>".repeat(2000));
     assert!(scan_all(many.as_bytes()).unwrap_err().contains("too many"));
 }
+
+/// Every entry but the ones named comes out as the input's bytes.
+pub(crate) fn assert_others_identical(before: &[u8], after: &[u8], changed: &[&str]) {
+    let (a, b) = (rows(before), rows(after));
+    for x in &a {
+        if changed.contains(&x.0.as_str()) {
+            continue;
+        }
+        let y = b
+            .iter()
+            .find(|y| y.0 == x.0)
+            .unwrap_or_else(|| panic!("{} is gone", x.0));
+        assert_eq!(x, y, "{} changed", x.0);
+    }
+    let names = |r: &[Row]| r.iter().map(|x| x.0.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&a), names(&b), "the order of the parts");
+}

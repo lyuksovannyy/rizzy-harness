@@ -76,6 +76,25 @@ impl<'a> Scan<'a> {
         })
     }
 
+    /// Read one element of a part the root of which was already read: a
+    /// slice that starts at that element's start tag, the main prefix being
+    /// the part's own. Positions are relative to the slice.
+    pub fn within(
+        src: &'a [u8],
+        ns: &'static str,
+        prefix: &str,
+        max_events: usize,
+    ) -> Result<Self> {
+        let mut s = Self::new(src, ns, max_events)?;
+        s.prefix = Some(prefix.to_string());
+        Ok(s)
+    }
+
+    /// The main namespace's prefix as the root bound it (empty: the default).
+    pub fn prefix(&self) -> &str {
+        self.prefix.as_deref().unwrap_or("")
+    }
+
     pub fn src(&self) -> &'a [u8] {
         self.src
     }

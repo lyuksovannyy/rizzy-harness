@@ -7,8 +7,15 @@
 //! the confined helper (`rizzy-harness doc-edit`), never in a server's or a
 //! node's own process.
 
+pub mod check;
+pub mod docx;
+pub mod para;
 pub mod pkg;
 pub mod scan;
 
 #[cfg(test)]
+pub(crate) mod fixtures;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_docx;
