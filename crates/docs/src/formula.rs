@@ -36,6 +36,8 @@ const DENIED: &[&str] = &[
     "DDEAUTO",
 ];
 
+const HYPERLINK_ONLY: &str = "HYPERLINK in a formula needs, as its first argument, one text that is an address starting \"http://\" or \"https://\", with nothing joined to it";
+
 fn invisible(c: char) -> bool {
     c.is_control() || harness_core::text::is_hidden(c) || xml::is_override(c)
 }
@@ -101,6 +103,13 @@ pub fn check(formula: &str) -> Result<String> {
                                 "a formula refers to another workbook (a reference with square brackets); only this workbook's cells can be used".into(),
                             );
                         }
+                        // A sheet's name has none of these: a path or an
+                        // address in quotes is a workbook outside this one.
+                        Some('\\' | '/' | ':') => {
+                            return Err(
+                                "a formula refers to a path or an address in quotes (another workbook); only this workbook's cells can be used".into(),
+                            );
+                        }
                         Some(_) => {}
                     }
                 }
@@ -142,29 +151,48 @@ pub fn check(formula: &str) -> Result<String> {
         while j < chars.len() && chars[j] == ' ' {
             j += 1;
         }
-        if chars.get(j) != Some(&'(') {
-            continue;
+        let call = chars.get(j) == Some(&'(');
+        // `Book1.xlsx!Total`: a file name before `!` is another workbook.
+        if chars.get(j) == Some(&'!') && chars[start..i].contains(&'.') {
+            return Err(
+                "a formula has a name with a dot before `!` (another workbook, `Book.xlsx!Cell`); put a sheet name in quotes, `'My.Sheet'!A1`".into(),
+            );
         }
         let mut name: String = chars[start..i].iter().collect();
-        // `_xlfn.IMAGE`, `_xlfn._xlws.FILTER`: the stored form of a newer
-        // function; the function is what follows the last prefix.
+        // `_xlfn.IMAGE`, `_xlfn._xlws.FILTER`, `_xleta.WEBSERVICE`: the
+        // stored form of a newer function or of a function used as a
+        // value; what follows the last prefix is the name.
         while name.starts_with("_XL") {
             match name.find('.') {
                 Some(p) => name = name[p + 1..].to_string(),
                 None => break,
             }
         }
+        // Called or handed to another function (`MAP(range, WEBSERVICE)`),
+        // the name is refused all the same.
         if DENIED.contains(&name.as_str()) || name.starts_with("CUBE") {
             return Err(format!(
-                "a formula calls {name}, which can reach outside the workbook and is not allowed"
+                "a formula uses {name}, which can reach outside the workbook and is not allowed"
             ));
         }
         if name == "HYPERLINK" {
+            if !call {
+                return Err(HYPERLINK_ONLY.into());
+            }
             let mut k = j + 1;
             while k < chars.len() && chars[k] == ' ' {
                 k += 1;
             }
-            let ok = chars.get(k) == Some(&'"') && {
+            // The first argument is one text literal, nothing joined to it:
+            // what follows it is `,` or `)`.
+            let alone = chars.get(k) == Some(&'"') && {
+                let mut e = k + 1;
+                while e < chars.len() && chars[e] == ' ' {
+                    e += 1;
+                }
+                matches!(chars.get(e), Some(',' | ')'))
+            };
+            let ok = alone && {
                 let n = chars[..k].iter().filter(|c| **c == '"').count();
                 let lit = lits.get(n).map(String::as_str).unwrap_or("");
                 let lit: String = lit
@@ -176,9 +204,7 @@ pub fn check(formula: &str) -> Result<String> {
                 lit.starts_with("http://") || lit.starts_with("https://")
             };
             if !ok {
-                return Err(
-                    "HYPERLINK in a formula needs an address that starts with the text \"http://\" or \"https://\"".into(),
-                );
+                return Err(HYPERLINK_ONLY.into());
             }
         }
     }
