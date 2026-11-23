@@ -612,3 +612,43 @@ fn a_fork_shares_a_made_file() {
             .is_none()
     );
 }
+
+/// The cap on made files counts made rows, not the person's attachments: a
+/// chat with a hundred attachments can still make a file, and the hundred
+/// and first made one is refused (PLAN.md T97).
+#[test]
+fn attachments_do_not_count_toward_the_made_files_cap() {
+    let s = store();
+    let mut l = Log::new();
+    append_all(&s, NODE, &l.events);
+    let sid = l.sid.to_string();
+    let files: Vec<_> = (0..MAX_MADE_PER_CHAT)
+        .map(|i| {
+            let id = format!("a{i}");
+            let f = taken(&s, &id, "u1", &format!("{i:04}x"));
+            s.chat_uploads_done(&[id]).unwrap();
+            f
+        })
+        .collect();
+    s.session_files_hold(&sid, &files).unwrap();
+    let _ = &mut l;
+    assert!(matches!(
+        made(&s, &sid, "m0", "u1", "m000", NO_LIMIT),
+        MadePut::Added { .. }
+    ));
+    for i in 1..MAX_MADE_PER_CHAT {
+        let r = made(
+            &s,
+            &sid,
+            &format!("m{i}"),
+            "u1",
+            &format!("m{i:03}"),
+            NO_LIMIT,
+        );
+        assert!(matches!(r, MadePut::Added { .. }), "{i}");
+    }
+    assert_eq!(
+        made(&s, &sid, "m-over", "u1", "mover", NO_LIMIT),
+        MadePut::TooMany
+    );
+}

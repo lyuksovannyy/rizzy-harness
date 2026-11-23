@@ -73,6 +73,14 @@ CREATE TABLE IF NOT EXISTS session_files (
 CREATE INDEX IF NOT EXISTS session_files_blob ON session_files(blob_id);
 "#;
 
+/// Schema version 6 (PLAN.md T97): which rows the master made for an agent
+/// (`doc_create`, `sheet_create`) as against the person's own attachments, so
+/// that the cap on made files counts only the former.
+pub const MADE_SCHEMA: &str = r#"
+ALTER TABLE session_files
+    ADD COLUMN made INTEGER NOT NULL DEFAULT 0 CHECK (made IN (0, 1));
+"#;
+
 /// A file a chat may read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionFile {
@@ -159,8 +167,8 @@ fn log_files<'a>(
             let Some(p) = &parent else { continue };
             tx.execute(
                 "INSERT OR IGNORE INTO session_files
-                   (session_id, file_id, blob_id, owner_id, name, mime, size, sha256, logged, created_ms)
-                 SELECT ?1, f.file_id, f.blob_id, f.owner_id, f.name, f.mime, f.size, f.sha256, 1, ?5
+                   (session_id, file_id, blob_id, owner_id, name, mime, size, sha256, logged, created_ms, made)
+                 SELECT ?1, f.file_id, f.blob_id, f.owner_id, f.name, f.mime, f.size, f.sha256, 1, ?5, f.made
                  FROM session_files f JOIN sessions ps ON ps.session_id = f.session_id
                  WHERE f.session_id = ?2 AND f.file_id = ?3 AND f.sha256 = ?4
                    AND f.logged = 1 AND ps.node_id = ?6",
@@ -193,7 +201,7 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let n: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM session_files WHERE session_id = ?1",
+            "SELECT COUNT(*) FROM session_files WHERE session_id = ?1 AND made = 1",
             params![m.session_id],
             |r| r.get(0),
         )?;
@@ -207,8 +215,8 @@ impl Store {
         };
         tx.execute(
             "INSERT INTO session_files
-               (session_id, file_id, blob_id, owner_id, name, mime, size, sha256, logged, created_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)",
+               (session_id, file_id, blob_id, owner_id, name, mime, size, sha256, logged, created_ms, made)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, 1)",
             params![
                 m.session_id,
                 m.file_id,
