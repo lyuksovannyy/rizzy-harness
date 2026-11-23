@@ -277,10 +277,6 @@ mod tests {
         assert_eq!(listing(&r.ws.join("docs")), ["a (edited).docx", "a.docx"]);
     }
 
-    /// A copy never replaces a file, and a name that is a link is not
-    /// followed or written through: a link to a file inside the folder is
-    /// passed over (the next free name), one that leads out is refused (the
-    /// path policy judges it before anything is written).
     /// A long name is cut before ` (edited)` is added, so the suffix always
     /// survives and the copy is never written over (or named as) the original.
     #[tokio::test]
@@ -314,6 +310,10 @@ mod tests {
         }
     }
 
+    /// A copy never replaces a file, and a name that is a link is not
+    /// followed or written through: a link to a file inside the folder is
+    /// passed over (the next free name), one that leads out is refused (the
+    /// path policy judges it before anything is written).
     #[tokio::test]
     async fn an_existing_name_or_a_link_in_its_place_is_not_written_through() {
         let r = rig();
