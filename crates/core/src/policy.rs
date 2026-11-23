@@ -38,11 +38,13 @@ pub const DEFAULT_CHAT_APPROVAL: ApprovalMode = ApprovalMode::Auto;
 /// The file tools `AcceptEdits` covers, by their registered names: the two
 /// that create Word and Excel files write a new file in the folder as
 /// `write` does (PLAN.md T97).
-pub const EDIT_TOOLS: [&str; 4] = [
+pub const EDIT_TOOLS: [&str; 6] = [
     "write",
     "edit",
     crate::docs::DOC_TOOL,
     crate::docs::SHEET_TOOL,
+    crate::docs::EDIT_DOC_TOOL,
+    crate::docs::EDIT_SHEET_TOOL,
 ];
 
 /// The one tool that changes things plan mode runs: `bash`, in the

@@ -72,6 +72,12 @@ fn the_view_shows_addresses_formulas_dates_and_what_an_edit_could_touch() {
         "{v}"
     );
     assert!(v.contains("7: A7==SUM(B2:B4) (not calculated)"));
+    assert!(
+        xlsx::view(&xlsx_real(), None, 1, 0)
+            .unwrap()
+            .contains("8: A8=353"),
+        "the default page"
+    );
     // Paging by row.
     let p = xlsx::view(&xlsx_real(), None, 3, 2).unwrap();
     assert!(

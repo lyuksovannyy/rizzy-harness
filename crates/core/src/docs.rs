@@ -16,9 +16,25 @@ use serde::{Deserialize, Serialize};
 /// harness's word.
 pub const DOC_TOOL: &str = "doc_create";
 pub const SHEET_TOOL: &str = "sheet_create";
+/// The tools that read and edit an existing Word or Excel file (ADOPTION_PLAN
+/// X.57, PLAN.md T98): the view, and the two edits.
+pub const VIEW_TOOL: &str = "doc_view";
+pub const EDIT_DOC_TOOL: &str = "doc_edit";
+pub const EDIT_SHEET_TOOL: &str = "sheet_edit";
 
-/// The one tool name each kind has, in the order a switch lists them.
-pub const TOOLS: [&str; 2] = [DOC_TOOL, SHEET_TOOL];
+/// The tool names the "Create and edit documents" switch lists.
+pub const TOOLS: [&str; 5] = [
+    DOC_TOOL,
+    SHEET_TOOL,
+    VIEW_TOOL,
+    EDIT_DOC_TOOL,
+    EDIT_SHEET_TOOL,
+];
+
+/// The tools of them that write a new file (the view only reads): what
+/// `denied_tools = ["write"]` of a node stands for, and what `AcceptEdits`
+/// covers inside the folder.
+pub const WRITE_TOOLS: [&str; 4] = [DOC_TOOL, SHEET_TOOL, EDIT_DOC_TOOL, EDIT_SHEET_TOOL];
 
 /// The longest request a node may send (the link's frame is 8 MiB).
 pub const MAX_REQUEST_BYTES: usize = 6 << 20;
@@ -51,6 +67,37 @@ pub enum DocRequest {
         name: String,
         spec: serde_json::Value,
     },
+    /// The view of a file of this chat (`doc_view`): `file` is the id the
+    /// chat's own log names it by.
+    View {
+        file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        from: u32,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        limit: u32,
+    },
+    /// Edits of a Word file of this chat (`doc_edit`); the result is a new
+    /// file named `save_as` (or `name (edited).docx`).
+    DocEdit {
+        file: String,
+        edits: Vec<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save_as: Option<String>,
+    },
+    /// Edits of a sheet of an Excel file of this chat (`sheet_edit`).
+    SheetEdit {
+        file: String,
+        sheet: String,
+        edits: Vec<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save_as: Option<String>,
+    },
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl DocRequest {
@@ -59,6 +106,9 @@ impl DocRequest {
         match self {
             Self::Doc { .. } => DOC_TOOL,
             Self::Sheet { .. } => SHEET_TOOL,
+            Self::View { .. } => VIEW_TOOL,
+            Self::DocEdit { .. } => EDIT_DOC_TOOL,
+            Self::SheetEdit { .. } => EDIT_SHEET_TOOL,
         }
     }
 }
@@ -77,6 +127,19 @@ pub struct DocCreated {
     /// was left out, built from counts (never from the model's text).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// The view's text (`doc_view`; the other answers leave it empty and
+    /// name a file).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+}
+
+/// How a node runs the confined `doc-edit` helper for a tool of a chat with a
+/// folder (X.57, T98): the framed request and file in (`harness_docs::edit::
+/// serve`), the framed reply out, or one sentence. The file is parsed only
+/// there, never in the node's own process.
+#[async_trait::async_trait]
+pub trait EditHelper: Send + Sync {
+    async fn run(&self, framed_request: Vec<u8>) -> Result<Vec<u8>, String>;
 }
 
 /// Where a plain chat's `doc_create` and `sheet_create` calls go: the node's

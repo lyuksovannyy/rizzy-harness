@@ -279,6 +279,7 @@ async fn in_chat(
     let cleaned = |n: &str| name::stem(n, kind.ext(), kind.fallback());
     match &mut req {
         DocRequest::Doc { name, .. } | DocRequest::Sheet { name, .. } => *name = cleaned(name),
+        _ => {}
     }
     let size = serde_json::to_vec(&req)
         .map(|b| b.len())
@@ -297,7 +298,7 @@ async fn in_chat(
     }
 }
 
-fn made_in_chat(c: DocCreated) -> ToolOutcome {
+pub(crate) fn made_in_chat(c: DocCreated) -> ToolOutcome {
     let text = told(
         &format!(
             "Created \"{}\" (id {}, {}).",
@@ -345,9 +346,76 @@ async fn build(kind: Kind, req: DocRequest) -> Result<(Vec<u8>, Vec<String>), St
         DocRequest::Sheet { spec, .. } => {
             xlsx::build(&spec, harness_docs::now_unix()).map(|b| (b.bytes, notes::sheet(&b.report)))
         }
+        _ => Err("not a request to make a file".into()),
     })
     .await
     .map_err(|_| format!("{} failed", kind.tool()))?
+}
+
+/// A new file in a chat's folder.
+pub(crate) struct Placed {
+    /// The path as the model gave it, with the free name.
+    pub shown: String,
+    pub real: std::path::PathBuf,
+    /// The path inside the folder, or the absolute one when it is not in it.
+    pub in_folder: String,
+    pub sha: crate::seen::Sha,
+    pub seen: harness_core::event::FileSeen,
+}
+
+/// The first free name `dir` + `stem` (+ ` (k)`) + `.ext` in the chat's
+/// folder, taken by creating it: a name that becomes taken meanwhile is
+/// passed over, never replaced (`create_nofollow` publishes with a link that
+/// fails when the name exists). Through `resolve_for_write`, so the folder,
+/// the protected places and `.git` are the policy of `write`.
+pub(crate) async fn create_free(
+    ctx: &ToolCtx,
+    dir: &str,
+    stem: &str,
+    ext: &str,
+    bytes: &[u8],
+) -> Result<Placed, String> {
+    let mut created = None;
+    for k in 1..=999u32 {
+        let file = if k == 1 {
+            format!("{stem}.{ext}")
+        } else {
+            format!("{stem} ({k}).{ext}")
+        };
+        let candidate = format!("{dir}{file}");
+        let real = ctx.resolve_for_write(&candidate)?;
+        if let Some(parent) = real.parent()
+            && let Err(e) = tokio::fs::create_dir_all(parent).await
+        {
+            return Err(format!("{}: {e}", parent.display()));
+        }
+        let key = ctx.seen_key(&real);
+        let _lock = crate::seen::lock_path(&key).await;
+        if crate::fs::create_nofollow(&real, bytes).await? {
+            created = Some((candidate, real, key));
+            break;
+        }
+    }
+    let Some((shown, real, key)) = created else {
+        return Err("there are already 999 files of that name here; use another name".into());
+    };
+    let sha = crate::seen::sha256(bytes);
+    let mut seen = ctx.seen.record_hash(&key, sha);
+    seen.base = Some(String::new());
+    // The chip shows where it is in the folder; the absolute path is in the
+    // result text and in `seen` already, as `write` has them.
+    let in_folder = ctx
+        .workspace_dir()
+        .ok()
+        .and_then(|ws| real.strip_prefix(&ws).ok().map(|r| r.display().to_string()))
+        .unwrap_or_else(|| real.display().to_string());
+    Ok(Placed {
+        shown,
+        real,
+        in_folder,
+        sha,
+        seen,
+    })
 }
 
 /// A chat with a folder: a new file there, never over one that exists.
@@ -363,67 +431,31 @@ async fn in_folder(ctx: &ToolCtx, kind: Kind, path: &str, req: DocRequest) -> To
         None => ("", path),
     };
     let stem = name::stem(base, kind.ext(), kind.fallback());
-    // The first free name, taken by creating it: a name that becomes taken
-    // meanwhile is passed over, never replaced (`create_nofollow` publishes
-    // with a link that fails when the name exists).
-    let mut created = None;
-    for k in 1..=999u32 {
-        let file = if k == 1 {
-            format!("{stem}.{}", kind.ext())
-        } else {
-            format!("{stem} ({k}).{}", kind.ext())
-        };
-        let candidate = format!("{dir}{file}");
-        let real = match ctx.resolve_for_write(&candidate) {
-            Ok(p) => p,
-            Err(e) => return ToolOutcome::err(e),
-        };
-        if let Some(parent) = real.parent()
-            && let Err(e) = tokio::fs::create_dir_all(parent).await
-        {
-            return ToolOutcome::err(format!("{}: {e}", parent.display()));
-        }
-        let key = ctx.seen_key(&real);
-        let _lock = crate::seen::lock_path(&key).await;
-        match crate::fs::create_nofollow(&real, &bytes).await {
-            Ok(true) => {
-                created = Some((candidate, real, key));
-                break;
-            }
-            Ok(false) => {}
-            Err(e) => return ToolOutcome::err(e),
-        }
-    }
-    let Some((shown, real, key)) = created else {
-        return ToolOutcome::err("there are already 999 files of that name here; use another name");
+    let placed = match create_free(ctx, dir, &stem, kind.ext(), &bytes).await {
+        Ok(p) => p,
+        Err(e) => return ToolOutcome::err(e),
     };
-    let sha = crate::seen::sha256(&bytes);
-    let mut seen = ctx.seen.record_hash(&key, sha);
-    seen.base = Some(String::new());
-    let where_ = real.display().to_string();
-    // The chip shows where it is in the folder; the absolute path is in the
-    // result text and in `seen` already, as `write` has them.
-    let in_folder = ctx
-        .workspace_dir()
-        .ok()
-        .and_then(|ws| real.strip_prefix(&ws).ok().map(|r| r.display().to_string()))
-        .unwrap_or_else(|| where_.clone());
     let text = told(
-        &format!("Created {where_} ({}).", human_bytes(bytes.len() as u64)),
+        &format!(
+            "Created {} ({}).",
+            placed.real.display(),
+            human_bytes(bytes.len() as u64)
+        ),
         "It is a new file in this chat's folder.",
         &notes,
     );
     let mut o = ToolOutcome::ok(text);
-    o.seen = Some(seen);
+    o.seen = Some(placed.seen);
     o.made = Some(MadeFile {
-        name: real
+        name: placed
+            .real
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or(shown),
+            .unwrap_or(placed.shown),
         size: bytes.len() as u64,
-        sha256: crate::seen::hex(&sha),
+        sha256: crate::seen::hex(&placed.sha),
         file_id: None,
-        path: Some(in_folder),
+        path: Some(placed.in_folder),
     });
     o
 }
@@ -456,6 +488,7 @@ mod tests {
             sha256: "ab".repeat(32),
             mime: harness_core::docs::DOCX_MIME.into(),
             notes: vec!["3 paragraphs, 0 tables, 0 numbered lists, 0 links.".into()],
+            text: String::new(),
         }
     }
 

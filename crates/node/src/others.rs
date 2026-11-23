@@ -59,7 +59,14 @@ const NO_WRITES: &[&str] = &[
 ];
 
 /// The file tools whose result records what they wrote.
-const RECORDED: &[&str] = &["edit", "write", "doc_create", "sheet_create"];
+const RECORDED: &[&str] = &[
+    "edit",
+    "write",
+    "doc_create",
+    "sheet_create",
+    "doc_edit",
+    "sheet_edit",
+];
 
 /// The kinds read of a chat's log.
 pub(crate) const KINDS: &[&str] = &[

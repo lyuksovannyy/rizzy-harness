@@ -109,6 +109,8 @@ fn the_view_shows_tags_styles_lists_tables_and_what_it_leaves_out() {
         v.contains("(not editable) Contents"),
         "a content control's paragraph is read-only"
     );
+    // The default page is long enough for the whole of this file.
+    assert!(docx::view(&docx_real(), 1, 0).unwrap().contains("The end."));
     // Paging.
     let p = docx::view(&docx_real(), 5, 2).unwrap();
     assert!(

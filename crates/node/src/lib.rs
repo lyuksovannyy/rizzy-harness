@@ -916,7 +916,7 @@ impl NodeRuntime {
             // `doc_create` and `sheet_create` likewise (PLAN.md T97): the
             // master makes and keeps a plain chat's file only for a node that
             // offers the tools.
-            if [harness_core::docs::DOC_TOOL, harness_core::docs::SHEET_TOOL]
+            if harness_core::docs::TOOLS
                 .iter()
                 .any(|t| self.inner.cfg.backend.has_tool(t) && !self.inner.cfg.policy.denies(t))
             {

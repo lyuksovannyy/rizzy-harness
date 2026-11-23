@@ -6101,6 +6101,14 @@ impl TurnHost for Session {
         })
     }
 
+    /// Only a chat with a folder: where there is none the master edits the
+    /// chat's file (X.57, T98).
+    fn doc_helper(&self) -> Option<Arc<dyn harness_core::docs::EditHelper>> {
+        (self.profile != Profile::Chat)
+            .then(crate::docs::shared_helper)
+            .flatten()
+    }
+
     fn board(&self) -> Option<Arc<dyn harness_core::board::BoardSource>> {
         Some(Arc::new(crate::board::LinkBoard {
             node: self.node.clone(),

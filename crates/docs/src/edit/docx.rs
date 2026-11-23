@@ -340,7 +340,11 @@ pub fn view(bytes: &[u8], from: usize, limit: usize) -> Result<String> {
     let part = src.read(DOC, MAX_EDIT_PART_BYTES)?;
     let idx = index(&part)?;
     let st = styles(&src)?;
-    let limit = limit.clamp(1, MAX_VIEW_ITEMS);
+    let limit = if limit == 0 {
+        200
+    } else {
+        limit.clamp(1, MAX_VIEW_ITEMS)
+    };
     let tables = idx
         .paras
         .iter()
@@ -634,9 +638,8 @@ fn replace_in(
     // Non-overlapping, left to right (match_indices already is).
     if matches.is_empty() {
         return Err(format!(
-            "no text \"{}\" in {tag}; its text is \"{}\"",
-            short(find),
-            short(&text)
+            "no text \"{}\" in {tag} (hidden text, deleted text and text in fields or pictures are not text to match); look at it with doc_view",
+            short(find)
         ));
     }
     if matches.len() > 1 && !all {

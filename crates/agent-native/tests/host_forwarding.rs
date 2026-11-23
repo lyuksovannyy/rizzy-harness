@@ -419,6 +419,7 @@ async fn the_hosts_docs_source_reaches_the_tool_and_the_file_reaches_the_log() {
                 sha256: "ab".repeat(32),
                 mime: harness_core::docs::DOCX_MIME.into(),
                 notes: vec![],
+                text: String::new(),
             })
         }
     }

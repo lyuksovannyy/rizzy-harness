@@ -998,7 +998,11 @@ pub fn view(bytes: &[u8], sheet: Option<&str>, from: usize, limit: usize) -> Res
     let sst = shared_strings(&src)?;
     let dates = date_styles(&src)?;
     let ex = extras(&src, &sh.path)?;
-    let limit = limit.clamp(1, MAX_VIEW_ITEMS);
+    let limit = if limit == 0 {
+        200
+    } else {
+        limit.clamp(1, MAX_VIEW_ITEMS)
+    };
     let mut out = format!(
         "Excel workbook, sheet \"{}\" (sheets: {}). Date system {}. Edit with sheet_edit: `set` cells by address, `append_rows`, `clear` a range. Formulas show as =formula (not calculated): the file holds old cached values that are not shown as current.\n",
         harness_core::text::clean_line(&sh.name, 40),
@@ -1298,7 +1302,6 @@ struct Slot {
     end: usize,
     val: Val,
     s: Option<String>,
-    shared_master: bool,
 }
 
 struct RowWork {
@@ -1352,7 +1355,6 @@ impl Ctx<'_> {
                                 end: rec.start + c.end,
                                 val: c.val.clone(),
                                 s: c.s.clone(),
-                                shared_master: c.shared_master,
                             },
                         );
                     }
@@ -1442,10 +1444,6 @@ impl Ctx<'_> {
             }
         }
         Ok(())
-    }
-
-    fn style_of(&mut self, col: u32, row: u32) -> Result<Option<String>> {
-        Ok(self.row(row)?.slots.get(&col).and_then(|s| s.s.clone()))
     }
 
     fn is_date(&self, s: Option<&str>) -> bool {
@@ -1543,7 +1541,6 @@ impl Ctx<'_> {
                     end: 0,
                     val,
                     s: style,
-                    shared_master: false,
                 },
             );
         }
