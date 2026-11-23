@@ -154,6 +154,11 @@ enum Cmd {
     /// starts it for such attachments.
     #[command(hide = true)]
     DocText,
+    /// Edit a Word or Excel file: a request and the file on stdin, the reply
+    /// and the new file on stdout, confined like `doc-text`. The server and
+    /// the node start it for `doc_edit` and `sheet_edit`.
+    #[command(hide = true)]
+    DocEdit,
 }
 
 #[derive(Subcommand)]
@@ -1576,6 +1581,11 @@ fn main() -> anyhow::Result<()> {
     if std::env::args_os().nth(1).as_deref() == Some(harness_master::pdf::DOC_SUBCOMMAND.as_ref()) {
         std::process::exit(harness_master::doc::helper_main());
     }
+    // And the one that edits them (X.57).
+    if std::env::args_os().nth(1).as_deref() == Some(harness_master::pdf::EDIT_SUBCOMMAND.as_ref())
+    {
+        std::process::exit(harness_master::doc_edit::helper_main());
+    }
     let loaded = load_dotenv()?;
     init_tracing();
     let cli = Cli::parse();
@@ -1767,6 +1777,10 @@ async fn async_main(cli: Cli, dir: PathBuf, dotenv_names: Vec<String>) -> anyhow
         Cmd::DocText => bail!(
             "{} must be the first argument",
             harness_master::pdf::DOC_SUBCOMMAND
+        ),
+        Cmd::DocEdit => bail!(
+            "{} must be the first argument",
+            harness_master::pdf::EDIT_SUBCOMMAND
         ),
         Cmd::Node {
             cmd:

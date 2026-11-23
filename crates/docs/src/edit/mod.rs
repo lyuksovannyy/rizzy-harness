@@ -12,6 +12,7 @@ pub mod docx;
 pub mod para;
 pub mod pkg;
 pub mod scan;
+pub mod serve;
 pub mod xlsx;
 
 #[cfg(test)]

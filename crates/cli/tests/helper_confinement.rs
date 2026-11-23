@@ -1,4 +1,4 @@
-//! The confinement of the `pdf-text` and `doc-text` helpers is proved, not
+//! The confinement of the `pdf-text`, `doc-text` and `doc-edit` helpers is proved, not
 //! assumed (they share `confined_helper`): after it, the helper cannot open a
 //! file that exists, cannot connect to a port that listens, holds a core
 //! limit of 0 and is not dumpable. The helper answers this only when built
@@ -49,7 +49,7 @@ fn a_confined_helper_opens_no_file_reaches_no_port_and_leaves_no_core() {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     assert!(std::path::Path::new("/etc/passwd").exists());
-    for sub in [pdf::SUBCOMMAND, pdf::DOC_SUBCOMMAND] {
+    for sub in [pdf::SUBCOMMAND, pdf::DOC_SUBCOMMAND, pdf::EDIT_SUBCOMMAND] {
         let Some(report) = probe(sub, port) else {
             return;
         };

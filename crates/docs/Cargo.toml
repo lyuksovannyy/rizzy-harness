@@ -17,6 +17,7 @@ harness-core.workspace = true
 # raw HTML is never rendered anywhere. MIT; its dependencies (bitflags,
 # memchr, unicase) were already in the tree.
 pulldown-cmark.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 # The streaming XML pass of the edit tools (PLAN.md T98): every event it does
