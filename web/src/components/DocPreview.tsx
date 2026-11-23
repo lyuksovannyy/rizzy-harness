@@ -26,6 +26,8 @@ interface Edit {
   pending: Record<string, string>;
   open: string | null;
   problems: Record<string, string>;
+  /** The place whose field was just closed with a key: its button takes the focus back. */
+  back: { current: string | null };
   begin: (at: string) => void;
   keep: (at: string, text: string, original: string) => void;
   drop: () => void;
@@ -54,15 +56,24 @@ function Field({ at, label, area, start, original, edit }: { at: string; label: 
         // Not the panel's own Escape (which closes it).
         e.stopPropagation();
         dropped.current = true;
+        edit.back.current = at;
         edit.drop();
       } else if (e.key === "Enter" && !(area && e.shiftKey)) {
         e.preventDefault();
+        edit.back.current = at;
         edit.keep(at, v, original);
       }
     },
   };
   return area ? <textarea {...props} rows={Math.min(8, Math.max(2, v.split("\n").length + 1))} /> : <input {...props} type="text" />;
 }
+
+const refocus = (edit: Edit, at: string) => (el: HTMLButtonElement | null) => {
+  if (el && edit.back.current === at) {
+    edit.back.current = null;
+    el.focus();
+  }
+};
 
 /** The reason a place was refused, next to it. */
 const Problem = ({ edit, at }: { edit: Edit; at: string }) =>
@@ -87,7 +98,7 @@ function Place({ at, runs, edit }: { at: string; runs: PRun[]; edit: Edit }) {
     );
   return (
     <>
-      <button type="button" className={`pv-place${now !== undefined ? " pv-changed" : ""}`} aria-label={`Edit ${label}`} aria-describedby={id} onClick={() => edit.begin(at)}>
+      <button type="button" className={`pv-place${now !== undefined ? " pv-changed" : ""}`} aria-label={`Edit ${label}`} aria-describedby={id} ref={refocus(edit, at)} onClick={() => edit.begin(at)}>
         <span id={id}>{now !== undefined ? showHidden(now) : <Runs runs={runs} />}</span>
         {now !== undefined && <span className="sr-only"> (changed)</span>}
       </button>
@@ -189,7 +200,7 @@ function Cell({ a, c, edit }: { a: string; c: PCell | undefined; edit: Edit }) {
   if (edit.open === a) return <Field at={a} label={label} area={false} start={now ?? was} original={was} edit={edit} />;
   return (
     <>
-      <button type="button" className={`pv-place pv-cell${now !== undefined ? " pv-changed" : ""}`} aria-label={`Edit ${label}`} onClick={() => edit.begin(a)}>
+      <button type="button" className={`pv-place pv-cell${now !== undefined ? " pv-changed" : ""}`} aria-label={`Edit ${label}`} ref={refocus(edit, a)} onClick={() => edit.begin(a)}>
         {showHidden(now ?? was)}
         {now !== undefined && <span className="sr-only"> (changed)</span>}
       </button>
@@ -328,7 +339,9 @@ export default function DocPreview(props: { target: PreviewTarget; onClose: () =
     head.current?.focus();
   }, [key]);
 
+  const back = useRef<string | null>(null);
   const edit: Edit = {
+    back,
     off: !!copy,
     pending,
     open,
@@ -364,6 +377,8 @@ export default function DocPreview(props: { target: PreviewTarget; onClose: () =
         setCopy({ name: f.name, data: applyChanges(data.preview, sent) });
         setSaved(box ? noun(f.name) : `A copy named “${f.name}” was saved.`);
         setAll({});
+        // The Save button is gone: keep the focus in the panel.
+        head.current?.focus();
       } else {
         const path = r.saved;
         if (typeof path !== "string" || !path) throw new Error("the node's answer was not understood");

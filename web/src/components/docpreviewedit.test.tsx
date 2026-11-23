@@ -142,10 +142,12 @@ test("a click makes a field with the current text; Enter keeps the change, Escap
   expect(field("Paragraph 3")).toBeNull();
   expect(q(".pv-body").textContent).toContain("Only bold");
   expect(host.textContent).not.toContain("1 change");
-  // Enter keeps it, and the place is marked.
+  // Enter keeps it, and the place is marked; the focus goes back to the place
+  // (so a keyboard user is not dropped on the page, and Escape still closes).
   await act(async () => button("Edit Paragraph 3")!.click());
   await type(field("Paragraph 3")!, "Kept");
   await press(field("Paragraph 3")!, "Enter");
+  expect(document.activeElement).toBe(button("Edit Paragraph 3"));
   expect(q(".pv-body").textContent).toContain("Kept");
   expect(host.querySelectorAll(".pv-changed")).toHaveLength(1);
   expect(host.textContent).toContain("1 change");
