@@ -208,10 +208,14 @@ export function MadeChip({ sessionId, made }: { sessionId: string; made: MadeFil
   return (
     <div className="artifact-card is-ready">
       <Icon size={16} aria-hidden="true" />
-      <span className="artifact-card-text">
-        <strong className="ellipsis">{made.name}</strong>
+      <span className="artifact-card-text" style={{ display: "block", minWidth: 0 }}>
+        <strong style={{ overflowWrap: "anywhere" }}>{made.name}</strong>
         <span className="small muted"> · {bytes(made.size)}</span>
-        {made.path && <span className="small muted mono ellipsis"> · {made.path}</span>}
+        {made.path && (
+          <span className="small muted mono" style={{ display: "block", overflowWrap: "anywhere" }}>
+            {made.path}
+          </span>
+        )}
       </span>
       {made.file_id && (
         <LinkedA className="link small" url={`/api/sessions/${sessionId}/made/${made.file_id}`} download={made.name}>

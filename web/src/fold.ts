@@ -218,6 +218,7 @@ const STRUCTS: Record<string, string> = {
   thinking: "model blocks:[@thought",
   thought: "type:=thought ?text",
   source: "id url title",
+  made: "name size:n sha256 ?file_id ?path",
   cleared: "turn_id results:n",
   unthought: "turn_id steps:n",
   folded: "steps:n text",
@@ -240,7 +241,7 @@ const KINDS: Record<string, string> = {
   assistant_message: "turn_id message_id text ?author ?variant:@variant ?blocks:[@ui ?thinking:@thinking",
   tool_call_started: "turn_id call_id tool input:j ?author",
   tool_output_delta: "call_id stream:=stream text",
-  tool_call_finished: "call_id ok:b output ?exit_code:n ?sources:[@source",
+  tool_call_finished: "call_id ok:b output ?exit_code:n ?sources:[@source ?made:@made",
   approval_requested: "approval_id call_id tool input:j reason ?turn_allow:b ?chat_allow:b ?preview",
   approval_resolved: "approval_id decision:=decision by:=resolvedBy ?note",
   checkpoint: "turn_id phase:=phase git_ref ?files:[s ?head_moved:@headMoved",
@@ -792,6 +793,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (t) {
         t.result = { ok: p.ok, output: p.output, exit_code: p.exit_code ?? null };
         if (p.sources?.length) t.result.sources = p.sources;
+        if (p.made) t.result.made = p.made;
       }
       break;
     }

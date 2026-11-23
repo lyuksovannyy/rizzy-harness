@@ -387,7 +387,7 @@ describe("files an agent made (T97)", () => {
     expect(h).toContain("plan.docx");
     expect(h).toContain("12 KB");
     expect(h).toContain("Download");
-    expect(h).not.toContain("mono ellipsis");
+    expect(h).not.toContain("small muted mono");
   });
 
   test("a chat with a folder: the saved path and no download", () => {

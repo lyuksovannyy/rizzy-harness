@@ -34,6 +34,19 @@ describe("fold", () => {
     expect(v.unknown_events).toBe(0);
   });
 
+  it("shows the file a doc_create call made on its result (T97)", () => {
+    const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
+    const made = { name: "plan.docx", size: 1234, sha256: "ab".repeat(32), file_id: "f1" };
+    const v = fold([
+      ev(1, "turn_started", { turn_id: "t" }),
+      ev(2, "user_message", { turn_id: "t", text: "make it" }),
+      ev(3, "tool_call_started", { turn_id: "t", call_id: "c", tool: "doc_create", input: {} }),
+      ev(4, "tool_call_finished", { call_id: "c", ok: true, output: "Created", truncated: false, made }),
+    ]);
+    expect(v.items[1]).toMatchObject({ type: "tool", result: { ok: true, made } });
+    expect(v.unknown_events).toBe(0);
+  });
+
   it("shows the files saved into the chat's folder on the message that brought them (T94)", () => {
     const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
     const up = { name: "x.zip", path: "attachments/x (2).zip", bytes: 1234, sha256: "ab".repeat(32), mime: "application/zip" };

@@ -6355,6 +6355,8 @@ impl NativeBackend {
                 .for_session(&ctx.session_id.to_string()),
             pin: host.folder_pin(),
             owned: host.owned_folder(),
+            // `doc_create`'s refusal reads whether the chat has a folder.
+            docs: host.docs(),
             ..ToolCtx::new(ctx.cwd.clone())
         }
     }

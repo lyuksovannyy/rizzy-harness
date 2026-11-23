@@ -280,9 +280,7 @@ async fn a_secret_in_a_name_is_not_in_the_event() {
     let sid = n.create(Profile::Chat).await;
     n.prompt(
         sid,
-        &format!(
-            r##"script: [{{"tool": "doc_create", "input": {{"path": "x", "markdown": "# P"}}}}]"##
-        ),
+        r##"script: [{"tool": "doc_create", "input": {"path": "x", "markdown": "# P"}}]"##,
     )
     .await;
     let leak = |r: &DocRequest| {
