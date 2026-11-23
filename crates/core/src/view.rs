@@ -402,6 +402,9 @@ pub struct ToolResult {
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<Source>,
+    /// The file a `doc_create` or `sheet_create` call made (T97).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made: Option<crate::event::MadeFile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -896,6 +899,7 @@ impl SessionView {
                         output: f.output,
                         exit_code: f.exit_code,
                         sources: f.sources,
+                        made: f.made,
                     });
                 }
             }
@@ -1715,6 +1719,7 @@ mod tests {
                     truncated: false,
                     sources: vec![source.clone()],
                     note: None,
+                    made: None,
                 }),
             ),
         ];

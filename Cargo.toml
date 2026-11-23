@@ -29,6 +29,7 @@ harness-master = { path = "crates/master" }
 harness-web = { path = "crates/web" }
 harness-memory = { path = "crates/memory" }
 harness-attached = { path = "crates/attached" }
+harness-docs = { path = "crates/docs" }
 harness-link = { path = "crates/link" }
 
 anyhow = "1.0.104"
@@ -71,6 +72,9 @@ landlock = "=0.4.7"
 jiff = { version = "0.2.39", features = ["tzdb-bundle-always"] }
 mime_guess = "2.0.5"
 nix = { version = "0.31.3", features = ["signal", "process", "hostname", "net", "fs", "dir", "resource", "user", "poll"] }
+# Markdown parser of `doc_create` (docs crate): MIT, 0.13.6 of 2026-10-30. No
+# default features: no HTML renderer and no command-line parser.
+pulldown-cmark = { version = "=0.13.6", default-features = false }
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "http2", "multipart"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }

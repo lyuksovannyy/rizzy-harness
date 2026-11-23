@@ -814,6 +814,7 @@ fn seed_other_chat(store: &Store, ws: &Path, turns: u64, age_ms: i64) {
                     sha256: "0".repeat(64),
                     base: None,
                 }),
+                made: None,
             }));
         }
         put(EventKind::Checkpoint(Checkpoint {

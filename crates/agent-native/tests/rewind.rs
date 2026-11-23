@@ -80,6 +80,7 @@ impl Log {
             note: None,
             seen: None,
             image: None,
+            made: None,
         }));
     }
     fn ended(&mut self, t: &str) {

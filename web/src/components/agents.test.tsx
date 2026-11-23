@@ -175,7 +175,7 @@ describe("an agent's page", () => {
     expect(api.agent).toHaveBeenCalledWith("coder", "server");
     expect(host.querySelector("h1")!.textContent).toBe("Coder");
     expect(host.querySelector("pre.agent-prompt")!.textContent).toBe("You are careful.");
-    expect(switches().length).toBe(20);
+    expect(switches().length).toBe(21);
     expect(switches().every((s) => s.disabled)).toBe(true);
     expect(sw("Change files").checked).toBe(true);
     expect(button("Duplicate")).toBeDefined();
@@ -349,6 +349,25 @@ describe("an agent's page", () => {
     expect(api.updateAgent).toHaveBeenCalledWith(
       "reviewer",
       { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, attached_files: true } },
+      "server",
+    );
+  });
+
+  test("creating documents is its own switch, off for a new agent (T97)", async () => {
+    expect(NEW_FEATURES.office).toBe(false);
+    api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it." }));
+    await show(admin, "reviewer");
+    expect(sw("Create and edit documents").checked).toBe(false);
+    // Changing files does not bring it.
+    act(() => sw("Change files").click());
+    expect(sw("Create and edit documents").checked).toBe(false);
+    act(() => sw("Change files").click());
+    act(() => sw("Create and edit documents").click());
+    api.updateAgent.mockResolvedValue(detail(reviewer));
+    await act(async () => button("Save")!.click());
+    expect(api.updateAgent).toHaveBeenCalledWith(
+      "reviewer",
+      { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, office: true } },
       "server",
     );
   });

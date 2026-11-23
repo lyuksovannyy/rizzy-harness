@@ -47,6 +47,9 @@ pub fn linkable(path: &str) -> bool {
         // A person's profile picture (T74; the handler checks who may see it).
         ["", "api", "users", u, "avatar" | "banner"] => id(u),
         ["", "api", "artifacts", a, "latest", "download"] => id(a),
+        // The Word or Excel file an agent made in a chat without a folder
+        // (T97; the handler checks that the chat is the caller's).
+        ["", "api", "sessions", s, "made", f] => id(s) && id(f),
         [
             "",
             "api",
@@ -174,6 +177,24 @@ impl Signer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The download of a file an agent made (T97) can have a link, and only
+    /// that path, with ids that are ids.
+    #[test]
+    fn a_made_file_download_is_linkable_and_nothing_near_it() {
+        assert!(linkable("/api/sessions/0193-ab/made/f1"));
+        for bad in [
+            "/api/sessions/0193-ab/made",
+            "/api/sessions/0193-ab/made/",
+            "/api/sessions/0193-ab/made/f1/x",
+            "/api/sessions/0193-ab/made/..",
+            "/api/sessions//made/f1",
+            "/api/sessions/0193-ab/events",
+            "/api/sessions/0193-ab/prompt",
+        ] {
+            assert!(!linkable(bad), "{bad}");
+        }
+    }
 
     /// RFC 4231 case 1 with its key widened to our 32 bytes of 0x0b; the
     /// expected value is Python's `hmac.new(b"\x0b" * 32, b"Hi There",

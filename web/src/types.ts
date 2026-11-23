@@ -162,11 +162,23 @@ export interface FormReply {
   values: Record<string, FormValue>;
 }
 
+/** A Word or Excel file a `doc_create` or `sheet_create` call made (PLAN.md T97). */
+export interface MadeFile {
+  name: string;
+  size: number;
+  sha256: string;
+  /** A chat without a folder: the server's kept copy, downloadable from here. */
+  file_id?: string;
+  /** A chat with a folder: where the file is. */
+  path?: string;
+}
+
 export interface ToolResult {
   ok: boolean;
   output: string;
   exit_code: number | null;
   sources?: Source[];
+  made?: MadeFile;
 }
 
 export interface ApprovalState {
@@ -616,6 +628,8 @@ export interface AgentFeatures {
   history: boolean;
   /** `attached_file`: reads the files you attach to a chat without a folder, never changes them (PLAN.md T95); its own switch. */
   attached_files: boolean;
+  /** `doc_create` and `sheet_create`: make Word and Excel files (PLAN.md T97); its own switch. */
+  office: boolean;
   /** The project's task board in project chats (`board`, `board_edit`); its own switch (PLAN.md T78). */
   board: boolean;
   web: boolean;

@@ -61,7 +61,7 @@ pub const MAX_FILE: u64 = 10 << 20;
 const KEPT: usize = 4096;
 
 /// A map of per-chat values that forgets the oldest chat when it is full.
-struct Recent<V> {
+pub(crate) struct Recent<V> {
     map: HashMap<SessionId, V>,
     order: VecDeque<SessionId>,
 }
@@ -98,8 +98,38 @@ impl<V> Recent<V> {
     }
 }
 
+/// What a refusal of the shared bounds says, for the service it is used by:
+/// the attached-file reads (T95) and the files agents make (T97) have the
+/// same limits and different words.
+pub struct Words {
+    /// A second call of a chat while one is in flight.
+    pub one_at_a_time: &'static str,
+    /// "this chat {did} {PER_WINDOW} times in the last N minutes".
+    pub did: &'static str,
+    /// The queue is full.
+    pub queue: &'static str,
+    /// No place came free in time.
+    pub busy: &'static str,
+}
+
+const ATTACHED_WORDS: Words = Words {
+    one_at_a_time: "one file read at a time in this chat: wait for the one before",
+    did: "looked into attached files",
+    queue: "too many file reads are waiting; try again in a moment",
+    busy: "the server is busy reading other files; try again in a moment",
+};
+
+/// The same bounds for `doc_create` and `sheet_create` (`crate::made`).
+pub(crate) const MADE_WORDS: Words = Words {
+    one_at_a_time: "one file is made at a time in this chat: wait for the one before",
+    did: "made files",
+    queue: "too many files are waiting to be made; try again in a moment",
+    busy: "the server is busy making other files; try again in a moment",
+};
+
 /// Calls waiting and parsing, and what each chat and node has used.
 pub struct Grants {
+    words: &'static Words,
     slots: Arc<tokio::sync::Semaphore>,
     waiting: AtomicUsize,
     wait: Duration,
@@ -111,7 +141,7 @@ pub struct Grants {
 
 impl Default for Grants {
     fn default() -> Self {
-        Self::with_wait(WAIT)
+        Self::with_wait(WAIT, &ATTACHED_WORDS)
     }
 }
 
@@ -134,8 +164,9 @@ impl Drop for ChatGuard<'_> {
 }
 
 impl Grants {
-    fn with_wait(wait: Duration) -> Self {
+    pub(crate) fn with_wait(wait: Duration, words: &'static Words) -> Self {
         Self {
+            words,
             slots: Arc::new(tokio::sync::Semaphore::new(AT_ONCE)),
             waiting: AtomicUsize::new(0),
             wait,
@@ -153,15 +184,15 @@ impl Grants {
 
     /// The one call a chat may have in flight, or why not. An honest model
     /// asks one at a time (the tool is not parallel-safe).
-    fn chat(&self, sid: SessionId) -> Result<ChatGuard<'_>, String> {
+    pub(crate) fn chat(&self, sid: SessionId) -> Result<ChatGuard<'_>, String> {
         if !lock(&self.busy).insert(sid) {
-            return Err("one file read at a time in this chat: wait for the one before".into());
+            return Err(self.words.one_at_a_time.into());
         }
         Ok(ChatGuard { grants: self, sid })
     }
 
     /// The node's room for calls (taken before a task is spawned).
-    fn node(&self, node_id: &str) -> Arc<tokio::sync::Semaphore> {
+    pub(crate) fn node(&self, node_id: &str) -> Arc<tokio::sync::Semaphore> {
         let mut n = lock(&self.nodes);
         if n.len() >= KEPT && !n.contains_key(node_id) {
             n.clear();
@@ -173,7 +204,7 @@ impl Grants {
 
     /// Count one call of chat `sid`'s turn `turn`: [`PER_TURN`] a turn, and
     /// [`PER_WINDOW`] in [`WINDOW`] whatever the turns say.
-    fn take(&self, sid: SessionId, turn: &str) -> Result<(), String> {
+    pub(crate) fn take(&self, sid: SessionId, turn: &str) -> Result<(), String> {
         let mut w = lock(&self.window);
         let q = w.entry(sid, KEPT, VecDeque::new);
         let now = Instant::now();
@@ -182,7 +213,8 @@ impl Grants {
         }
         if q.len() >= PER_WINDOW {
             return Err(format!(
-                "this chat looked into attached files {PER_WINDOW} times in the last {} minutes; try again later",
+                "this chat {} {PER_WINDOW} times in the last {} minutes; try again later",
+                self.words.did,
                 WINDOW.as_secs() / 60
             ));
         }
@@ -193,7 +225,8 @@ impl Grants {
         }
         if e.1 >= PER_TURN {
             return Err(format!(
-                "this turn already looked into attached files {PER_TURN} times; work with what you have"
+                "this turn already {} {PER_TURN} times; work with what you have",
+                self.words.did
             ));
         }
         e.1 += 1;
@@ -202,7 +235,7 @@ impl Grants {
     }
 
     /// Give back the count of a call that was refused for lack of room.
-    fn give_back(&self, sid: SessionId, turn: &str) {
+    pub(crate) fn give_back(&self, sid: SessionId, turn: &str) {
         if let Some(e) = lock(&self.turns).map.get_mut(&sid)
             && e.0 == turn
         {
@@ -214,16 +247,16 @@ impl Grants {
     }
 
     /// A place to parse in, or why not.
-    async fn slot(&self) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+    pub(crate) async fn slot(&self) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
         if self.waiting.fetch_add(1, Ordering::SeqCst) >= QUEUE {
             self.waiting.fetch_sub(1, Ordering::SeqCst);
-            return Err("too many file reads are waiting; try again in a moment".into());
+            return Err(self.words.queue.into());
         }
         let got = tokio::time::timeout(self.wait, self.slots.clone().acquire_owned()).await;
         self.waiting.fetch_sub(1, Ordering::SeqCst);
         match got {
             Ok(Ok(p)) => Ok(p),
-            _ => Err("the server is busy reading other files; try again in a moment".into()),
+            _ => Err(self.words.busy.into()),
         }
     }
 }
@@ -545,7 +578,10 @@ mod tests {
     /// waiting, the next is refused at once with its own sentence.
     #[tokio::test]
     async fn the_queue_is_bounded() {
-        let g = Arc::new(Grants::with_wait(Duration::from_millis(400)));
+        let g = Arc::new(Grants::with_wait(
+            Duration::from_millis(400),
+            &ATTACHED_WORDS,
+        ));
         let mut held = Vec::new();
         for _ in 0..AT_ONCE {
             held.push(g.slot().await.unwrap());

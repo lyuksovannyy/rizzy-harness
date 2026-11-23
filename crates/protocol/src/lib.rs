@@ -565,6 +565,14 @@ pub const CAP_RECALL: &str = "recall";
 /// `attached.result` only to one.
 pub const CAP_ATTACHED: &str = "attached-file";
 
+/// The node capability that says it offers `doc_create` or `sheet_create` to
+/// its sessions (registered there and not in its `denied_tools`) and speaks
+/// `docs.request` (PLAN.md T97). The master offers the tools to a chat
+/// without a folder only on such a node, answers requests only from one, and
+/// sends `docs.result` only to one. A chat with a folder writes the file
+/// itself and needs none of this.
+pub const CAP_DOCS: &str = "doc-create";
+
 /// The node capability that says it enforces `AgentSpec::deny_skills` and
 /// `AgentSpec::deny_mcp_servers` (ADOPTION_PLAN X.34, PLAN.md T80). To a
 /// node without it the master withholds the whole `skill` tool or `mcp`
@@ -954,6 +962,16 @@ pub enum NodeToMaster {
         req_id: String,
         session_id: SessionId,
         request: harness_core::attached::AttachedRequest,
+    },
+    /// A `doc_create` or `sheet_create` call of a session this node runs in
+    /// a chat without a folder (PLAN.md T97): the file's content and nothing
+    /// else. The master decides whose chat and quota from `session_id` alone,
+    /// builds and keeps the file and answers with one `docs.result`.
+    #[serde(rename = "docs.request")]
+    Docs {
+        req_id: String,
+        session_id: SessionId,
+        request: harness_core::docs::DocRequest,
     },
     /// A `board` or `board_edit` call of a session this node runs (PLAN.md
     /// T78): what to do and nothing else. The master finds the project,
@@ -1686,6 +1704,16 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The answer to a `docs.request`: the file that was made and kept, or
+    /// why not. Only to nodes whose hello listed [`CAP_DOCS`]; never acked.
+    #[serde(rename = "docs.result")]
+    DocsResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<harness_core::docs::DocCreated>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// The answer to a `board.request`: the board or what was changed, or
     /// why not. Only to nodes whose hello listed `CAP_BOARD`; never acked.
     #[serde(rename = "board.result")]
@@ -1824,6 +1852,7 @@ impl MasterToNode {
             | MasterToNode::ArtifactFetch { .. }
             | MasterToNode::RecallResult { .. }
             | MasterToNode::AttachedResult { .. }
+            | MasterToNode::DocsResult { .. }
             | MasterToNode::BoardResult { .. }
             | MasterToNode::SkillResult { .. }
             | MasterToNode::ConnectorResult { .. }

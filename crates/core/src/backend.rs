@@ -207,6 +207,14 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
+    /// Where this session's `doc_create` and `sheet_create` calls go in a
+    /// chat without a folder (the node's link to the master, bound to this
+    /// session); `None` where files are written into the folder instead, or
+    /// where there is none (tests, a runtime without a master).
+    fn docs(&self) -> Option<std::sync::Arc<dyn crate::docs::DocSource>> {
+        None
+    }
+
     /// Where this session's loads of a stored skill go (X.34 step B: the
     /// node's link to the master, bound to this session); `None` where
     /// there is none (tests, a runtime without a master).

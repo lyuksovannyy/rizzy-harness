@@ -474,6 +474,34 @@ fn replace_with(
     bytes: &[u8],
     fill: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
 ) -> Result<(), String> {
+    replace_impl(path, bytes, fill, false).map(|_| ())
+}
+
+/// A new file that is never a replacement (`doc_create`, `sheet_create`,
+/// PLAN.md T97): `Ok(true)` when `path` was created, `Ok(false)` when
+/// something is there already (a file, a link, a folder, whatever it is),
+/// left as it was. Written as [`replace_with`] writes, to a temporary file
+/// in the same directory, and published with a hard link, which fails when
+/// the name exists: a file that appears between the caller's choice of name
+/// and the publish is not replaced.
+pub(crate) async fn create_nofollow(path: &std::path::Path, bytes: &[u8]) -> Result<bool, String> {
+    let path = path.to_path_buf();
+    let bytes = bytes.to_vec();
+    tokio::task::spawn_blocking(move || {
+        replace_impl(&path, &bytes, std::io::Write::write_all, true)
+    })
+    .await
+    .map_err(|e| format!("write failed: {e}"))?
+}
+
+/// [`replace_with`], or with `create_only` a create that never replaces
+/// (`Ok(false)`: the name was taken).
+fn replace_impl(
+    path: &std::path::Path,
+    bytes: &[u8],
+    fill: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+    create_only: bool,
+) -> Result<bool, String> {
     use nix::errno::Errno;
     use nix::fcntl::{AtFlags, OFlag};
     use nix::sys::stat::{Mode, SFlag};
@@ -489,7 +517,8 @@ fn replace_with(
         _ => std::path::Path::new("."),
     };
     // A FIFO or device is refused before anything opens it.
-    if let Ok(md) = std::fs::symlink_metadata(path)
+    if !create_only
+        && let Ok(md) = std::fs::symlink_metadata(path)
         && !md.file_type().is_symlink()
     {
         crate::check_regular(path, md.file_type())?;
@@ -501,6 +530,13 @@ fn replace_with(
     )
     .map_err(|e| format!("{}: {}", parent.display(), std::io::Error::from(e)))?;
 
+    if create_only {
+        match nix::sys::stat::fstatat(&dir, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+            Ok(_) => return Ok(false),
+            Err(Errno::ENOENT) => {}
+            Err(e) => return Err(nixerr(e)),
+        }
+    }
     // The target as it is now: absent, or a regular file we may write.
     // Opening it for writing (never truncating) keeps the rule that a
     // read-only file is not changed.
@@ -580,21 +616,46 @@ fn replace_with(
         }
         _ => false,
     };
+    if create_only && now.is_some() {
+        return Ok(false);
+    }
     if !same {
         return Err(format!(
             "{shown}: changed while it was being written (replaced, removed, created or turned \
              into a symlink); nothing was written. Read it again and retry"
         ));
     }
-    nix::fcntl::renameat(&dir, &tmp, &dir, name).map_err(nixerr)?;
-    guard.armed = false;
+    if create_only {
+        // A hard link to the name fails if the name exists, however it
+        // came to: nothing is replaced.
+        match nix::unistd::linkat(&dir, &tmp, &dir, name, AtFlags::empty()) {
+            Ok(()) => {}
+            Err(Errno::EEXIST) => return Ok(false),
+            Err(Errno::EPERM | Errno::ENOTSUP | Errno::EMLINK | Errno::ENOSYS) => {
+                // A file system with no hard links: the last look, then rename.
+                match nix::sys::stat::fstatat(&dir, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+                    Ok(_) => return Ok(false),
+                    Err(Errno::ENOENT) => {}
+                    Err(e) => return Err(nixerr(e)),
+                }
+                nix::fcntl::renameat(&dir, &tmp, &dir, name).map_err(nixerr)?;
+                guard.armed = false;
+            }
+            Err(e) => return Err(nixerr(e)),
+        }
+        // `guard` removes the temporary name (the file stays under `name`).
+    } else {
+        nix::fcntl::renameat(&dir, &tmp, &dir, name).map_err(nixerr)?;
+        guard.armed = false;
+    }
     nix::unistd::fsync(&dir).map_err(|e| {
         format!(
             "{shown} was replaced, but its directory could not be synced ({}); the change may \
              not survive a crash",
             std::io::Error::from(e)
         )
-    })
+    })?;
+    Ok(true)
 }
 
 /// Removes [`replace_with`]'s temporary file unless it was renamed.
@@ -1409,6 +1470,60 @@ mod tests {
             );
             assert_eq!(std::fs::read_to_string(&target).unwrap(), "outside\n");
             assert_eq!(names(dir.path()), ["f.txt"]);
+        }
+
+        /// A create never replaces (PLAN.md T97): a name that is taken,
+        /// by a file or a link, is `Ok(false)` and untouched, also when it
+        /// is taken after the write began and before the publish, and no
+        /// temporary file is left.
+        #[test]
+        fn a_create_never_replaces_what_is_there() {
+            use std::os::unix::fs::symlink;
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path().join("new.docx");
+            assert_eq!(
+                replace_impl(&p, b"one", std::io::Write::write_all, true),
+                Ok(true)
+            );
+            assert_eq!(std::fs::read(&p).unwrap(), b"one");
+            assert_eq!(
+                replace_impl(&p, b"two", std::io::Write::write_all, true),
+                Ok(false)
+            );
+            assert_eq!(std::fs::read(&p).unwrap(), b"one");
+            // A dangling link is a name that is taken.
+            let l = dir.path().join("link.docx");
+            symlink(dir.path().join("nowhere"), &l).unwrap();
+            assert_eq!(
+                replace_impl(&l, b"x", std::io::Write::write_all, true),
+                Ok(false)
+            );
+            assert!(
+                std::fs::symlink_metadata(&l)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert!(!dir.path().join("nowhere").exists());
+            // The race: the name is taken while the temporary file is
+            // being written, after the first look and before the publish.
+            let q = dir.path().join("race.docx");
+            let q2 = q.clone();
+            let r = replace_impl(
+                &q,
+                b"mine",
+                move |f, b| {
+                    std::fs::write(&q2, "the person's own file")?;
+                    std::io::Write::write_all(f, b)
+                },
+                true,
+            );
+            assert_eq!(r, Ok(false));
+            assert_eq!(
+                std::fs::read_to_string(&q).unwrap(),
+                "the person's own file"
+            );
+            assert_eq!(names(dir.path()), ["link.docx", "new.docx", "race.docx"]);
         }
 
         /// A rename needs only the directory writable; a read-only file

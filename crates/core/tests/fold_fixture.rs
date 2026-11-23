@@ -177,7 +177,7 @@ fn events() -> Vec<RawEvent> {
             exit_code: Some(101),
             truncated: false,
             sources: vec![],
-            note: None,
+            note: None, made: None,
         }),
         EventKind::ToolCallStarted(ToolCallStarted {
             author: None,
@@ -195,7 +195,7 @@ fn events() -> Vec<RawEvent> {
             exit_code: None,
             truncated: false,
             sources: vec![],
-            note: None,
+            note: None, made: None,
         }),
         // A web tool's result carries the sources behind its labels.
         EventKind::ToolCallStarted(ToolCallStarted {
@@ -218,7 +218,7 @@ fn events() -> Vec<RawEvent> {
                 url: "https://tokio.rs/".into(),
                 title: "Tokio".into(),
             }],
-            note: None,
+            note: None, made: None,
         }),
         // A message with no preceding deltas, with one valid block and one
         // that is an error.

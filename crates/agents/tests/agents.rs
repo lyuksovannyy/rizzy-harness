@@ -368,6 +368,7 @@ fn features() -> harness_agents::Features {
         history: true,
         recall: false,
         attached_files: false,
+        office: false,
         board: false,
         web: true,
         read_files: true,
@@ -380,6 +381,66 @@ fn features() -> harness_agents::Features {
         as_agent: true,
         as_subagent: true,
     }
+}
+
+/// "Create and edit documents" (PLAN.md T97) is one switch for the family:
+/// on for the built-in Assistant only, off for every other agent and for a
+/// new one; a file agent's list decides; reading files and writing them do
+/// not bring it; and it adds `doc_create` and `sheet_create` together.
+#[test]
+fn creating_documents_is_its_own_switch() {
+    for a in builtins() {
+        let want = a.id == "general";
+        assert_eq!(a.features.office, want, "{}", a.id);
+        assert_eq!(a.spec.allows_tool("doc_create"), want, "{}", a.id);
+        assert_eq!(a.spec.allows_tool("sheet_create"), want, "{}", a.id);
+    }
+    let make = |office: bool, edit_files: bool| {
+        harness_agents::custom(
+            "r",
+            "R",
+            "",
+            "r",
+            harness_agents::Features {
+                office,
+                edit_files,
+                ..features()
+            },
+            vec![],
+        )
+        .unwrap()
+    };
+    let on = make(true, false);
+    assert!(on.features.office);
+    assert!(on.spec.allows_tool("doc_create") && on.spec.allows_tool("sheet_create"));
+    let off = make(false, true);
+    assert!(!off.features.office, "writing files does not bring it");
+    assert!(!off.spec.allows_tool("doc_create") && !off.spec.allows_tool("sheet_create"));
+    assert!(off.spec.allows_tool("write"));
+    // The tools change files, so an agent with only them is not read-only.
+    assert!(on.spec.changes_things(|_| true));
+    let file = parse(
+        "other",
+        "---\nname: O\ntools: [web_search, remember]\n---\nhi\n",
+        false,
+    )
+    .unwrap();
+    assert!(!file.features.office, "a file agent's list decides");
+    let one = parse(
+        "other",
+        "---\nname: O\ntools: [sheet_create]\n---\nhi\n",
+        false,
+    )
+    .unwrap();
+    assert!(one.features.office);
+    // A page agent saved before the switch has it off.
+    let old: harness_agents::edits::Custom = serde_json::from_str(
+        r#"{"name":"Old","summary":"","prompt":"p","features":{"memory":true,"web":false,
+        "read_files":true,"edit_files":false,"commands":false,"delegate":false,
+        "as_agent":true,"as_subagent":true}}"#,
+    )
+    .unwrap();
+    assert!(!old.features.office);
 }
 
 /// The Personalisation switch (PLAN.md T74): on unless a definition says

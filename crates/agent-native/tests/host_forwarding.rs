@@ -400,6 +400,90 @@ async fn the_hosts_attached_source_reaches_the_tool_through_the_loop() {
     );
 }
 
+/// The same for `doc_create` (PLAN.md T97): the host's link to the master
+/// reaches the tool through the wrapper (so a plain chat's file is made by
+/// the master and not written into the folder), and the file the call made
+/// reaches the call's event as `made`.
+#[tokio::test]
+async fn the_hosts_docs_source_reaches_the_tool_and_the_file_reaches_the_log() {
+    use harness_core::docs::{DocCreated, DocRequest, DocSource};
+    struct Source(Mutex<Vec<DocRequest>>);
+    #[async_trait::async_trait]
+    impl DocSource for Source {
+        async fn create(&self, r: DocRequest) -> Result<DocCreated, String> {
+            self.0.lock().unwrap().push(r);
+            Ok(DocCreated {
+                file_id: "f-1".into(),
+                name: "plan.docx".into(),
+                bytes: 9,
+                sha256: "ab".repeat(32),
+                mime: harness_core::docs::DOCX_MIME.into(),
+                notes: vec![],
+            })
+        }
+    }
+    struct Linked {
+        inner: Host,
+        source: Arc<Source>,
+    }
+    #[async_trait::async_trait]
+    impl TurnHost for Linked {
+        async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+            self.inner.emit(kind).await
+        }
+        async fn approve(&self, a: &str, b: &str, c: &Value, d: ToolRisk) -> Decision {
+            self.inner.approve(a, b, c, d).await
+        }
+        fn docs(&self) -> Option<Arc<dyn DocSource>> {
+            Some(self.source.clone())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ws: PathBuf = dir.path().canonicalize().unwrap().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let source = Arc::new(Source(Mutex::default()));
+    let host = Linked {
+        inner: Host {
+            events: Mutex::default(),
+            pin: None,
+            owned: None,
+            exec: None,
+        },
+        source: source.clone(),
+    };
+    let backend = NativeBackend::new(
+        Arc::new(Script {
+            calls: vec![("doc_create", json!({"path": "plan", "markdown": "# P"}))],
+            before: Mutex::default(),
+        }),
+        vec![Arc::new(harness_tools::DocCreate)],
+        NativeConfig::default(),
+    );
+    backend.run_turn(turn_of(&host, &ws)).await;
+    assert_eq!(
+        source.0.lock().unwrap().len(),
+        1,
+        "{:?}",
+        host.inner.results()
+    );
+    assert!(
+        std::fs::read_dir(&ws).unwrap().next().is_none(),
+        "nothing in the folder"
+    );
+    let made = host
+        .inner
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|e| match e {
+            EventKind::ToolCallFinished(f) => f.made.clone(),
+            _ => None,
+        })
+        .expect("the finished call names the file");
+    assert_eq!(made.file_id.as_deref(), Some("f-1"));
+}
+
 /// `turn` for any host.
 fn turn_of<'a>(host: &'a dyn TurnHost, cwd: &Path) -> TurnCtx<'a> {
     TurnCtx {

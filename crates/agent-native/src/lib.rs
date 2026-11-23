@@ -377,6 +377,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.attached()
     }
 
+    fn docs(&self) -> Option<Arc<dyn harness_core::docs::DocSource>> {
+        self.host.docs()
+    }
+
     fn history(&self) -> Option<Arc<dyn harness_core::history::HistorySource>> {
         self.host.history()
     }
@@ -1418,6 +1422,19 @@ impl NativeBackend {
                 ..s
             })
             .collect()
+    }
+
+    /// The file a `doc_create` or `sheet_create` call made, as the log has it:
+    /// its name and path scrubbed like the output (the model chose the name).
+    fn scrub_made(
+        &self,
+        made: Option<harness_core::event::MadeFile>,
+    ) -> Option<harness_core::event::MadeFile> {
+        made.map(|m| harness_core::event::MadeFile {
+            name: self.config.secrets.scrub(&m.name),
+            path: m.path.map(|p| self.config.secrets.scrub(&p)),
+            ..m
+        })
     }
 
     /// Run one `delegate` call. Returns the result and the child's usage.
@@ -4407,6 +4424,7 @@ impl NativeBackend {
                                 truncated: false,
                                 sources: vec![],
                                 note: None,
+                                made: None,
                             }))
                             .await
                             .is_err()
@@ -4503,6 +4521,7 @@ impl NativeBackend {
                             truncated: false,
                             sources: vec![],
                             note: None,
+                            made: None,
                         }))
                         .await
                         .is_err()
@@ -4553,6 +4572,7 @@ impl NativeBackend {
                                 truncated: false,
                                 sources: vec![],
                                 note: None,
+                                made: None,
                             }))
                             .await
                             .is_err()
@@ -4699,6 +4719,7 @@ impl NativeBackend {
                                     truncated: false,
                                     sources: vec![],
                                     note: None,
+                                    made: None,
                                 }))
                                 .await
                                 .is_err()
@@ -4762,6 +4783,7 @@ impl NativeBackend {
                             truncated: outcome.truncated,
                             sources: self.scrub_sources(outcome.sources),
                             note: None,
+                            made: None,
                         }))
                         .await
                         .is_err()
@@ -5167,6 +5189,7 @@ impl NativeBackend {
                             sources: self.scrub_sources(outcome.sources),
                             note: note.clone(),
                             image,
+                            made: self.scrub_made(outcome.made.clone()),
                         }))
                         .await
                         .is_err()
@@ -6165,6 +6188,7 @@ impl NativeBackend {
             seen: self.seen.session(ctx.session_id),
             recall: host.recall(),
             attached: host.attached(),
+            docs: host.docs(),
             history: host.history(),
             board: host.board(),
             stored_skills: host.stored_skills(),
@@ -6331,6 +6355,8 @@ impl NativeBackend {
                 .for_session(&ctx.session_id.to_string()),
             pin: host.folder_pin(),
             owned: host.owned_folder(),
+            // `doc_create`'s refusal reads whether the chat has a folder.
+            docs: host.docs(),
             ..ToolCtx::new(ctx.cwd.clone())
         }
     }
@@ -7205,6 +7231,7 @@ mod tests {
                     title: "old".into(),
                 }],
                 note: None,
+                made: None,
             })
             .into_parts();
             RawEvent {
@@ -7971,6 +7998,7 @@ mod tests {
                 },
             ],
             note: None,
+            made: None,
         })
         .into_parts();
         let mut c = ctx(
@@ -9300,6 +9328,7 @@ mod tests {
                     truncated: false,
                     sources: vec![],
                     note: None,
+                    made: None,
                 }),
             ] {
                 seq += 1;

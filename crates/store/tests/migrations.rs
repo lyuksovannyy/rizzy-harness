@@ -924,7 +924,7 @@ fn a_version_2_database_is_migrated_to_the_latest_and_keeps_its_rows() {
         }
         drop(Store::open(&path, d).unwrap_or_else(|e| panic!("{name}: {e}")));
         assert_eq!(version_of(&path), MIGRATIONS.len() as i64, "{name}");
-        assert_eq!(MIGRATIONS.len(), 5);
+        assert_eq!(MIGRATIONS.len(), 6);
         let c = Connection::open(&path).unwrap();
         assert_eq!(count(&c, "events"), 1, "{name}: the row is kept");
         assert_eq!(
@@ -1073,7 +1073,7 @@ fn a_version_4_database_is_migrated_to_the_latest_and_keeps_its_rows() {
             assert_eq!(has, 0, "version 4 has no session_files");
         }
         drop(Store::open(&path, d).unwrap_or_else(|e| panic!("{name}: {e}")));
-        assert_eq!(version_of(&path), 5, "{name}");
+        assert_eq!(version_of(&path), MIGRATIONS.len() as i64, "{name}");
         let c = Connection::open(&path).unwrap();
         assert_eq!(count(&c, "events"), 1, "{name}: the row is kept");
         assert_eq!(count(&c, "chat_uploads"), 0, "{name}");
@@ -1082,6 +1082,61 @@ fn a_version_4_database_is_migrated_to_the_latest_and_keeps_its_rows() {
             0,
             "{name}: the new table is there"
         );
+        drop(c);
+        drop(Store::open(&path, d).unwrap());
+    }
+}
+
+/// Version 5 is as recorded when migration 5 shipped.
+#[test]
+fn the_recorded_version_5_is_the_frozen_one() {
+    let recorded = include_str!("../schema/5.sql");
+    assert!(
+        !recorded.contains("made INTEGER"),
+        "version 5 was recorded before session_files.made; that column is migration 6"
+    );
+    assert_eq!(recorded.len(), FROZEN_V5_BYTES, "schema/5.sql was changed");
+    assert_eq!(
+        fnv1a(recorded.as_bytes()),
+        FROZEN_V5_FNV1A,
+        "schema/5.sql was changed"
+    );
+}
+
+/// Migration 6 (PLAN.md T97): a version 5 database gets `session_files.made`
+/// and its rows, which are the person's own attachments, are not made files.
+#[test]
+fn a_version_5_database_is_migrated_and_its_rows_are_not_made_files() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, d) in [
+        ("master.db", Durability::Normal),
+        ("node.db", Durability::Full),
+    ] {
+        let path = dir.path().join(name);
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(include_str!("../schema/5.sql")).unwrap();
+            c.execute_batch(
+                "INSERT INTO blobs (blob_id, owner_id, sha256, size, kind, format, mime, display, key, created_ms)
+                   VALUES ('b1', NULL, 'aa', 10, 'other', 'bin', 'application/octet-stream', 'download', x'00', 1);
+                 INSERT INTO session_files (session_id, file_id, blob_id, owner_id, name, mime, size, sha256, logged, created_ms)
+                   VALUES ('s', 'f1', 'b1', NULL, 'a.docx', 'application/zip', 10, 'aa', 1, 1);
+                 PRAGMA user_version = 5;",
+            )
+            .unwrap();
+        }
+        migrate::check_file(&path, &harness_store::DB_SCHEMA).unwrap();
+        drop(Store::open(&path, d).unwrap_or_else(|e| panic!("{name}: {e}")));
+        assert_eq!(version_of(&path), 6, "{name}");
+        let c = Connection::open(&path).unwrap();
+        let made: i64 = c
+            .query_row(
+                "SELECT made FROM session_files WHERE file_id = 'f1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(made, 0, "{name}: an attachment is not a made file");
         drop(c);
         drop(Store::open(&path, d).unwrap());
     }
@@ -1113,6 +1168,8 @@ const FROZEN_V3_BYTES: usize = 24543;
 const FROZEN_V3_FNV1A: u64 = 0xef81_eb03_3e46_0a98;
 const FROZEN_V4_BYTES: usize = 25235;
 const FROZEN_V4_FNV1A: u64 = 0x29f4_5b7b_4f19_bd90;
+const FROZEN_V5_BYTES: usize = 25830;
+const FROZEN_V5_FNV1A: u64 = 0xdb6d_3a17_b9d7_1b06;
 
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {

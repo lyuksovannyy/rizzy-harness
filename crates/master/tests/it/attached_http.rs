@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 
 type Answers = Arc<Mutex<HashMap<String, (Option<AttachedAnswer>, Option<String>)>>>;
 type Seen = Arc<Mutex<Vec<MasterToNode>>>;
+type Made = Arc<Mutex<HashMap<String, (Option<harness_core::docs::DocCreated>, Option<String>)>>>;
 
 /// A fake node: acks every command, mirrors a `session_created` for each
 /// chat it is asked to create, keeps each session's seq so a test can append
@@ -34,6 +35,8 @@ pub(crate) struct Fake {
     tx: mpsc::Sender<NodeToMaster>,
     pub(crate) seqs: Arc<Mutex<HashMap<SessionId, u64>>>,
     answers: Answers,
+    /// Each `docs.result`, by request id (PLAN.md T97).
+    pub(crate) made: Made,
     pub(crate) seen: Seen,
 }
 
@@ -54,9 +57,11 @@ fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Fake) {
         tx: to_master.clone(),
         seqs: Arc::default(),
         answers: Arc::default(),
+        made: Arc::default(),
         seen: Arc::default(),
     };
     let (seqs, answers, seen) = (fake.seqs.clone(), fake.answers.clone(), fake.seen.clone());
+    let made = fake.made.clone();
     let node = node_id.to_string();
     tokio::spawn(async move {
         while let Some(msg) = commands.recv().await {
@@ -80,6 +85,17 @@ fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Fake) {
                     payload,
                 };
                 to_master.try_send(NodeToMaster::Event { event }).unwrap();
+            }
+            if let MasterToNode::DocsResult {
+                req_id,
+                answer,
+                error,
+            } = &msg
+            {
+                made.lock()
+                    .unwrap()
+                    .insert(req_id.clone(), (answer.clone(), error.clone()));
+                continue;
             }
             if let MasterToNode::AttachedResult {
                 req_id,
@@ -109,7 +125,7 @@ fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Fake) {
 }
 
 impl Fake {
-    async fn emit(&self, sid: SessionId, kind: &str, payload: Value) {
+    pub(crate) async fn emit(&self, sid: SessionId, kind: &str, payload: Value) {
         let seq = {
             let mut s = self.seqs.lock().unwrap();
             let n = s.entry(sid).or_insert(0);
@@ -169,7 +185,7 @@ impl Fake {
     }
 
     /// Ask on behalf of `sid` and wait for the answer.
-    async fn ask(
+    pub(crate) async fn ask(
         &self,
         sid: SessionId,
         request: AttachedRequest,
@@ -193,6 +209,52 @@ impl Fake {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("no attached.result for {req_id}");
+    }
+
+    /// `doc_create` or `sheet_create` on behalf of `sid`: wait for the answer.
+    pub(crate) async fn ask_docs(
+        &self,
+        sid: SessionId,
+        request: harness_core::docs::DocRequest,
+    ) -> Result<harness_core::docs::DocCreated, String> {
+        let req_id = harness_core::new_id();
+        self.tx
+            .send(NodeToMaster::Docs {
+                req_id: req_id.clone(),
+                session_id: sid,
+                request,
+            })
+            .await
+            .unwrap();
+        for _ in 0..800 {
+            if let Some((a, e)) = self.made.lock().unwrap().get(&req_id) {
+                return match e {
+                    Some(e) => Err(e.clone()),
+                    None => Ok(a.clone().expect("an answer")),
+                };
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no docs.result for {req_id}");
+    }
+
+    /// Whether no `docs.result` came for a request that was sent.
+    pub(crate) async fn no_docs_answer(
+        &self,
+        sid: SessionId,
+        request: harness_core::docs::DocRequest,
+    ) -> bool {
+        let before = self.made.lock().unwrap().len();
+        self.tx
+            .send(NodeToMaster::Docs {
+                req_id: harness_core::new_id(),
+                session_id: sid,
+                request,
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        self.made.lock().unwrap().len() == before
     }
 
     /// Send `n` requests at once for `sid` and wait for every answer.
@@ -258,7 +320,7 @@ pub(crate) async fn start() -> T {
     start_with(&["profile:chat", CAP_ATTACHED]).await
 }
 
-async fn start_with(caps: &[&str]) -> T {
+pub(crate) async fn start_with(caps: &[&str]) -> T {
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

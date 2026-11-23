@@ -1597,6 +1597,59 @@ say-so. The same holds for an image's name, which older messages show in
 place of the image.
 To have such a link read, paste it into your message.
 
+**Documents the agent makes.** An agent can make a new Word or Excel file
+from its own text, with two tools: `doc_create` (Markdown to `.docx`) and
+`sheet_create` (a sheet spec to `.xlsx`). Ask for "a one-page summary as a Word
+file" or "a budget as a spreadsheet with totals" and the tool's block in the
+chat shows the file as a chip with its name and size.
+
+- **Where the file goes.** In a chat with a folder it is written into the
+  folder, like any file the agent writes: the same rules about which places it
+  may write, the same approvals, and it is part of the turn's undo. The chip
+  shows its path. It never replaces a file that is already there: a name taken
+  becomes `report (2).docx`. In a chat without a folder nothing is written
+  anywhere on a machine: the server keeps the file as your own stored file
+  (encrypted at rest, counted in your storage quota) and the chip has a
+  **Download** button. Only you can download it, in the chat it was made in. The
+  agent can read it again with `attached_file` (it is a file of that chat), so
+  "now add a section" starts from what is there; changing an existing file is
+  coming and is not part of this yet.
+- **In a folder chat without `write`.** The Assistant has no `write` tool, but
+  with this switch it can now create new Word and Excel files in a chat's
+  folder (never over an existing file). A node turns the two tools off with
+  `denied_tools = ["doc_create", "sheet_create"]` in its node.toml, and
+  `denied_tools = ["write"]` turns them off too, since they write files there.
+- **The switch.** "Create and edit documents" is a per-agent switch on the
+  agent's page, on for the built-in Assistant and off for every other agent and
+  for a new one. A sub-agent's chat without a folder and a temporary chat make
+  no files. In Ask mode the agent asks before it makes a file, as it asks before
+  any change.
+- **What a document holds.** Headings 1 to 4, paragraphs, bold, italic,
+  strike-through, inline code, links (only `http`, `https` and `mailto`; others
+  stay plain text), bulleted and numbered lists up to three levels, tables with
+  a header row and column alignment, block quotes, code blocks and `---` as a
+  page break; A4 (the default) or Letter, portrait or landscape, and a title
+  property. Raw HTML and pictures are not used and the agent is told so. At most
+  1 MiB of Markdown, 20,000 paragraphs and 20,000 table cells.
+- **What a workbook holds.** Up to 20 sheets of 10,000 rows and 100 columns
+  (200,000 cells in all), typed cells (numbers, text, true and false, empty),
+  columns formatted as text, integer, number, number2, percent, currency, date
+  or datetime, ISO dates ("2026-12-01") that become real dates, a frozen bold
+  header, a filter on it, column widths, and formulas. A string is always text,
+  also when it starts with `=`; a formula is a separate field, and a formula that
+  could send your data away when you open the file (`WEBSERVICE`, `IMAGE`, `RTD`,
+  DDE, a reference to another workbook, a `HYPERLINK` whose address is not one
+  plain `http` or `https` text) is refused. Formulas have no stored results: Excel calculates them
+  when it opens the file, and a viewer that does not calculate shows them empty.
+- **Names.** The agent chooses a name; the program makes it one clean file name
+  and adds `.docx` or `.xlsx` itself. In a chat without a folder it is only a
+  name, in one with a folder a path inside the folder as `write` takes it.
+- **What was left out.** Fonts and colors come from one fixed style set; there
+  are no pictures, charts, footnotes or headers. A file is written from text the
+  agent made, so check it before you send it on.
+- **A server or node that predates this** (a chat runtime that does not announce
+  `doc-create`) does not offer the tools in a chat without a folder.
+
 **Mentioning a file.** In an agentic chat, type `@` and a path to hand the
 agent a file of the chat's folder with your message, as Claude Code, OpenCode
 and goose do: the agent gets its content at once, without spending a `read`

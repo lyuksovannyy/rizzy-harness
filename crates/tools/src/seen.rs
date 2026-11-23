@@ -1061,6 +1061,7 @@ mod tests {
             truncated: false,
             sources: vec![],
             note: None,
+            made: None,
         })
     }
 

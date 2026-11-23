@@ -12,6 +12,7 @@ mod board;
 pub mod connector;
 pub mod contain;
 pub mod guard;
+mod office;
 pub use bash::{
     DEFAULT_TIMEOUT_MAX_S, MAX_TIMEOUT_MAX_S, MIN_TIMEOUT_MAX_S, workdir as bash_workdir,
 };
@@ -75,6 +76,7 @@ pub use board::{Board, BoardEdit, render as render_board};
 pub use edit::Edit;
 pub use env::ToolEnv;
 pub use fs::{Read, Write, image_of};
+pub use office::{DocCreate, SheetCreate};
 pub use outline::Outline;
 pub use outputs::{OutputStore, SessionOutputs, ToolOutput};
 pub use publish::Publish;
@@ -245,6 +247,10 @@ pub struct ToolCtx {
     /// Where `attached_file` sends its requests: the session's link to the
     /// master (`TurnHost::attached`); `None` where there is none.
     pub attached: Option<Arc<dyn harness_core::attached::AttachedSource>>,
+    /// Where `doc_create` and `sheet_create` send their requests in a chat
+    /// without a folder (`TurnHost::docs`); `None` in a chat with one, where
+    /// they write into the folder.
+    pub docs: Option<Arc<dyn harness_core::docs::DocSource>>,
     /// Where `history` reads the session's own chat (`TurnHost::history`);
     /// `None` where there is none.
     pub history: Option<Arc<dyn harness_core::history::HistorySource>>,
@@ -347,6 +353,7 @@ impl ToolCtx {
             seen: Default::default(),
             recall: None,
             attached: None,
+            docs: None,
             history: None,
             board: None,
             stored_skills: None,
@@ -682,6 +689,10 @@ pub struct ToolOutcome {
     /// records it as the call's `note`. Not part of `output`, whose
     /// `[harness]` lines the model reads as forged.
     pub note: Option<String>,
+    /// The Word or Excel file a `doc_create` or `sheet_create` call made
+    /// (PLAN.md T97): the loop records it with the call's result
+    /// (`tool_call_finished.made`).
+    pub made: Option<harness_core::event::MadeFile>,
 }
 
 /// An image file as `read` found it: its bytes as read (at most
@@ -841,6 +852,8 @@ pub fn builtin() -> ToolSet {
         Arc::new(ToolOutput),
         Arc::new(Outline),
         Arc::new(Publish),
+        Arc::new(DocCreate),
+        Arc::new(SheetCreate),
         Arc::new(todo::Todo),
         Arc::new(skills::SkillTool),
     ]

@@ -522,7 +522,7 @@ CREATE INDEX IF NOT EXISTS session_workspaces_ws ON session_workspaces(workspace
 /// last one leaves, as recorded (`schema/<n>.sql`, n = `MIGRATIONS.len()`).
 pub const DB_SCHEMA: migrate::Schema<'static> = migrate::Schema {
     steps: MIGRATIONS,
-    recorded: include_str!("../schema/5.sql"),
+    recorded: include_str!("../schema/6.sql"),
 };
 
 /// The schema of `master.db`, `chat.db` and `node.db`, one entry per version.
@@ -555,6 +555,8 @@ pub const MIGRATIONS: &[migrate::Migration] = &[
     // 5: files a chat without a folder may read through `attached_file`
     // (PLAN.md T95).
     &[session_files::SCHEMA],
+    // 6: which `session_files` rows an agent made (PLAN.md T97).
+    &[session_files::MADE_SCHEMA],
 ];
 
 /// The most files one message may name in `user_message.attached` (the
@@ -974,6 +976,11 @@ impl Store {
             // Files kept for `attached_file` (T95): readable from the
             // message that names them on.
             session_files::on_message(tx, &sid, owner, e, copy)?;
+        }
+        if e.kind == "tool_call_finished" {
+            // A file a `doc_create` or `sheet_create` call made (T97): the
+            // chat's own once its log says so.
+            session_files::on_finished(tx, &sid, owner, e, copy)?;
         }
         match e.kind.as_str() {
             "session_created" => {

@@ -1195,10 +1195,14 @@ impl NodePolicy {
     /// Whether `denied_tools` refuses `tool` outright.
     /// `mcp` stands for every MCP tool and `mcp__<server>` for one
     /// server's (X.3, review N2); any other entry is an exact name.
+    ///
+    /// `write` also stands for the tools that create Word and Excel files
+    /// in a folder ([`harness_core::docs::TOOLS`], T97).
     pub fn denies(&self, tool: &str) -> bool {
         let prefix = harness_tools::mcp::PREFIX;
         self.denied_tools.iter().any(|t| {
             t == tool
+                || (t == "write" && harness_core::docs::TOOLS.contains(&tool))
                 || (tool.starts_with(prefix)
                     && (t == harness_core::agent::MCP_ALL
                         || (t.starts_with(prefix)
@@ -1716,6 +1720,26 @@ mod tests {
         let w = InstructionsPolicy::warnings(&f);
         assert_eq!(w.len(), 2, "{w:?}");
         assert!(w[0].contains("it is not read"), "{w:?}");
+    }
+
+    /// `denied_tools = ["write"]` also denies the two tools that write Word
+    /// and Excel files into a folder (PLAN.md T97): an operator who refuses
+    /// writes has not agreed to them; either can still be denied alone.
+    #[test]
+    fn denying_write_denies_the_document_tools() {
+        let p = |d: &[&str]| NodePolicy {
+            denied_tools: d.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        for t in ["doc_create", "sheet_create"] {
+            assert!(p(&["write"]).denies(t), "{t}");
+            assert!(p(&[t]).denies(t), "{t}");
+            assert!(!p(&["edit"]).denies(t), "{t}");
+            assert!(!p(&[]).denies(t), "{t}");
+        }
+        assert!(!p(&["doc_create"]).denies("sheet_create"));
+        assert!(!p(&["doc_create"]).denies("write"));
+        assert!(!p(&["write"]).denies("attached_file"));
     }
 
     /// Review N2: `mcp` denies every MCP tool, `mcp__<server>` one

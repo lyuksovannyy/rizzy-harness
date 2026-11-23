@@ -115,6 +115,7 @@ impl Log {
                     note: None,
                     seen: None,
                     image: None,
+                    made: None,
                 }),
             );
         }

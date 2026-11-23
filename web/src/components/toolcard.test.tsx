@@ -376,3 +376,47 @@ describe("bash's workdir", () => {
     expect(row).toContain("hidden-mark");
   });
 });
+
+const FID = "0123456789abcdef0123456789abcdef";
+
+describe("files an agent made (T97)", () => {
+  const made = (m: object, ok = true, tool = "doc_create"): Tool =>
+    web(tool, { path: "plan", markdown: "# P" }, { ok, output: "Created", exit_code: null, made: { name: "plan.docx", size: 12345, sha256: "ab", ...m } });
+  const html = (item: Tool) => renderToStaticMarkup(<ToolCard sessionId="s1" item={item} />);
+
+  test("a chat without a folder: a chip with the name, the size and a download", () => {
+    const h = html(made({ file_id: FID }));
+    expect(h).toContain("plan.docx");
+    expect(h).toContain("12 KB");
+    expect(h).toContain("Download");
+    expect(h).not.toContain("small muted mono");
+  });
+
+  test("a chat with a folder: the saved path and no download", () => {
+    const h = html(made({ path: "/work/plan.docx" }));
+    expect(h).toContain("/work/plan.docx");
+    expect(h).not.toContain("Download");
+  });
+
+  test("a sheet has its own icon; a failed call shows no chip", () => {
+    expect(html(made({ name: "b.xlsx", file_id: FID }, true, "sheet_create"))).toContain("b.xlsx");
+    expect(html(made({ file_id: FID }, false))).not.toContain("Download");
+  });
+
+  test("a hostile name is text", () => {
+    const h = html(made({ name: '<img src=x onerror=alert(1)>.docx', file_id: FID }));
+    expect(h).not.toContain("<img");
+    expect(h).toContain("&lt;img");
+  });
+
+  test("a link is made only for an id as the server makes it (32 hex), and its parts are encoded", () => {
+    for (const bad of ["f1", "../../x", "a/b", "0123456789abcdef0123456789abcde?", "0123456789ABCDEF0123456789ABCDEF", "0123456789abcdef0123456789abcdef0"]) {
+      const h = html(made({ file_id: bad }));
+      expect(h).toContain("plan.docx");
+      expect(h).not.toContain("Download");
+    }
+    expect(html(made({ file_id: FID }))).toContain("Download");
+    const odd = renderToStaticMarkup(<ToolCard sessionId="s/../1?x" item={made({ file_id: FID })} />);
+    expect(odd).toContain("Download");
+  });
+});

@@ -651,6 +651,7 @@ async fn a_new_turn_starts_a_new_count() {
                 truncated: false,
                 sources: vec![],
                 note: None,
+                made: None,
             }),
         ));
     }

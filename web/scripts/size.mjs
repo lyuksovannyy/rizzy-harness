@@ -598,8 +598,12 @@ const ATTACH_ANY_KB = 0.2; // the measure is a few hundredths over 471.9
 // the sent message's file chip and the agent's switch. Measured 472.1 total,
 // first load 103.0.
 const FILE_VIEW_KB = 0.2;
+// Made documents (X.56, T97): the chip of a file `doc_create` or `sheet_create`
+// made, its download link and the agent's switch. Measured 472.7 total (just over, so 0.6), first
+// load 103.0.
+const DOC_CREATE_KB = 0.6;
 
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + SIDEBAR_KB + X23_T70_KB + X24_KB + X28_KB + WAITING_KB + X29_KB + X25_KB + X26_KB + X32_KB + X33_KB + X34A_KB + X34B_KB + X36_KB + X27A_KB + WEBGUARD_KB + X35A_KB + PICKMARK_KB + X35B_KB + X27C_KB + X37A_KB + X38_KB + TRIALUI2_KB + X39_KB + X39B_KB + X41_KB + X42_KB + PRICEHINT_KB + X44_KB + X7_REVIEW_KB + DIET_KB + X36_HOST_KB + W6_KB + X45_KB + BATCH2_KB + USAGE_KB + BROWSER_FIXES_KB + REWIND_FOLD_KB + HISTORY_SWITCH_KB + REWIND_UI_KB + FORK_KB + FORK_DETAILS_KB + MESSAGE_ACTIONS_KB + COMPOSER_STRIP_KB + AGENT_PAGE_MODELS_KB + SHARED_FOLDER_KB + EXEC_SWITCH_KB + ATTACH_ANY_KB + FILE_VIEW_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + SIDEBAR_KB + X23_T70_KB + X24_KB + X28_KB + WAITING_KB + X29_KB + X25_KB + X26_KB + X32_KB + X33_KB + X34A_KB + X34B_KB + X36_KB + X27A_KB + WEBGUARD_KB + X35A_KB + PICKMARK_KB + X35B_KB + X27C_KB + X37A_KB + X38_KB + TRIALUI2_KB + X39_KB + X39B_KB + X41_KB + X42_KB + PRICEHINT_KB + X44_KB + X7_REVIEW_KB + DIET_KB + X36_HOST_KB + W6_KB + X45_KB + BATCH2_KB + USAGE_KB + BROWSER_FIXES_KB + REWIND_FOLD_KB + HISTORY_SWITCH_KB + REWIND_UI_KB + FORK_KB + FORK_DETAILS_KB + MESSAGE_ACTIONS_KB + COMPOSER_STRIP_KB + AGENT_PAGE_MODELS_KB + SHARED_FOLDER_KB + EXEC_SWITCH_KB + ATTACH_ANY_KB + FILE_VIEW_KB + DOC_CREATE_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

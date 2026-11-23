@@ -202,6 +202,10 @@ const RECALL_TOOL: &str = "recall";
 /// Reading the files the person attached to a chat without a folder: its own
 /// switch, off when absent ("Read attached files").
 const ATTACHED_TOOL: &str = harness_core::attached::TOOL;
+/// Making Word and Excel files (`doc_create`, `sheet_create`; the tools that
+/// change them follow): one switch for the family, "Create and edit
+/// documents", off when absent, on for the built-in Assistant (PLAN.md T97).
+const OFFICE_TOOLS: &[&str] = &harness_core::docs::TOOLS;
 /// Reading this chat's own earlier messages in full: its own switch, on
 /// when absent (it shows an agent only what it was sent once, in the one
 /// chat it is in).
@@ -273,6 +277,14 @@ pub struct Features {
     /// absent, on for the built-in Assistant.
     #[serde(default)]
     pub attached_files: bool,
+    /// `doc_create` and `sheet_create`: make Word and Excel files (PLAN.md
+    /// T97); the tools that change existing ones will join this switch,
+    /// "Create and edit documents". Its own switch, off when absent, on for
+    /// the built-in Assistant. In a chat with a folder it writes there like
+    /// `write` and needs no file access of its own; in a chat without one the
+    /// master keeps the file for the person to download.
+    #[serde(default)]
+    pub office: bool,
     /// The project's task board, in a project's chats (PLAN.md T78):
     /// `board` lists it, `board_edit` adds, moves and notes cards (never
     /// deletes or overwrites). An agent that changes nothing else and has
@@ -330,6 +342,7 @@ impl Features {
             (self.memory || self.project_memory, &[MEMORY_TOOL][..]),
             (self.recall, &[RECALL_TOOL][..]),
             (self.attached_files, &[ATTACHED_TOOL][..]),
+            (self.office, OFFICE_TOOLS),
             (self.history, &[HISTORY_TOOL][..]),
             (self.web, WEB_TOOLS),
             (self.read_files, READ_TOOLS),
@@ -576,6 +589,7 @@ fn build(id: &str, mut fm: Frontmatter, body: &str, origin: Origin) -> Result<Ag
         history: fm.history && fm.tools.allows(HISTORY_TOOL),
         recall: fm.tools.allows(RECALL_TOOL),
         attached_files: fm.tools.allows(ATTACHED_TOOL),
+        office: any(OFFICE_TOOLS),
         board: fm.tools.allows(BOARD_TOOL),
         web: any(WEB_TOOLS),
         read_files: any(READ_TOOLS),

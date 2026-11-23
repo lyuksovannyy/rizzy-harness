@@ -6,6 +6,7 @@ mod attached;
 mod audit;
 mod board;
 mod connectors;
+mod docs;
 mod environment;
 pub mod exec;
 mod forge_clone;
@@ -150,6 +151,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::ArtifactFetch { .. }
         | MasterToNode::RecallResult { .. }
         | MasterToNode::AttachedResult { .. }
+        | MasterToNode::DocsResult { .. }
         | MasterToNode::BoardResult { .. }
         | MasterToNode::SkillResult { .. }
         | MasterToNode::ConnectorResult { .. }
@@ -252,6 +254,8 @@ pub(crate) struct Inner {
     pub(crate) recalls: recall::Pending,
     /// `attached_file` calls waiting for the master's answer (PLAN.md T95).
     pub(crate) attacheds: attached::Pending,
+    /// `doc_create` and `sheet_create` calls waiting for the master (T97).
+    pub(crate) docs_pending: docs::Pending,
     /// `board` and `board_edit` calls waiting for the master (PLAN.md T78).
     pub(crate) boards: board::Pending,
     /// Loads of a stored skill waiting for their `skill.result`.
@@ -678,6 +682,7 @@ impl NodeRuntime {
             background: harness_tools::background::Registry::new(bg_limits, bg_secrets),
             recalls: Default::default(),
             attacheds: Default::default(),
+            docs_pending: Default::default(),
             boards: Default::default(),
             stored_skills: Default::default(),
             connectors: Default::default(),
@@ -908,6 +913,15 @@ impl NodeRuntime {
             {
                 capabilities.push(harness_protocol::CAP_ATTACHED.into());
             }
+            // `doc_create` and `sheet_create` likewise (PLAN.md T97): the
+            // master makes and keeps a plain chat's file only for a node that
+            // offers the tools.
+            if [harness_core::docs::DOC_TOOL, harness_core::docs::SHEET_TOOL]
+                .iter()
+                .any(|t| self.inner.cfg.backend.has_tool(t) && !self.inner.cfg.policy.denies(t))
+            {
+                capabilities.push(harness_protocol::CAP_DOCS.into());
+            }
             // The board tools likewise (PLAN.md T78): the master answers
             // board requests only from a node that offers one of them.
             let offers =
@@ -1075,6 +1089,12 @@ impl NodeRuntime {
                         answer,
                         error,
                     } => this.inner.attacheds.answer(&req_id, answer, error),
+                    // Likewise a made file's answer (PLAN.md T97).
+                    MasterToNode::DocsResult {
+                        req_id,
+                        answer,
+                        error,
+                    } => this.inner.docs_pending.answer(&req_id, answer, error),
                     // Likewise a board call's answer.
                     MasterToNode::BoardResult {
                         req_id,
@@ -2155,6 +2175,14 @@ impl NodeRuntime {
                 error,
             } => {
                 self.inner.attacheds.answer(&req_id, answer, error);
+                Ok(())
+            }
+            MasterToNode::DocsResult {
+                req_id,
+                answer,
+                error,
+            } => {
+                self.inner.docs_pending.answer(&req_id, answer, error);
                 Ok(())
             }
             MasterToNode::BoardResult {

@@ -6090,6 +6090,17 @@ impl TurnHost for Session {
         }))
     }
 
+    /// Only a chat without a folder: where there is one the tools write the
+    /// file into it themselves, as `write` does (PLAN.md T97).
+    fn docs(&self) -> Option<Arc<dyn harness_core::docs::DocSource>> {
+        (self.profile == Profile::Chat).then(|| {
+            Arc::new(crate::docs::LinkDocs {
+                node: self.node.clone(),
+                session: self.id,
+            }) as Arc<dyn harness_core::docs::DocSource>
+        })
+    }
+
     fn board(&self) -> Option<Arc<dyn harness_core::board::BoardSource>> {
         Some(Arc::new(crate::board::LinkBoard {
             node: self.node.clone(),

@@ -809,6 +809,7 @@ mod tests {
                 truncated: false,
                 sources: vec![],
                 note: None,
+                made: None,
             })
         };
         let f = finish_in([
