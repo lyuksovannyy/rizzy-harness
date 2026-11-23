@@ -45,13 +45,11 @@ fn sq_rects(list: &[String]) -> (Vec<Rect>, bool) {
     let mut out = vec![];
     let mut more = false;
     for sq in list {
-        let mut n = 0;
-        for tok in sq.split_whitespace() {
+        for (n, tok) in sq.split_whitespace().enumerate() {
             if n >= MAX_RANGES_PER_ENTRY {
                 more = true;
                 break;
             }
-            n += 1;
             if let Some(r) = parse_range(tok) {
                 out.push(r);
             }
