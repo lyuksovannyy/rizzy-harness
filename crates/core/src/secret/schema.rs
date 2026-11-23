@@ -86,6 +86,10 @@ use crate::event::EventKind;
 /// - `user_message.attached[].file_id`: the id the model gives
 ///   `attached_file`, which the master looks up in the chat's own record
 ///   (`master/src/attached.rs`, T95).
+/// - `tool_call_finished.made.file_id`, `.sha256`: the master marks its own
+///   row for the chat logged only on an exact id and hash (`store`
+///   `session_files::on_finished`, T97). The name and path stay free text,
+///   scrubbed like any other.
 /// - `artifact_staged` `stage_id`, `sha256`: the master's artifact pull
 ///   (`master/src/artifacts.rs`).
 /// - `agent.agent_id`, `agent_changed.model`: the agent switch.
@@ -137,7 +141,13 @@ pub const KEPT: &[(&str, &[&str])] = &[
     ("tool_output_delta", &[]),
     (
         "tool_call_finished",
-        &["seen.sha256", "seen.base", "image.sha256"],
+        &[
+            "seen.sha256",
+            "seen.base",
+            "image.sha256",
+            "made.sha256",
+            "made.file_id",
+        ],
     ),
     ("approval_requested", &["approval_id"]),
     ("approval_resolved", &["approval_id"]),

@@ -106,6 +106,8 @@ const FREE: &[(&str, &[&str])] = &[
             "note",
             "seen.path",
             "image.mime",
+            "made.name",
+            "made.path",
         ],
     ),
     (
