@@ -22,6 +22,8 @@ mod tests;
 #[cfg(test)]
 mod tests_docx;
 #[cfg(test)]
+mod tests_fuzz;
+#[cfg(test)]
 mod tests_xlsx;
 
 /// What a call did: per edit, one sentence (applied, or why not); the file

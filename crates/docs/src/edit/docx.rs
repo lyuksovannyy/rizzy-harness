@@ -1170,6 +1170,7 @@ pub fn edit(bytes: &[u8], ops: &[DocOp]) -> Result<Outcome> {
         }
     }
     // Inserts.
+    let mut generated = 0usize;
     for (k, op) in ops.iter().enumerate() {
         if errs[k].is_some() {
             continue;
@@ -1179,6 +1180,12 @@ pub fn edit(bytes: &[u8], ops: &[DocOp]) -> Result<Outcome> {
             DocOp::InsertBefore { markdown, .. } => (markdown, false),
             _ => continue,
         };
+        // What the inserts make is counted as it is made: one call cannot
+        // multiply a megabyte of Markdown into a gigabyte of XML.
+        if generated > MAX_EDIT_OUT_PART_BYTES {
+            errs[k] = Some("the inserts of this call make more text than a document part may hold; insert less".into());
+            continue;
+        }
         let pi = target[k];
         let para = &idx.paras[pi];
         let key = tag_text(para).unwrap_or_default();
@@ -1196,6 +1203,7 @@ pub fn edit(bytes: &[u8], ops: &[DocOp]) -> Result<Outcome> {
             Ok(np) => {
                 let at = if after { para.end } else { para.start };
                 let xml: String = np.iter().map(|n| n.xml.as_str()).collect();
+                generated += xml.len();
                 patches.replace(at, at, xml.into_bytes());
                 inserts.push((at, k, pi, np.iter().map(|n| n.text.clone()).collect()));
                 done[k] = Some(format!(

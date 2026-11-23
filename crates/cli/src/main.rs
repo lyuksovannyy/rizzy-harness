@@ -372,6 +372,11 @@ async fn serve(
     // (PLAN.md T97).
     web_tools.push(Arc::new(harness_tools::DocCreate));
     web_tools.push(Arc::new(harness_tools::SheetCreate));
+    // And the three that look at and edit an existing one: the master runs
+    // the confined editor for the chat's own file (X.57, T98).
+    web_tools.push(Arc::new(harness_tools::DocView));
+    web_tools.push(Arc::new(harness_tools::DocEdit));
+    web_tools.push(Arc::new(harness_tools::SheetEdit));
     // The project board tools: the master answers them too (PLAN.md T78).
     web_tools.push(Arc::new(harness_tools::Board));
     web_tools.push(Arc::new(harness_tools::BoardEdit));

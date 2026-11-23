@@ -1612,12 +1612,31 @@ chat shows the file as a chip with its name and size.
   (encrypted at rest, counted in your storage quota) and the chip has a
   **Download** button. Only you can download it, in the chat it was made in. The
   agent can read it again with `attached_file` (it is a file of that chat), so
-  "now add a section" starts from what is there; changing an existing file is
-  coming and is not part of this yet.
+  "now add a section" starts from what is there, and the editing tools below
+  change it into a new file.
+- **Editing a file you have.** `doc_view` shows a Word or Excel file the way
+  the agent needs to point at it, `doc_edit` changes a Word file and
+  `sheet_edit` a sheet, and the formatting is kept: the tools change only the
+  parts you asked for and copy everything else of the file as it was. Ask "change
+  the date in the second paragraph", "add a row for November under the table" or
+  "rename the column and fix the total". The result is always a NEW file (in a
+  folder: `name (edited).docx` beside the original, or where the agent says; in a
+  chat without one, a new file you can download); the original is never changed.
+  Either every edit of a call applies or none does, and the result says which was
+  refused and why. A formula you add is calculated when you open the file in
+  Excel; tables, filters and validations are not extended when rows are added
+  next to them (the result says so). Not edited: text in fields, pictures, hidden
+  text, tracked changes, a signed or protected file, hidden rows, columns and
+  sheets; not done: comments, images, charts, number formats, adding sheets,
+  inserting rows, new lists and links in an existing file. The file is read only
+  by a separate, confined process (like a PDF or a document you attach), so a
+  machine without Linux 6.7 or newer and Landlock cannot edit. These files have
+  not been opened in Word or Excel by the program's tests: look at the result
+  before you rely on it.
 - **In a folder chat without `write`.** The Assistant has no `write` tool, but
   with this switch it can now create new Word and Excel files in a chat's
   folder (never over an existing file). A node turns the two tools off with
-  `denied_tools = ["doc_create", "sheet_create"]` in its node.toml, and
+  `denied_tools = ["doc_create", "sheet_create", "doc_edit", "sheet_edit"]` in its node.toml, and
   `denied_tools = ["write"]` turns them off too, since they write files there.
 - **The switch.** "Create and edit documents" is a per-agent switch on the
   agent's page, on for the built-in Assistant and off for every other agent and

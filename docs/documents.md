@@ -1,6 +1,6 @@
 # Documents the agent makes (X.56, T97)
 
-Design note for `doc_create` and `sheet_create`; the threat model is [T97](threats/T97.md) and the plan row [X.56](plan/X.56.md).
+Design note for `doc_create` and `sheet_create`; the threat model is [T97](threats/T97.md) and the plan row [X.56](plan/X.56.md). Editing an existing file (`doc_view`, `doc_edit`, `sheet_edit`) is at the end: [T98](threats/T98.md), [X.57](plan/X.57.md).
 The editing tools that follow build on the same pieces.
 
 ## What was compared
@@ -33,4 +33,14 @@ The editing tools that follow build on the same pieces.
 
 ## What is not here
 
-Editing, images, headers and footers, charts, comments, `.odt`, `.ods`, `.pptx` creation and a rendering check (nothing here can show how Word draws the file; the tests read every file back with our own reader only).
+Images, headers and footers, charts, comments, `.odt`, `.ods`, `.pptx` creation and a rendering check (nothing here can show how Word draws the file; the tests read every file back with our own reader only).
+
+## Editing an existing file (X.57, T98)
+
+`crates/docs/src/edit/`: `scan` (the quick-xml pass and the byte-range patcher), `pkg` (a package opened for editing; every untouched entry copied as stored), `para` (one Word paragraph read across runs), `docx` and `xlsx` (the views and the edits), `check` (the self-check), `serve` (the helper's request and reply).
+
+- **Approach.** The research looked at three: parse the file into a model and write it again (what `docx-rs` and `umya-spreadsheet` do: charts, prefixed elements and margins are lost and valid files make them panic), patch one part and copy the rest (what the contract-editing tools do and what this does), and give the model the raw XML (works for Claude because it has a shell, a validator and a renderer; here it would have none). Patching keeps what it does not understand and its failure is a refusal.
+- **Tags.** A paragraph is `p12#a3f`: its place among the body's paragraphs and 16 bits of FNV-1a of its visible text; a cell's paragraph is `t2r3c1#9bd` (`t2r3c1p2#...` when a cell has several). The hash is a staleness check, not security.
+- **Runs.** The visible text of a paragraph is the text of its `w:t`, tabs and breaks; a replacement goes into the first run of the match, the following runs lose the matched text and their properties stay.
+- **Workbooks.** A touched row is written again from its own bytes with the cells it did not touch copied; everything else of the sheet is copied. `dimension` and `spans` are widened when a cell lies outside. Text is an inline string (Excel converts it to a shared string when it saves).
+- **Where it runs.** `rizzy-harness doc-edit` (`crates/master/src/doc_edit.rs`) is started by the master's service (`made.rs::edit_answer`, under the account's helper slot) for a plain chat and by the node (`crates/tools/src/doc_helper.rs`) for a folder chat.
