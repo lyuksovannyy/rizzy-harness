@@ -349,3 +349,36 @@ async fn the_largest_part_is_edited_inside_the_memory_cap() {
         );
     }
 }
+
+/// The preview of a made file, through the real confined helper: a document
+/// as blocks, a workbook as cells, and what is no office file as no preview.
+#[tokio::test]
+async fn the_helper_previews_a_document_a_workbook_and_nothing_else() {
+    use harness_docs::edit::preview::{Block, Preview};
+    let r = PdfReader::new(EXE.into());
+    let req = Request::Preview { sheet: None };
+    let Some(out) = call(&r, &req, &docx_bytes("# Title\n\nThe **quick** fox.\n")).await else {
+        return;
+    };
+    let out = out.unwrap();
+    let (reply, rest) = parse_reply(&out).unwrap();
+    assert!(rest.is_empty());
+    let Some(Preview::Doc { blocks, .. }) = reply.preview else {
+        panic!("{reply:?}")
+    };
+    assert!(matches!(&blocks[0], Block::H { l: 1, .. }), "{blocks:?}");
+    assert!(
+        matches!(&blocks[1], Block::P { r } if r.iter().any(|x| x.t == "quick" && x.b)),
+        "{blocks:?}"
+    );
+    let out = call(&r, &req, &xlsx_bytes()).await.unwrap().unwrap();
+    let (reply, _) = parse_reply(&out).unwrap();
+    let Some(Preview::Sheet { sheet, rows, .. }) = reply.preview else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(sheet, "Data");
+    assert_eq!(rows[0].c[0].v, "Name");
+    // A PDF's bytes: an answer, no preview.
+    let out = call(&r, &req, b"%PDF-1.4\n").await.unwrap().unwrap();
+    assert!(parse_reply(&out).unwrap().0.preview.is_none());
+}
