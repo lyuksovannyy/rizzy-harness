@@ -127,6 +127,7 @@ const SHEET = JSON.stringify([{ tool: 'sheet_create', input: { path: 'budget', s
     await p.waitForSelector('.doc-preview [role=alert]');
     check((await p.locator('.doc-preview table').count()) === 0, 'no old grid under the error');
     check((await p.locator('.doc-preview .pv-tabs button[aria-pressed="true"]').textContent()) === 'Notes', 'the chosen tab is marked');
+    await p.waitForTimeout(500);
     await p.screenshot({ path: `${S}/docpreview-2b-error.png` });
     await p.unroute('**/preview?sheet=1');
     await p.click('.doc-preview [role=alert] button:has-text("Try again")');
