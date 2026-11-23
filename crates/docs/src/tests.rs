@@ -1538,3 +1538,67 @@ fn a_body_past_its_cap_is_refused_early_not_built() {
         }
     }
 }
+
+/// Seen in real Word (2026-11-23): a new file opened in compatibility mode,
+/// a short column broke its header in the middle of a word ("Own/er"), and
+/// code was underlined by the spelling checker.
+#[test]
+fn word_opens_a_new_file_in_its_current_mode_with_whole_words_in_narrow_columns() {
+    let b = doc("| Name | Owner | Hours | Status |\n|---|---|--:|---|\n\
+         | A longer row with a lot of text in the first cell to see how the widths are shared | Ola | 3 | blocked |\n\n\
+         `code` here\n\n```\nfn main() {}\n```\n");
+    // Its own settings part says which Word it is written for.
+    let settings = part(&b.bytes, "word/settings.xml");
+    assert!(
+        settings.contains("w:name=\"compatibilityMode\"") && settings.contains("w:val=\"15\""),
+        "{settings}"
+    );
+    assert!(part(&b.bytes, "[Content_Types].xml").contains("/word/settings.xml"));
+    assert!(part(&b.bytes, "word/_rels/document.xml.rels").contains("Target=\"settings.xml\""));
+    // A column is at least as wide as its longest word needs.
+    let d = part(&b.bytes, "word/document.xml");
+    let widths: Vec<u32> = d
+        .split("<w:gridCol w:w=\"")
+        .skip(1)
+        .map(|s| s[..s.find('"').unwrap()].parse().unwrap())
+        .collect();
+    assert_eq!(widths.len(), 4);
+    for (w, word) in widths.iter().zip(["longer", "Owner", "Hours", "blocked"]) {
+        let need = docx::word_width(word.chars().count());
+        assert!(*w >= need, "{word}: {w} < {need}");
+    }
+    let total: u32 = widths.iter().sum();
+    assert!(
+        d.contains(&format!("<w:tblW w:w=\"{total}\"")),
+        "the widths sum to the table's"
+    );
+    // Code is not spell-checked.
+    let styles = part(&b.bytes, "word/styles.xml");
+    for id in ["w:styleId=\"Code\"", "w:styleId=\"InlineCode\""] {
+        let at = styles.find(id).unwrap();
+        let end = at + styles[at..].find("</w:style>").unwrap();
+        assert!(styles[at..end].contains("<w:noProof/>"), "{id}");
+    }
+}
+
+/// Many columns of long words cannot all have their word: the widths still
+/// sum to the page and none is zero.
+#[test]
+fn more_long_words_than_the_page_holds_still_sum_to_the_page() {
+    let head = (0..12)
+        .map(|_| "Supercalifragilistic")
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let sep = (0..12).map(|_| "---").collect::<Vec<_>>().join("|");
+    let b = doc(&format!("| {head} |\n|{sep}|\n"));
+    let d = part(&b.bytes, "word/document.xml");
+    let widths: Vec<u32> = d
+        .split("<w:gridCol w:w=\"")
+        .skip(1)
+        .map(|s| s[..s.find('"').unwrap()].parse().unwrap())
+        .collect();
+    assert_eq!(widths.len(), 12);
+    assert!(widths.iter().all(|w| *w > 0));
+    let total: u32 = widths.iter().sum();
+    assert!(d.contains(&format!("<w:tblW w:w=\"{total}\"")));
+}
