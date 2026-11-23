@@ -1784,6 +1784,36 @@
         "type": "number"
       },
       {
+        "path": "made",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "made.file_id",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "made.name",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "made.path",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "made.sha256",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "made.size",
+        "required": true,
+        "type": "number"
+      },
+      {
         "path": "note",
         "required": false,
         "type": "string"

@@ -247,7 +247,13 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
                 height: 2,
                 bytes: 3,
             }),
-            made: None,
+            made: Some(MadeFile {
+                name: s(),
+                size: 4,
+                sha256: s(),
+                file_id: Some(s()),
+                path: Some(s()),
+            }),
         }),
         EventKind::ApprovalRequested(ApprovalRequested {
             approval_id: s(),
