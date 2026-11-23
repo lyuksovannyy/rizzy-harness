@@ -356,6 +356,14 @@ pub mod testing {
 
     use harness_tools::sandbox::Sandbox;
 
+    /// Run the document helper as `sh -c <script>` instead of this binary
+    /// (`tests/folder_preview_busy.rs`): to be set before anything asks for
+    /// the helper, once per process.
+    pub fn doc_helper_script(script: &str) {
+        let _ = DOC_HELPER_SCRIPT.set(script.to_string());
+    }
+    pub(crate) static DOC_HELPER_SCRIPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
     type Holds = std::sync::Mutex<Vec<(harness_core::SessionId, Arc<EndHold>)>>;
     static END_HOLD: Holds = std::sync::Mutex::new(Vec::new());
 

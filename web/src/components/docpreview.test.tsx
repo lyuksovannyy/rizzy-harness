@@ -291,3 +291,14 @@ test("tabs go by place: names that look alike are two tabs, and a failed switch 
   expect(host.textContent).toContain("second sheet");
   errors.mockRestore();
 });
+
+test("the cut note sends a folder file to Word or Excel and a kept file to its download", async () => {
+  const cut: PreviewAnswer = { name: "a.docx", preview: { kind: "doc", more: true, notes: [], blocks: [{ k: "p", r: [{ t: "x" }] }] } };
+  await show(cut, { session: "s1", fileId: "f1", name: "a.docx" });
+  expect(host.querySelector(".pv-more")?.textContent).toContain("Download the file to see all of it.");
+  await act(async () => root.render(null));
+  await show(cut, { session: "s1", path: "a.docx", name: "a.docx" });
+  const note = host.querySelector(".pv-more")?.textContent ?? "";
+  expect(note).toContain("Open the file in Word or Excel to see all of it.");
+  expect(note).not.toContain("Download");
+});

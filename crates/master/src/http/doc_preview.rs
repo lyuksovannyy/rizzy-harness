@@ -110,10 +110,10 @@ async fn preview(
         return Err(not_office());
     }
     if file.size == 0 {
-        return Err(refusal(PreviewRefusal::Empty));
+        return Err(refusal(PreviewRefusal::Empty, false));
     }
     if file.size > attached::MAX_FILE {
-        return Err(refusal(PreviewRefusal::FileTooLarge));
+        return Err(refusal(PreviewRefusal::FileTooLarge, false));
     }
     let reader = m.pdf_reader().ok_or_else(|| sentence(DocError::NotSetUp))?;
     // The caller's place, as attachments take it: the API token has one of
@@ -191,7 +191,21 @@ pub(super) fn why(w: Why) -> ApiError {
 
 /// What a node said it could not show (the folder route), in the sentences
 /// of this route, so a person meets the same words in both kinds of chat.
-pub(super) fn refusal(r: PreviewRefusal) -> ApiError {
+/// `folder`: the file is in a chat's folder, where the panel has no
+/// download, so the two "too large" sentences send the person to Word or
+/// Excel instead.
+pub(super) fn refusal(r: PreviewRefusal, folder: bool) -> ApiError {
+    if folder && matches!(r, PreviewRefusal::FileTooLarge | PreviewRefusal::TooLarge) {
+        let code = if r == PreviewRefusal::FileTooLarge {
+            StatusCode::PAYLOAD_TOO_LARGE
+        } else {
+            StatusCode::UNPROCESSABLE_ENTITY
+        };
+        return ApiError(
+            code,
+            "this file is too large to preview; open it in Word or Excel".into(),
+        );
+    }
     match r {
         PreviewRefusal::NotFound => unknown(),
         PreviewRefusal::FileTooLarge => ApiError(

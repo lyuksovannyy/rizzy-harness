@@ -244,7 +244,7 @@ export default function DocPreview(props: { target: PreviewTarget; onClose: () =
         {p?.kind === "sheet" && (p.rows.length ? <Grid rows={p.rows} /> : <p className="muted small">Nothing to show: this sheet has no values.</p>)}
         {p?.more && (
           <p className="pv-more small" role="note">
-            More is not shown: the preview is cut at a size the page can draw. Download the file to see all of it.
+            More is not shown: the preview is cut at a size the page can draw. {fileId !== undefined ? "Download the file to see all of it." : "Open the file in Word or Excel to see all of it."}
           </p>
         )}
         {p?.notes.map((n, i) => (

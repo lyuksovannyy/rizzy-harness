@@ -30,10 +30,29 @@ struct Fake {
     seen: Arc<Mutex<Vec<MasterToNode>>>,
     /// Answers to `slow.docx` wait for `true`.
     release: watch::Sender<bool>,
+    tx: mpsc::Sender<NodeToMaster>,
     _leave: mpsc::UnboundedSender<()>,
 }
 
 impl Fake {
+    /// The `req_id` of every `session.doc_preview` this node was sent.
+    fn req_ids(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                MasterToNode::DocPreview { req_id, .. } => Some(req_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// This node says something unasked.
+    fn say(&self, m: NodeToMaster) {
+        self.tx.try_send(m).unwrap();
+    }
+
     /// The node's link closes.
     fn go_away(&self) {
         let _ = self._leave.send(());
@@ -77,6 +96,7 @@ async fn answer(
             (Some(doc_json()), None)
         }
         "big.docx" => (None, Some(PreviewRefusal::FileTooLarge)),
+        "toolarge.docx" => (None, Some(PreviewRefusal::TooLarge)),
         "pass.docx" => (None, Some(PreviewRefusal::Protected)),
         "hurt.docx" => (None, Some(PreviewRefusal::Damaged)),
         "full.docx" => (None, Some(PreviewRefusal::Busy)),
@@ -85,6 +105,11 @@ async fn answer(
 }
 
 fn fake(id: &str, caps: &[&str], profile: Profile) -> (NodeLink, Fake) {
+    fake_with(id, caps, profile, false)
+}
+
+/// `incognito`: the chats this node opens say they are temporary.
+fn fake_with(id: &str, caps: &[&str], profile: Profile, incognito: bool) -> (NodeLink, Fake) {
     let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
     let (tx, from_node) = mpsc::channel::<NodeToMaster>(1024);
     let mut capabilities = vec![
@@ -106,6 +131,7 @@ fn fake(id: &str, caps: &[&str], profile: Profile) -> (NodeLink, Fake) {
     let (leave, mut left) = mpsc::unbounded_channel::<()>();
     let (release, rel) = watch::channel(false);
     let (node, keep) = (id.to_string(), seen.clone());
+    let sender = tx.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -126,7 +152,7 @@ fn fake(id: &str, caps: &[&str], profile: Profile) -> (NodeLink, Fake) {
                                 approval_mode: ApprovalMode::Ask,
                                 profile,
                                 agent_id: None,
-                                incognito: false,
+                                incognito,
                                 parent_session: None,
                                 sub_folder: None,
                             })
@@ -170,6 +196,7 @@ fn fake(id: &str, caps: &[&str], profile: Profile) -> (NodeLink, Fake) {
         Fake {
             seen,
             release,
+            tx: sender,
             _leave: leave,
         },
     )
@@ -183,6 +210,7 @@ struct T {
     old: Fake,
     plain: Fake,
     remote: Fake,
+    inc: Fake,
     _dir: tempfile::TempDir,
 }
 
@@ -205,7 +233,10 @@ async fn start() -> T {
     let (l, plain) = fake("plain", &[CAP_DOC_PREVIEW], Profile::Chat);
     master.add_link(l, false).await.unwrap();
     // A member's own coding chats are on a remote node, not the server's.
-    let (l, remote) = fake("remote", &[CAP_DOC_PREVIEW], Profile::Agentic);
+    let (l, remote) = fake("remote", &[CAP_DOC_PREVIEW, "exec:host"], Profile::Agentic);
+    master.add_link(l, false).await.unwrap();
+    // A node whose coding chats say they are temporary.
+    let (l, inc) = fake_with("inc", &[CAP_DOC_PREVIEW], Profile::Agentic, true);
     master.add_link(l, false).await.unwrap();
     let m2 = master.clone();
     tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });
@@ -226,6 +257,7 @@ async fn start() -> T {
         old,
         plain,
         remote,
+        inc,
         _dir: dir,
     }
 }
@@ -259,6 +291,11 @@ async fn req(
 }
 
 async fn account(t: &T, name: &str, role: &str) -> String {
+    account_with_id(t, name, role).await.0
+}
+
+/// The account's cookie and its user id.
+async fn account_with_id(t: &T, name: &str, role: &str) -> (String, String) {
     let (st, v) = req(
         t,
         Method::POST,
@@ -285,7 +322,10 @@ async fn account(t: &T, name: &str, role: &str) -> String {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
-    common::signed_in(r).await
+    (
+        common::signed_in(r).await,
+        v["user_id"].as_str().unwrap().to_string(),
+    )
 }
 
 async fn chat(t: &T, who: &str, node: &str, extra: Value) -> SessionId {
@@ -388,7 +428,17 @@ async fn each_refusal_has_the_sentence_of_the_other_route() {
     for (path, code, has) in [
         ("../etc/x.docx", 404, "unknown file"),
         ("gone.docx", 404, "unknown file"),
-        ("big.docx", 413, "too large to preview; download it"),
+        // A folder file has no download: Word or Excel, never "download".
+        (
+            "big.docx",
+            413,
+            "too large to preview; open it in Word or Excel",
+        ),
+        (
+            "toolarge.docx",
+            422,
+            "too large to preview; open it in Word or Excel",
+        ),
         ("pass.docx", 422, "protected with a password"),
         ("hurt.docx", 422, "damaged or signed"),
         ("full.docx", 503, "busy"),
@@ -403,6 +453,12 @@ async fn each_refusal_has_the_sentence_of_the_other_route() {
         .await;
         assert_eq!(st.as_u16(), code, "{path}: {v}");
         assert!(v["error"].as_str().unwrap().contains(has), "{path}: {v}");
+        if path.ends_with("large.docx") || path == "big.docx" {
+            assert!(
+                !v["error"].as_str().unwrap().contains("download"),
+                "{path}: {v}"
+            );
+        }
     }
     // A node that sends what is no preview, or too much of it, is not
     // forwarded.
@@ -484,4 +540,118 @@ async fn one_account_previews_one_file_at_a_time() {
     assert_eq!(slow.await.unwrap(), StatusCode::OK);
     let (st, _) = req(&t, Method::GET, &url(sid, "?path=ok.docx"), None, &t.alex).await;
     assert_eq!(st, StatusCode::OK);
+}
+
+/// A coding chat that says it is temporary is not previewed, and its node is
+/// never asked.
+#[tokio::test]
+async fn a_temporary_coding_chat_is_404_and_asks_nothing() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "inc", json!({})).await;
+    let (st, v) = req(&t, Method::GET, &url(sid, "?path=ok.docx"), None, &t.alex).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    assert!(t.inc.asked().is_empty());
+}
+
+/// An owner whose level no longer allows agentic chats gets what the `@`
+/// completion gives, and the node is never asked.
+#[tokio::test]
+async fn an_owner_who_lost_the_level_is_refused_and_the_node_is_never_asked() {
+    let t = start().await;
+    let (bob, bob_id) = account_with_id(&t, "bob", "member").await;
+    // A chat on the host, while the account's level allows the host.
+    let sid = chat(&t, &bob, "remote", json!({"exec_mode": "host"})).await;
+    let (st, v) = req(&t, Method::GET, &url(sid, "?path=ok.docx"), None, &bob).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = req(
+        &t,
+        Method::PUT,
+        &format!("/api/users/{bob_id}/exec-ceiling"),
+        Some(json!({"level": "sandbox"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = req(&t, Method::GET, &url(sid, "?path=ok.docx"), None, &bob).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(t.remote.asked().len(), 1, "only the first was asked");
+}
+
+/// An answer from a node that was not asked is ignored; the asked node's own
+/// answer is the one the page gets.
+#[tokio::test]
+async fn another_nodes_answer_to_a_request_is_ignored() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "local", json!({})).await;
+    let (base, alex) = (t.base.clone(), t.alex.clone());
+    let slow = tokio::spawn(async move {
+        let r = reqwest::Client::new()
+            .get(format!(
+                "{base}/api/sessions/{sid}/folder-preview?path=slow.docx"
+            ))
+            .login(&alex)
+            .same_origin()
+            .send()
+            .await
+            .unwrap();
+        (r.status(), r.text().await.unwrap())
+    });
+    for _ in 0..100 {
+        if !t.local.req_ids().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let forged = json!({"kind": "doc", "blocks": [{"k": "p", "r": [{"t": "FORGED"}]}], "more": false, "notes": []});
+    t.old.say(NodeToMaster::DocPreviewResult {
+        req_id: t.local.req_ids()[0].clone(),
+        preview: Some(forged),
+        refusal: None,
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!slow.is_finished(), "the forged answer ended the request");
+    t.local.release.send(true).unwrap();
+    let (st, body) = slow.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(body.contains("Hello") && !body.contains("FORGED"), "{body}");
+}
+
+/// A person who closes the page while the node is still reading gives the
+/// account's place back at once.
+#[tokio::test]
+async fn a_request_the_page_gave_up_frees_the_accounts_place() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "local", json!({})).await;
+    let (base, alex) = (t.base.clone(), t.alex.clone());
+    let slow = tokio::spawn(async move {
+        reqwest::Client::new()
+            .get(format!(
+                "{base}/api/sessions/{sid}/folder-preview?path=slow.docx"
+            ))
+            .login(&alex)
+            .same_origin()
+            .send()
+            .await
+    });
+    for _ in 0..100 {
+        if !t.local.asked().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (st, _) = req(&t, Method::GET, &url(sid, "?path=ok.docx"), None, &t.alex).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "the place is taken");
+    slow.abort();
+    let _ = slow.await;
+    let mut got = StatusCode::SERVICE_UNAVAILABLE;
+    for _ in 0..60 {
+        got = req(&t, Method::GET, &url(sid, "?path=ok.docx"), None, &t.alex)
+            .await
+            .0;
+        if got == StatusCode::OK {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(got, StatusCode::OK);
 }

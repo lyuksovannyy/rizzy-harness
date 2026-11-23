@@ -90,7 +90,7 @@ async fn preview(
                 StatusCode::GATEWAY_TIMEOUT,
                 "the node did not read the file in time".into(),
             ),
-            PreviewError::Refused(r) => refusal(r),
+            PreviewError::Refused(r) => refusal(r, true),
             PreviewError::Unknown => unknown(),
         })?;
     // The node's answer is read once into the typed preview: anything else

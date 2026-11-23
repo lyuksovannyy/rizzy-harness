@@ -114,10 +114,6 @@ pub const CAP_DOC_PREVIEW: &str = "doc-preview";
 /// The longest path a `session.doc_preview` may carry, in bytes.
 pub const MAX_PREVIEW_PATH_BYTES: usize = 1024;
 
-/// The largest serialized preview a node answers with, in bytes: the
-/// helper's own bound is about 200 KB; the master refuses more than this.
-pub const MAX_PREVIEW_JSON: usize = 512 * 1024;
-
 /// Why a node shows no preview: one word each, never text from the file or
 /// the folder. `not_found` is the one answer for a path that is outside the
 /// folder, missing, a directory, a device, behind a link that leads out, in
@@ -1083,8 +1079,8 @@ pub enum NodeToMaster {
         error: Option<String>,
     },
     /// The answer to `session.doc_preview` (pull only): the preview (the
-    /// helper's `Preview`, as JSON, at most [`MAX_PREVIEW_JSON`]) or why
-    /// there is none.
+    /// helper's `Preview`, as JSON, at most 512 KB: the node and the master
+    /// each check it) or why there is none.
     #[serde(rename = "session.doc_preview_result")]
     DocPreviewResult {
         req_id: String,
@@ -2648,6 +2644,68 @@ mod tests {
         assert_eq!(v["diff"]["files"][0]["hunks"][0]["lines"][1], "+two");
         assert!(v["diff"].get("cut").is_none(), "{v}");
         assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), ans);
+    }
+
+    /// X.59: the wire shape of the folder preview pair.
+    #[test]
+    fn doc_preview_wire_shape() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let ask = MasterToNode::DocPreview {
+            req_id: "r".into(),
+            session_id: sid,
+            path: "docs/a.docx".into(),
+            sheet: Some(2),
+        };
+        let v = serde_json::to_value(&ask).unwrap();
+        assert_eq!(v["type"], "session.doc_preview");
+        assert_eq!(v["path"], "docs/a.docx");
+        assert_eq!(v["sheet"], 2);
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), ask);
+        // No sheet: omitted when sent, and a message without one is read.
+        let first = MasterToNode::DocPreview {
+            req_id: "r".into(),
+            session_id: sid,
+            path: "a.docx".into(),
+            sheet: None,
+        };
+        let v = serde_json::to_value(&first).unwrap();
+        assert!(v.get("sheet").is_none(), "{v}");
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), first);
+        // A preview: the refusal is omitted.
+        let ok = NodeToMaster::DocPreviewResult {
+            req_id: "r".into(),
+            preview: Some(json!({"kind": "doc"})),
+            refusal: None,
+        };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["type"], "session.doc_preview_result");
+        assert!(v.get("refusal").is_none(), "{v}");
+        assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), ok);
+        // Every refusal is one snake_case word, the preview omitted.
+        for (r, word) in [
+            (PreviewRefusal::NotFound, "not_found"),
+            (PreviewRefusal::FileTooLarge, "file_too_large"),
+            (PreviewRefusal::TooLarge, "too_large"),
+            (PreviewRefusal::Empty, "empty"),
+            (PreviewRefusal::NotOffice, "not_office"),
+            (PreviewRefusal::Protected, "protected"),
+            (PreviewRefusal::Damaged, "damaged"),
+            (PreviewRefusal::NoSheet, "no_sheet"),
+            (PreviewRefusal::Busy, "busy"),
+            (PreviewRefusal::NotAvailable, "not_available"),
+        ] {
+            let no = NodeToMaster::DocPreviewResult {
+                req_id: "r".into(),
+                preview: None,
+                refusal: Some(r),
+            };
+            let v = serde_json::to_value(&no).unwrap();
+            assert_eq!(v["refusal"], word);
+            assert!(v.get("preview").is_none(), "{v}");
+            assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), no);
+        }
+        // The message is never acked.
+        assert_eq!(ask.req_id(), None);
     }
 
     #[test]

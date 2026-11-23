@@ -1638,8 +1638,9 @@ chat shows the file as a chip with its name and size.
   sent message's chip), in a chat without a folder and in a coding chat alike.
   In a coding chat the file is in the chat's folder and the node that owns it
   reads it, by the rules its `read` tool has: a file outside the folder, inside
-  `.git`, over 10 MB, or on a node that denies `read` says "unknown file", and
-  an older node says it must be updated. Preview opens the file in the panel on
+  `.git`, or on a node that denies `read` says "unknown file"; one over 10 MB
+  says it is too large to preview and to open it in Word or Excel; an older node
+  says it must be updated. Preview opens the file in the panel on
   the right: a Word file as headings, paragraphs (bold, italic and strike-through
   as the file has them), lists and tables; an Excel file as a grid with column
   letters and row numbers, one sheet at a time with a tab for each, and a

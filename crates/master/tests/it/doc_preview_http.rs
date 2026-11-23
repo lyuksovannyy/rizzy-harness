@@ -524,7 +524,7 @@ async fn each_reason_has_its_own_sentence() {
         (
             Why::TooLarge,
             StatusCode::UNPROCESSABLE_ENTITY,
-            "too large to preview",
+            "too large to preview; download it to open it",
         ),
         (Why::Damaged, StatusCode::UNPROCESSABLE_ENTITY, "damaged"),
         (Why::NoSheet, StatusCode::BAD_REQUEST, "no such sheet"),

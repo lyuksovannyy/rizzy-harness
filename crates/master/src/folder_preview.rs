@@ -61,6 +61,12 @@ impl From<crate::CommandError> for PreviewError {
     }
 }
 
+/// No room for `user`'s request: too many waiting in all, or this account's
+/// own place is taken.
+fn full(w: &HashMap<String, Wait>, user: &str) -> bool {
+    w.len() >= MAX_WAITING || w.values().filter(|x| x.user == user).count() >= PER_USER
+}
+
 struct Entry<'a> {
     m: &'a Master,
     req_id: &'a str,
@@ -92,7 +98,7 @@ pub async fn ask(
     let (tx, rx) = oneshot::channel();
     {
         let mut w = lock(&m.inner.previews.0);
-        if w.len() >= MAX_WAITING || w.values().filter(|x| x.user == user).count() >= PER_USER {
+        if full(&w, user) {
             return Err(PreviewError::Busy);
         }
         w.insert(
@@ -148,4 +154,36 @@ pub fn on_answer(m: &Master, node_id: &str, req_id: String, answer: Answer) {
 /// The node's link closed: its waiting requests end now, as "away".
 pub fn node_down(m: &Master, node_id: &str) {
     lock(&m.inner.previews.0).retain(|_, x| x.node != node_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wait(user: &str) -> Wait {
+        Wait {
+            node: "n".into(),
+            user: user.into(),
+            tx: oneshot::channel().0,
+        }
+    }
+
+    /// One place per account, and a bound on all of them together.
+    #[test]
+    fn the_places_are_bounded_per_account_and_in_all() {
+        let mut w = HashMap::new();
+        assert!(!full(&w, "a"));
+        w.insert("r-a".to_string(), wait("a"));
+        assert!(full(&w, "a"), "an account's second request waits");
+        assert!(!full(&w, "b"), "another account is not held up");
+        for i in 1..MAX_WAITING {
+            assert!(!full(&w, &format!("u{i}")), "{i}");
+            w.insert(format!("r{i}"), wait(&format!("u{i}")));
+        }
+        assert_eq!(w.len(), MAX_WAITING);
+        assert!(
+            full(&w, "newcomer"),
+            "no room for anybody once all are taken"
+        );
+    }
 }
