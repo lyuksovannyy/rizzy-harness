@@ -351,3 +351,30 @@ async fn edit(
     .await?;
     Ok(Json(json!({"file": file, "results": results_json(&results)})).into_response())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::copy_name;
+
+    /// The copy's name keeps ` (edited)` at every length and is never the
+    /// original's name; the kind of the copy is the kind of the name.
+    #[test]
+    fn a_long_name_keeps_the_suffix_and_never_names_the_original() {
+        for n in [91usize, 92, 100, 120] {
+            let name = format!("{}.docx", "a".repeat(n));
+            let (copy, ext, _) = copy_name(&name);
+            assert!(copy.ends_with(" (edited).docx"), "{n}: {copy}");
+            assert_ne!(copy, name, "{n}");
+            assert!(copy.chars().count() <= 100 + ".docx".len(), "{n}");
+            assert_eq!(ext, "docx");
+        }
+        let (copy, ext, mime) = copy_name(&format!("{}.xlsm", "é日".repeat(45)));
+        assert!(
+            copy.ends_with(" (edited).xlsm") && copy.len() <= 255,
+            "{copy}"
+        );
+        assert_eq!(ext, "xlsm");
+        assert!(mime.contains("spreadsheetml"));
+        assert_eq!(copy_name("plan.docx").0, "plan (edited).docx");
+    }
+}

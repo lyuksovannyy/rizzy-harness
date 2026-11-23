@@ -64,8 +64,10 @@ async fn preview(
     let who = require(&m, &headers).await?;
     let row = visible_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
-    // Only a plain top-level coding chat with a folder: a chat without one
-    // has the other route; a temporary chat shows no files.
+    // Only a coding chat with a folder: a chat without one has the other
+    // route; a temporary chat shows no files. A sub-agent's chat of the owner
+    // is asked as any other: it shares its parent's folder and the node reads
+    // under the session's own rules.
     if row.profile.as_deref() == Some("chat") || row.incognito {
         return Err(unknown());
     }

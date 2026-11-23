@@ -126,7 +126,7 @@ test("a paragraph, a heading and a list item are places to click; a table and a 
   // Reachable by Tab: real buttons, none taken out of the tab order.
   expect([...host.querySelectorAll<HTMLButtonElement>(".pv-body button.pv-place")].every((b) => b.tabIndex === 0)).toBe(true);
   expect(q(".pv-table button")).toBeNull();
-  expect(host.textContent).toContain("Tables and cut paragraphs cannot be changed here");
+  expect(host.textContent).toContain("Tables, paragraphs that are cut, and paragraphs with characters that cannot be shown here cannot be changed here");
 });
 
 test("a click makes a field with the current text; Enter keeps the change, Escape drops it, leaving the field keeps it", async () => {
@@ -360,6 +360,11 @@ test("a mention is the path as typed, quoted when it holds a space, and none whe
   expect(mentionOf("a\nb.docx")).toBeNull();
   expect(mentionOf("a@b.docx")).toBeNull();
   expect(mentionOf("")).toBeNull();
+  // Invisible and direction characters (Cf), private use, line separators: shown, not inserted.
+  for (const c of ["\u200b", "\u200c", "\u200f", "\u202a", "\u202e", "\u2060", "\u2066", "\u2069", "\ufeff", "\u00ad", "\ue000", "\u2028"]) {
+    expect(mentionOf(`a${c}b.docx`), JSON.stringify(c)).toBeNull();
+  }
+  expect(mentionOf("日本語 (edited).docx")).toBe('@"日本語 (edited).docx"');
   // And the composer reads both forms back.
   expect(fileMentions('see @docs/a.docx and @"docs/a (edited).docx" now')).toEqual(["docs/a.docx", "docs/a (edited).docx"]);
   expect(fileMentions('@"nofile" @x')).toEqual([]);

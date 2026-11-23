@@ -127,7 +127,7 @@ async fn the_owner_saves_a_copy_that_is_held_like_an_upload() {
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(
         request_of(&record),
-        json!({"tool": "page_edit", "sheet": 1, "changes": [{"at": "p1#00ab", "text": "New text"}]})
+        json!({"tool": "page_edit", "kind": "doc", "sheet": 1, "changes": [{"at": "p1#00ab", "text": "New text"}]})
     );
     assert_eq!(v["file"]["name"], "plan (edited).docx");
     assert_eq!(v["file"]["kept"], true);

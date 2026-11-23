@@ -1674,7 +1674,12 @@ chat shows the file as a chip with its name and size.
   `@` mention of it is put in the message (`@"a path with a space"` is a
   mention too). Either way the panel says a copy named X was saved and added to
   the message and shows it (in a chat without a folder, read-only until the
-  message is sent). Changes are per sheet: Save sends the sheet shown. If any
+  message is sent). Changes are per sheet: Save sends the sheet shown. A paragraph or cell that
+  holds characters the preview cannot show (invisible, direction or
+  private-use characters, line breaks in a cell) is not offered for change, so
+  they are never lost. Opening another chat or pressing Preview on another file
+  drops unsaved changes without asking (closing the panel or switching sheets
+  asks). If any
   change cannot be applied (the paragraph changed since the preview, a field, a
   link or tracked changes in the paragraph, a merged, hidden or array cell, a
   formula that is not allowed) nothing is saved and the panel says which place
@@ -1682,7 +1687,8 @@ chat shows the file as a chip with its name and size.
   (stored, not calculated: its value appears when Excel or the agent opens the
   file); a plain number (a sign, digits, a `.`, an exponent; no `1,200`, no
   spaces, no leading zeros, at most 15 digits) is a number; anything else is
-  text. Changing a paragraph keeps the formatting of its first part and drops
+  text, so a retyped date (`2026-11-23`) or percentage (`12%`) becomes text, not
+  a date or a number, unless it is a plain number. Changing a paragraph keeps the formatting of its first part and drops
   the rest, and the panel says so before you save a paragraph of several
   formattings. Not here: adding or removing paragraphs, rows, columns or
   sheets, formatting, table cells of a Word file, and text the preview cut. A

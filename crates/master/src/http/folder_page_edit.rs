@@ -58,13 +58,22 @@ fn bad() -> ApiError {
     )
 }
 
+/// A character a path must not hold: a control, a line separator, or an
+/// invisible or direction character (Unicode category Cf and the private
+/// use area, which the page would draw as nothing or reversed).
+fn unreadable(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{2028}' | '\u{2029}' | '\u{00AD}' | '\u{0600}'..='\u{0605}' | '\u{06DD}' | '\u{070F}' | '\u{180E}' | '\u{FFF9}'..='\u{FFFB}')
+        || harness_core::text::is_hidden(c)
+}
+
 /// A path a node names for the copy: text of bounded length that is relative
 /// and plain.
 fn plain_path(p: &str) -> bool {
     !p.is_empty()
         && p.len() <= MAX_SAVED_PATH_BYTES
         && !p.starts_with('/')
-        && !p.chars().any(char::is_control)
+        && !p.chars().any(unreadable)
         && !p.split('/').any(|c| c == ".." || c.is_empty())
 }
 
@@ -77,8 +86,10 @@ async fn edit(
     let who = require(&m, &headers).await?;
     let row = acting_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
-    // Only a plain top-level coding chat with a folder: a chat without one
-    // has the other route; a temporary chat shows no files.
+    // Only a coding chat with a folder: a chat without one has the other
+    // route; a temporary chat shows no files. A sub-agent's chat of the owner
+    // is asked as any other: it shares its parent's folder and the node reads
+    // under the session's own rules.
     if row.profile.as_deref() == Some("chat") || row.incognito {
         return Err(unknown());
     }

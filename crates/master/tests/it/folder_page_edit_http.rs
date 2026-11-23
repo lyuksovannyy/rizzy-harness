@@ -239,6 +239,11 @@ async fn a_node_that_misbehaves_is_a_502_and_nothing_it_says_is_forwarded() {
         "dotdot.docx",
         "abs.docx",
         "ctrl.docx",
+        "bidi.docx",
+        "zwsp.docx",
+        "bom.docx",
+        "private.docx",
+        "softhyphen.docx",
         "long.docx",
         "empty.docx",
         "more.docx",
@@ -398,4 +403,65 @@ async fn a_request_the_page_gave_up_frees_the_accounts_place() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let (st, _) = post(&t, &t.alex, sid, body("ok.docx")).await;
     assert_eq!(st, StatusCode::OK);
+}
+
+/// A sub-agent's chat of the owner shares its parent's folder and is asked as
+/// any other coding chat; another person's is not theirs to ask.
+#[tokio::test]
+async fn a_sub_agent_chat_of_the_owner_is_asked_as_any_other() {
+    use harness_core::RawEvent;
+    use harness_core::event::{EventKind, Profile, SessionCreated};
+    use harness_core::policy::ApprovalMode;
+    let t = start().await;
+    let bob = account(&t, "bob", "member").await;
+    let top = chat(&t, &t.alex, "local", json!({})).await;
+    let sub = SessionId::new();
+    let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+        forked: None,
+        exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
+        no_callbacks: false,
+        title: "sub".into(),
+        cwd: "/w".into(),
+        model: "demo::mock".into(),
+        backend: "native".into(),
+        node_id: "local".into(),
+        approval_mode: ApprovalMode::Ask,
+        profile: Profile::Agentic,
+        agent_id: None,
+        incognito: false,
+        parent_session: Some(top),
+        sub_folder: None,
+    })
+    .into_parts();
+    t.local.say(NodeToMaster::Event {
+        event: RawEvent {
+            session_id: sub,
+            seq: 1,
+            ts_ms: harness_core::now_ms(),
+            kind,
+            payload,
+        },
+    });
+    for _ in 0..100 {
+        if t.master.inner_mirror().session(sub).unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let row = t
+        .master
+        .inner_mirror()
+        .session(sub)
+        .unwrap()
+        .expect("the sub-agent's chat");
+    assert_eq!(
+        row.parent_id.as_deref().map(|p| p.to_string()),
+        Some(top.to_string())
+    );
+    let (st, v) = post(&t, &t.alex, sub, body("ok.docx")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(t.local.edits().len(), 1, "the node was asked");
+    let (st, _) = post(&t, &bob, sub, body("ok.docx")).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_eq!(t.local.edits().len(), 1);
 }

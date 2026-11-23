@@ -18,6 +18,8 @@ The engine part is one request of the confined `doc-edit` helper, `PageEdit { sh
 A chat without a folder: `POST /api/sessions/{id}/files/{file_id}/edit` (`crates/master/src/http/doc_page_edit.rs`).
 A coding chat: `POST /api/sessions/{id}/folder-edit` (`folder_page_edit.rs`) and one typed request over the link, `session.doc_page_edit`, answered by one `session.doc_page_edit_result`; the capability `doc-page-edit` is announced only where the helper can start and node.toml lets the agent's own `doc_edit` or `sheet_edit` run.
 Claude Desktop and Codex edit a document by asking the agent; none lets a person change a paragraph or a cell in the panel and keep the original; this does.
+A place whose cleaned preview text differs from the file's (invisible, direction or private-use characters, an object, line breaks or runs of spaces in a cell) is not offered and the helper refuses it (`not_editable`); the request carries the kind the file's name says and the helper refuses a file of the other kind; a node whose approval ceiling is plan refuses and does not announce the capability; a copy's stem is cut before ` (edited)` is added.
+Moving to another chat or pressing Preview on another file drops unsaved changes without asking (no prompt is built for it; closing the panel or changing the sheet asks); a retyped date or percentage becomes text.
 Out of scope: a rich-text field, a save across sheets, a download of a folder file, previewing a held copy, a stale-cell check for a workbook (a cell has no hash: a cell the agent changed since the preview is changed to what the person typed, in the copy only).
 
 ## Safeguards and abuse tests

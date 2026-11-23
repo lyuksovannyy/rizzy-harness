@@ -32,9 +32,12 @@ export const losesFormatting = (runs: PRun[]) => runs.length > 1;
 
 /** How a path is written in the message so the composer reads it back as a mention
  * (`@path`, or `@"a path"` when it holds a space); none when it cannot be read back
- * (a quote, a line break, an `@`). */
+ * (a quote, a line break, an `@`, an invisible or direction character). */
 export function mentionOf(path: string): string | null {
-  if (!path || /[\u0000-\u001f\u007f"@]/.test(path)) return null;
+  // Not a control, a line separator, an invisible or direction character
+  // (category Cf: U+200B to U+200F, U+202A to U+202E, U+2060 to U+2069, U+FEFF), a
+  // private-use character, a quote or an `@`: the path would read as something else.
+  if (!path || /[\p{Cc}\p{Cf}\p{Co}\p{Zl}\p{Zp}"@]/u.test(path)) return null;
   return /\s/.test(path) ? `@"${path}"` : `@${path}`;
 }
 

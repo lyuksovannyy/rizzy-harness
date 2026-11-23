@@ -482,7 +482,7 @@ export default function DocPreview(props: { target: PreviewTarget; onClose: () =
         )}
         {editable && (hasTable || hasCut) && (
           <p className="muted small" role="note">
-            {hasCut ? "Cut cells and shared formulas cannot be changed here." : "Tables and cut paragraphs cannot be changed here."}
+            {hasCut ? "Cells that are cut, shared formulas, and cells with characters that cannot be shown here cannot be changed here." : "Tables, paragraphs that are cut, and paragraphs with characters that cannot be shown here cannot be changed here."}
           </p>
         )}
         {p?.notes.map((n, i) => (
