@@ -508,18 +508,27 @@ mod tests {
     async fn a_name_taken_by_anything_is_passed_over() {
         let d = tempfile::tempdir().unwrap();
         let c = ctx(d.path());
-        std::os::unix::fs::symlink(d.path().join("nowhere"), d.path().join("a.docx")).unwrap();
+        std::fs::write(d.path().join("a.docx"), "mine").unwrap();
         std::fs::create_dir(d.path().join("a (2).docx")).unwrap();
         let o = DocCreate
             .run(&c, json!({"path": "a", "markdown": "x"}))
             .await;
         assert!(o.ok, "{}", o.output);
         assert_eq!(o.made.unwrap().name, "a (3).docx");
+        assert!(d.path().join("a (2).docx").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("a.docx")).unwrap(),
+            "mine"
+        );
+        std::os::unix::fs::symlink(d.path().join("nowhere"), d.path().join("b.docx")).unwrap();
+        let o = DocCreate
+            .run(&c, json!({"path": "b", "markdown": "x"}))
+            .await;
+        assert!(!o.ok && o.output.contains("symlink"), "{}", o.output);
         assert!(
             !d.path().join("nowhere").exists(),
             "the link was not followed"
         );
-        assert!(d.path().join("a (2).docx").is_dir());
     }
 
     #[tokio::test]
