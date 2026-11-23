@@ -1472,10 +1472,13 @@ sent message shows one chip per document. What the model gets: paragraphs in
 order, headings as `# `, list items as `- `, tables as rows of cells joined
 with ` | `; for a workbook, per sheet `## Sheet: <name>` and its rows with the
 cells joined by tabs, values as stored (a formula shows its stored result, a
-date is its number; hidden sheets are left out; a sheet is cut at 10,000
-rows and 256 columns, and the text says so); for a presentation, per slide
+date is its number; a sheet is cut at 10,000 rows and 256 columns, and the
+text says so); for a presentation, per slide
 `## Slide n`, its text and its notes. Comments, footnotes, headers, tracked
-deletions, charts, pictures and embedded objects are not read. A file is a
+deletions, charts, pictures and embedded objects are not read, and neither is
+what you cannot see in your editor (Word hidden text, hidden rows, columns,
+sheets and slides); when something was left out the text ends with one line
+saying so. A file is a
 document by what is inside it, never by its name (a zip called `.docx` is a
 plain file, a document called `.bin` is read), and an encrypted file, an old
 `.doc`, `.xls` or `.ppt`, and a zip that is not a document stay what they are:
@@ -1484,9 +1487,12 @@ runs in the confined helper `rizzy-harness doc-text`, the twin of `pdf-text`
 (same Landlock lock-out, memory limit, 20 second kill and two-at-a-time
 queue; a file that starts like a zip is passed to it, which costs a process
 start), and needs the same Linux 6.7 or newer. A document that cannot be read
-(damaged, too deep, too large, too slow, no text) is kept as a plain file
+(damaged, too deep, too large, no text) is kept as a plain file
 where files are kept, with a line under its chip saying its text could not be
-read, and refused with the same sentence where they are not.
+read, and refused with the same sentence where they are not. A zip the
+reader could not judge (busy, too slow, crashed) is simply kept as a file, as
+before, without a sentence. One account is read one file at a time, so
+attaching many files at once queues them and never starves other accounts.
 
 **Any other file.** In a coding chat (one with a folder) you can attach any
 file: a zip, a binary, a PDF without a text layer, an old `.doc` or `.xls`.
