@@ -462,8 +462,18 @@ describe("media", () => {
       attached: [{ file_id: "f1", name: "plan.docx", bytes: 2048 }],
     };
     await show([docx], sessionRow());
-    const chips = [...host.querySelectorAll(".msg.user ul.chips li")].map((li) => li.textContent?.trim());
-    expect(chips).toEqual(["notes.md", "plan.docx (2.0 KB, read-only)"]);
+    const chips = [...host.querySelectorAll(".msg.user ul.chips li")].map((li) => li.textContent?.replace(/\s+/g, " ").trim());
+    expect(chips).toEqual(["notes.md", "plan.docx (2.0 KB, read-only) Preview"]);
+    // The kept file opens in the side panel (T99), and closing it gives the
+    // focus back to the control that opened it.
+    const open = host.querySelector<HTMLButtonElement>("ul.chips button[aria-label='Preview plan.docx']")!;
+    open.focus();
+    await act(async () => open.click());
+    await until(() => host.querySelector("aside.doc-preview"));
+    expect(host.querySelector("aside.doc-preview")!.getAttribute("aria-label")).toBe("Preview of plan.docx");
+    await act(async () => host.querySelector<HTMLButtonElement>("button[aria-label='Close the preview']")!.click());
+    expect(host.querySelector("aside.doc-preview")).toBeNull();
+    expect(document.activeElement).toBe(open);
   });
 
   test("the bar takes images where the server does", async () => {

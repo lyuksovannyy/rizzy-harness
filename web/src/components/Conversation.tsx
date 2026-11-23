@@ -46,6 +46,8 @@ import { Composer, type ComposerHandle, type Submission } from "./Composer";
 import type { Picture } from "../lib/downscale";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import { ChatArtifactsCtx, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
+import { closePreview, usePreview } from "../lib/docPreview";
+import { PreviewButton } from "./PreviewButton";
 import { BubbleImages } from "./ChatImages";
 import { HeadNote, LaterNotes } from "./HeadNote";
 import { ThinkingRow } from "./ThinkingRow";
@@ -84,6 +86,8 @@ const SidePanel = lazy(() => import("./SidePanel"));
 // A turn's changes (X.12), beside the conversation: loaded on the first
 // "Show changes".
 const DiffPanel = lazy(() => import("./DiffPanel"));
+// A Word or Excel file of the chat, read as text and structure (T99).
+const DocPreview = lazy(() => import("./DocPreview"));
 // Export as Markdown, loaded on its first click.
 const ExportChat = lazy(() => import("./ExportChat"));
 // Loaded on the chat's first task list (the agent's `todo` tool).
@@ -698,6 +702,13 @@ export default function Conversation(props: {
     setDiffOf(null);
     diffOpener.current?.focus();
   };
+  // A file of this chat in the side panel: it and a turn's changes take the
+  // right side in turn.
+  const preview = usePreview();
+  const previewHere = preview?.session === sessionId ? preview : null;
+  useEffect(() => {
+    if (previewHere) setDiffOf(null);
+  }, [previewHere]);
 
   // The chat's figures, at the right of the composer's strip (they were the
   // header's): drawn per render from the view, which is mutated in place.
@@ -888,7 +899,8 @@ export default function Conversation(props: {
                             ))}
                             {it.attached?.map((a, j) => (
                               <li key={`a${j}`} className="chip" title={t("composer.keptHint")}>
-                                <FileText size={14} /> {a.name} <span className="muted">({bytes(a.bytes)}, {t("composer.kept")})</span>
+                                <FileText size={14} /> {a.name} <span className="muted">({bytes(a.bytes)}, {t("composer.kept")})</span>{" "}
+                                <PreviewButton sessionId={sessionId} fileId={a.file_id} name={a.name} />
                               </li>
                             ))}
                             {it.uploads?.map((u, j) => (
@@ -1138,6 +1150,7 @@ export default function Conversation(props: {
                           saved={cp.restored ? cp.saved : undefined}
                           onShow={(rewind, from) => {
                             diffOpener.current = from;
+                            closePreview();
                             setDiffOf({ session: sessionId, turn: it.turn_id, rewind });
                           }}
                         />
@@ -1464,6 +1477,11 @@ export default function Conversation(props: {
               </Suspense>
             );
           })()}
+        {previewHere && (
+          <Suspense fallback={null}>
+            <DocPreview key={`${sessionId}:${previewHere.fileId}`} target={previewHere} onClose={closePreview} />
+          </Suspense>
+        )}
         {sideFor.current === sessionId && (
           <Suspense fallback={null}>
             <SidePanel
@@ -1473,8 +1491,11 @@ export default function Conversation(props: {
               models={props.models}
               away={!!node && !node.connected}
               nodeLabel={node ? (node.embedded ? "local" : node.hostname) : nodeId}
-              yielded={diffOf?.session === sessionId}
-              onReclaim={() => setDiffOf(null)}
+              yielded={diffOf?.session === sessionId || !!previewHere}
+              onReclaim={() => {
+                setDiffOf(null);
+                closePreview();
+              }}
             />
           </Suspense>
         )}

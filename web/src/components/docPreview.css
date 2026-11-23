@@ -1,0 +1,125 @@
+/* A Word or Excel file beside the chat (DocPreview.tsx): on the right of the
+   conversation on a wide screen, over it on a narrow one. Rizzy Glass tokens
+   only. */
+.doc-preview {
+  flex: none;
+  width: min(640px, 48%);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border-left: 1px solid var(--line);
+  background: var(--bg-2);
+  font-size: var(--text-sm);
+}
+.pv-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+.pv-title {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font-weight: var(--w-semibold);
+  overflow-wrap: anywhere;
+}
+.pv-note {
+  margin: 0;
+  padding: 6px 12px 0;
+}
+.pv-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding: 6px 12px 0;
+}
+.pv-tabs button[aria-pressed="true"] {
+  font-weight: var(--w-semibold);
+  border-color: var(--accent);
+}
+.pv-body {
+  overflow: auto;
+  flex: 1;
+  padding: 8px 12px 16px;
+  min-width: 0;
+}
+.pv-p,
+.pv-h {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.pv-h {
+  font-weight: var(--w-semibold);
+  margin-top: 12px;
+}
+.pv-h1 {
+  font-size: 1.35em;
+}
+.pv-h2 {
+  font-size: 1.2em;
+}
+.pv-h3 {
+  font-size: 1.1em;
+}
+.pv-list {
+  margin: 0 0 8px;
+  padding-left: 1.4em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.pv-scroll {
+  overflow: auto;
+  max-width: 100%;
+  margin: 0 0 10px;
+}
+.pv-table,
+.pv-grid {
+  border-collapse: collapse;
+}
+.pv-table td,
+.pv-grid td,
+.pv-grid th {
+  border: 1px solid var(--hairline);
+  padding: 3px 8px;
+  vertical-align: top;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 28em;
+}
+.pv-grid th {
+  background: var(--bg-3, var(--bg-2));
+  color: var(--fg-2);
+  font-weight: var(--w-medium);
+  position: sticky;
+  top: 0;
+}
+.pv-grid tbody th {
+  position: static;
+  text-align: right;
+}
+.pv-formula {
+  font-style: italic;
+  font-family: var(--mono, monospace);
+  color: var(--fg-2);
+}
+.pv-more {
+  border: 1px dashed var(--hairline);
+  border-radius: var(--r-sm);
+  padding: 6px 8px;
+}
+@media (max-width: 900px) {
+  .doc-preview {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    width: auto;
+    /* Opaque: the chat must not show through. */
+    background: var(--surface);
+    box-shadow: var(--shadow-1);
+  }
+}

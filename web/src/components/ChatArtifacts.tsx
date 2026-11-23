@@ -12,6 +12,7 @@ import { artifactHash } from "../lib/routes";
 import type { Live } from "../live";
 import type { Item, MadeFile, StagedArtifact } from "../types";
 import { LinkedA } from "./Linked";
+import { PreviewButton } from "./PreviewButton";
 
 const POLL_MS = 1500;
 /** After this many polls (a minute), a staged file the server has no row for
@@ -225,6 +226,8 @@ export function MadeChip({ sessionId, made }: { sessionId: string; made: MadeFil
           Download
         </LinkedA>
       )}
+      {/* A chat without a folder: the server's copy opens in the side panel. */}
+      <PreviewButton sessionId={sessionId} fileId={madeId(made.file_id)} name={made.name} />
     </div>
   );
 }

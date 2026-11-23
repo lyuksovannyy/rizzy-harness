@@ -1633,6 +1633,25 @@ chat shows the file as a chip with its name and size.
   machine without Linux 6.7 or newer and Landlock cannot edit. These files have
   not been opened in Word or Excel by the program's tests: look at the result
   before you rely on it.
+- **Looking at a file.** In a chat without a folder, a Word or Excel file the
+  agent made, and one you attached, has a **Preview** button next to its name
+  (a made file's chip, a sent message's chip). It opens the file in the panel on
+  the right: a Word file as headings, paragraphs (bold, italic and strike-through
+  as the file has them), lists and tables; an Excel file as a grid with column
+  letters and row numbers, one sheet at a time with a tab for each, and a
+  formula shown as written (italic, "not calculated") in place of a value. It is
+  the text and the structure, not the page: no fonts, colours, pictures, charts
+  or page breaks, and no text the file hides (hidden text, deleted tracked
+  changes, hidden rows, columns and sheets). A very large file is cut at about
+  2,000 blocks, 5,000 table cells, 500 rows or 50 columns, or a size the page
+  can draw, and the panel says so; **Download** is in the panel's top bar.
+  Everything in it is plain text: a link, a script or a picture inside a
+  file is shown as the characters it is, and a formula such as `=HYPERLINK(...)`
+  is only text. The file is read by the same separate, confined process as the
+  editing tools, one at a time per account, so a machine without Linux 6.7 or
+  newer and Landlock cannot preview. Only you can preview your chat's files. A
+  file in a chat's folder is not previewed yet; you can only edit it through the
+  agent.
 - **In a folder chat without `write`.** The Assistant has no `write` tool, but
   with this switch it can now create new Word and Excel files in a chat's
   folder (never over an existing file). A node turns the two tools off with
