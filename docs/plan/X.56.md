@@ -15,7 +15,7 @@ Tests: `docs/src/tests.rs` (every file read back with the reader of T96; injecti
 
 ## Invariants
 
-The master runs no shell, no file tool and no program the model names (a fixed built-in service, bounded text in, bounded bytes out); the node decides what it writes (the folder's own path policy and approvals; the file is the chat's only when its own log names it); chats are private to their owner (the download resolves the chat as opening it does); no secret in an event, a URL or a log line (the name and path are scrubbed, lengths only in logs); nothing the model writes is trusted (every string is cleaned and escaped, formulas are checked, a string is never a formula, raw HTML and images are dropped, an attachment never rendered)
+The master runs no shell, no file tool and no program the model names (a fixed built-in service; text in is bounded and one build's memory is measured, up to about 60 MiB, T97); the node decides what it writes (the folder's own path policy and approvals; the file is the chat's only when its own log names it); chats are private to their owner (the download resolves the chat as opening it does); no secret in an event, a URL or a log line (the name and path are scrubbed, lengths only in logs); nothing the model writes is trusted (every string is cleaned and escaped, formulas are checked, a string is never a formula, raw HTML and images are dropped, an attachment never rendered)
 
 ## Podman / Node
 

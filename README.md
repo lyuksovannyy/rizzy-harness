@@ -1614,6 +1614,11 @@ chat shows the file as a chip with its name and size.
   agent can read it again with `attached_file` (it is a file of that chat), so
   "now add a section" starts from what is there; changing an existing file is
   coming and is not part of this yet.
+- **In a folder chat without `write`.** The Assistant has no `write` tool, but
+  with this switch it can now create new Word and Excel files in a chat's
+  folder (never over an existing file). A node turns the two tools off with
+  `denied_tools = ["doc_create", "sheet_create"]` in its node.toml, and
+  `denied_tools = ["write"]` turns them off too, since they write files there.
 - **The switch.** "Create and edit documents" is a per-agent switch on the
   agent's page, on for the built-in Assistant and off for every other agent and
   for a new one. A sub-agent's chat without a folder and a temporary chat make
@@ -1633,8 +1638,8 @@ chat shows the file as a chip with its name and size.
   header, a filter on it, column widths, and formulas. A string is always text,
   also when it starts with `=`; a formula is a separate field, and a formula that
   could send your data away when you open the file (`WEBSERVICE`, `IMAGE`, `RTD`,
-  DDE, a reference to another workbook, a `HYPERLINK` that is not `http` or
-  `https`) is refused. Formulas have no stored results: Excel calculates them
+  DDE, a reference to another workbook, a `HYPERLINK` whose address is not one
+  plain `http` or `https` text) is refused. Formulas have no stored results: Excel calculates them
   when it opens the file, and a viewer that does not calculate shows them empty.
 - **Names.** The agent chooses a name; the program makes it one clean file name
   and adds `.docx` or `.xlsx` itself. In a chat without a folder it is only a

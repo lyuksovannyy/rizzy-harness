@@ -11,7 +11,7 @@ The editing tools that follow build on the same pieces.
 - **MCP office servers** take structured operations (add a paragraph, set a cell).
   That is the right shape for editing (a later row), and the wrong one for making a whole file: many calls for one document.
 - **Rust crates**: `docx-rs` pulls an old `zip` and a serialisation stack for a job that is string templates; `rust_xlsxwriter` is the best xlsx writer around and brings `zip` in; `zip` had ten releases and seven advisories in a fortnight.
-  The create path is five parts of XML of which one varies, so it is written by hand, with a zip writer beside the bounded reader of X.54; the single new dependency is `pulldown-cmark` (Markdown parsing, no HTML renderer).
+  The create path is five parts of XML of which one varies, so it is written by hand, with a zip writer in the same crate (the bounded reader of X.54 is in `harness-attached`); the single new dependency is `pulldown-cmark` (Markdown parsing, no HTML renderer).
 
 ## The pieces (`crates/docs`)
 
