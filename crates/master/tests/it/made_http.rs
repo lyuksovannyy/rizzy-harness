@@ -19,11 +19,11 @@ use harness_protocol::{CAP_ATTACHED, CAP_DOCS};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
-async fn start() -> T {
+pub(crate) async fn start() -> T {
     start_with(&["profile:chat", CAP_ATTACHED, CAP_DOCS]).await
 }
 
-fn doc(name: &str, md: &str) -> DocRequest {
+pub(crate) fn doc(name: &str, md: &str) -> DocRequest {
     DocRequest::Doc {
         name: name.into(),
         markdown: md.into(),
@@ -41,7 +41,7 @@ fn sheet(name: &str, spec: Value) -> DocRequest {
 }
 
 /// A plain chat of `who` with a turn open the way an honest node opens it.
-async fn open(t: &T, who: &str, turn: &str, extra: Value) -> SessionId {
+pub(crate) async fn open(t: &T, who: &str, turn: &str, extra: Value) -> SessionId {
     let sid = chat(t, who, json!({})).await;
     next_turn(t, who, sid, turn, extra).await;
     sid
@@ -55,7 +55,7 @@ async fn next_turn(t: &T, who: &str, sid: SessionId, turn: &str, extra: Value) {
 }
 
 /// The chat's own log names the file, as the node's loop writes it.
-async fn name_in_log(t: &T, sid: SessionId, c: &DocCreated) {
+pub(crate) async fn name_in_log(t: &T, sid: SessionId, c: &DocCreated) {
     t.chat
         .emit(
             sid,
@@ -77,7 +77,7 @@ async fn download(t: &T, who: &str, sid: SessionId, file_id: &str) -> reqwest::R
         .unwrap()
 }
 
-fn owner_of(t: &T, sid: SessionId) -> String {
+pub(crate) fn owner_of(t: &T, sid: SessionId) -> String {
     t.master
         .inner_mirror()
         .session(sid)
@@ -87,7 +87,7 @@ fn owner_of(t: &T, sid: SessionId) -> String {
         .unwrap()
 }
 
-fn blob_paths(t: &T) -> Vec<std::path::PathBuf> {
+pub(crate) fn blob_paths(t: &T) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     for shard in std::fs::read_dir(t.dir.path().join("blobs"))
         .into_iter()
@@ -666,7 +666,12 @@ async fn the_blob_goes_with_the_last_chat_that_refers_to_it() {
 
 /// A chat of `kind` ("agentic", or "chat" with a parent) the fake node wrote
 /// and `who` owns: what the route and the service must refuse for.
-async fn raw_chat(t: &T, who: &str, profile: &str, parent: Option<SessionId>) -> SessionId {
+pub(crate) async fn raw_chat(
+    t: &T,
+    who: &str,
+    profile: &str,
+    parent: Option<SessionId>,
+) -> SessionId {
     let sid = SessionId::new();
     let mut payload = json!({"title": "t", "cwd": "/w", "model": "m", "backend": "native",
         "node_id": "master", "profile": profile, "approval_mode": "ask", "incognito": false});
@@ -689,7 +694,14 @@ async fn raw_chat(t: &T, who: &str, profile: &str, parent: Option<SessionId>) ->
 
 /// A row for `blob` in chat `sid`, the way a send holds it, named by the
 /// chat's own log: what a node (or a bug) could plant.
-async fn plant(t: &T, sid: SessionId, owner: Option<String>, blob: &str, sha: &str, fid: &str) {
+pub(crate) async fn plant(
+    t: &T,
+    sid: SessionId,
+    owner: Option<String>,
+    blob: &str,
+    sha: &str,
+    fid: &str,
+) {
     let taken = harness_store::chat_uploads::TakenUpload {
         upload_id: fid.into(),
         owner_id: owner,
@@ -714,7 +726,7 @@ async fn plant(t: &T, sid: SessionId, owner: Option<String>, blob: &str, sha: &s
     landed(t, sid).await;
 }
 
-fn blob_of(t: &T, sid: SessionId, fid: &str) -> (String, String) {
+pub(crate) fn blob_of(t: &T, sid: SessionId, fid: &str) -> (String, String) {
     let f = t
         .master
         .inner_mirror()
@@ -816,7 +828,7 @@ async fn the_service_and_the_route_refuse_what_is_not_a_plain_chat() {
 /// A stand-in for the `doc-edit` helper that reads its stdin and answers
 /// with the framed reply in a file (the real helper is tested in
 /// `crates/cli/tests/doc_edit.rs`; here the service is).
-fn helper_says(t: &T, frame: &[u8]) {
+pub(crate) fn helper_says(t: &T, frame: &[u8]) {
     let path = t.dir.path().join("helper-reply");
     std::fs::write(&path, frame).unwrap();
     t.master
@@ -829,7 +841,12 @@ fn helper_says(t: &T, frame: &[u8]) {
         ));
 }
 
-fn reply(text: &str, results: &[(bool, &str)], notes: &[&str], file: Option<&[u8]>) -> Vec<u8> {
+pub(crate) fn reply(
+    text: &str,
+    results: &[(bool, &str)],
+    notes: &[&str],
+    file: Option<&[u8]>,
+) -> Vec<u8> {
     let r = harness_docs::edit::serve::Reply {
         text: text.into(),
         results: results
@@ -841,6 +858,8 @@ fn reply(text: &str, results: &[(bool, &str)], notes: &[&str], file: Option<&[u8
             .collect(),
         notes: notes.iter().map(|s| s.to_string()).collect(),
         file: file.is_some(),
+        preview: None,
+        why: None,
     };
     let head = serde_json::to_vec(&r).unwrap();
     let mut out = (head.len() as u32).to_be_bytes().to_vec();

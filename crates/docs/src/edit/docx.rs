@@ -76,6 +76,9 @@ pub struct Para {
     pub field_in: i32,
     /// A table ends right before it and another starts right after it.
     pub between_tables: bool,
+    /// The table, row and column of the top-level cell it is in, for every
+    /// paragraph of the cell (a nested table's included): the preview's.
+    pub cell: Option<(u32, u32, u32)>,
 }
 
 pub struct Index {
@@ -147,6 +150,9 @@ pub fn index(part: &[u8]) -> Result<Index> {
                         (Some(C::Tbl { top: true, t, .. }), Some(C::Tr { r, .. })) => (*t, *r),
                         _ => continue,
                     };
+                    for p in &mut paras[first..] {
+                        p.cell = Some((tt, rr, c));
+                    }
                     let cell: Vec<usize> = (first..paras.len())
                         .filter(|i| paras[*i].tag.is_some())
                         .collect();
@@ -195,10 +201,10 @@ pub fn index(part: &[u8]) -> Result<Index> {
                     s.skip_to_end(t.depth)?
                 };
                 if paras.len() >= MAX_EDIT_PARAS {
-                    return Err("the document has too many paragraphs to be edited".into());
+                    return Err(super::E_PARAS.into());
                 }
                 if end - t.start > MAX_EDIT_PARA_BYTES {
-                    return Err("a paragraph of the document is too large to be edited".into());
+                    return Err(super::E_PARA_BYTES.into());
                 }
                 let ps = para::scan(&part[t.start..end], s.prefix(), NS_W, field_depth.max(0))?;
                 let field_in = field_depth.max(0);
@@ -206,7 +212,7 @@ pub fn index(part: &[u8]) -> Result<Index> {
                 let text = ps.text();
                 text_total += text.len();
                 if text_total > MAX_EDIT_PART_BYTES {
-                    return Err("the document's text is too large to be edited".into());
+                    return Err(super::E_TEXT.into());
                 }
                 let tag = match parent {
                     Some(C::Body) => {
@@ -242,6 +248,7 @@ pub fn index(part: &[u8]) -> Result<Index> {
                     field: ps.field,
                     field_in,
                     between_tables: false,
+                    cell: None,
                 });
                 if let Some(sb) = sibs.last_mut() {
                     if sb.last_tbl {

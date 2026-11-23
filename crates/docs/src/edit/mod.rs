@@ -11,6 +11,7 @@ pub mod check;
 pub mod docx;
 pub mod para;
 pub mod pkg;
+pub mod preview;
 pub mod scan;
 pub mod serve;
 pub mod xlsx;
@@ -28,7 +29,31 @@ mod tests_fix;
 #[cfg(test)]
 mod tests_fuzz;
 #[cfg(test)]
+mod tests_preview;
+#[cfg(test)]
 mod tests_xlsx;
+
+// The refusals that mean "past a limit of the reader" (the preview says so
+// in a word of its own, `preview::Why::TooLarge`): one text each, shared by
+// the place that refuses and the place that tells them from a damaged file.
+pub(crate) const E_EVENTS: &str = "a part of the file has too many elements to be edited";
+pub(crate) const E_PARAS: &str = "the document has too many paragraphs to be edited";
+pub(crate) const E_PARA_BYTES: &str = "a paragraph of the document is too large to be edited";
+pub(crate) const E_TEXT: &str = "the document's text is too large to be edited";
+pub(crate) const E_SHEETS: &str = "the workbook has too many sheets to be edited";
+pub(crate) const E_STRINGS: &str = "the workbook's strings are too large to be read";
+pub(crate) const E_ROWS: &str = "the sheet has too many rows to be edited";
+pub(crate) const E_PARTS: &str = "the file has too many parts to be edited";
+pub(crate) const LIMIT_REFUSALS: [&str; 8] = [
+    E_EVENTS,
+    E_PARAS,
+    E_PARA_BYTES,
+    E_TEXT,
+    E_SHEETS,
+    E_STRINGS,
+    E_ROWS,
+    E_PARTS,
+];
 
 /// A view cut to [`crate::limits::MAX_VIEW_BYTES`] bytes whatever it holds.
 pub(crate) fn cap_view(mut s: String) -> String {

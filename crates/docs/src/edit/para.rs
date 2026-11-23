@@ -48,6 +48,9 @@ pub struct Piece {
     pub kind: Kind,
     pub region: u32,
     pub locked: bool,
+    /// The run it sits in (an index into [`ParaScan::runs`]); none for what
+    /// stands outside a run.
+    pub run: Option<usize>,
 }
 
 /// A run directly inside the paragraph.
@@ -61,6 +64,11 @@ pub struct Run {
     pub rpr: Option<(usize, usize)>,
     pub has_text: bool,
     pub hidden: bool,
+    /// Direct formatting of the run's own `rPr` (a character style is not
+    /// followed): the preview draws these three.
+    pub bold: bool,
+    pub italic: bool,
+    pub strike: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -94,7 +102,43 @@ pub struct ParaScan {
     pub in_field: bool,
 }
 
+/// A stretch of the visible text with one direct formatting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Span {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub strike: bool,
+}
+
 impl ParaScan {
+    /// The visible text in stretches of one formatting (the preview's; the
+    /// same pieces as [`Self::text`], so hidden text is not in it).
+    pub fn spans(&self) -> Vec<Span> {
+        let mut out: Vec<Span> = vec![];
+        for p in &self.pieces {
+            let (b, i, s) = match p.run.and_then(|r| self.runs.get(r)) {
+                Some(r) => (r.bold, r.italic, r.strike),
+                None => (false, false, false),
+            };
+            let mut buf = [0u8; 4];
+            let t: &str = match &p.kind {
+                Kind::T(k) => &self.tnodes[*k].text,
+                Kind::Ch(c) => c.encode_utf8(&mut buf),
+            };
+            match out.last_mut() {
+                Some(l) if (l.bold, l.italic, l.strike) == (b, i, s) => l.text.push_str(t),
+                _ => out.push(Span {
+                    text: t.to_string(),
+                    bold: b,
+                    italic: i,
+                    strike: s,
+                }),
+            }
+        }
+        out
+    }
+
     /// The visible text.
     pub fn text(&self) -> String {
         let mut s = String::new();
@@ -236,12 +280,21 @@ pub fn scan(src: &[u8], prefix: &str, ns: &'static str, field_in: i32) -> Result
                                     } else {
                                         d + 1
                                     }
-                                && s.local(ce.name()) == Some("vanish")
-                                && !is_off(attr(ce, "val")?)
                             {
-                                run_hidden = true;
-                                out.runs[ri].hidden = true;
-                                out.hidden = true;
+                                let on = !is_off(attr(ce, "val")?);
+                                match s.local(ce.name()) {
+                                    Some("vanish") if on => {
+                                        run_hidden = true;
+                                        out.runs[ri].hidden = true;
+                                        out.hidden = true;
+                                    }
+                                    Some("b") => out.runs[ri].bold = on,
+                                    Some("i") => out.runs[ri].italic = on,
+                                    Some("strike" | "dstrike") if on => {
+                                        out.runs[ri].strike = true;
+                                    }
+                                    _ => {}
+                                }
                             }
                             if let Event::Start(ce) = &c.ev
                                 && c.depth == d + 1
@@ -282,6 +335,7 @@ pub fn scan(src: &[u8], prefix: &str, ns: &'static str, field_in: i32) -> Result
                         kind: Kind::T(i),
                         region,
                         locked,
+                        run: Some(ri),
                     });
                     if !empty {
                         stack.push(Ctx::T(i));
@@ -304,6 +358,10 @@ pub fn scan(src: &[u8], prefix: &str, ns: &'static str, field_in: i32) -> Result
                             kind: Kind::Ch(c),
                             region,
                             locked: true,
+                            run: match parent {
+                                Some(Ctx::Run(i)) => Some(*i),
+                                _ => None,
+                            },
                         });
                     }
                     if !empty {
@@ -343,6 +401,10 @@ pub fn scan(src: &[u8], prefix: &str, ns: &'static str, field_in: i32) -> Result
                             kind: Kind::Ch(OBJ),
                             region,
                             locked: true,
+                            run: match parent {
+                                Some(Ctx::Run(i)) => Some(*i),
+                                _ => None,
+                            },
                         });
                     }
                     if !empty {
@@ -400,6 +462,9 @@ pub fn scan(src: &[u8], prefix: &str, ns: &'static str, field_in: i32) -> Result
                     rpr: None,
                     has_text: false,
                     hidden: false,
+                    bold: false,
+                    italic: false,
+                    strike: false,
                 });
                 if !empty {
                     // A run inside a wrapper still holds text; `set_text`
@@ -470,6 +535,7 @@ pub fn scan(src: &[u8], prefix: &str, ns: &'static str, field_in: i32) -> Result
                     kind: Kind::Ch(OBJ),
                     region,
                     locked: true,
+                    run: None,
                 });
                 if !empty {
                     s.skip_to_end(t.depth)?;

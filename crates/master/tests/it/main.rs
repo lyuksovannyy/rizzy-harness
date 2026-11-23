@@ -36,6 +36,7 @@ mod coding_memory_http;
 mod compact_http;
 mod deny_always_http;
 mod doc_http;
+mod doc_preview_http;
 mod exec_levels_http;
 mod exec_mode_http;
 mod exec_switch_http;

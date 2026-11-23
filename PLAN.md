@@ -824,6 +824,7 @@ Each row's full text is in `docs/threats/`.
 | [T96](docs/threats/T96.md) | **A person's Word, Excel, PowerPoint or OpenDocument file is parsed so that the model can read its text**… |
 | [T97](docs/threats/T97.md) | **An agent makes a Word or Excel file from its own text, and that file is written into a folder or kept by the master for a person to open**… |
 | [T98](docs/threats/T98.md) | **An agent edits a Word or Excel file somebody else wrote, and the result is a new file the person opens** (`doc_view`, `doc_edit`, `sheet_edit`): the file is hostile and is parsed only in the confined `doc-edit` helper, one part is patched by byte ranges and every other entry is copied as stored, hidden content is not addressable, an edit that would corrupt the file is refused, and all edits apply or none and are read back… |
+| [T99](docs/threats/T99.md) | **A person previews a Word or Excel file in the page** (X.58): the route takes the download's checks (owner only, a plain chat's own logged file, the owner's blob), the file is read only by the confined `doc-edit` helper under the account's one slot and comes back as bounded structure and strings, never HTML, drawn only as text with no link made from the file, and every failure is a plain sentence… |
 
 Numbers T15 and T31 were never used; rows are never renumbered.
 

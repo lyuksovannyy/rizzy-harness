@@ -22,7 +22,7 @@ use crate::formula;
 use crate::limits::*;
 use crate::xml;
 
-const WORKBOOK: &str = "xl/workbook.xml";
+pub(super) const WORKBOOK: &str = "xl/workbook.xml";
 const MAX_ROW: u32 = 1_048_576;
 const MAX_COL: u32 = 16_384;
 /// Rows of a sheet an edit will index.
@@ -103,7 +103,7 @@ pub(crate) fn col_name(mut c: u32) -> String {
     String::from_utf8(o).unwrap_or_default()
 }
 
-fn addr(col: u32, row: u32) -> String {
+pub(super) fn addr(col: u32, row: u32) -> String {
     format!("{}{row}", col_name(col))
 }
 
@@ -151,7 +151,7 @@ pub struct Wb {
     pub has_calc_chain: bool,
 }
 
-fn read_wb(src: &Source<'_>, part: &[u8]) -> Result<Wb> {
+pub(super) fn read_wb(src: &Source<'_>, part: &[u8]) -> Result<Wb> {
     // Relationship ids to targets.
     let rels_name = "xl/_rels/workbook.xml.rels";
     let mut rels: HashMap<String, String> = HashMap::new();
@@ -268,7 +268,7 @@ fn read_wb(src: &Source<'_>, part: &[u8]) -> Result<Wb> {
             _ => {}
         }
         if wb.sheets.len() > 500 {
-            return Err("the workbook has too many sheets to be edited".into());
+            return Err(super::E_SHEETS.into());
         }
     }
     if wb.sheets.is_empty() {
@@ -280,7 +280,7 @@ fn read_wb(src: &Source<'_>, part: &[u8]) -> Result<Wb> {
 // -- styles and shared strings -------------------------------------------------
 
 /// The cell style indexes (`s`) whose number format is a date or a time.
-fn date_styles(src: &Source<'_>) -> Result<HashSet<u32>> {
+pub(super) fn date_styles(src: &Source<'_>) -> Result<HashSet<u32>> {
     let mut out = HashSet::new();
     if !src.has("xl/styles.xml") {
         return Ok(out);
@@ -348,7 +348,7 @@ fn is_date_code(code: &str) -> bool {
     false
 }
 
-fn shared_strings(src: &Source<'_>) -> Result<Vec<String>> {
+pub(super) fn shared_strings(src: &Source<'_>) -> Result<Vec<String>> {
     let mut out = vec![];
     if !src.has("xl/sharedStrings.xml") {
         return Ok(out);
@@ -373,7 +373,7 @@ fn shared_strings(src: &Source<'_>) -> Result<Vec<String>> {
                     if let Some(c) = cur.take() {
                         total += c.len();
                         if total > MAX_EDIT_PART_BYTES {
-                            return Err("the workbook's strings are too large to be read".into());
+                            return Err(super::E_STRINGS.into());
                         }
                         out.push(c);
                     }
@@ -424,6 +424,15 @@ pub struct SheetIdx {
     pub hidden_cols: Vec<(u32, u32)>,
     pub formulas: usize,
     pub prefix: String,
+}
+
+impl SheetIdx {
+    /// Is column `col` (1-based) in a hidden range? The ranges are sorted
+    /// and apart (see [`index`]), so this is a binary search.
+    pub fn col_hidden(&self, col: u32) -> bool {
+        let i = self.hidden_cols.partition_point(|(_, hi)| *hi < col);
+        self.hidden_cols.get(i).is_some_and(|(lo, _)| *lo <= col)
+    }
 }
 
 fn truthy(v: Option<String>) -> bool {
@@ -488,7 +497,7 @@ pub fn index(part: &[u8]) -> Result<SheetIdx> {
                             }
                             last_row = r;
                             if ix.rows.len() >= MAX_INDEXED_ROWS {
-                                return Err("the sheet has too many rows to be edited".into());
+                                return Err(super::E_ROWS.into());
                             }
                             let hidden = truthy(attr(re, "hidden")?);
                             let mut end = c.end;
@@ -652,6 +661,18 @@ pub fn index(part: &[u8]) -> Result<SheetIdx> {
     if !saw_root || (ix.sd.3 == 0 && !ix.sd_empty) {
         return Err("this worksheet has no cell data to edit".into());
     }
+    // Sorted and apart: a sheet may name tens of thousands of ranges, and
+    // every cell asks.
+    ix.hidden_cols.retain(|(lo, hi)| lo <= hi);
+    ix.hidden_cols.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ix.hidden_cols.len());
+    for (lo, hi) in ix.hidden_cols.drain(..) {
+        match merged.last_mut() {
+            Some(l) if lo <= l.1.saturating_add(1) => l.1 = l.1.max(hi),
+            _ => merged.push((lo, hi)),
+        }
+    }
+    ix.hidden_cols = merged;
     Ok(ix)
 }
 
@@ -910,7 +931,7 @@ fn serial_iso(x: f64, date1904: bool) -> Option<String> {
     })
 }
 
-fn show_val(v: &Val, date: bool, d1904: bool, shared: bool) -> Option<String> {
+pub(super) fn show_val(v: &Val, date: bool, d1904: bool, shared: bool) -> Option<String> {
     Some(match v {
         Val::Empty => return None,
         Val::Num(x) if date => match serial_iso(*x, d1904) {
@@ -940,7 +961,7 @@ fn show_val(v: &Val, date: bool, d1904: bool, shared: bool) -> Option<String> {
     })
 }
 
-fn sheet_ref<'a>(wb: &'a Wb, name: Option<&str>) -> Result<&'a SheetRef> {
+pub(super) fn sheet_ref<'a>(wb: &'a Wb, name: Option<&str>) -> Result<&'a SheetRef> {
     let list = || {
         wb.sheets
             .iter()
@@ -1184,11 +1205,7 @@ pub fn view(bytes: &[u8], sheet: Option<&str>, from: usize, limit: usize) -> Res
                 skipped += 1;
                 continue;
             }
-            if ix
-                .hidden_cols
-                .iter()
-                .any(|(lo, hi)| c.col >= *lo && c.col <= *hi)
-            {
+            if ix.col_hidden(c.col) {
                 continue;
             }
             let date =
@@ -1475,12 +1492,7 @@ impl Ctx<'_> {
                 "row {row} is hidden; hidden content cannot be addressed"
             ));
         }
-        if self
-            .ix
-            .hidden_cols
-            .iter()
-            .any(|(lo, hi)| col >= *lo && col <= *hi)
-        {
+        if self.ix.col_hidden(col) {
             return Err(format!(
                 "{a} is in a hidden column; hidden content cannot be addressed"
             ));
