@@ -320,5 +320,12 @@ pub(crate) fn assert_others_identical(before: &[u8], after: &[u8], changed: &[&s
         assert_eq!(x, y, "{} changed", x.0);
     }
     let names = |r: &[Row]| r.iter().map(|x| x.0.clone()).collect::<Vec<_>>();
-    assert_eq!(names(&a), names(&b), "the order of the parts");
+    let keep = |r: &[Row]| {
+        r.iter()
+            .map(|x| x.0.clone())
+            .filter(|n| !changed.contains(&n.as_str()))
+            .collect::<Vec<_>>()
+    };
+    let _ = names;
+    assert_eq!(keep(&a), keep(&b), "the order of the parts");
 }

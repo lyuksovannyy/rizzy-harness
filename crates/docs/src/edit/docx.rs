@@ -540,14 +540,7 @@ impl DocOp {
     }
 }
 
-/// What a call did: per edit, one sentence; the file only when every edit
-/// applied.
-#[derive(Debug)]
-pub struct Outcome {
-    pub results: Vec<std::result::Result<String, String>>,
-    pub bytes: Option<Vec<u8>>,
-    pub notes: Vec<String>,
-}
+pub use super::Outcome;
 
 fn parse_at(at: &str) -> Option<(&str, u16)> {
     let (k, h) = at.rsplit_once('#')?;
@@ -1367,7 +1360,11 @@ fn set_text_patches(
 
 /// Every element and attribute of the part parses.
 pub fn wellformed(part: &[u8]) -> Result<()> {
-    let mut s = Scan::new(part, NS_W, MAX_EDIT_EVENTS)?;
+    wellformed_ns(part, NS_W)
+}
+
+pub fn wellformed_ns(part: &[u8], ns: &'static str) -> Result<()> {
+    let mut s = Scan::new(part, ns, MAX_EDIT_EVENTS)?;
     loop {
         let Some(t) = s.next()? else { return Ok(()) };
         if let Event::Start(e) | Event::Empty(e) = &t.ev {

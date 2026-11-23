@@ -189,6 +189,12 @@ fn sheet_name(asked: &str, n: usize, taken: &[String]) -> String {
 /// space may stand for the `T`, a trailing `Z` is ignored), as an Excel
 /// serial number (1900 date system), or `None`.
 pub fn iso_serial(s: &str) -> Option<f64> {
+    iso_serial_in(s, false)
+}
+
+/// [`iso_serial`] in the workbook's own date system: 1900, or 1904 when the
+/// workbook says `date1904`.
+pub fn iso_serial_in(s: &str, date1904: bool) -> Option<f64> {
     let s = s.trim();
     let s = s.strip_suffix('Z').unwrap_or(s);
     let (d, t) = match s.split_once(['T', ' ']) {
@@ -211,8 +217,17 @@ pub fn iso_serial(s: &str) -> Option<f64> {
     }
     // Excel's 1900 date system counts a 29 February 1900 that never was:
     // serials of earlier dates would be off by one, so they are not made.
-    let serial = days - crate::days_from_civil(1899, 12, 30);
-    if !(61..=2_958_465).contains(&serial) {
+    let serial = if date1904 {
+        days - crate::days_from_civil(1904, 1, 1)
+    } else {
+        days - crate::days_from_civil(1899, 12, 30)
+    };
+    let range = if date1904 {
+        0..=2_957_003
+    } else {
+        61..=2_958_465
+    };
+    if !range.contains(&serial) {
         return None;
     }
     let mut frac = 0.0;

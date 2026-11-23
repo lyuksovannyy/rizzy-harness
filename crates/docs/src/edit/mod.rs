@@ -12,6 +12,7 @@ pub mod docx;
 pub mod para;
 pub mod pkg;
 pub mod scan;
+pub mod xlsx;
 
 #[cfg(test)]
 pub(crate) mod fixtures;
@@ -19,3 +20,14 @@ pub(crate) mod fixtures;
 mod tests;
 #[cfg(test)]
 mod tests_docx;
+#[cfg(test)]
+mod tests_xlsx;
+
+/// What a call did: per edit, one sentence (applied, or why not); the file
+/// only when every edit applied; notes (warnings) for the person.
+#[derive(Debug)]
+pub struct Outcome {
+    pub results: Vec<std::result::Result<String, String>>,
+    pub bytes: Option<Vec<u8>>,
+    pub notes: Vec<String>,
+}
