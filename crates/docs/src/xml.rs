@@ -30,8 +30,8 @@ pub fn text(s: &str) -> String {
     for c in s.chars() {
         match c {
             '&' => o.push_str("&amp;"),
-            '<' => o.push('<'),
-            '>' => o.push('>'),
+            '<' => o.push_str("&lt;"),
+            '>' => o.push_str("&gt;"),
             c => o.push(c),
         }
     }
