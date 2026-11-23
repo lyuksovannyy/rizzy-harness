@@ -23,9 +23,11 @@ mod connection_repos;
 mod connections;
 mod custom_connectors;
 mod diff;
+mod doc_page_edit;
 mod doc_preview;
 mod exec_mode;
 mod files;
+mod folder_page_edit;
 mod folder_preview;
 mod fork;
 mod hooks;
@@ -246,6 +248,8 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(files::routes())
         .merge(made_files::routes())
         .merge(doc_preview::routes())
+        .merge(doc_page_edit::routes())
+        .merge(folder_page_edit::routes())
         .merge(folder_preview::routes())
         .merge(approval_mode::routes())
         .merge(exec_mode::routes())

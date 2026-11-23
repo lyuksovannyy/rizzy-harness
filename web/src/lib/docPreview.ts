@@ -10,7 +10,7 @@ import { useSyncExternalStore } from "react";
  * names (the server keeps a copy); of a chat with a folder, its path in the
  * folder (the node reads it). Exactly one of the two.
  */
-export type PreviewTarget = { session: string; name: string } & ({ fileId: string; path?: undefined } | { path: string; fileId?: undefined });
+export type PreviewTarget = { session: string; name: string; /** A sentence the panel opens with (a copy was just saved). */ note?: string } & ({ fileId: string; path?: undefined } | { path: string; fileId?: undefined });
 
 /** What tells one target from another (the panel restarts on a change). */
 export const targetKey = (t: PreviewTarget) => `${t.session}:${t.fileId ?? `path:${t.path}`}`;
@@ -29,7 +29,8 @@ export interface PRun {
   i?: boolean;
   s?: boolean;
 }
-export type PBlock = { k: "h"; l: number; r: PRun[] } | { k: "p"; r: PRun[] } | { k: "li"; r: PRun[] } | { k: "t"; rows: string[][] };
+/** `at`: the place the edit tools take (`p2#00a1`); none: not changeable from the page. */
+export type PBlock = { k: "h"; l: number; r: PRun[]; at?: string } | { k: "p"; r: PRun[]; at?: string } | { k: "li"; r: PRun[]; at?: string } | { k: "t"; rows: string[][] };
 export interface PCell {
   /** `B7`. */
   a: string;
@@ -37,6 +38,8 @@ export interface PCell {
   v?: string;
   /** The formula, as written, with its `=`. */
   f?: string;
+  /** Cut or a stand-in: not changeable from the page. */
+  x?: boolean;
 }
 export interface PRow {
   n: number;

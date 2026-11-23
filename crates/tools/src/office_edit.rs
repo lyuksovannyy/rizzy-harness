@@ -294,7 +294,7 @@ async fn run_folder(
 
 /// The extension of the result: the input's when it is a Word or Excel
 /// extension that keeps its kind (macros), else the kind's own.
-fn ext_for(file: &str, sheet: bool) -> &'static str {
+pub(crate) fn ext_for(file: &str, sheet: bool) -> &'static str {
     let e = file.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
     match (sheet, e.as_deref()) {
         (true, Some("xlsm")) => "xlsm",

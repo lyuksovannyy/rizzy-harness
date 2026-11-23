@@ -134,3 +134,15 @@ pub(crate) fn shared_helper() -> Option<Arc<dyn harness_core::docs::EditHelper>>
         .clone()
         .map(|h| h as Arc<dyn harness_core::docs::EditHelper>)
 }
+
+/// Whether the person's own text change may be written with the agent's
+/// editing tool `tool`: the node offers it, node.toml does not deny it, and
+/// node.toml's approval ceiling is not plan (which refuses every tool that
+/// changes something). The chat's own mode does not gate it: the save is the
+/// person's act, as an upload saved into the folder is; the node's ceiling
+/// does, since node.toml has the last say on what may be written there.
+pub(crate) fn page_edit_usable(cfg: &crate::NodeConfig, tool: &str) -> bool {
+    cfg.backend.has_tool(tool)
+        && !cfg.policy.denies(tool)
+        && !cfg.policy.max_approval_mode.refuses(tool)
+}

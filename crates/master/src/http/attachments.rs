@@ -43,27 +43,27 @@ pub(super) fn routes() -> Router<Master> {
 }
 
 #[derive(Deserialize)]
-struct UploadQuery {
-    name: String,
+pub(super) struct UploadQuery {
+    pub(super) name: String,
     /// The file's own type as the browser said (informational).
     #[serde(default, rename = "type")]
-    mime: Option<String>,
+    pub(super) mime: Option<String>,
     /// The chat it is for, when it exists.
     #[serde(default)]
-    session: Option<String>,
+    pub(super) session: Option<String>,
     /// For a chat that does not exist yet (the home composer): it will be
     /// a coding chat. Checked again at send.
     #[serde(default)]
-    agentic: Option<String>,
+    pub(super) agentic: Option<String>,
     /// The agent the next message goes to (a plain chat keeps a file only
     /// for an agent with the switch); the chat's own when absent. Checked
     /// again at send.
     #[serde(default)]
-    agent: Option<String>,
+    pub(super) agent: Option<String>,
 }
 
 /// Where a file the model cannot read may go.
-enum Target {
+pub(super) enum Target {
     /// Nowhere: the reason it is refused with.
     Plain(String),
     /// A coding chat: its node's limit when the chat is known. `kept`: a
@@ -72,10 +72,10 @@ enum Target {
 }
 
 /// Where a kept file goes.
-struct Dest {
-    max: u64,
-    session: Option<String>,
-    kept: bool,
+pub(super) struct Dest {
+    pub(super) max: u64,
+    pub(super) session: Option<String>,
+    pub(super) kept: bool,
 }
 
 /// A plain chat (or one to come) keeps the file when the agent it goes to
@@ -132,7 +132,11 @@ fn too_large(max: u64) -> ApiError {
     )
 }
 
-async fn target(m: &Master, who: &crate::auth::Principal, q: &UploadQuery) -> ApiResult<Target> {
+pub(super) async fn target(
+    m: &Master,
+    who: &crate::auth::Principal,
+    q: &UploadQuery,
+) -> ApiResult<Target> {
     let Some(id) = q.session.as_deref().filter(|s| !s.is_empty()) else {
         return Ok(if matches!(q.agentic.as_deref(), Some("1" | "true")) {
             Target::Folder(Dest {
@@ -363,18 +367,18 @@ async fn store_text(
 
 /// What a kept file is besides a file.
 #[derive(Default)]
-struct AsFile {
+pub(super) struct AsFile {
     /// The id to store it under (a document's own file:
     /// `attachments::file_id_of`).
-    upload_id: Option<String>,
+    pub(super) upload_id: Option<String>,
     /// A sentence for the person: why this file is only a file.
-    note: Option<String>,
+    pub(super) note: Option<String>,
 }
 
 /// Keep a file for the chat's folder: streamed into the blob store under
 /// `max` and the account's room, then recorded as the owner's unsent
 /// upload.
-async fn keep(
+pub(super) async fn keep(
     m: &Master,
     who: &crate::auth::Principal,
     q: &UploadQuery,

@@ -36,6 +36,17 @@ pub enum Request {
         #[serde(default)]
         sheet: Option<u32>,
     },
+    /// Changes of text from the web page (`page::apply`): a paragraph's tag
+    /// or a cell's address with the text typed for it. `sheet` is the place
+    /// among the visible sheets.
+    PageEdit {
+        /// The kind the file's name says; a file of the other kind is no
+        /// office file here.
+        kind: super::page::PageKind,
+        #[serde(default)]
+        sheet: Option<u32>,
+        changes: Vec<super::page::Change>,
+    },
     DocEdit {
         edits: Vec<Value>,
     },
@@ -50,6 +61,10 @@ pub enum Request {
 pub struct Item {
     pub ok: bool,
     pub msg: String,
+    /// A page edit's reason, as a word (the engine's `msg` may hold text of
+    /// the file and is not for the page).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<super::page::ChangeWhy>,
 }
 
 /// What came back. The new file follows the header when `file` is set.
@@ -133,10 +148,12 @@ fn items(o: &super::Outcome) -> Vec<Item> {
             Ok(m) => Item {
                 ok: true,
                 msg: m.clone(),
+                why: None,
             },
             Err(m) => Item {
                 ok: false,
                 msg: m.clone(),
+                why: None,
             },
         })
         .collect()
@@ -185,6 +202,38 @@ pub fn serve(input: &[u8]) -> Result<Vec<u8>> {
                 },
                 None,
             ))
+        }
+        Request::PageEdit {
+            kind,
+            sheet,
+            changes,
+        } => {
+            if changes.is_empty() {
+                return Err("give at least one change".into());
+            }
+            if changes.len() > crate::limits::MAX_PAGE_CHANGES {
+                return Err(format!(
+                    "at most {} changes in one request",
+                    crate::limits::MAX_PAGE_CHANGES
+                ));
+            }
+            Ok(match super::page::apply(file, kind, sheet, &changes) {
+                Ok(done) => reply(
+                    &Reply {
+                        results: done.items,
+                        file: done.bytes.is_some(),
+                        ..Default::default()
+                    },
+                    done.bytes,
+                ),
+                Err(why) => reply(
+                    &Reply {
+                        why: Some(why),
+                        ..Default::default()
+                    },
+                    None,
+                ),
+            })
         }
         Request::DocEdit { edits } => {
             if kind_of(file)? != Kind::Doc {

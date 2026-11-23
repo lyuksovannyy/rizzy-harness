@@ -7,14 +7,17 @@
 //! confined helper. It keeps nothing and writes no path to a log. The owner
 //! check is the caller's (`http/folder_preview.rs`).
 //!
-//! A later "edit" request takes the same target and waits the same way: add
-//! a sibling message and a sibling `ask`; nothing here changes.
+//! A person's text changes to such a file (X.60, T100) wait the same way,
+//! in the same map (so one account's preview and edit share its one place),
+//! each answer taken only by the kind of request that is waiting for it.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use harness_core::SessionId;
-use harness_protocol::{CAP_DOC_PREVIEW, MasterToNode, PreviewRefusal};
+use harness_protocol::{
+    CAP_DOC_PAGE_EDIT, CAP_DOC_PREVIEW, ChangeResult, MasterToNode, PageChange, PreviewRefusal,
+};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
@@ -29,13 +32,39 @@ const WAIT: Duration = Duration::from_secs(40);
 const MAX_WAITING: usize = 16;
 const PER_USER: usize = 1;
 
-type Answer = Result<Value, PreviewRefusal>;
+/// What a node answered.
+#[derive(Debug)]
+pub enum Got {
+    Preview(Value),
+    Edit {
+        saved: Option<String>,
+        results: Vec<ChangeResult>,
+    },
+}
+
+type Answer = Result<Got, PreviewRefusal>;
+
+/// What a waiting request is for: an answer of the other kind is not taken.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Preview,
+    Edit,
+}
+
+/// What a page edit got: the new file's path (none when a change was
+/// refused) and one result per change.
+#[derive(Debug)]
+pub struct Edited {
+    pub saved: Option<String>,
+    pub results: Vec<ChangeResult>,
+}
 
 /// Requests waiting for nodes' answers, by request id.
 #[derive(Default)]
 pub struct Waiting(std::sync::Mutex<HashMap<String, Wait>>);
 
 struct Wait {
+    kind: Kind,
     node: String,
     user: String,
     tx: oneshot::Sender<Answer>,
@@ -88,13 +117,64 @@ pub async fn ask(
     sheet: Option<u32>,
 ) -> Result<Value, PreviewError> {
     let node = m.owner(sid).await?;
-    if !m.is_connected(&node) {
-        return Err(PreviewError::Away(node));
+    check_node(m, &node, CAP_DOC_PREVIEW)?;
+    let req_id = harness_core::new_id();
+    let msg = MasterToNode::DocPreview {
+        req_id: req_id.clone(),
+        session_id: sid,
+        path,
+        sheet,
+    };
+    match wait(m, user, node, req_id, Kind::Preview, msg).await? {
+        Got::Preview(v) => Ok(v),
+        Got::Edit { .. } => Err(PreviewError::Unknown),
     }
-    if !m.node_has(&node, CAP_DOC_PREVIEW) {
+}
+
+/// `changes` to the file at `path` in `sid`'s folder, saved by the node that
+/// owns the chat as a new file beside it.
+pub async fn ask_edit(
+    m: &Master,
+    user: &str,
+    sid: SessionId,
+    path: String,
+    sheet: Option<u32>,
+    changes: Vec<PageChange>,
+) -> Result<Edited, PreviewError> {
+    let node = m.owner(sid).await?;
+    check_node(m, &node, CAP_DOC_PAGE_EDIT)?;
+    let req_id = harness_core::new_id();
+    let msg = MasterToNode::DocPageEdit {
+        req_id: req_id.clone(),
+        session_id: sid,
+        path,
+        sheet,
+        changes,
+    };
+    match wait(m, user, node, req_id, Kind::Edit, msg).await? {
+        Got::Edit { saved, results } => Ok(Edited { saved, results }),
+        Got::Preview(_) => Err(PreviewError::Unknown),
+    }
+}
+
+fn check_node(m: &Master, node: &str, cap: &str) -> Result<(), PreviewError> {
+    if !m.is_connected(node) {
+        return Err(PreviewError::Away(node.to_string()));
+    }
+    if !m.node_has(node, cap) {
         return Err(PreviewError::TooOld);
     }
-    let req_id = harness_core::new_id();
+    Ok(())
+}
+
+async fn wait(
+    m: &Master,
+    user: &str,
+    node: String,
+    req_id: String,
+    kind: Kind,
+    msg: MasterToNode,
+) -> Result<Got, PreviewError> {
     let (tx, rx) = oneshot::channel();
     {
         let mut w = lock(&m.inner.previews.0);
@@ -104,6 +184,7 @@ pub async fn ask(
         w.insert(
             req_id.clone(),
             Wait {
+                kind,
                 node: node.clone(),
                 user: user.to_string(),
                 tx,
@@ -111,16 +192,7 @@ pub async fn ask(
         );
     }
     let _entry = Entry { m, req_id: &req_id };
-    let sent = m.send_raw(
-        &node,
-        MasterToNode::DocPreview {
-            req_id: req_id.clone(),
-            session_id: sid,
-            path,
-            sheet,
-        },
-    );
-    if !sent {
+    if !m.send_raw(&node, msg) {
         return Err(PreviewError::Away(node));
     }
     match tokio::time::timeout(WAIT, rx).await {
@@ -134,13 +206,33 @@ pub async fn ask(
 /// A `session.doc_preview_result` from `node_id`: to the request it answers,
 /// if that request went to this node; dropped otherwise. The size is the
 /// route's to check (it parses the value once).
-pub fn on_answer(m: &Master, node_id: &str, req_id: String, answer: Answer) {
+pub fn on_answer(m: &Master, node_id: &str, req_id: String, answer: Result<Value, PreviewRefusal>) {
+    deliver(m, node_id, req_id, Kind::Preview, answer.map(Got::Preview));
+}
+
+/// A `session.doc_page_edit_result` from `node_id`, likewise.
+pub fn on_edit_answer(
+    m: &Master,
+    node_id: &str,
+    req_id: String,
+    answer: Result<(Option<String>, Vec<ChangeResult>), PreviewRefusal>,
+) {
+    deliver(
+        m,
+        node_id,
+        req_id,
+        Kind::Edit,
+        answer.map(|(saved, results)| Got::Edit { saved, results }),
+    );
+}
+
+fn deliver(m: &Master, node_id: &str, req_id: String, kind: Kind, answer: Answer) {
     let tx = {
         let mut w = lock(&m.inner.previews.0);
         match w.get(&req_id) {
-            Some(x) if x.node == node_id => w.remove(&req_id).map(|x| x.tx),
+            Some(x) if x.node == node_id && x.kind == kind => w.remove(&req_id).map(|x| x.tx),
             Some(_) => {
-                tracing::warn!(node = %node_id, "preview answer for another node's request; ignored");
+                tracing::warn!(node = %node_id, "answer for another node's or another kind of request; ignored");
                 None
             }
             None => None,
@@ -162,6 +254,7 @@ mod tests {
 
     fn wait(user: &str) -> Wait {
         Wait {
+            kind: Kind::Preview,
             node: "n".into(),
             user: user.into(),
             tx: oneshot::channel().0,

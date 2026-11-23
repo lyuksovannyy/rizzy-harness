@@ -114,6 +114,59 @@ pub const CAP_DOC_PREVIEW: &str = "doc-preview";
 /// The longest path a `session.doc_preview` may carry, in bytes.
 pub const MAX_PREVIEW_PATH_BYTES: usize = 1024;
 
+/// The node capability that announces `session.doc_page_edit` (ADOPTION_PLAN
+/// X.60, PLAN.md T100): a person's text changes to a Word or Excel file of
+/// the chat's folder, made into a new file beside it by the node. Announced
+/// only where the helper can be started and node.toml lets the agent's own
+/// `doc_edit` and `sheet_edit` run (the node decides); the master sends it
+/// only to nodes that listed it.
+pub const CAP_DOC_PAGE_EDIT: &str = "doc-page-edit";
+
+/// Changes in one `session.doc_page_edit` (the edit tools' own bound).
+pub const MAX_PAGE_EDIT_CHANGES: usize = 200;
+/// The longest place (`at`) of a change, in bytes: a paragraph's tag or a
+/// cell's address is far shorter.
+pub const MAX_PAGE_EDIT_AT_BYTES: usize = 64;
+/// The longest text of a change, in bytes (the edit tools take 20,000
+/// characters, at most four bytes each).
+pub const MAX_PAGE_EDIT_TEXT_BYTES: usize = 80_000;
+/// The longest path a node may name in `saved`, in bytes.
+pub const MAX_SAVED_PATH_BYTES: usize = 1024;
+
+/// One change a person typed in the page: the place and the text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageChange {
+    pub at: String,
+    pub text: String,
+}
+
+/// Why one change was not applied: one word each, never text from the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeFailure {
+    BadPlace,
+    Stale,
+    Gone,
+    NotEditable,
+    BadFormula,
+    TooLong,
+    Duplicate,
+    Skipped,
+    /// Any other reason, and a word a newer node has and this master does
+    /// not: read as this, never a failure to read the message.
+    #[serde(other)]
+    Other,
+}
+
+/// The outcome of one change, in the order sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeResult {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<ChangeFailure>,
+}
+
 /// Why a node shows no preview: one word each, never text from the file or
 /// the folder. `not_found` is the one answer for a path that is outside the
 /// folder, missing, a directory, a device, behind a link that leads out, in
@@ -134,6 +187,16 @@ pub enum PreviewRefusal {
     NoSheet,
     Busy,
     NotAvailable,
+    /// The file or a sheet of it is protected against editing (page edit).
+    Locked,
+    /// The node will not write the copy: it denies the editing tools, the
+    /// place is read-only or protected, or every name beside the original is
+    /// taken (page edit).
+    NoWrite,
+    /// A word a newer node has and this master does not: read as this, so a
+    /// newer node's answer is a 502, never a broken link.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The node capability that announces `project.create` (ADOPTION_PLAN
@@ -1089,6 +1152,19 @@ pub enum NodeToMaster {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         refusal: Option<PreviewRefusal>,
     },
+    /// The answer to `session.doc_page_edit` (pull only): the path of the new
+    /// file relative to the chat's folder and one result per change, or why
+    /// nothing was made.
+    #[serde(rename = "session.doc_page_edit_result")]
+    DocPageEditResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        saved: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        results: Vec<ChangeResult>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refusal: Option<PreviewRefusal>,
+    },
     /// What the node has for the Plugins screen (X.34), sent unasked after
     /// `node.hello` once the node has read it. The master keeps the first
     /// one of each link, bounded ([`NodePlugins::bounded`]), and ignores a
@@ -1827,6 +1903,24 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sheet: Option<u32>,
     },
+    /// A person's text changes to a Word or Excel file of the chat's folder
+    /// (X.60, T100): the node reads the file as `session.doc_preview` does,
+    /// runs the changes through its confined helper and writes the result as
+    /// a NEW file beside the original (never over a file), answered by one
+    /// `session.doc_page_edit_result`; never acked, appends no event. `path`
+    /// is text for the node to resolve under its own rules; `sheet` is the
+    /// place among the visible sheets. Only to nodes with
+    /// [`CAP_DOC_PAGE_EDIT`]. No field names the new file: the node makes
+    /// its name.
+    #[serde(rename = "session.doc_page_edit")]
+    DocPageEdit {
+        req_id: String,
+        session_id: SessionId,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<u32>,
+        changes: Vec<PageChange>,
+    },
     /// Make a new project's folder (ADOPTION_PLAN X.26, PLAN.md T77): a
     /// display name and nothing else. The node makes the folder's name
     /// from it (`<slug>-<4 random characters>`) inside the projects folder
@@ -1916,6 +2010,7 @@ impl MasterToNode {
             | MasterToNode::Diff { .. }
             | MasterToNode::Files { .. }
             | MasterToNode::DocPreview { .. }
+            | MasterToNode::DocPageEdit { .. }
             | MasterToNode::ProjectCreate { .. }
             | MasterToNode::ProjectClone { .. }
             | MasterToNode::ProjectMcp { .. } => None,
@@ -2706,6 +2801,98 @@ mod tests {
         }
         // The message is never acked.
         assert_eq!(ask.req_id(), None);
+    }
+
+    /// X.60: the wire shape of the page edit pair, and a refusal word this
+    /// master does not know is read as `unknown`, not a broken message.
+    #[test]
+    fn doc_page_edit_wire_shape() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let ask = MasterToNode::DocPageEdit {
+            req_id: "r".into(),
+            session_id: sid,
+            path: "docs/a.docx".into(),
+            sheet: Some(1),
+            changes: vec![PageChange {
+                at: "p2#00a1".into(),
+                text: "New".into(),
+            }],
+        };
+        let v = serde_json::to_value(&ask).unwrap();
+        assert_eq!(v["type"], "session.doc_page_edit");
+        assert_eq!(v["changes"][0]["at"], "p2#00a1");
+        assert_eq!(
+            serde_json::from_value::<MasterToNode>(v.clone()).unwrap(),
+            ask
+        );
+        // A field that names a destination is refused, not ignored.
+        let mut bad = v.clone();
+        bad["changes"][0]["save_as"] = "/etc/x".into();
+        assert!(serde_json::from_value::<MasterToNode>(bad).is_err());
+        assert_eq!(ask.req_id(), None, "never acked");
+        let ok = NodeToMaster::DocPageEditResult {
+            req_id: "r".into(),
+            saved: Some("docs/a (edited).docx".into()),
+            results: vec![ChangeResult {
+                ok: true,
+                why: None,
+            }],
+            refusal: None,
+        };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["type"], "session.doc_page_edit_result");
+        assert!(
+            v.get("refusal").is_none() && v["results"][0].get("why").is_none(),
+            "{v}"
+        );
+        assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), ok);
+        for (w, word) in [
+            (ChangeFailure::BadPlace, "bad_place"),
+            (ChangeFailure::Stale, "stale"),
+            (ChangeFailure::Gone, "gone"),
+            (ChangeFailure::NotEditable, "not_editable"),
+            (ChangeFailure::BadFormula, "bad_formula"),
+            (ChangeFailure::TooLong, "too_long"),
+            (ChangeFailure::Duplicate, "duplicate"),
+            (ChangeFailure::Skipped, "skipped"),
+        ] {
+            let v = serde_json::to_value(ChangeResult {
+                ok: false,
+                why: Some(w),
+            })
+            .unwrap();
+            assert_eq!(v["why"], word);
+        }
+        for (r, word) in [
+            (PreviewRefusal::Locked, "locked"),
+            (PreviewRefusal::NoWrite, "no_write"),
+        ] {
+            let no = NodeToMaster::DocPageEditResult {
+                req_id: "r".into(),
+                saved: None,
+                results: vec![],
+                refusal: Some(r),
+            };
+            let v = serde_json::to_value(&no).unwrap();
+            assert_eq!(v["refusal"], word);
+            assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), no);
+        }
+        // A newer node's words.
+        let newer = json!({"type": "session.doc_page_edit_result", "req_id": "r",
+            "refusal": "something_new", "results": [{"ok": false, "why": "something_new"}]});
+        let got: NodeToMaster = serde_json::from_value(newer).unwrap();
+        assert_eq!(
+            got,
+            NodeToMaster::DocPageEditResult {
+                req_id: "r".into(),
+                saved: None,
+                results: vec![ChangeResult {
+                    ok: false,
+                    why: Some(ChangeFailure::Other)
+                }],
+                refusal: Some(PreviewRefusal::Unknown),
+            }
+        );
     }
 
     #[test]

@@ -38,9 +38,13 @@ pub enum Refusal {
     NoSheet,
     Busy,
     NotAvailable,
+    /// Protected against editing (a page edit's).
+    Locked,
+    /// The node will not write the copy (a page edit's).
+    NoWrite,
 }
 
-fn office_name(name: &str) -> bool {
+pub(crate) fn office_name(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, e)| {
         matches!(
             e.to_ascii_lowercase().as_str(),
@@ -49,16 +53,14 @@ fn office_name(name: &str) -> bool {
     })
 }
 
-/// The preview of `path` (a path of the chat's folder, as text) as JSON.
-/// `ctx` is a read context of the session with `allow_outside_workspace`
-/// off; a context that allows the outside is refused, since a person's
-/// preview never leaves the folder.
-pub async fn preview(
-    ctx: &ToolCtx,
-    helper: &dyn EditHelper,
-    path: &str,
-    sheet: Option<u32>,
-) -> Result<Value, Refusal> {
+/// A path of the chat's folder as text, opened for a person's request (the
+/// preview, a page edit): resolved as the `read` tool resolves it (the pinned
+/// folder, links followed and judged, protected places), never outside the
+/// folder whatever `allow_outside_workspace` says, never inside `.git`, only
+/// a regular file opened without blocking, at most [`MAX_OUTPUT_BYTES`]. Every
+/// way of not reaching it is the one [`Refusal::NotFound`]. `ctx` is a read
+/// context of the session.
+pub(crate) async fn open_source(ctx: &ToolCtx, path: &str) -> Result<Vec<u8>, Refusal> {
     if ctx.allow_outside_workspace
         || path.is_empty()
         || path.len() > MAX_PATH_BYTES
@@ -78,7 +80,7 @@ pub async fn preview(
     }
     // Existence is told before the name's kind, so a name that is not an
     // office file's says nothing about a path that is not there.
-    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, Refusal> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<u8>, Refusal> {
         let f = crate::open_regular(&real).map_err(|_| Refusal::NotFound)?;
         let mut out = Vec::new();
         f.take(MAX_OUTPUT_BYTES as u64 + 1)
@@ -90,7 +92,20 @@ pub async fn preview(
         Ok(out)
     })
     .await
-    .map_err(|_| Refusal::NotFound)??;
+    .map_err(|_| Refusal::NotFound)?
+}
+
+/// The preview of `path` (a path of the chat's folder, as text) as JSON.
+/// `ctx` is a read context of the session with `allow_outside_workspace`
+/// off; a context that allows the outside is refused, since a person's
+/// preview never leaves the folder.
+pub async fn preview(
+    ctx: &ToolCtx,
+    helper: &dyn EditHelper,
+    path: &str,
+    sheet: Option<u32>,
+) -> Result<Value, Refusal> {
+    let bytes = open_source(ctx, path).await?;
     if !office_name(path) {
         return Err(Refusal::NotOffice);
     }
@@ -126,6 +141,7 @@ pub async fn preview(
                 Why::TooLarge => Refusal::TooLarge,
                 Why::Damaged => Refusal::Damaged,
                 Why::NoSheet => Refusal::NoSheet,
+                Why::Locked => Refusal::Locked,
             })
         }
         (None, None) => Err(Refusal::NotOffice),

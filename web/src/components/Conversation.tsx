@@ -1480,7 +1480,7 @@ export default function Conversation(props: {
           })()}
         {previewHere && (
           <Suspense fallback={null}>
-            <DocPreview key={targetKey(previewHere)} target={previewHere} onClose={closePreview} />
+            <DocPreview key={targetKey(previewHere)} target={previewHere} onClose={closePreview} composer={box} />
           </Suspense>
         )}
         {sideFor.current === sessionId && (

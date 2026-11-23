@@ -854,6 +854,7 @@ pub(crate) fn reply(
             .map(|(ok, m)| harness_docs::edit::serve::Item {
                 ok: *ok,
                 msg: (*m).into(),
+                why: None,
             })
             .collect(),
         notes: notes.iter().map(|s| s.to_string()).collect(),

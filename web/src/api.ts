@@ -34,6 +34,8 @@ export class HttpError extends Error {
     public id?: string,
     /** Seconds from a `Retry-After` header (a 429's wait). */
     public retry?: number,
+    /** The error body, for a refusal that says more than a sentence (a save names the places it refused). */
+    public body?: unknown,
   ) {
     super(message);
   }
@@ -50,6 +52,7 @@ export const httpError = (res: Response, data: unknown): HttpError => {
     b?.code,
     b?.request_id ?? h.get("x-request-id") ?? undefined,
     Number(h.get("retry-after")) || undefined,
+    data,
   );
 };
 

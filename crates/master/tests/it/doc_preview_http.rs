@@ -44,6 +44,7 @@ fn one_paragraph(text: &str) -> Preview {
                 i: false,
                 s: false,
             }],
+            at: String::new(),
         }],
         more: false,
         notes: vec![],

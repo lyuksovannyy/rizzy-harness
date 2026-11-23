@@ -3310,7 +3310,98 @@ impl Session {
                 F::NoSheet => R::NoSheet,
                 F::Busy => R::Busy,
                 F::NotAvailable => R::NotAvailable,
+                F::Locked => R::Locked,
+                F::NoWrite => R::NoWrite,
             })
+    }
+
+    /// A person's text changes to a Word or Excel file of this chat's folder,
+    /// saved as a new file beside it (X.60, T100). Read as the preview reads
+    /// it (the pinned folder, a sub-agent's own, the protected places, never
+    /// outside the folder, never `.git`); written by the create-only write of
+    /// `doc_edit` through the write side of the path policy. The node decides:
+    /// a node that denies `read`, or the editing tool for this kind of file
+    /// (node.toml `denied_tools`), or that does not offer it, writes nothing,
+    /// whatever the page asks. Every refusal to read is the one `NotFound`,
+    /// and no file-system error text leaves this function.
+    pub(crate) async fn edit_folder_file(
+        &self,
+        path: &str,
+        sheet: Option<u32>,
+        changes: Vec<harness_protocol::PageChange>,
+    ) -> Result<Saved, harness_protocol::PreviewRefusal> {
+        use harness_protocol::PreviewRefusal as R;
+        if self.profile != Profile::Agentic
+            || self.node.cfg.policy.denies("read")
+            || self.check_cwd_still_allowed().is_err()
+        {
+            return Err(R::NotFound);
+        }
+        // The same tools the agent's own edit is gated by. The extension
+        // picks the tool; a name of neither kind needs one of them to
+        // exist, and says nothing about the path.
+        let usable = |tool: &str| crate::docs::page_edit_usable(&self.node.cfg, tool);
+        let ext = path
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        let allowed = match ext.as_str() {
+            "docx" | "docm" => usable(harness_core::docs::EDIT_DOC_TOOL),
+            "xlsx" | "xlsm" => usable(harness_core::docs::EDIT_SHEET_TOOL),
+            _ => {
+                usable(harness_core::docs::EDIT_DOC_TOOL)
+                    || usable(harness_core::docs::EDIT_SHEET_TOOL)
+            }
+        };
+        if !allowed {
+            return Err(R::NoWrite);
+        }
+        let helper = crate::docs::shared_helper().ok_or(R::NotAvailable)?;
+        let mut ctx = self.read_ctx();
+        ctx.allow_outside_workspace = false;
+        let changes = changes
+            .into_iter()
+            .map(|c| harness_tools::folder_edit::Change {
+                at: c.at,
+                text: c.text,
+            })
+            .collect();
+        use harness_tools::folder_edit::Edited;
+        use harness_tools::folder_preview::Refusal as F;
+        let done = harness_tools::folder_edit::edit(&ctx, helper.as_ref(), path, sheet, changes)
+            .await
+            .map_err(|r| match r {
+                F::NotFound => R::NotFound,
+                F::FileTooLarge => R::FileTooLarge,
+                F::TooLarge => R::TooLarge,
+                F::Empty => R::Empty,
+                F::NotOffice => R::NotOffice,
+                F::Protected => R::Protected,
+                F::Damaged => R::Damaged,
+                F::NoSheet => R::NoSheet,
+                F::Busy => R::Busy,
+                F::NotAvailable => R::NotAvailable,
+                F::Locked => R::Locked,
+                F::NoWrite => R::NoWrite,
+            })?;
+        let words = |rs: Vec<harness_tools::folder_edit::ChangeOutcome>| {
+            rs.into_iter()
+                .map(|r| harness_protocol::ChangeResult {
+                    ok: r.ok,
+                    why: r.why.map(change_failure),
+                })
+                .collect::<Vec<_>>()
+        };
+        Ok(match done {
+            Edited::Saved { path, results } => Saved {
+                path: Some(path),
+                results: words(results),
+            },
+            Edited::Refused(results) => Saved {
+                path: None,
+                results: words(results),
+            },
+        })
     }
 
     /// Free the turn slot if `turn_id` still holds it.
@@ -7138,5 +7229,29 @@ mod callback_budget_tests {
             started(9, Some(TurnCause::Callback(vec!["bg-0".into()]))),
         );
         assert_eq!(callback_check(&log, &["bg-1".into()]).unwrap().0, 1);
+    }
+}
+
+/// What a person's page edit made on this node: the new file's path (none
+/// when a change was refused and nothing was written) and one result per
+/// change.
+pub(crate) struct Saved {
+    pub path: Option<String>,
+    pub results: Vec<harness_protocol::ChangeResult>,
+}
+
+fn change_failure(w: harness_tools::folder_edit::ChangeWhy) -> harness_protocol::ChangeFailure {
+    use harness_protocol::ChangeFailure as C;
+    use harness_tools::folder_edit::ChangeWhy as W;
+    match w {
+        W::BadPlace => C::BadPlace,
+        W::Stale => C::Stale,
+        W::Gone => C::Gone,
+        W::NotEditable => C::NotEditable,
+        W::BadFormula => C::BadFormula,
+        W::TooLong => C::TooLong,
+        W::Duplicate => C::Duplicate,
+        W::Skipped => C::Skipped,
+        W::Other => C::Other,
     }
 }
