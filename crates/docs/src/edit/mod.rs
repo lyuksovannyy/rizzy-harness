@@ -24,9 +24,25 @@ mod tests;
 #[cfg(test)]
 mod tests_docx;
 #[cfg(test)]
+mod tests_fix;
+#[cfg(test)]
 mod tests_fuzz;
 #[cfg(test)]
 mod tests_xlsx;
+
+/// A view cut to [`crate::limits::MAX_VIEW_BYTES`] bytes whatever it holds.
+pub(crate) fn cap_view(mut s: String) -> String {
+    use crate::limits::MAX_VIEW_BYTES;
+    if s.len() > MAX_VIEW_BYTES {
+        let mut end = MAX_VIEW_BYTES;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        s.push_str("\n[cut: the view is too long; ask for a later page with `from`]\n");
+    }
+    s
+}
 
 /// What a call did: per edit, one sentence (applied, or why not); the file
 /// only when every edit applied; notes (warnings) for the person.

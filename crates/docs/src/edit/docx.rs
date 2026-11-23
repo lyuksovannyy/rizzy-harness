@@ -71,11 +71,27 @@ pub struct Para {
     pub hidden: bool,
     pub tracked: bool,
     pub field: bool,
+    /// Fields open where the paragraph starts (a field can run over several
+    /// paragraphs).
+    pub field_in: i32,
+    /// A table ends right before it and another starts right after it.
+    pub between_tables: bool,
 }
 
 pub struct Index {
     pub paras: Vec<Para>,
     pub prefix: String,
+    /// Prefixes the root element declares.
+    pub bound: Vec<String>,
+}
+
+/// What the siblings of one container were, for the paragraph between two
+/// tables.
+#[derive(Default)]
+struct Sib {
+    last_para: Option<usize>,
+    last_tbl: bool,
+    after_tbl: Vec<usize>,
 }
 
 /// The short hash of a paragraph's text (FNV-1a, 16 bits): enough to know a
@@ -106,12 +122,25 @@ pub fn index(part: &[u8]) -> Result<Index> {
     let (mut np, mut nt) = (0u32, 0u32);
     let mut text_total = 0usize;
     let mut saw_doc = false;
+    let mut field_depth = 0i32;
+    let mut bound: Vec<String> = vec![];
+    let mut sibs: Vec<Sib> = vec![];
     while let Some(t) = s.next()? {
         let (e, empty) = match &t.ev {
             Event::Start(e) => (e, false),
             Event::Empty(e) => (e, true),
             Event::End(_) => {
-                if let Some(C::Tc { first, c }) = stack.pop() {
+                let popped = stack.pop();
+                if matches!(popped, Some(C::Body | C::Tc { .. } | C::Wrap)) {
+                    sibs.pop();
+                }
+                if matches!(popped, Some(C::Tbl { .. }))
+                    && let Some(sb) = sibs.last_mut()
+                {
+                    sb.last_tbl = true;
+                    sb.last_para = None;
+                }
+                if let Some(C::Tc { first, c }) = popped {
                     // The tags of the cell's paragraphs (a cell of a table
                     // directly in the body; the others have none).
                     let (tt, rr) = match (stack.iter().rev().nth(1), stack.last()) {
@@ -143,6 +172,11 @@ pub fn index(part: &[u8]) -> Result<Index> {
                 return Err("this is not a Word document: its main part is not a document".into());
             }
             saw_doc = true;
+            for a in e.attributes().flatten() {
+                if let Some(x) = a.key.as_ref().strip_prefix("xmlns:") {
+                    bound.push(x.to_string());
+                }
+            }
             if !empty {
                 stack.push(C::Doc);
             }
@@ -150,7 +184,10 @@ pub fn index(part: &[u8]) -> Result<Index> {
         }
         let parent = stack.last();
         match (parent, local) {
-            (Some(C::Doc), Some("body")) if !empty => stack.push(C::Body),
+            (Some(C::Doc), Some("body")) if !empty => {
+                stack.push(C::Body);
+                sibs.push(Sib::default());
+            }
             (Some(C::Body | C::Tc { .. } | C::Wrap), Some("p")) => {
                 let end = if empty {
                     t.end
@@ -163,7 +200,9 @@ pub fn index(part: &[u8]) -> Result<Index> {
                 if end - t.start > MAX_EDIT_PARA_BYTES {
                     return Err("a paragraph of the document is too large to be edited".into());
                 }
-                let ps = para::scan(&part[t.start..end], s.prefix(), NS_W)?;
+                let ps = para::scan(&part[t.start..end], s.prefix(), NS_W, field_depth.max(0))?;
+                let field_in = field_depth.max(0);
+                field_depth = ps.field_out.max(0);
                 let text = ps.text();
                 text_total += text.len();
                 if text_total > MAX_EDIT_PART_BYTES {
@@ -201,12 +240,28 @@ pub fn index(part: &[u8]) -> Result<Index> {
                     hidden: ps.hidden,
                     tracked: ps.tracked,
                     field: ps.field,
+                    field_in,
+                    between_tables: false,
                 });
+                if let Some(sb) = sibs.last_mut() {
+                    if sb.last_tbl {
+                        sb.after_tbl.push(paras.len() - 1);
+                    }
+                    sb.last_para = Some(paras.len() - 1);
+                    sb.last_tbl = false;
+                }
             }
             (Some(C::Body | C::Tc { .. }), Some("tbl")) if !empty => {
                 let top = matches!(parent, Some(C::Body));
                 if top {
                     nt += 1;
+                }
+                if let Some(sb) = sibs.last_mut()
+                    && let Some(i) = sb.last_para
+                    && sb.after_tbl.last() == Some(&i)
+                {
+                    // A paragraph with a table before it and one after.
+                    paras[i].between_tables = true;
                 }
                 stack.push(C::Tbl {
                     top,
@@ -236,11 +291,15 @@ pub fn index(part: &[u8]) -> Result<Index> {
                     first: paras.len(),
                     c,
                 });
+                sibs.push(Sib::default());
             }
             (
                 Some(C::Body | C::Tc { .. } | C::Wrap),
                 Some("sdt" | "sdtContent" | "ins" | "customXml" | "smartTag"),
-            ) if !empty => stack.push(C::Wrap),
+            ) if !empty => {
+                stack.push(C::Wrap);
+                sibs.push(Sib::default());
+            }
             (_, _) => {
                 if !empty {
                     s.skip_to_end(t.depth)?;
@@ -258,6 +317,7 @@ pub fn index(part: &[u8]) -> Result<Index> {
     Ok(Index {
         paras,
         prefix: s.prefix().to_string(),
+        bound,
     })
 }
 
@@ -284,7 +344,10 @@ fn shown(text: &str, max: usize) -> String {
             '\t' => o.push_str("\\t"),
             '\n' => o.push_str("\\n"),
             OBJ => o.push_str("[obj]"),
-            c if c.is_control() => o.push(' '),
+            // Invisible characters are not shown (the tag is the address, not
+            // the shown text).
+            c if harness_core::text::is_hidden(c) => {}
+            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') => o.push(' '),
             c => o.push(c),
         }
     }
@@ -384,11 +447,13 @@ pub fn view(bytes: &[u8], from: usize, limit: usize) -> Result<String> {
             None => "(not editable)".into(),
         };
         if let Some(sid) = &p.style {
-            let name = st
-                .by_id
-                .get(sid)
-                .cloned()
-                .unwrap_or_else(|| sid.to_lowercase());
+            let name = harness_core::text::clean_line(
+                &st.by_id
+                    .get(sid)
+                    .cloned()
+                    .unwrap_or_else(|| sid.to_lowercase()),
+                40,
+            );
             if name != "normal" {
                 line.push_str(&format!(" [{name}]"));
             }
@@ -415,7 +480,7 @@ pub fn view(bytes: &[u8], from: usize, limit: usize) -> Result<String> {
             i + 1
         ));
     }
-    Ok(out)
+    Ok(super::cap_view(out))
 }
 
 // -- edits ------------------------------------------------------------------
@@ -636,9 +701,21 @@ fn replace_in(
     let matches: Vec<usize> = text.match_indices(find).map(|(i, _)| i).collect();
     // Non-overlapping, left to right (match_indices already is).
     if matches.is_empty() {
+        if text.chars().any(harness_core::text::is_hidden) {
+            return Err(format!(
+                "no text \"{}\" in {tag}, which holds invisible characters (zero-width or direction marks) the view does not show; match a shorter part of it that has none, or use set_text",
+                short(find)
+            ));
+        }
         return Err(format!(
             "no text \"{}\" in {tag} (hidden text, deleted text and text in fields or pictures are not text to match); look at it with doc_view",
             short(find)
+        ));
+    }
+    if matches.len().saturating_mul(replace.len()) > MAX_EDIT_OUT_PART_BYTES {
+        return Err(format!(
+            "replacing {} occurrences in {tag} would make more text than a document part may hold",
+            matches.len()
         ));
     }
     if matches.len() > 1 && !all {
@@ -666,7 +743,15 @@ fn replace_in(
         let ci = chars.partition_point(|(o, _)| o < b);
         let span = &map[ci..ci + find_chars];
         let region = ps.pieces[span[0].0].region;
+        let mut last_piece = usize::MAX;
         for (pi, _) in span {
+            if *pi != last_piece && last_piece != usize::MAX && ps.pieces[*pi].gap {
+                return Err(format!(
+                    "\"{}\" in {tag} runs across hidden text, which is left as it is and cannot be edited around; edit the text on one side of it",
+                    short(find)
+                ));
+            }
+            last_piece = *pi;
             let p = &ps.pieces[*pi];
             if p.locked {
                 return Err(format!(
@@ -683,34 +768,43 @@ fn replace_in(
         }
         spans.push(span.to_vec());
     }
-    // From the last match to the first, so earlier offsets stay right.
-    for span in spans.iter().rev() {
+    // One pass per node: the characters of every match are cut out and the
+    // replacement goes where the first of them was (a node is rebuilt once,
+    // however many matches it holds).
+    let mut cuts: BTreeMap<usize, Vec<(usize, usize, bool)>> = BTreeMap::new();
+    for span in &spans {
         let mut first = true;
-        // Cut the matched characters out of every node, from the last
-        // character to the first, then put the replacement where the
-        // first one was.
-        let mut by_node: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for (pi, off) in span {
-            if let Kind::T(i) = ps.pieces[*pi].kind {
-                by_node.entry(i).or_default().push(*off);
+        let mut i = 0;
+        while i < span.len() {
+            let Kind::T(node) = ps.pieces[span[i].0].kind else {
+                i += 1;
+                continue;
+            };
+            let lo = span[i].1;
+            let mut j = i;
+            while j + 1 < span.len() && span[j + 1].0 == span[i].0 {
+                j += 1;
             }
+            cuts.entry(node).or_default().push((lo, span[j].1, first));
+            first = false;
+            i = j + 1;
         }
-        for (i, offs) in &by_node {
-            let n = &mut ps.tnodes[*i];
-            let mut cs: Vec<char> = n.text.chars().collect();
-            let lo = offs[0];
-            let hi = offs[offs.len() - 1];
-            cs.drain(lo..=hi);
-            if first {
-                let at = lo.min(cs.len());
-                for (k, c) in replace.chars().enumerate() {
-                    cs.insert(at + k, c);
-                }
-                first = false;
+    }
+    for (node, list) in cuts {
+        let n = &mut ps.tnodes[node];
+        let cs: Vec<char> = n.text.chars().collect();
+        let mut out = String::with_capacity(cs.len());
+        let mut at = 0usize;
+        for (lo, hi, put) in list {
+            out.extend(&cs[at..lo]);
+            if put {
+                out.push_str(replace);
             }
-            n.text = cs.into_iter().collect();
-            n.dirty = true;
+            at = hi + 1;
         }
+        out.extend(&cs[at..]);
+        n.text = out;
+        n.dirty = true;
     }
     Ok(spans.len())
 }
@@ -739,6 +833,7 @@ fn markdown_paras(
     anchor: &para::ParaScan,
     anchor_src: &[u8],
     st: &Styles,
+    bound: &[String],
 ) -> std::result::Result<Vec<NewPara>, String> {
     use pulldown_cmark::{Event as E, HeadingLevel, Options, Parser, Tag as T, TagEnd};
     let markers = md
@@ -766,7 +861,12 @@ fn markdown_paras(
         let mut s = String::new();
         for (n, a, b) in &anchor.ppr {
             if names.contains(&n.as_str()) {
-                s.push_str(&String::from_utf8_lossy(&anchor_src[*a..*b]));
+                let text = String::from_utf8_lossy(&anchor_src[*a..*b]);
+                // An element that uses a prefix the document's root does not
+                // declare would be broken where it lands: it is left out.
+                if super::scan::prefixes_declared(text.as_bytes(), bound) {
+                    s.push_str(&text);
+                }
             }
         }
         s
@@ -1086,7 +1186,7 @@ pub fn edit(bytes: &[u8], ops: &[DocOp]) -> Result<Outcome> {
             }
         }
         let slice = &part[para.start..para.end];
-        let mut ps = match para::scan(slice, &idx.prefix, NS_W) {
+        let mut ps = match para::scan(slice, &idx.prefix, NS_W, para.field_in) {
             Ok(x) => x,
             Err(e) => {
                 for k in list {
@@ -1141,6 +1241,10 @@ pub fn edit(bytes: &[u8], ops: &[DocOp]) -> Result<Outcome> {
                         errs[*k] = Some(format!(
                             "{key} carries the section's page setup (sectPr) and cannot be deleted"
                         ));
+                    } else if para.between_tables {
+                        errs[*k] = Some(format!(
+                            "{key} is the only paragraph between two tables; deleting it would merge them. Clear its text with set_text instead"
+                        ));
                     } else if para.last {
                         errs[*k] = Some(format!(
                             "{key} is the last paragraph of its body or cell, which must keep one; clear its text with set_text instead"
@@ -1185,19 +1289,23 @@ pub fn edit(bytes: &[u8], ops: &[DocOp]) -> Result<Outcome> {
             errs[k] = Some("the inserts of this call make more text than a document part may hold; insert less".into());
             continue;
         }
+        if idx.prefix.is_empty() {
+            errs[k] = Some("this document writes its elements with no prefix (a default namespace), so a new paragraph would need attributes Word may not read; insert is not done on it. replace_text and set_text still work".into());
+            continue;
+        }
         let pi = target[k];
         let para = &idx.paras[pi];
         let key = tag_text(para).unwrap_or_default();
         let key = key.split('#').next().unwrap_or("").to_string();
         let slice = &part[para.start..para.end];
-        let ps = match para::scan(slice, &idx.prefix, NS_W) {
+        let ps = match para::scan(slice, &idx.prefix, NS_W, para.field_in) {
             Ok(x) => x,
             Err(e) => {
                 errs[k] = Some(e);
                 continue;
             }
         };
-        match markdown_paras(md, &p, &ps, slice, &st) {
+        match markdown_paras(md, &p, &ps, slice, &st, &idx.bound) {
             Err(e) => errs[k] = Some(format!("{key}: {e}")),
             Ok(np) => {
                 let at = if after { para.end } else { para.start };
@@ -1240,6 +1348,7 @@ pub fn edit(bytes: &[u8], ops: &[DocOp]) -> Result<Outcome> {
         format!("the edited document did not pass its own check ({e}); nothing was written")
     })?;
     wellformed(&out_part)?;
+    super::scan::all_prefixes_bound(&out_part)?;
     let mut expect: Vec<(usize, u8, usize, String)> = vec![];
     for (i, para) in idx.paras.iter().enumerate() {
         if deleted.contains(&i) {
@@ -1280,7 +1389,7 @@ pub fn edit(bytes: &[u8], ops: &[DocOp]) -> Result<Outcome> {
 fn what_blocks(ps: &para::ParaScan) -> &'static str {
     if ps.sect {
         "page setup"
-    } else if ps.field {
+    } else if ps.field || ps.in_field {
         "a field"
     } else if ps.barrier {
         "a picture, note mark or page break"

@@ -106,7 +106,7 @@ pub fn handle(m: &Master, node_id: &str, req_id: String, sid: SessionId, r: DocR
             Err(e) => {
                 // Lengths only: a refusal may carry text the model wrote.
                 tracing::debug!(node = %node_id, session = %sid, len = e.len(), "a document request was refused");
-                (None, Some(harness_core::text::clean_line(&e, 400)))
+                (None, Some(clean_reasons(&e)))
             }
         };
         m.send_unacked(
@@ -119,6 +119,22 @@ pub fn handle(m: &Master, node_id: &str, req_id: String, sid: SessionId, r: DocR
         );
     });
 }
+
+/// A refusal's words for the link: one reason to a line, each cleaned to one
+/// short line, at most [`MAX_REASONS`] of them (a call with many edits has a
+/// reason for each; one `clean_line` over the whole would keep only the
+/// first).
+fn clean_reasons(e: &str) -> String {
+    e.lines()
+        .map(|l| harness_core::text::clean_line(l, 400))
+        .filter(|l| !l.is_empty())
+        .take(MAX_REASONS)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Reasons one refusal may carry (the most edits of a call, and its headline).
+const MAX_REASONS: usize = harness_docs::limits::MAX_EDITS + 2;
 
 /// The open turn of `row`, if it may make files: not a callback turn, the
 /// tool not withheld from it, its agent with the switch.
@@ -180,9 +196,14 @@ pub async fn answer(
     ) {
         return match edit_answer(m, &row, q).await {
             Ok(a) => Ok(a),
-            Err(e) => {
-                // A refusal is not a call: it gives its count back.
-                m.inner.made.give_back(sid, &open.turn_id);
+            Err((e, started)) => {
+                // A refusal before the helper starts is not a call and gives
+                // its count back; a helper that ran counts whatever it said,
+                // so a file that takes its full time cannot be retried
+                // without limit.
+                if !started {
+                    m.inner.made.give_back(sid, &open.turn_id);
+                }
                 Err(e)
             }
         };
@@ -220,6 +241,18 @@ async fn edit_answer(
     m: &Master,
     row: &harness_store::SessionRow,
     q: DocRequest,
+) -> Result<DocCreated, (String, bool)> {
+    let mut started = false;
+    edit_inner(m, row, q, &mut started)
+        .await
+        .map_err(|e| (e, started))
+}
+
+async fn edit_inner(
+    m: &Master,
+    row: &harness_store::SessionRow,
+    q: DocRequest,
+    started: &mut bool,
 ) -> Result<DocCreated, String> {
     use harness_docs::edit::serve::{Request, frame_request, parse_reply};
     let (file_id, req, save_as) = match q {
@@ -270,12 +303,19 @@ async fn edit_answer(
     let bytes = bytes_of(m, &file).await?;
     let is_view = matches!(req, Request::DocView { .. });
     let sheet_tool = matches!(req, Request::SheetEdit { .. });
+    *started = true;
     let out = reader
         .edit(frame_request(&req, &bytes))
         .await
-        .map_err(|e| match e {
-            crate::pdf::DocError::Unreadable(m) => m,
-            other => other.to_string(),
+        .map_err(|e| {
+            // Waiting for a place and not getting one is not a run.
+            if matches!(e, crate::pdf::DocError::Busy) {
+                *started = false;
+            }
+            match e {
+                crate::pdf::DocError::Unreadable(m) => m,
+                other => other.to_string(),
+            }
         })?;
     drop(bytes);
     let (reply, new) =

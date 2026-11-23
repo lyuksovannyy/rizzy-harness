@@ -27,6 +27,52 @@ const MAX_ROW: u32 = 1_048_576;
 const MAX_COL: u32 = 16_384;
 /// Rows of a sheet an edit will index.
 const MAX_INDEXED_ROWS: usize = 300_000;
+/// Validation and conditional-format entries kept, and ranges read from one
+/// entry: what a view prints and what an edit checks its cells against.
+const MAX_RANGE_ENTRIES: usize = 200;
+const MAX_RANGES_PER_ENTRY: usize = 20;
+/// Cells one view line shows at most.
+const MAX_LINE_CELLS: usize = 60;
+/// Bounds of the warnings an edit gives.
+const MAX_NOTE_CELLS: usize = 10_000;
+const MAX_NOTE_RANGES: usize = 400;
+const MAX_NOTES: usize = 20;
+
+/// The ranges of `sqref` entries, parsed, never the file's own text (which
+/// may hold anything after a space): at most [`MAX_RANGES_PER_ENTRY`] of each
+/// entry; the second value says some were left out.
+fn sq_rects(list: &[String]) -> (Vec<Rect>, bool) {
+    let mut out = vec![];
+    let mut more = false;
+    for sq in list {
+        let mut n = 0;
+        for tok in sq.split_whitespace() {
+            if n >= MAX_RANGES_PER_ENTRY {
+                more = true;
+                break;
+            }
+            n += 1;
+            if let Some(r) = parse_range(tok) {
+                out.push(r);
+            }
+        }
+    }
+    (out, more)
+}
+
+fn rects_text(list: &[String]) -> String {
+    let (r, more) = sq_rects(list);
+    let mut s = r
+        .iter()
+        .take(20)
+        .map(|r| format!("{}:{}", addr(r.0, r.1), addr(r.2, r.3)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if r.len() > 20 || more {
+        s.push_str(" and more");
+    }
+    s
+}
 
 // -- addresses ----------------------------------------------------------------
 
@@ -48,7 +94,7 @@ pub fn parse_addr(s: &str) -> Option<(u32, u32)> {
     ((1..=MAX_COL).contains(&col) && (1..=MAX_ROW).contains(&row)).then_some((col, row))
 }
 
-fn col_name(mut c: u32) -> String {
+pub(crate) fn col_name(mut c: u32) -> String {
     let mut o = Vec::new();
     while c > 0 {
         c -= 1;
@@ -543,7 +589,9 @@ pub fn index(part: &[u8]) -> Result<SheetIdx> {
                 }
             },
             (2, Some("conditionalFormatting")) => {
-                if let Some(x) = attr(e, "sqref")? {
+                if let Some(x) = attr(e, "sqref")?
+                    && ix.cond.len() < MAX_RANGE_ENTRIES
+                {
                     ix.cond.push(x);
                 }
                 if !empty {
@@ -559,7 +607,9 @@ pub fn index(part: &[u8]) -> Result<SheetIdx> {
                     Event::Start(m) | Event::Empty(m)
                         if s.local(m.name()) == Some("dataValidation") =>
                     {
-                        if let Some(x) = attr(m, "sqref")? {
+                        if let Some(x) = attr(m, "sqref")?
+                            && ix.valid.len() < MAX_RANGE_ENTRIES
+                        {
                             ix.valid.push(x);
                         }
                     }
@@ -1082,12 +1132,12 @@ pub fn view(bytes: &[u8], sheet: Option<&str>, from: usize, limit: usize) -> Res
         ));
     }
     if !ix.valid.is_empty() {
-        out.push_str(&format!("Data validation on {}\n", list(ix.valid.clone())));
+        out.push_str(&format!("Data validation on {}\n", rects_text(&ix.valid)));
     }
     if !ix.cond.is_empty() {
         out.push_str(&format!(
             "Conditional formatting on {}\n",
-            list(ix.cond.clone())
+            rects_text(&ix.cond)
         ));
     }
     if ex.pivots > 0 {
@@ -1097,7 +1147,13 @@ pub fn view(bytes: &[u8], sheet: Option<&str>, from: usize, limit: usize) -> Res
         .names
         .iter()
         .take(20)
-        .map(|(n, v)| format!("{} = {}", harness_core::text::clean_line(n, 40), v))
+        .map(|(n, v)| {
+            format!(
+                "{} = {}",
+                harness_core::text::clean_line(n, 40),
+                harness_core::text::clean_line(v, 120)
+            )
+        })
         .collect();
     if !names.is_empty() {
         out.push_str(&format!("Defined names: {}\n", names.join("; ")));
@@ -1123,7 +1179,13 @@ pub fn view(bytes: &[u8], sheet: Option<&str>, from: usize, limit: usize) -> Res
         }
         let rs = scan_row(&part[rr.start..rr.end], &ix.prefix, &sst)?;
         let mut line = String::new();
+        let mut cells_shown = 0usize;
+        let mut skipped = 0usize;
         for c in &rs.cells {
+            if cells_shown >= MAX_LINE_CELLS {
+                skipped += 1;
+                continue;
+            }
             if ix
                 .hidden_cols
                 .iter()
@@ -1140,7 +1202,11 @@ pub fn view(bytes: &[u8], sheet: Option<&str>, from: usize, limit: usize) -> Res
                     line.push(' ');
                 }
                 line.push_str(&format!("{}={t}", addr(c.col, rr.r)));
+                cells_shown += 1;
             }
+        }
+        if skipped > 0 {
+            line.push_str(&format!(" [+{skipped} more cells in this row]"));
         }
         shown += 1;
         out.push_str(&format!("{}: {}\n", rr.r, line));
@@ -1153,7 +1219,7 @@ pub fn view(bytes: &[u8], sheet: Option<&str>, from: usize, limit: usize) -> Res
             ix.rows[i].r
         ));
     }
-    Ok(out)
+    Ok(super::cap_view(out))
 }
 
 // -- edits ---------------------------------------------------------------------------
@@ -1571,10 +1637,6 @@ impl Ctx<'_> {
     }
 }
 
-fn ranges_of(sqref: &str) -> Vec<Rect> {
-    sqref.split_whitespace().filter_map(parse_range).collect()
-}
-
 /// Edit one sheet of an Excel file.
 pub fn edit(bytes: &[u8], sheet: &str, ops: &[SheetOp]) -> Result<Outcome> {
     if ops.is_empty() {
@@ -1819,6 +1881,7 @@ pub fn edit(bytes: &[u8], sheet: &str, ops: &[SheetOp]) -> Result<Outcome> {
     }
     let out_part = patches.apply(&part, MAX_EDIT_OUT_PART_BYTES)?;
     super::docx::wellformed_ns(&out_part, NS_S)?;
+    super::scan::all_prefixes_bound(&out_part)?;
     let again = index(&out_part).map_err(|e| {
         format!("the edited sheet did not pass its own check ({e}); nothing was written")
     })?;
@@ -1923,9 +1986,25 @@ pub fn edit(bytes: &[u8], sheet: &str, ops: &[SheetOp]) -> Result<Outcome> {
     // What the person should know.
     let mut notes = cx.notes.clone();
     notes.push("Formulas are calculated when the file is opened in Excel; the file holds no calculated value for a formula you wrote, and other cached results are refreshed then.".into());
+    // Cells touched, once each and at most `MAX_NOTE_CELLS`; the ranges they
+    // are checked against are parsed (never the file's own text) and bounded,
+    // so the work is a fixed number of comparisons whatever the file holds.
+    let touched: std::collections::BTreeSet<(u32, u32)> =
+        cx.touched.iter().copied().take(MAX_NOTE_CELLS).collect();
+    let mut checked_all = cx.touched.len() <= MAX_NOTE_CELLS;
+    let mut groups: Vec<(&str, Vec<Rect>)> = vec![];
+    for (what, list) in [
+        ("conditional formatting", &ix.cond),
+        ("data validation", &ix.valid),
+    ] {
+        let (mut r, more) = sq_rects(list);
+        checked_all &= !more && r.len() <= MAX_NOTE_RANGES;
+        r.truncate(MAX_NOTE_RANGES);
+        groups.push((what, r));
+    }
     let mut seen: HashSet<String> = HashSet::new();
-    for (c, r) in &cx.touched {
-        for (n, rc) in &ex.tables {
+    for (c, r) in &touched {
+        for (n, rc) in ex.tables.iter().take(MAX_NOTE_RANGES) {
             if adjoins(*rc, *c, *r) && seen.insert(format!("t{n}")) {
                 notes.push(format!(
                     "{} is in or next to the table \"{}\" ({}:{}); the table's range is not extended.",
@@ -1936,16 +2015,12 @@ pub fn edit(bytes: &[u8], sheet: &str, ops: &[SheetOp]) -> Result<Outcome> {
                 ));
             }
         }
-        for (what, list) in [
-            ("conditional formatting", &ix.cond),
-            ("data validation", &ix.valid),
-        ] {
-            for sq in list {
-                if ranges_of(sq).iter().any(|rc| adjoins(*rc, *c, *r))
-                    && seen.insert(format!("{what}{sq}"))
-                {
+        for (what, rects) in &groups {
+            for rc in rects {
+                let range = format!("{}:{}", addr(rc.0, rc.1), addr(rc.2, rc.3));
+                if adjoins(*rc, *c, *r) && seen.insert(format!("{what}{range}")) {
                     notes.push(format!(
-                        "{} is in or next to {what} on {sq}; its range is not extended.",
+                        "{} is in or next to {what} on {range}; its range is not extended.",
                         addr(*c, *r)
                     ));
                 }
@@ -1957,10 +2032,22 @@ pub fn edit(bytes: &[u8], sheet: &str, ops: &[SheetOp]) -> Result<Outcome> {
             && seen.insert("af".into())
         {
             notes.push(format!(
-                "{} is in or next to the filter on {af}; the filter's range is not extended.",
-                addr(*c, *r)
+                "{} is in or next to the filter on {}:{}; the filter's range is not extended.",
+                addr(*c, *r),
+                addr(rc.0, rc.1),
+                addr(rc.2, rc.3)
             ));
         }
+        if notes.len() > MAX_NOTES {
+            break;
+        }
+    }
+    if notes.len() > MAX_NOTES {
+        notes.truncate(MAX_NOTES);
+        checked_all = false;
+    }
+    if !checked_all {
+        notes.push("More cells or ranges than are checked here may be next to tables, filters, validations or conditional formats; none of them is extended.".into());
     }
     if ex.pivots > 0 {
         notes.push("This sheet has a pivot table; it is not refreshed by an edit.".into());

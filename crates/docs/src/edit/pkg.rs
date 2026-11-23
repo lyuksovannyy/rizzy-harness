@@ -67,6 +67,17 @@ impl<'a> Source<'a> {
             }
             names.push(n.to_string());
         }
+        // A package treats `%64` in a part name as `d` (OPC): a name that
+        // reads as another entry's name that way would be two parts to this
+        // reader and one to Word.
+        for n in &names {
+            if n.contains('%') {
+                let d = percent_decode(n);
+                if d != *n && seen.contains(&d.to_lowercase()) {
+                    return Err("a part of the file has a name that, percent-decoded, is another part's name; readers disagree on which is meant, so it is not edited".into());
+                }
+            }
+        }
         Ok(Self { pkg, names })
     }
 
@@ -117,4 +128,26 @@ impl<'a> Source<'a> {
         }
         w.finish()
     }
+}
+
+/// `%XX` escapes of a part name decoded (what a package's part names are
+/// read as); anything that is not an escape stays.
+fn percent_decode(n: &str) -> String {
+    let b = n.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Some(h) = n.get(i + 1..i + 3)
+            && let Ok(v) = u8::from_str_radix(h, 16)
+        {
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }

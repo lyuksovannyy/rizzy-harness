@@ -89,5 +89,3 @@ pub const MAX_EDIT_EVENTS: usize = 4_000_000;
 pub const MAX_VIEW_BYTES: usize = 30_000;
 /// Items (paragraphs or rows) one view page shows at most.
 pub const MAX_VIEW_ITEMS: usize = 400;
-/// Wall time of one edit or view in the helper.
-pub const EDIT_SECONDS: u64 = 15;

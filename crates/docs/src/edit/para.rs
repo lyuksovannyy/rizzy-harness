@@ -43,6 +43,8 @@ pub enum Kind {
 
 #[derive(Debug, Clone)]
 pub struct Piece {
+    /// Hidden text lies between this piece and the one before it.
+    pub gap: bool,
     pub kind: Kind,
     pub region: u32,
     pub locked: bool,
@@ -85,6 +87,11 @@ pub struct ParaScan {
     pub open_end: usize,
     pub close_start: usize,
     pub self_closing: bool,
+    /// Fields open at the end of the paragraph (a field can run over several
+    /// paragraphs: a table of contents).
+    pub field_out: i32,
+    /// The paragraph starts inside a field's result.
+    pub in_field: bool,
 }
 
 impl ParaScan {
@@ -103,7 +110,13 @@ impl ParaScan {
     /// Nothing in it but plain runs, text and bookmarks: what `set_text`
     /// can rewrite without losing something the person put there.
     pub fn plain(&self) -> bool {
-        !(self.barrier || self.field || self.wrapper || self.tracked || self.hidden || self.sect)
+        !(self.barrier
+            || self.field
+            || self.in_field
+            || self.wrapper
+            || self.tracked
+            || self.hidden
+            || self.sect)
     }
 
     /// What `delete` may remove: plain, and no anchor that another part of
@@ -125,15 +138,16 @@ enum Ctx {
 }
 
 /// Read the element at `src` (a `w:p`; positions are relative to `src`).
-pub fn scan(src: &[u8], prefix: &str, ns: &'static str) -> Result<ParaScan> {
+pub fn scan(src: &[u8], prefix: &str, ns: &'static str, field_in: i32) -> Result<ParaScan> {
     let mut s = Scan::within(src, ns, prefix, MAX_EDIT_EVENTS)?;
     let mut out = ParaScan::default();
     let mut stack: Vec<Ctx> = vec![];
     let mut region = 0u32;
     let mut next_region = 1u32;
-    let mut field_depth = 0i32;
+    let mut field_depth = field_in;
     let mut simple_depth = 0i32;
     let mut run_hidden = false;
+    let mut pending_gap = false;
     let mut first = true;
     while let Some(t) = s.next()? {
         let (e, empty) = match &t.ev {
@@ -246,6 +260,7 @@ pub fn scan(src: &[u8], prefix: &str, ns: &'static str) -> Result<ParaScan> {
                     };
                     let preserve = attr(e, "space")?.as_deref() == Some("preserve");
                     if hide {
+                        pending_gap = true;
                         if !empty {
                             s.skip_to_end(t.depth)?;
                         }
@@ -263,6 +278,7 @@ pub fn scan(src: &[u8], prefix: &str, ns: &'static str) -> Result<ParaScan> {
                     });
                     let i = out.tnodes.len() - 1;
                     out.pieces.push(Piece {
+                        gap: std::mem::take(&mut pending_gap),
                         kind: Kind::T(i),
                         region,
                         locked,
@@ -284,6 +300,7 @@ pub fn scan(src: &[u8], prefix: &str, ns: &'static str) -> Result<ParaScan> {
                             out.barrier = true;
                         }
                         out.pieces.push(Piece {
+                            gap: std::mem::take(&mut pending_gap),
                             kind: Kind::Ch(c),
                             region,
                             locked: true,
@@ -322,6 +339,7 @@ pub fn scan(src: &[u8], prefix: &str, ns: &'static str) -> Result<ParaScan> {
                     if !hide {
                         out.barrier = true;
                         out.pieces.push(Piece {
+                            gap: std::mem::take(&mut pending_gap),
                             kind: Kind::Ch(OBJ),
                             region,
                             locked: true,
@@ -448,6 +466,7 @@ pub fn scan(src: &[u8], prefix: &str, ns: &'static str) -> Result<ParaScan> {
             _ => {
                 out.barrier = true;
                 out.pieces.push(Piece {
+                    gap: std::mem::take(&mut pending_gap),
                     kind: Kind::Ch(OBJ),
                     region,
                     locked: true,
@@ -458,5 +477,7 @@ pub fn scan(src: &[u8], prefix: &str, ns: &'static str) -> Result<ParaScan> {
             }
         }
     }
+    out.field_out = field_depth;
+    out.in_field = field_in > 0;
     Ok(out)
 }

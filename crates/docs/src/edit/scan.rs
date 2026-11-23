@@ -158,14 +158,17 @@ impl<'a> Scan<'a> {
             let key = a.key.as_ref();
             let val: &str = &a.value;
             if val == self.ns {
-                if key == "xmlns" {
-                    found = Some(String::new());
-                    break;
+                let p = if key == "xmlns" {
+                    String::new()
+                } else if let Some(p) = key.strip_prefix("xmlns:") {
+                    p.to_string()
+                } else {
+                    continue;
+                };
+                if found.is_some() {
+                    return Err("a part of the file binds its main namespace to more than one prefix; it is not edited".into());
                 }
-                if let Some(p) = key.strip_prefix("xmlns:") {
-                    found = Some(p.to_string());
-                    break;
-                }
+                found = Some(p);
             }
         }
         let p = found.ok_or_else(|| {
@@ -350,5 +353,101 @@ impl Patches {
         }
         out.extend_from_slice(&src[at..]);
         Ok(out)
+    }
+}
+
+/// Whether every prefix a fragment of XML uses is one of `bound` (declared
+/// by the root of the part it will land in) or declared by the fragment.
+pub fn prefixes_declared(fragment: &[u8], bound: &[String]) -> bool {
+    let Ok(text) = std::str::from_utf8(fragment) else {
+        return false;
+    };
+    let mut rd = Reader::from_str(text);
+    let mut local: Vec<String> = vec![];
+    loop {
+        match rd.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                for a in e.attributes() {
+                    let Ok(a) = a else { return false };
+                    if let Some(p) = a.key.as_ref().strip_prefix("xmlns:") {
+                        local.push(p.to_string());
+                    }
+                }
+                let known = |p: &str| {
+                    p == "xml"
+                        || p == "xmlns"
+                        || bound.iter().any(|b| b == p)
+                        || local.iter().any(|b| b == p)
+                };
+                if let Some(p) = e.name().prefix()
+                    && !known(p.into_inner())
+                {
+                    return false;
+                }
+                for a in e.attributes().flatten() {
+                    if let Some(p) = a.key.prefix()
+                        && !known(p.into_inner())
+                    {
+                        return false;
+                    }
+                }
+            }
+            Ok(Event::Eof) => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Every element and attribute of a whole part uses a prefix that is in
+/// scope where it stands (the self-check of an edit: a fragment copied from
+/// below the root would otherwise pass as well-formed).
+pub fn all_prefixes_bound(part: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(part)
+        .map_err(|_| "a part of the file is not UTF-8 text".to_string())?;
+    let bad = || {
+        "the edited part uses a namespace prefix that is not declared where it is used; nothing was written".to_string()
+    };
+    let mut rd = Reader::from_str(text);
+    let mut scopes: Vec<Vec<String>> = vec![];
+    loop {
+        let ev = rd.read_event().map_err(|_| syntax())?;
+        match ev {
+            Event::Start(ref e) | Event::Empty(ref e) => {
+                let mut mine = vec![];
+                for a in e.attributes() {
+                    let a = a.map_err(|_| syntax())?;
+                    if let Some(p) = a.key.as_ref().strip_prefix("xmlns:") {
+                        mine.push(p.to_string());
+                    }
+                }
+                let in_scope = |p: &str| {
+                    p == "xml"
+                        || p == "xmlns"
+                        || mine.iter().any(|b| b == p)
+                        || scopes.iter().any(|s| s.iter().any(|b| b == p))
+                };
+                if let Some(p) = e.name().prefix()
+                    && !in_scope(p.into_inner())
+                {
+                    return Err(bad());
+                }
+                for a in e.attributes().flatten() {
+                    if let Some(p) = a.key.prefix()
+                        && !in_scope(p.into_inner())
+                    {
+                        return Err(bad());
+                    }
+                }
+                if matches!(ev, Event::Start(_)) {
+                    scopes.push(mine);
+                }
+            }
+            Event::End(_) => {
+                scopes.pop();
+            }
+            Event::Eof => return Ok(()),
+            _ => {}
+        }
     }
 }

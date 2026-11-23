@@ -1071,3 +1071,76 @@ async fn a_failing_helper_keeps_nothing_and_says_why() {
     assert!(e.contains("not understood"), "{e}");
     assert_eq!(blob_paths(&t).len(), n);
 }
+
+/// Every refusal of an edit keeps its reason: a call with many edits has one
+/// for each, and all of them reach the node through the real `handle`.
+#[tokio::test]
+async fn a_refused_call_keeps_the_reason_of_every_edit() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let sid = open(&t, &alex, "t1", json!({})).await;
+    let made = t.chat.ask_docs(sid, doc("plan", "# Plan")).await.unwrap();
+    name_in_log(&t, sid, &made).await;
+    let long = |k: u8| format!("edit {k}: {}", format!("reason{k} ").repeat(40));
+    helper_says(
+        &t,
+        &reply(
+            "",
+            &[(false, &long(1)), (false, &long(2)), (false, &long(3))],
+            &["a warning"],
+            None,
+        ),
+    );
+    let e = t
+        .chat
+        .ask_docs(sid, edit_req(&made.file_id, None))
+        .await
+        .unwrap_err();
+    for k in 1..=3 {
+        assert!(e.contains(&format!("reason{k}")), "edit {k} is in: {e}");
+    }
+    assert!(
+        e.lines().count() >= 4 && e.lines().all(|l| l.chars().count() <= 400),
+        "{e}"
+    );
+}
+
+/// A helper that ran counts against the turn whatever it said (a slow
+/// hostile file cannot be retried without limit); a refusal before it starts
+/// gives its count back.
+#[tokio::test]
+async fn a_run_of_the_helper_counts_and_a_refusal_before_it_does_not() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let sid = open(&t, &alex, "t1", json!({})).await;
+    let made = t.chat.ask_docs(sid, doc("plan", "# Plan")).await.unwrap();
+    name_in_log(&t, sid, &made).await;
+    let script = t.dir.path().join("helper.sh");
+    std::fs::write(&script, "cat >/dev/null; printf 'bad part'; exit 3").unwrap();
+    t.master
+        .set_pdf_reader(harness_master::pdf::PdfReader::with_command(
+            "/bin/sh".into(),
+            vec![script.into_os_string()],
+        ));
+    // One call was the creation above; sixty in all are allowed in a turn.
+    // A hundred refusals before the helper starts count for nothing.
+    for _ in 0..100 {
+        let e = t
+            .chat
+            .ask_docs(sid, edit_req("nope", None))
+            .await
+            .unwrap_err();
+        assert!(e.contains("no such file"), "{e}");
+    }
+    let mut ran = 0;
+    let err = loop {
+        match t.chat.ask_docs(sid, edit_req(&made.file_id, None)).await {
+            Err(e) if e == "bad part" => ran += 1,
+            Err(e) => break e,
+            Ok(_) => panic!("the helper failed"),
+        }
+        assert!(ran <= 60, "no limit");
+    };
+    assert_eq!(ran, 59, "the creation and 59 failed runs are the turn's 60");
+    assert!(err.contains("60 times"), "{err}");
+}
