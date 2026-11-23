@@ -1505,3 +1505,36 @@ fn attribute_values_are_escaped() {
         "{wb}"
     );
 }
+
+#[test]
+fn inline_markup_characters_are_counted_before_the_parser_sees_them() {
+    let md = |n: usize| format!("a {}", "!".repeat(n));
+    assert!(docx::build(&md(MAX_INLINE_MARKERS), &opts()).is_ok());
+    let e = docx::build(&md(MAX_INLINE_MARKERS + 1), &opts()).unwrap_err();
+    assert!(e.contains("inline markup"), "{e}");
+    // The ordinary markup of a long document is far below it.
+    let doc = "# T\n\nSome **bold** and [a link](https://x.example/) and `code`.\n\n".repeat(5000);
+    assert!(docx::build(&doc, &opts()).is_ok());
+}
+
+#[test]
+fn a_body_past_its_cap_is_refused_early_not_built() {
+    // A megabyte of tabs in bold italic struck text is about 90 MB of runs.
+    let md = format!("***~~a{}a~~***", "\t".repeat(MAX_MARKDOWN_BYTES - 20));
+    let e = docx::build(&md, &opts()).unwrap_err();
+    assert!(e.contains("larger than 16 MiB"), "{e}");
+    // The same in a code block, a table cell and a list item.
+    for md in [
+        format!("```\n{}\n```\n", "\t".repeat(MAX_MARKDOWN_BYTES - 20)),
+        format!(
+            "| a |\n|---|\n| {} |\n",
+            "\t".repeat(MAX_MARKDOWN_BYTES - 40)
+        ),
+        format!("- {}\n", "\t".repeat(MAX_MARKDOWN_BYTES - 20)),
+    ] {
+        match docx::build(&md, &opts()) {
+            Ok(b) => assert!(b.bytes.len() <= MAX_OUTPUT_BYTES),
+            Err(e) => assert!(e.contains("larger than"), "{e}"),
+        }
+    }
+}

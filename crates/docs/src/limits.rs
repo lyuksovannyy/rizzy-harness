@@ -3,6 +3,11 @@
 
 /// The Markdown of one `doc_create`, in bytes.
 pub const MAX_MARKDOWN_BYTES: usize = 1 << 20;
+/// Characters in the Markdown that start or end inline markup (`[ ] * _ ~ `
+/// and `<`, `>`, `!`): the parser makes a node for each before the first one is
+/// used, so its memory grows with their number (about 50 bytes each, a
+/// million of them 55 MiB). Prose has a few thousand in a megabyte.
+pub const MAX_INLINE_MARKERS: usize = 150_000;
 /// Paragraphs of one document (code lines, list items and headings count;
 /// table cells have their own count).
 pub const MAX_PARAGRAPHS: usize = 20_000;
@@ -48,5 +53,12 @@ pub const MAX_OUTPUT_BYTES: usize = 10 << 20;
 /// `harness-attached` cuts a part at four million XML events, and a part
 /// this size is already past it.
 pub const MAX_PART_BYTES: usize = 24 << 20;
+/// The document part (`word/document.xml`) while it is built, in bytes: all
+/// of it counted, the finished body, the paragraph being written and each
+/// table cell, before anything is copied. A part past it is refused, so one
+/// build holds a few times this and not an amount that grows with what the
+/// Markdown can multiply into (a tab is thirty bytes of XML, and ninety in
+/// bold italic struck text).
+pub const MAX_DOC_PART_BYTES: usize = 16 << 20;
 /// Characters of a file name, without its extension.
 pub const MAX_NAME_CHARS: usize = 100;

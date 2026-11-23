@@ -109,7 +109,11 @@ struct Table {
 }
 
 struct Gen {
+    /// The document part, written in place: its start, then every block.
     body: String,
+    /// Bytes held: the body, the open paragraph's runs and each table
+    /// cell's, and a count of what each block adds around them.
+    used: usize,
     /// Link targets: relationship `rId{3 + index}` (1 and 2 are the styles
     /// and the numbering).
     rels: Vec<String>,
@@ -156,37 +160,44 @@ fn run_props(f: Fmt) -> String {
 }
 
 /// Runs for `s`: tabs and line breaks become their own elements, every
-/// other character is text.
-fn runs(s: &str, f: Fmt) -> String {
+/// other character is text. `None` when they would pass `max` bytes: it
+/// stops there, so the amount built is bounded by `max` and not by what the
+/// text multiplies into.
+fn runs(s: &str, f: Fmt, max: usize) -> Option<String> {
     let props = run_props(f);
     let mut out = String::new();
     let mut buf = String::new();
     let flush = |buf: &mut String, out: &mut String| {
         if !buf.is_empty() {
-            out.push_str(&format!(
-                "<w:r>{props}<w:t xml:space=\"preserve\">{}</w:t></w:r>",
-                xml::text(buf)
-            ));
+            out.push_str("<w:r>");
+            out.push_str(&props);
+            out.push_str("<w:t xml:space=\"preserve\">");
+            out.push_str(&xml::text(buf));
+            out.push_str("</w:t></w:r>");
             buf.clear();
         }
     };
     for c in xml::clean(s).chars() {
         match c {
-            '\t' => {
+            '\t' | '\n' => {
                 flush(&mut buf, &mut out);
-                out.push_str(&format!("<w:r>{props}<w:tab/></w:r>"));
+                out.push_str("<w:r>");
+                out.push_str(&props);
+                out.push_str(if c == '\t' {
+                    "<w:tab/></w:r>"
+                } else {
+                    "<w:br/></w:r>"
+                });
             }
-            '\n' | '\r' => {
-                flush(&mut buf, &mut out);
-                if c == '\n' {
-                    out.push_str(&format!("<w:r>{props}<w:br/></w:r>"));
-                }
-            }
+            '\r' => flush(&mut buf, &mut out),
             c => buf.push(c),
+        }
+        if out.len() + buf.len() > max {
+            return None;
         }
     }
     flush(&mut buf, &mut out);
-    out
+    (out.len() <= max).then_some(out)
 }
 
 fn ppr(p: &Par) -> String {
@@ -213,9 +224,10 @@ fn ppr(p: &Par) -> String {
 }
 
 impl Gen {
-    fn new(content_width: u32) -> Self {
+    fn new(content_width: u32, start: String) -> Self {
         Self {
-            body: String::new(),
+            used: start.len(),
+            body: start,
             rels: vec![],
             content_width,
             in_html: false,
@@ -234,6 +246,23 @@ impl Gen {
             cells: 0,
             err: None,
         }
+    }
+
+    /// Count `n` more bytes held; false (and the build fails) past the cap.
+    fn spend(&mut self, n: usize) -> bool {
+        self.used = self.used.saturating_add(n);
+        if self.used > MAX_DOC_PART_BYTES {
+            self.fail(&format!(
+                "the document would be larger than {} MiB as a Word file; make it shorter or split it",
+                MAX_DOC_PART_BYTES >> 20
+            ));
+            return false;
+        }
+        true
+    }
+
+    fn room(&self) -> usize {
+        MAX_DOC_PART_BYTES.saturating_sub(self.used)
     }
 
     fn fail(&mut self, e: &str) {
@@ -298,6 +327,9 @@ impl Gen {
     }
 
     fn push_inline(&mut self, xml_runs: String) {
+        if !self.spend(xml_runs.len()) {
+            return;
+        }
         if let Some(t) = self.table.as_mut() {
             if let Some(c) = t.rows.last_mut().and_then(|r| r.last_mut()) {
                 c.runs.push_str(&xml_runs);
@@ -317,8 +349,13 @@ impl Gen {
         {
             c.chars += s.chars().count();
         }
-        let r = runs(s, f);
-        self.push_inline(r);
+        // `push_inline` counts what is added; the room is what is left.
+        match runs(s, f, self.room()) {
+            Some(r) => self.push_inline(r),
+            None => {
+                self.spend(usize::MAX / 2);
+            }
+        }
     }
 
     /// Finish the open paragraph.
@@ -339,9 +376,16 @@ impl Gen {
             ));
             return;
         }
+        let head = ppr(p);
+        // The runs were counted when they were made; this is what wraps them.
+        if !self.spend(head.len() + 16) {
+            return;
+        }
         self.report.paragraphs += 1;
-        self.body
-            .push_str(&format!("<w:p>{}{}</w:p>", ppr(p), p.runs));
+        self.body.push_str("<w:p>");
+        self.body.push_str(&head);
+        self.body.push_str(&p.runs);
+        self.body.push_str("</w:p>");
     }
 
     fn start(&mut self, tag: Tag<'_>) {
@@ -418,6 +462,8 @@ impl Gen {
             }
             Tag::TableCell => {
                 self.cells += 1;
+                // The cell's own markup (`w:tc`, its properties, a paragraph).
+                self.spend(220);
                 if self.cells > MAX_TABLE_CELLS {
                     self.fail(&format!(
                         "the tables have more than {MAX_TABLE_CELLS} cells in all"
@@ -507,7 +553,17 @@ impl Gen {
                             num: None,
                             ind: None,
                             jc: None,
-                            runs: runs(line.trim_end_matches('\r'), Fmt::default()),
+                            runs: match runs(
+                                line.trim_end_matches('\r'),
+                                Fmt::default(),
+                                self.room(),
+                            ) {
+                                Some(r) if self.spend(r.len()) => r,
+                                _ => {
+                                    self.spend(usize::MAX / 2);
+                                    break;
+                                }
+                            },
                             from_item: false,
                         };
                         self.emit_par(&p);
@@ -744,8 +800,23 @@ pub fn build(markdown: &str, o: &DocOptions) -> Result<Built> {
     if markdown.trim().is_empty() {
         return Err("the document is empty: give its text as Markdown".into());
     }
+    let markers = markdown
+        .bytes()
+        .filter(|b| {
+            matches!(
+                b,
+                b'[' | b']' | b'*' | b'_' | b'~' | b'`' | b'<' | b'>' | b'!'
+            )
+        })
+        .count();
+    if markers > MAX_INLINE_MARKERS {
+        return Err(format!(
+            "the Markdown has more than {MAX_INLINE_MARKERS} characters of inline markup ([ ] * _ ~ ` < > !); write it as plain text or split it"
+        ));
+    }
     let (pw, ph, content) = page_dims(o);
-    let mut g = Gen::new(content);
+    let start = format!("{DECL}<w:document xmlns:w=\"{W}\" xmlns:r=\"{R}\"><w:body>");
+    let mut g = Gen::new(content, start);
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
     for ev in Parser::new_ext(markdown, opts) {
         match ev {
@@ -775,9 +846,11 @@ pub fn build(markdown: &str, o: &DocOptions) -> Result<Built> {
                         "the document has more than {MAX_PARAGRAPHS} paragraphs"
                     ));
                 } else {
-                    g.report.paragraphs += 1;
-                    g.body
-                        .push_str("<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>");
+                    if g.spend(60) {
+                        g.report.paragraphs += 1;
+                        g.body
+                            .push_str("<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>");
+                    }
                 }
             }
             _ => {}
@@ -803,11 +876,9 @@ pub fn build(markdown: &str, o: &DocOptions) -> Result<Built> {
         .map(|t| xml::clean(&harness_core::text::clean_line(t, MAX_TITLE_CHARS)))
         .filter(|t| !t.is_empty());
 
-    let mut doc = String::from(DECL);
-    doc.push_str(&format!(
-        "<w:document xmlns:w=\"{W}\" xmlns:r=\"{R}\"><w:body>{}",
-        g.body
-    ));
+    // The part was started in place and is finished in place: no second
+    // copy of the whole body.
+    let mut doc = std::mem::take(&mut g.body);
     doc.push_str(&format!(
         "<w:sectPr><w:pgSz w:w=\"{pw}\" w:h=\"{ph}\"{}/>\
          <w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr></w:body></w:document>",
