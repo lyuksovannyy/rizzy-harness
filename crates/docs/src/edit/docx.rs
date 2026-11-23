@@ -201,10 +201,10 @@ pub fn index(part: &[u8]) -> Result<Index> {
                     s.skip_to_end(t.depth)?
                 };
                 if paras.len() >= MAX_EDIT_PARAS {
-                    return Err("the document has too many paragraphs to be edited".into());
+                    return Err(super::E_PARAS.into());
                 }
                 if end - t.start > MAX_EDIT_PARA_BYTES {
-                    return Err("a paragraph of the document is too large to be edited".into());
+                    return Err(super::E_PARA_BYTES.into());
                 }
                 let ps = para::scan(&part[t.start..end], s.prefix(), NS_W, field_depth.max(0))?;
                 let field_in = field_depth.max(0);
@@ -212,7 +212,7 @@ pub fn index(part: &[u8]) -> Result<Index> {
                 let text = ps.text();
                 text_total += text.len();
                 if text_total > MAX_EDIT_PART_BYTES {
-                    return Err("the document's text is too large to be edited".into());
+                    return Err(super::E_TEXT.into());
                 }
                 let tag = match parent {
                     Some(C::Body) => {

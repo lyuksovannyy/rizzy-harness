@@ -19,7 +19,6 @@ use super::para::{self, OBJ};
 use super::pkg::Source;
 use super::scan::NS_W;
 use super::xlsx::{self, Val};
-use crate::Result;
 use crate::limits::*;
 
 /// A stretch of text with one direct formatting.
@@ -94,33 +93,70 @@ pub enum Preview {
     Sheet {
         /// The visible sheets.
         sheets: Vec<String>,
-        /// The one shown.
-        sheet: String,
+        /// The place of the one shown among `sheets`.
+        at: u32,
         rows: Vec<Row>,
         more: bool,
         notes: Vec<String>,
     },
 }
 
-/// The preview of a Word or Excel file; `Ok(None)` when it is neither (not a
-/// zip, or a package without a document or a workbook). A file of either kind
-/// that cannot be read (protected, too large, a DOCTYPE) is an `Err` with one
-/// sentence.
-pub fn preview(file: &[u8], sheet: Option<&str>) -> Result<Option<Preview>> {
-    let src = match Source::open(file) {
-        Ok(s) => s,
-        // Not a zip at all is not an office file; a zip this reader refuses
-        // to keep faithfully is a refusal.
-        Err(e) if e.starts_with("this is not a zip file") => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    if src.has("word/document.xml") {
-        Ok(Some(doc(&src)?))
-    } else if src.has(xlsx::WORKBOOK) {
-        Ok(Some(sheet_of(&src, sheet)?))
-    } else {
-        Ok(None)
+/// Why a file has no preview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Why {
+    /// Not a Word or Excel file.
+    NotOffice,
+    /// Protected with a password (an encrypted container).
+    Protected,
+    /// Past a limit of the reader (a part, the paragraphs, the rows).
+    TooLarge,
+    /// Cut short, protected or signed in a way the reader refuses, or
+    /// malformed.
+    Damaged,
+    /// A workbook with no sheet at that place (or none visible).
+    NoSheet,
+}
+
+/// The preview of a Word or Excel file, or why there is none. `sheet` is the
+/// place of the sheet among the visible ones (a workbook's names are text of
+/// the file and cannot be sent back reliably).
+pub fn preview(file: &[u8], sheet: Option<u32>) -> std::result::Result<Preview, Why> {
+    // An encrypted Office file is an OLE container (`D0 CF 11 E0`), not a zip.
+    if file.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
+        return Err(Why::Protected);
     }
+    if !file.starts_with(b"PK") {
+        return Err(Why::NotOffice);
+    }
+    let src = Source::open(file).map_err(|e| why_of(&e))?;
+    if src.has("word/document.xml") {
+        doc(&src)
+    } else if src.has(xlsx::WORKBOOK) {
+        sheet_of(&src, sheet)
+    } else {
+        Err(Why::NotOffice)
+    }
+}
+
+/// A refusal of the reader as a kind: a limit, or damage.
+fn why_of(e: &str) -> Why {
+    if crate::edit::LIMIT_REFUSALS.contains(&e) {
+        Why::TooLarge
+    } else {
+        Why::Damaged
+    }
+}
+
+/// A part, unpacked: past the ceiling is too large, anything else damage.
+fn read(src: &Source<'_>, name: &str) -> std::result::Result<Vec<u8>, Why> {
+    if src
+        .part_size(name)
+        .is_some_and(|n| n > MAX_EDIT_PART_BYTES as u64)
+    {
+        return Err(Why::TooLarge);
+    }
+    src.read(name, MAX_EDIT_PART_BYTES).map_err(|e| why_of(&e))
 }
 
 /// What has been put in a reply so far, against [`MAX_PREVIEW_BYTES`].
@@ -195,10 +231,10 @@ struct Table {
     open: Option<(usize, usize)>,
 }
 
-fn doc(src: &Source<'_>) -> Result<Preview> {
-    let part = src.read("word/document.xml", MAX_EDIT_PART_BYTES)?;
-    let idx = docx::index(&part)?;
-    let st = docx::styles(src)?;
+fn doc(src: &Source<'_>) -> std::result::Result<Preview, Why> {
+    let part = read(src, "word/document.xml")?;
+    let idx = docx::index(&part).map_err(|e| why_of(&e))?;
+    let st = docx::styles(src).map_err(|e| why_of(&e))?;
     let mut blocks: Vec<Block> = vec![];
     let mut more = false;
     let mut budget = Budget::default();
@@ -277,7 +313,8 @@ fn doc(src: &Source<'_>) -> Result<Preview> {
             break;
         }
         // The paragraph again, for its runs: the same reader as the index.
-        let ps = para::scan(&part[p.start..p.end], &idx.prefix, NS_W, p.field_in)?;
+        let ps = para::scan(&part[p.start..p.end], &idx.prefix, NS_W, p.field_in)
+            .map_err(|e| why_of(&e))?;
         let mut left = MAX_PREVIEW_PARA_CHARS;
         let mut runs: Vec<Run> = vec![];
         for sp in ps.spans() {
@@ -330,37 +367,34 @@ fn doc(src: &Source<'_>) -> Result<Preview> {
     })
 }
 
-fn sheet_of(src: &Source<'_>, sheet: Option<&str>) -> Result<Preview> {
-    let wb_part = src.read(xlsx::WORKBOOK, MAX_EDIT_PART_BYTES)?;
-    let wb = xlsx::read_wb(src, &wb_part)?;
-    let sh = xlsx::sheet_ref(&wb, sheet)?;
-    let part = src.read(&sh.path, MAX_EDIT_PART_BYTES)?;
-    let ix = xlsx::index(&part)?;
-    let sst = xlsx::shared_strings(src)?;
-    let dates = xlsx::date_styles(src)?;
+fn sheet_of(src: &Source<'_>, sheet: Option<u32>) -> std::result::Result<Preview, Why> {
+    let wb_part = read(src, xlsx::WORKBOOK)?;
+    let wb = xlsx::read_wb(src, &wb_part).map_err(|e| why_of(&e))?;
+    let visible: Vec<&xlsx::SheetRef> = wb.sheets.iter().filter(|s| s.state == "visible").collect();
+    let at = sheet.unwrap_or(0);
+    let sh = visible.get(at as usize).ok_or(Why::NoSheet)?;
+    let part = read(src, &sh.path)?;
+    let ix = xlsx::index(&part).map_err(|e| why_of(&e))?;
+    let sst = xlsx::shared_strings(src).map_err(|e| why_of(&e))?;
+    let dates = xlsx::date_styles(src).map_err(|e| why_of(&e))?;
     let mut more = false;
-    let sheets: Vec<String> = wb
-        .sheets
+    let sheets: Vec<String> = visible
         .iter()
-        .filter(|s| s.state == "visible")
         .take(MAX_PREVIEW_SHEETS)
         .map(|s| harness_core::text::clean_line(&s.name, MAX_SHEET_NAME * 2))
         .collect();
-    more |= wb.sheets.iter().filter(|s| s.state == "visible").count() > MAX_PREVIEW_SHEETS;
+    more |= visible.len() > MAX_PREVIEW_SHEETS;
     let mut budget = Budget::default();
     let mut rows: Vec<Row> = vec![];
     'rows: for rr in &ix.rows {
         if rr.hidden {
             continue;
         }
-        let rs = xlsx::scan_row(&part[rr.start..rr.end], &ix.prefix, &sst)?;
+        let rs =
+            xlsx::scan_row(&part[rr.start..rr.end], &ix.prefix, &sst).map_err(|e| why_of(&e))?;
         let mut cells: Vec<Cell> = vec![];
         for c in &rs.cells {
-            if ix
-                .hidden_cols
-                .iter()
-                .any(|(lo, hi)| c.col >= *lo && c.col <= *hi)
-            {
+            if matches!(c.val, Val::Empty) || ix.col_hidden(c.col) {
                 continue;
             }
             let (v, f) = match &c.val {
@@ -427,7 +461,7 @@ fn sheet_of(src: &Source<'_>, sheet: Option<&str>) -> Result<Preview> {
     notes.push("Formulas are shown as written; their values are not calculated.".to_string());
     Ok(Preview::Sheet {
         sheets,
-        sheet: harness_core::text::clean_line(&sh.name, MAX_SHEET_NAME * 2),
+        at,
         rows,
         more,
         notes,

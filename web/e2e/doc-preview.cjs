@@ -116,7 +116,21 @@ const SHEET = JSON.stringify([{ tool: 'sheet_create', input: { path: 'budget', s
     await p.locator('.doc-preview .pv-tabs button:has-text("Notes")').click();
     await p.waitForFunction(() => document.querySelector('.doc-preview .pv-body')?.textContent.includes('second sheet'));
     await p.screenshot({ path: `${S}/docpreview-2-sheet.png` });
+    check((await p.locator('.doc-preview .pv-tabs button[aria-pressed="true"]').textContent()) === 'Notes', 'the second tab is the active one');
     log('workbook preview ok');
+
+    // A failed switch: the error in place of the grid, the chosen tab marked.
+    await p.locator('.doc-preview .pv-tabs button:has-text("Budget")').click();
+    await p.waitForSelector('.doc-preview td:has-text("Coffee beans")');
+    await p.route('**/preview?sheet=1', (r) => r.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'the server is busy reading other files; try again in a minute' }) }));
+    await p.locator('.doc-preview .pv-tabs button:has-text("Notes")').click();
+    await p.waitForSelector('.doc-preview [role=alert]');
+    check((await p.locator('.doc-preview table').count()) === 0, 'no old grid under the error');
+    check((await p.locator('.doc-preview .pv-tabs button[aria-pressed="true"]').textContent()) === 'Notes', 'the chosen tab is marked');
+    await p.screenshot({ path: `${S}/docpreview-2b-error.png` });
+    await p.unroute('**/preview?sheet=1');
+    await p.click('.doc-preview [role=alert] button:has-text("Try again")');
+    await p.waitForSelector('.doc-preview td:has-text("second sheet")');
     await p.click('button[aria-label="Close the preview"]');
     await p.waitForSelector('aside.doc-preview', { state: 'detached' });
 

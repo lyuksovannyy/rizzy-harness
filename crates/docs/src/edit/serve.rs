@@ -32,8 +32,9 @@ pub enum Request {
     /// The file as data for the web page (`preview::preview`): no tags, not
     /// bounded by the model's view.
     Preview {
+        /// The place of the sheet among the visible ones.
         #[serde(default)]
-        sheet: Option<String>,
+        sheet: Option<u32>,
     },
     DocEdit {
         edits: Vec<Value>,
@@ -66,6 +67,9 @@ pub struct Reply {
     /// file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<super::preview::Preview>,
+    /// Why there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<super::preview::Why>,
 }
 
 /// A request and the file, as the helper reads them.
@@ -169,10 +173,14 @@ pub fn serve(input: &[u8]) -> Result<Vec<u8>> {
             ))
         }
         Request::Preview { sheet } => {
-            let preview = super::preview::preview(file, sheet.as_deref())?;
+            let (preview, why) = match super::preview::preview(file, sheet) {
+                Ok(p) => (Some(p), None),
+                Err(w) => (None, Some(w)),
+            };
             Ok(reply(
                 &Reply {
                     preview,
+                    why,
                     ..Default::default()
                 },
                 None,

@@ -106,7 +106,7 @@ impl<'a> Scan<'a> {
     pub fn next(&mut self) -> Result<Option<Tok<'a>>> {
         self.events += 1;
         if self.events > self.max_events {
-            return Err("a part of the file has too many elements to be edited".into());
+            return Err(super::E_EVENTS.into());
         }
         let start = self.rd.buffer_position() as usize;
         let ev = self.rd.read_event().map_err(|_| syntax())?;

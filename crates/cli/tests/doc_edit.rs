@@ -373,12 +373,16 @@ async fn the_helper_previews_a_document_a_workbook_and_nothing_else() {
     );
     let out = call(&r, &req, &xlsx_bytes()).await.unwrap().unwrap();
     let (reply, _) = parse_reply(&out).unwrap();
-    let Some(Preview::Sheet { sheet, rows, .. }) = reply.preview else {
+    let Some(Preview::Sheet {
+        sheets, at, rows, ..
+    }) = reply.preview
+    else {
         panic!("{reply:?}")
     };
-    assert_eq!(sheet, "Data");
+    assert_eq!(sheets[at as usize], "Data");
     assert_eq!(rows[0].c[0].v, "Name");
     // A PDF's bytes: an answer, no preview.
     let out = call(&r, &req, b"%PDF-1.4\n").await.unwrap().unwrap();
-    assert!(parse_reply(&out).unwrap().0.preview.is_none());
+    let r = parse_reply(&out).unwrap().0;
+    assert!(r.preview.is_none() && r.why == Some(harness_docs::edit::preview::Why::NotOffice));
 }

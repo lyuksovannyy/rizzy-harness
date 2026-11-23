@@ -268,7 +268,7 @@ pub(super) fn read_wb(src: &Source<'_>, part: &[u8]) -> Result<Wb> {
             _ => {}
         }
         if wb.sheets.len() > 500 {
-            return Err("the workbook has too many sheets to be edited".into());
+            return Err(super::E_SHEETS.into());
         }
     }
     if wb.sheets.is_empty() {
@@ -373,7 +373,7 @@ pub(super) fn shared_strings(src: &Source<'_>) -> Result<Vec<String>> {
                     if let Some(c) = cur.take() {
                         total += c.len();
                         if total > MAX_EDIT_PART_BYTES {
-                            return Err("the workbook's strings are too large to be read".into());
+                            return Err(super::E_STRINGS.into());
                         }
                         out.push(c);
                     }
@@ -424,6 +424,15 @@ pub struct SheetIdx {
     pub hidden_cols: Vec<(u32, u32)>,
     pub formulas: usize,
     pub prefix: String,
+}
+
+impl SheetIdx {
+    /// Is column `col` (1-based) in a hidden range? The ranges are sorted
+    /// and apart (see [`index`]), so this is a binary search.
+    pub fn col_hidden(&self, col: u32) -> bool {
+        let i = self.hidden_cols.partition_point(|(_, hi)| *hi < col);
+        self.hidden_cols.get(i).is_some_and(|(lo, _)| *lo <= col)
+    }
 }
 
 fn truthy(v: Option<String>) -> bool {
@@ -488,7 +497,7 @@ pub fn index(part: &[u8]) -> Result<SheetIdx> {
                             }
                             last_row = r;
                             if ix.rows.len() >= MAX_INDEXED_ROWS {
-                                return Err("the sheet has too many rows to be edited".into());
+                                return Err(super::E_ROWS.into());
                             }
                             let hidden = truthy(attr(re, "hidden")?);
                             let mut end = c.end;
@@ -652,6 +661,18 @@ pub fn index(part: &[u8]) -> Result<SheetIdx> {
     if !saw_root || (ix.sd.3 == 0 && !ix.sd_empty) {
         return Err("this worksheet has no cell data to edit".into());
     }
+    // Sorted and apart: a sheet may name tens of thousands of ranges, and
+    // every cell asks.
+    ix.hidden_cols.retain(|(lo, hi)| lo <= hi);
+    ix.hidden_cols.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ix.hidden_cols.len());
+    for (lo, hi) in ix.hidden_cols.drain(..) {
+        match merged.last_mut() {
+            Some(l) if lo <= l.1.saturating_add(1) => l.1 = l.1.max(hi),
+            _ => merged.push((lo, hi)),
+        }
+    }
+    ix.hidden_cols = merged;
     Ok(ix)
 }
 
@@ -1184,11 +1205,7 @@ pub fn view(bytes: &[u8], sheet: Option<&str>, from: usize, limit: usize) -> Res
                 skipped += 1;
                 continue;
             }
-            if ix
-                .hidden_cols
-                .iter()
-                .any(|(lo, hi)| c.col >= *lo && c.col <= *hi)
-            {
+            if ix.col_hidden(c.col) {
                 continue;
             }
             let date =
@@ -1475,12 +1492,7 @@ impl Ctx<'_> {
                 "row {row} is hidden; hidden content cannot be addressed"
             ));
         }
-        if self
-            .ix
-            .hidden_cols
-            .iter()
-            .any(|(lo, hi)| col >= *lo && col <= *hi)
-        {
+        if self.ix.col_hidden(col) {
             return Err(format!(
                 "{a} is in a hidden column; hidden content cannot be addressed"
             ));

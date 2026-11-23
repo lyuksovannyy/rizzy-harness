@@ -265,6 +265,12 @@ impl PdfReader {
         let cap = harness_docs::limits::MAX_OUTPUT_BYTES
             + harness_docs::edit::serve::MAX_HEADER_BYTES
             + 4096;
+        self.edit_capped(input, cap).await
+    }
+
+    /// [`Self::edit`] for a request whose answer is small (a preview): more
+    /// output than `cap` is a failed helper, not something read.
+    pub async fn edit_capped(&self, input: Vec<u8>, cap: usize) -> Result<Vec<u8>, DocError> {
         let (code, out) = self.run_capped(&self.edit_args, input, cap).await?;
         match code {
             Some(0) => Ok(out),

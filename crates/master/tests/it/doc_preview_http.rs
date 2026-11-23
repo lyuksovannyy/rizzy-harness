@@ -13,7 +13,7 @@ use crate::common::{Login as _, SameOrigin as _};
 use std::time::{Duration, Instant};
 
 use harness_core::SessionId;
-use harness_docs::edit::preview::{Block, Preview, Run};
+use harness_docs::edit::preview::{Block, Preview, Run, Why};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
@@ -52,8 +52,13 @@ fn one_paragraph(text: &str) -> Preview {
 
 /// A reply of the stand-in helper with a preview.
 fn preview_reply(p: Option<Preview>) -> Vec<u8> {
+    why_reply(p, None)
+}
+
+fn why_reply(p: Option<Preview>, why: Option<Why>) -> Vec<u8> {
     let r = harness_docs::edit::serve::Reply {
         preview: p,
+        why,
         ..Default::default()
     };
     let head = serde_json::to_vec(&r).unwrap();
@@ -131,13 +136,14 @@ async fn the_owner_previews_a_made_file_and_an_attached_one() {
         request_of(&record),
         json!({"tool": "preview", "sheet": null})
     );
-    // A sheet name goes to the helper as asked.
-    let r = get(&t, &alex, sid, &made.file_id, "?sheet=Data").await;
+    // The place of a sheet goes to the helper as asked; nothing else does.
+    let r = get(&t, &alex, sid, &made.file_id, "?sheet=2").await;
     assert_eq!(r.status(), StatusCode::OK);
-    assert_eq!(
-        request_of(&record),
-        json!({"tool": "preview", "sheet": "Data"})
-    );
+    assert_eq!(request_of(&record), json!({"tool": "preview", "sheet": 2}));
+    for bad in ["Data", "-1", "1.5", "99999999999", ""] {
+        let r = get(&t, &alex, sid, &made.file_id, &format!("?sheet={bad}")).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
     // An attached file: held before the log names it, previewed after.
     assert_eq!(
         get(&t, &alex, sid, &id, "").await.status(),
@@ -236,7 +242,16 @@ async fn a_planted_row_a_folder_chat_an_incognito_chat_and_a_sub_agent_are_not_p
     let cb = t.chat.ask_docs(b1, doc("his", "# Bob's")).await.unwrap();
     name_in_log(&t, b1, &cb).await;
     let (bblob, bsha) = blob_of(&t, b1, &cb.file_id);
-    plant(&t, top, Some(owner_of(&t, b1)), &bblob, &bsha, "p-bob").await;
+    // With the blob's real size, so that only the owner check refuses it.
+    plant_named(
+        &t,
+        top,
+        &owner_of(&t, b1),
+        (&bblob, &bsha, cb.bytes),
+        "p-bob",
+        "planted.docx",
+    )
+    .await;
     assert_eq!(
         get(&t, &alex, top, "p-bob", "").await.status(),
         StatusCode::NOT_FOUND
@@ -298,7 +313,7 @@ async fn what_is_not_a_document_is_415_and_a_failing_helper_does_not_leak() {
     let says = |body: &str| std::fs::write(&script, body).unwrap();
     let record = t.dir.path().join("helper-stdin");
     let reply_none = t.dir.path().join("reply-none");
-    std::fs::write(&reply_none, preview_reply(None)).unwrap();
+    std::fs::write(&reply_none, why_reply(None, Some(Why::NotOffice))).unwrap();
     says(&format!(
         "cat >'{}'; cat '{}'",
         record.display(),
@@ -391,16 +406,6 @@ async fn a_reply_past_the_limit_is_not_forwarded() {
     );
     let r = get(&t, &alex, sid, &made.file_id, "").await;
     assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
-    // A sheet name that is not a sheet name is refused before the helper.
-    let r = get(
-        &t,
-        &alex,
-        sid,
-        &made.file_id,
-        &format!("?sheet={}", "s".repeat(500)),
-    )
-    .await;
-    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
 }
 
 /// Many previews at once from one account: one helper at a time; the
@@ -454,4 +459,109 @@ async fn one_account_runs_one_preview_at_a_time() {
     assert_eq!(first.await.unwrap(), StatusCode::OK);
     assert!(started.elapsed() >= Duration::from_secs(1));
     let _ = req(&t, Method::GET, "/api/sessions", None, &alex).await;
+}
+
+/// A reply past what a preview can be is a failure of the helper, not
+/// something read: the master reads only a preview-sized answer.
+#[tokio::test]
+async fn the_helper_may_answer_only_a_preview_sized_reply() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let sid = open(&t, &alex, "t1", json!({})).await;
+    let made = t.chat.ask_docs(sid, doc("plan", "# Plan")).await.unwrap();
+    name_in_log(&t, sid, &made).await;
+    helper_says(
+        &t,
+        &preview_reply(Some(one_paragraph(&"x".repeat(1024 * 1024)))),
+    );
+    let r = get(&t, &alex, sid, &made.file_id, "").await;
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// Every reason has its own sentence: not a document (415), protected with a
+/// password, too large (download it), damaged, no such sheet, empty.
+#[tokio::test]
+async fn each_reason_has_its_own_sentence() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let sid = open(&t, &alex, "t1", json!({})).await;
+    let made = t.chat.ask_docs(sid, doc("plan", "# Plan")).await.unwrap();
+    name_in_log(&t, sid, &made).await;
+    let (blob, sha) = blob_of(&t, sid, &made.file_id);
+    plant_named(
+        &t,
+        sid,
+        &owner_of(&t, sid),
+        (&blob, &sha, 0),
+        "empty",
+        "empty.docx",
+    )
+    .await;
+    let script = t.dir.path().join("helper.sh");
+    let reply = t.dir.path().join("reply");
+    let says = |why: Option<Why>| {
+        std::fs::write(&reply, why_reply(None, why)).unwrap();
+        std::fs::write(
+            &script,
+            format!("cat >/dev/null; cat '{}'", reply.display()),
+        )
+        .unwrap();
+    };
+    says(None);
+    t.master
+        .set_pdf_reader(harness_master::pdf::PdfReader::with_command(
+            "/bin/sh".into(),
+            vec![script.clone().into_os_string()],
+        ));
+    let mut seen = vec![];
+    for (why, code, word) in [
+        (
+            Why::NotOffice,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Word or Excel",
+        ),
+        (Why::Protected, StatusCode::UNPROCESSABLE_ENTITY, "password"),
+        (
+            Why::TooLarge,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "too large to preview",
+        ),
+        (Why::Damaged, StatusCode::UNPROCESSABLE_ENTITY, "damaged"),
+        (Why::NoSheet, StatusCode::BAD_REQUEST, "no such sheet"),
+    ] {
+        says(Some(why));
+        let (st, v) = body(get(&t, &alex, sid, &made.file_id, "").await).await;
+        let e = v["error"].as_str().unwrap_or_default().to_string();
+        assert_eq!(st, code, "{why:?}: {e}");
+        assert!(e.contains(word), "{why:?}: {e}");
+        assert!(!seen.contains(&e), "one sentence each: {e}");
+        seen.push(e);
+    }
+    // An empty file is not "too large".
+    let (st, v) = body(get(&t, &alex, sid, "empty", "").await).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    let e = v["error"].as_str().unwrap();
+    assert!(e.contains("empty") && !e.contains("large"), "{e}");
+}
+
+/// The server's API token reads any chat, as it can download from it (T10);
+/// it holds its own helper place, not the owner's.
+#[tokio::test]
+async fn the_api_token_previews_as_it_downloads() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let sid = open(&t, &alex, "t1", json!({})).await;
+    let made = t.chat.ask_docs(sid, doc("plan", "# Plan")).await.unwrap();
+    name_in_log(&t, sid, &made).await;
+    helper_says(&t, &preview_reply(Some(one_paragraph("hi"))));
+    let r = reqwest::Client::new()
+        .get(format!(
+            "{}/api/sessions/{sid}/files/{}/preview",
+            t.base, made.file_id
+        ))
+        .bearer_auth("tok")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
 }

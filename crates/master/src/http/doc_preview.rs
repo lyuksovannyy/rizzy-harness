@@ -17,7 +17,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
-use harness_docs::edit::preview::Preview;
+use harness_docs::edit::preview::{Preview, Why};
 use harness_docs::edit::serve::{Request, frame_request, parse_reply};
 use serde::{Deserialize, Serialize};
 
@@ -25,12 +25,12 @@ use super::{ApiError, ApiResult, require, visible_session};
 use crate::pdf::DocError;
 use crate::{Master, attached};
 
-/// The longest `sheet` the route passes on, in bytes (a sheet's name is at
-/// most 31 characters; this leaves room for any of them).
-const MAX_SHEET_BYTES: usize = 200;
 /// The largest answer the route forwards, in bytes: the helper's own bound
 /// is under 256 KB, so this is a helper that misbehaves.
 const MAX_ANSWER_BYTES: usize = 512 * 1024;
+/// The most the master reads from the helper for a preview: that, a header
+/// and room for the framing. More is a failed helper.
+const MAX_HELPER_BYTES: usize = MAX_ANSWER_BYTES + 128 * 1024;
 
 pub(super) fn routes() -> Router<Master> {
     Router::new().route("/api/sessions/{id}/files/{file_id}/preview", get(preview))
@@ -39,7 +39,7 @@ pub(super) fn routes() -> Router<Master> {
 #[derive(Deserialize)]
 struct PreviewQuery {
     #[serde(default)]
-    sheet: Option<String>,
+    sheet: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -69,10 +69,7 @@ fn sentence(e: DocError) -> ApiError {
             ApiError(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }
         // The helper's own words may hold a name from the file.
-        DocError::Unreadable(_) | DocError::Crashed | DocError::NoText => ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "this file could not be previewed: it is damaged, protected or too large".into(),
-        ),
+        DocError::Unreadable(_) | DocError::Crashed | DocError::NoText => why(Why::Damaged),
     }
 }
 
@@ -96,12 +93,6 @@ async fn preview(
     {
         return Err(unknown());
     }
-    if q.sheet.as_ref().is_some_and(|s| s.len() > MAX_SHEET_BYTES) {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "that is not the name of a sheet".into(),
-        ));
-    }
     let sid = row.session_id.to_string();
     let fid = file_id.clone();
     let file = m
@@ -117,17 +108,22 @@ async fn preview(
     if !office_name(&file.name) {
         return Err(not_office());
     }
-    if file.size == 0 || file.size > attached::MAX_FILE {
+    if file.size == 0 {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this file is empty".into(),
+        ));
+    }
+    if file.size > attached::MAX_FILE {
         return Err(ApiError(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "this file is too large to preview".into(),
+            "this file is too large to preview; download it to open it".into(),
         ));
     }
     let reader = m.pdf_reader().ok_or_else(|| sentence(DocError::NotSetUp))?;
-    let account = row
-        .owner_id
-        .clone()
-        .unwrap_or_else(|| format!("chat:{}", row.session_id));
+    // The caller's place, as attachments take it: the API token has one of
+    // its own, whatever chat it asks about.
+    let account = who.user_id.clone().unwrap_or_else(|| "api-token".into());
     // One helper at a time per account: a second preview waits here, at most
     // the queue bound, then is told to try again.
     let _mine = reader
@@ -136,7 +132,10 @@ async fn preview(
         .map_err(|e| sentence(e.into()))?;
     let bytes = attached::bytes_of(&m, &file).await.map_err(|_| unknown())?;
     let out = reader
-        .edit(frame_request(&Request::Preview { sheet: q.sheet }, &bytes))
+        .edit_capped(
+            frame_request(&Request::Preview { sheet: q.sheet }, &bytes),
+            MAX_HELPER_BYTES,
+        )
         .await
         .map_err(sentence)?;
     drop(bytes);
@@ -146,7 +145,11 @@ async fn preview(
             "the document reader's answer was not understood".into(),
         )
     })?;
-    let preview = reply.preview.ok_or_else(not_office)?;
+    let preview = match (reply.preview, reply.why) {
+        (Some(p), _) => p,
+        (None, Some(w)) => return Err(why(w)),
+        (None, None) => return Err(not_office()),
+    };
     let answer = Answer {
         name: file.name,
         preview,
@@ -165,4 +168,28 @@ fn not_office() -> ApiError {
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
         "this is not a Word or Excel document that can be previewed".into(),
     )
+}
+
+/// What the helper said it could not do, as one sentence of ours each.
+fn why(w: Why) -> ApiError {
+    let (code, text) = match w {
+        Why::NotOffice => return not_office(),
+        Why::Protected => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this file is protected with a password, so it cannot be previewed",
+        ),
+        Why::TooLarge => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this file is too large to preview; download it to open it",
+        ),
+        Why::Damaged => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this file could not be previewed: it is damaged or signed in a way the reader will not keep",
+        ),
+        Why::NoSheet => (
+            StatusCode::BAD_REQUEST,
+            "there is no such sheet in this file",
+        ),
+    };
+    ApiError(code, text.into())
 }

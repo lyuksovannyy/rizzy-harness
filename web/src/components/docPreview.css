@@ -36,9 +36,12 @@
   gap: var(--space-1);
   padding: 6px 12px 0;
 }
+/* The shown sheet: a filled tab, as a primary button is. */
 .pv-tabs button[aria-pressed="true"] {
-  font-weight: var(--w-semibold);
+  background: var(--accent);
+  color: var(--on-accent);
   border-color: var(--accent);
+  font-weight: var(--w-semibold);
 }
 .pv-body {
   overflow: auto;

@@ -91,7 +91,7 @@ const book: PreviewAnswer = {
   preview: {
     kind: "sheet",
     sheets: ["Data", "Totals"],
-    sheet: "Data",
+    at: 0,
     more: false,
     notes: [],
     rows: [
@@ -116,7 +116,7 @@ test("a workbook is a grid with column and row headers, a marked formula, and sh
   const tabs = [...host.querySelectorAll<HTMLButtonElement>(".pv-tabs button")];
   expect(tabs.map((t) => [t.textContent, t.getAttribute("aria-pressed")])).toEqual([["Data", "true"], ["Totals", "false"]]);
   await act(async () => tabs[1]!.click());
-  expect(call).toHaveBeenLastCalledWith("GET", "/api/sessions/s1/files/f2/preview?sheet=Totals", undefined, expect.anything());
+  expect(call).toHaveBeenLastCalledWith("GET", "/api/sessions/s1/files/f2/preview?sheet=1", undefined, expect.anything());
 });
 
 test("nothing from the file becomes HTML, an image, a script or a link", async () => {
@@ -156,7 +156,7 @@ test("nothing from the file becomes HTML, an image, a script or a link", async (
     preview: {
       kind: "sheet",
       sheets: ["S"],
-      sheet: "S",
+      at: 0,
       more: false,
       notes: [],
       rows: [{ n: 1, c: [{ a: "A1", v: "=cmd|' /C calc'!A0" }, { a: "B1", f: '=HYPERLINK("http://evil.example/","x")' }, { a: "javascript:1", v: "bad address" }] }],
@@ -221,4 +221,32 @@ test("a made file's chip has Preview only in a chat that keeps a copy", async ()
   // A chat with a folder: the file is there, no copy to read.
   await act(async () => root.render(<MadeChip sessionId="s1" made={{ ...made, path: "out/plan.docx" }} />));
   expect(host.textContent).not.toContain("Preview");
+});
+
+test("tabs go by place: names that look alike are two tabs, and a failed switch shows the error under the chosen tab, not the old sheet", async () => {
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  const two: PreviewAnswer = {
+    name: "b.xlsx",
+    preview: { kind: "sheet", sheets: ["A B", "A B", "Q1 2025"], at: 0, more: false, notes: [], rows: [{ n: 1, c: [{ a: "A1", v: "first sheet" }] }] },
+  };
+  await show(two, { ...target, fileId: "f9", name: "b.xlsx" });
+  const tabs = () => [...host.querySelectorAll<HTMLButtonElement>(".pv-tabs button")];
+  expect(tabs().map((t) => t.textContent)).toEqual(["A B", "A B", "Q1 2025"]);
+  expect(errors).not.toHaveBeenCalled();
+  // The second of the two: asked for by its place.
+  call.mockImplementation(() => Promise.reject(new Error("the server is busy")));
+  await act(async () => tabs()[1]!.click());
+  await flush();
+  expect(call).toHaveBeenLastCalledWith("GET", "/api/sessions/s1/files/f9/preview?sheet=1", undefined, expect.anything());
+  expect(host.querySelector("[role=alert]")?.textContent).toContain("the server is busy");
+  expect(host.querySelector("table")).toBeNull();
+  expect(host.textContent).not.toContain("first sheet");
+  expect(tabs().map((t) => t.getAttribute("aria-pressed"))).toEqual(["false", "true", "false"]);
+  // Try again asks for the same place.
+  call.mockImplementation(() => Promise.resolve({ ...two, preview: { ...two.preview, at: 1, rows: [{ n: 1, c: [{ a: "A1", v: "second sheet" }] }] } }));
+  await act(async () => host.querySelector<HTMLButtonElement>("[role=alert] button")!.click());
+  await flush();
+  expect(call).toHaveBeenLastCalledWith("GET", "/api/sessions/s1/files/f9/preview?sheet=1", undefined, expect.anything());
+  expect(host.textContent).toContain("second sheet");
+  errors.mockRestore();
 });

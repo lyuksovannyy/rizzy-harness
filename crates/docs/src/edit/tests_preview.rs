@@ -2,7 +2,7 @@
 //! shows, bounded, hostile text left as text.
 
 use super::fixtures::*;
-use super::preview::{Block, Preview, Run, preview};
+use super::preview::{Block, Preview, Run, Why, preview};
 use super::serve::{Request, frame_request, parse_reply, serve};
 use crate::limits::*;
 
@@ -14,7 +14,7 @@ fn doc_of(body: &str) -> Vec<u8> {
 }
 
 fn blocks(b: &[u8]) -> (Vec<Block>, bool, Vec<String>) {
-    match preview(b, None).unwrap().expect("a document") {
+    match preview(b, None).expect("a document") {
         Preview::Doc {
             blocks,
             more,
@@ -27,7 +27,7 @@ fn blocks(b: &[u8]) -> (Vec<Block>, bool, Vec<String>) {
 #[allow(clippy::type_complexity)]
 fn sheet_of(
     b: &[u8],
-    sheet: Option<&str>,
+    sheet: Option<u32>,
 ) -> (
     Vec<String>,
     String,
@@ -35,14 +35,17 @@ fn sheet_of(
     bool,
     Vec<String>,
 ) {
-    match preview(b, sheet).unwrap().expect("a workbook") {
+    match preview(b, sheet).expect("a workbook") {
         Preview::Sheet {
             sheets,
-            sheet,
+            at,
             rows,
             more,
             notes,
-        } => (sheets, sheet, rows, more, notes),
+        } => {
+            let name = sheets[at as usize].clone();
+            (sheets, name, rows, more, notes)
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -250,7 +253,7 @@ fn a_hundred_thousand_paragraphs_give_a_bounded_reply_that_says_more() {
     let body: String = (0..100_000)
         .map(|i| format!("<w:p><w:r><w:t>line {i}</w:t></w:r></w:p>"))
         .collect();
-    let p = preview(&doc_of(&body), None).unwrap().unwrap();
+    let p = preview(&doc_of(&body), None).unwrap();
     let Preview::Doc { blocks, more, .. } = &p else {
         panic!()
     };
@@ -290,7 +293,7 @@ fn big_paragraphs_and_big_tables_are_cut_and_the_worst_case_fits() {
         "<w:p><w:r><w:t>{}</w:t></w:r></w:p>",
         "&quot;".repeat(MAX_PREVIEW_PARA_CHARS)
     );
-    let p = preview(&doc_of(&para.repeat(200)), None).unwrap().unwrap();
+    let p = preview(&doc_of(&para.repeat(200)), None).unwrap();
     assert!(size(&p) < 262_144, "{}", size(&p));
     // A table of 40,000 cells: cut at the cell limit.
     let rows: String = (0..2_000)
@@ -318,20 +321,164 @@ fn big_paragraphs_and_big_tables_are_cut_and_the_worst_case_fits() {
 }
 
 #[test]
-fn what_is_not_an_office_file_is_none() {
-    assert!(preview(b"just text", None).unwrap().is_none());
-    assert!(preview(b"%PDF-1.7\n1 0 obj", None).unwrap().is_none());
-    assert!(preview(b"", None).unwrap().is_none());
+fn what_is_not_a_document_says_which_kind_of_not() {
+    let why = |b: &[u8]| preview(b, None).unwrap_err();
+    assert_eq!(why(b"just text"), Why::NotOffice);
+    assert_eq!(why(b"%PDF-1.7\n1 0 obj"), Why::NotOffice);
+    assert_eq!(why(b""), Why::NotOffice);
     // A zip with neither part.
     let mut w = crate::zip::ZipWriter::new(1 << 20);
     w.add("a.txt", b"x").unwrap();
-    assert!(preview(&w.finish().unwrap(), None).unwrap().is_none());
-    // A document with a DOCTYPE is refused with a sentence, not None.
+    assert_eq!(why(&w.finish().unwrap()), Why::NotOffice);
+    // A password-protected file is an OLE container, not a zip.
+    let mut ole = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    ole.extend_from_slice(&[0; 600]);
+    assert_eq!(why(&ole), Why::Protected);
+    // A zip that is cut short, and a document with a DOCTYPE, are damaged.
+    let good = docx_real();
+    assert_eq!(why(&good[..good.len() / 2]), Why::Damaged);
     let b = docx_with(
         "<?xml version=\"1.0\"?><!DOCTYPE x [<!ENTITY a \"b\">]><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>",
         &[],
     );
-    assert!(preview(&b, None).is_err());
+    assert_eq!(why(&b), Why::Damaged);
+}
+
+#[test]
+fn a_file_past_a_limit_is_too_large_not_damaged() {
+    let why = |b: &[u8]| preview(b, None).unwrap_err();
+    // A part past the 8 MiB ceiling.
+    let filler = "x".repeat(9 << 20);
+    assert_eq!(
+        why(&doc_of(&format!(
+            "<w:p><w:r><w:t>{filler}</w:t></w:r></w:p>"
+        ))),
+        Why::TooLarge
+    );
+    // More paragraphs than a document may have to be read.
+    let body = "<w:p/>".repeat(MAX_EDIT_PARAS + 1);
+    assert_eq!(why(&doc_of(&body)), Why::TooLarge);
+    // A sheet with more rows than are indexed.
+    let rows: String = (1..=300_001u32)
+        .map(|r| format!("<row r=\"{r}\"/>"))
+        .collect();
+    let sheet = format!(
+        "{DECL}<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>{rows}</sheetData></worksheet>"
+    );
+    assert_eq!(why(&xlsx_with(&sheet, "", &[])), Why::TooLarge);
+}
+
+/// A workbook of sheets named as given (`true`: visible), each with `A1` =
+/// its position.
+fn book(names: &[(&str, bool)]) -> Vec<u8> {
+    use crate::zip::ZipWriter;
+    let ns = "xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"";
+    let mut w = ZipWriter::new(8 << 20);
+    let types: String = (1..=names.len())
+        .map(|i| format!("<Override PartName=\"/xl/worksheets/sheet{i}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"))
+        .collect();
+    w.add("[Content_Types].xml", format!("{DECL}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>{types}</Types>").as_bytes()).unwrap();
+    w.add("_rels/.rels", format!("{DECL}<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>").as_bytes()).unwrap();
+    let sheets: String = names
+        .iter()
+        .enumerate()
+        .map(|(i, (n, vis))| {
+            format!(
+                "<sheet name=\"{n}\" sheetId=\"{}\"{} r:id=\"rId{}\"/>",
+                i + 1,
+                if *vis { "" } else { " state=\"hidden\"" },
+                i + 1
+            )
+        })
+        .collect();
+    w.add(
+        "xl/workbook.xml",
+        format!("{DECL}<workbook {ns}><sheets>{sheets}</sheets></workbook>").as_bytes(),
+    )
+    .unwrap();
+    let rels: String = (1..=names.len())
+        .map(|i| format!("<Relationship Id=\"rId{i}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{i}.xml\"/>"))
+        .collect();
+    w.add("xl/_rels/workbook.xml.rels", format!("{DECL}<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{rels}</Relationships>").as_bytes()).unwrap();
+    for i in 1..=names.len() {
+        w.add(&format!("xl/worksheets/sheet{i}.xml"), format!("{DECL}<worksheet {ns}><sheetData><row r=\"1\"><c r=\"A1\"><v>{i}</v></c></row></sheetData></worksheet>").as_bytes()).unwrap();
+    }
+    w.finish().unwrap()
+}
+
+#[test]
+fn a_sheet_is_picked_by_its_place_so_any_name_can_be_opened() {
+    // Names that cleaning changes (a double space, zero-width and joiner
+    // characters) and two that clean to the same text; a hidden sheet is not
+    // counted.
+    let b = book(&[
+        ("First", true),
+        ("Q1  2025", true),
+        ("Hidden", false),
+        ("A\u{200b}B", true),
+        ("A B", true),
+        ("\u{1F469}\u{200D}\u{1F4BB} Team", true),
+    ]);
+    let (sheets, _, _, _, _) = sheet_of(&b, None);
+    assert_eq!(sheets.len(), 5);
+    for (i, want) in ["1", "2", "4", "5", "6"].iter().enumerate() {
+        let (list, name, rows, _, _) = sheet_of(&b, Some(i as u32));
+        assert_eq!(list, sheets);
+        assert_eq!(name, sheets[i]);
+        assert_eq!(rows[0].c[0].v, *want, "place {i}");
+    }
+    // Past the last visible sheet, and in an all-hidden workbook.
+    assert_eq!(preview(&b, Some(5)).unwrap_err(), Why::NoSheet);
+    assert_eq!(
+        preview(&book(&[("H", false)]), None).unwrap_err(),
+        Why::NoSheet
+    );
+}
+
+#[test]
+fn tens_of_thousands_of_hidden_column_ranges_are_merged_and_answered_right() {
+    // 40,000 one-column ranges, every other column from 2: 2, 4, ... 80,000,
+    // given out of order, and 10,000 that touch and overlap.
+    let mut cols = String::new();
+    for k in (1..=40_000u32).rev() {
+        cols.push_str(&format!(
+            "<col min=\"{0}\" max=\"{0}\" hidden=\"1\"/>",
+            k * 2
+        ));
+    }
+    for k in 0..10_000u32 {
+        cols.push_str(&format!(
+            "<col min=\"{}\" max=\"{}\" hidden=\"1\"/>",
+            100_001 + k,
+            100_003 + k
+        ));
+    }
+    let sheet = format!(
+        "{DECL}<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><cols>{cols}</cols><sheetData><row r=\"1\"><c r=\"A1\"><v>1</v></c><c r=\"B1\"><v>2</v></c><c r=\"C1\"><v>3</v></c><c r=\"D1\"><v>4</v></c></row></sheetData></worksheet>"
+    );
+    let ix = super::xlsx::index(sheet.as_bytes()).unwrap();
+    // The touching and overlapping ones are one range; the others are apart.
+    assert_eq!(ix.hidden_cols.len(), 40_001);
+    assert_eq!(ix.hidden_cols.last(), Some(&(100_001, 110_002)));
+    assert!(ix.hidden_cols.windows(2).all(|w| w[0].1 < w[1].0));
+    assert!(
+        ix.col_hidden(2)
+            && ix.col_hidden(80_000)
+            && ix.col_hidden(105_000)
+            && ix.col_hidden(110_002)
+    );
+    assert!(
+        !ix.col_hidden(1) && !ix.col_hidden(3) && !ix.col_hidden(80_001) && !ix.col_hidden(110_003)
+    );
+    // The preview and the view leave out B and D alike.
+    let b = xlsx_with(&sheet, "", &[]);
+    let (_, _, rows, _, _) = sheet_of(&b, None);
+    assert_eq!(
+        rows[0].c.iter().map(|c| c.a.as_str()).collect::<Vec<_>>(),
+        ["A1", "C1"]
+    );
+    let v = super::xlsx::view(&b, None, 1, 100).unwrap();
+    assert!(v.contains("A1=1 C1=3") && !v.contains("B1="), "{v}");
 }
 
 // -- workbooks ---------------------------------------------------------------
@@ -375,17 +522,6 @@ fn a_sheet_has_addresses_values_formulas_and_dates_and_leaves_hidden_things_out(
     assert!(notes.iter().any(|n| n.contains("Hidden rows")), "{notes:?}");
     // Rows come in order.
     assert!(rows.windows(2).all(|w| w[0].n < w[1].n));
-}
-
-#[test]
-fn a_hidden_or_unknown_sheet_is_refused_with_a_sentence() {
-    let b = xlsx_real();
-    let e = preview(&b, Some("Old")).unwrap_err();
-    assert!(e.contains("hidden"), "{e}");
-    let e = preview(&b, Some("Nope")).unwrap_err();
-    assert!(e.contains("no sheet"), "{e}");
-    let (_, name, _, _, _) = sheet_of(&b, Some("data"));
-    assert_eq!(name, "Data");
 }
 
 #[test]
@@ -459,7 +595,7 @@ fn a_huge_sheet_is_cut_at_the_row_and_column_limits() {
         "",
         &[],
     );
-    let p = preview(&b, None).unwrap().unwrap();
+    let p = preview(&b, None).unwrap();
     assert!(size(&p) < 262_144, "{}", size(&p));
     assert!(matches!(p, Preview::Sheet { more: true, .. }));
 }
@@ -476,27 +612,26 @@ fn the_helper_answers_a_preview_request_and_nothing_else_is_accepted() {
     let (reply, rest) = parse_reply(&out).unwrap();
     assert!(rest.is_empty() && !reply.file);
     assert!(matches!(reply.preview, Some(Preview::Doc { .. })));
-    // Not an office file: an answer with no preview, not a failure.
+    // Not an office file: an answer that says so, not a failure.
     let out = serve(&frame_request(
         &Request::Preview { sheet: None },
         b"%PDF-1.4",
     ))
     .unwrap();
-    assert!(parse_reply(&out).unwrap().0.preview.is_none());
+    let r = parse_reply(&out).unwrap().0;
+    assert!(r.preview.is_none() && r.why == Some(Why::NotOffice));
     // A request with another field is not understood.
     let head = br#"{"tool":"preview","sheet":null,"edits":[]}"#;
     let mut inp = (head.len() as u32).to_be_bytes().to_vec();
     inp.extend_from_slice(head);
     assert!(serve(&inp).is_err());
-    // A refusal inside a real document is a sentence.
-    let e = serve(&frame_request(
-        &Request::Preview {
-            sheet: Some("Old".into()),
-        },
+    // A sheet that is not there is an answer too.
+    let out = serve(&frame_request(
+        &Request::Preview { sheet: Some(7) },
         &xlsx_real(),
     ))
-    .unwrap_err();
-    assert!(e.contains("hidden"), "{e}");
+    .unwrap();
+    assert_eq!(parse_reply(&out).unwrap().0.why, Some(Why::NoSheet));
 }
 
 #[test]

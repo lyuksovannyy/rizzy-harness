@@ -859,6 +859,7 @@ pub(crate) fn reply(
         notes: notes.iter().map(|s| s.to_string()).collect(),
         file: file.is_some(),
         preview: None,
+        why: None,
     };
     let head = serde_json::to_vec(&r).unwrap();
     let mut out = (head.len() as u32).to_be_bytes().to_vec();

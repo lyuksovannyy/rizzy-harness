@@ -158,7 +158,10 @@ export default function DocPreview(props: { target: PreviewTarget; onClose: () =
   const [data, setData] = useState<PreviewAnswer | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
-  const [sheet, setSheet] = useState<string | undefined>(undefined);
+  // The sheet asked for, by its place among the visible ones (a name is the
+  // file's text and cannot be sent back), and the tabs the last answer had.
+  const [sheet, setSheet] = useState<number | undefined>(undefined);
+  const [tabs, setTabs] = useState<string[]>([]);
   const [tries, setTries] = useState(0);
   const head = useRef<HTMLHeadingElement>(null);
 
@@ -166,10 +169,13 @@ export default function DocPreview(props: { target: PreviewTarget; onClose: () =
     const ac = new AbortController();
     setBusy(true);
     setErr(null);
-    const q = sheet === undefined ? "" : `?sheet=${encodeURIComponent(sheet)}`;
+    // The sheet on screen is never under another sheet's tab or error.
+    setData(null);
+    const q = sheet === undefined ? "" : `?sheet=${sheet}`;
     call<PreviewAnswer>("GET", `/api/sessions/${encodeURIComponent(session)}/files/${encodeURIComponent(fileId)}/preview${q}`, undefined, ac.signal)
       .then((a) => {
         setData(a);
+        if (a.preview.kind === "sheet") setTabs(a.preview.sheets);
         setBusy(false);
       })
       .catch((x: unknown) => {
@@ -206,11 +212,11 @@ export default function DocPreview(props: { target: PreviewTarget; onClose: () =
         </button>
       </div>
       <p className="pv-note small muted">Preview: text and structure, not the page layout</p>
-      {p?.kind === "sheet" && p.sheets.length > 1 && (
+      {tabs.length > 1 && (
         <div className="pv-tabs" role="group" aria-label="Sheets">
-          {p.sheets.map((s) => (
-            <button key={s} type="button" className="small" aria-pressed={s === p.sheet} disabled={busy && s !== p.sheet} onClick={() => setSheet(s)}>
-              {showHidden(s)}
+          {tabs.map((name, i) => (
+            <button key={i} type="button" className="small" aria-pressed={i === (sheet ?? 0)} disabled={busy && i !== (sheet ?? 0)} onClick={() => setSheet(i)}>
+              {showHidden(name)}
             </button>
           ))}
         </div>

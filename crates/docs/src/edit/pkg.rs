@@ -45,7 +45,7 @@ impl<'a> Source<'a> {
             .map_err(|e| format!("this is not a zip file that can be edited: {e}"))?;
         let entries = pkg.raw_entries()?;
         if entries.len() > MAX_ENTRIES {
-            return Err("the file has too many parts to be edited".into());
+            return Err(super::E_PARTS.into());
         }
         let mut names = Vec::with_capacity(entries.len());
         let mut seen = HashSet::new();
@@ -83,6 +83,16 @@ impl<'a> Source<'a> {
 
     pub fn has(&self, name: &str) -> bool {
         self.names.iter().any(|n| n == name)
+    }
+
+    /// The unpacked size a part says it has (the directory's word).
+    pub fn part_size(&self, name: &str) -> Option<u64> {
+        let entries = self.pkg.raw_entries().ok()?;
+        entries
+            .iter()
+            .zip(&self.names)
+            .find(|(_, n)| n.as_str() == name)
+            .map(|(e, _)| e.size)
     }
 
     pub fn names(&self) -> &[String] {

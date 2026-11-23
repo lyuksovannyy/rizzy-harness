@@ -34,7 +34,7 @@ export interface PRow {
 }
 export type PreviewData =
   | { kind: "doc"; blocks: PBlock[]; more: boolean; notes: string[] }
-  | { kind: "sheet"; sheets: string[]; sheet: string; rows: PRow[]; more: boolean; notes: string[] };
+  | { kind: "sheet"; sheets: string[]; /** The place of the shown sheet among `sheets`. */ at: number; rows: PRow[]; more: boolean; notes: string[] };
 export interface PreviewAnswer {
   name: string;
   preview: PreviewData;

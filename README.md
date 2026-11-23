@@ -1642,14 +1642,18 @@ chat shows the file as a chip with its name and size.
   formula shown as written (italic, "not calculated") in place of a value. It is
   the text and the structure, not the page: no fonts, colours, pictures, charts
   or page breaks, and no text the file hides (hidden text, deleted tracked
-  changes, hidden rows, columns and sheets). A very large file is cut at about
+  changes, hidden rows, columns and sheets). A large file is cut at about
   2,000 blocks, 5,000 table cells, 500 rows or 50 columns, or a size the page
-  can draw, and the panel says so; **Download** is in the panel's top bar.
+  can draw, and the panel says so; a file too big to be read at all (a part of
+  it over 8 MB once unpacked, more than 200,000 paragraphs or 300,000 rows) is
+  not previewed, and the panel says "too large to preview; download it". A
+  file protected with a password says so. **Download** is in the panel's top bar.
   Everything in it is plain text: a link, a script or a picture inside a
   file is shown as the characters it is, and a formula such as `=HYPERLINK(...)`
   is only text. The file is read by the same separate, confined process as the
   editing tools, one at a time per account, so a machine without Linux 6.7 or
-  newer and Landlock cannot preview. Only you can preview your chat's files. A
+  newer and Landlock cannot preview. Only you can preview your chat's files
+  (the server's API token can, as it can download them). A
   file in a chat's folder is not previewed yet; you can only edit it through the
   agent.
 - **In a folder chat without `write`.** The Assistant has no `write` tool, but
