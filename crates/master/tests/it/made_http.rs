@@ -661,3 +661,152 @@ async fn the_blob_goes_with_the_last_chat_that_refers_to_it() {
     );
     let _ = owner;
 }
+
+// -- guards that no other test proved ------------------------------------------
+
+/// A chat of `kind` ("agentic", or "chat" with a parent) the fake node wrote
+/// and `who` owns: what the route and the service must refuse for.
+async fn raw_chat(t: &T, who: &str, profile: &str, parent: Option<SessionId>) -> SessionId {
+    let sid = SessionId::new();
+    let mut payload = json!({"title": "t", "cwd": "/w", "model": "m", "backend": "native",
+        "node_id": "master", "profile": profile, "approval_mode": "ask", "incognito": false});
+    if let Some(p) = parent {
+        payload["parent_session"] = json!(p.to_string());
+    }
+    t.chat.emit(sid, "session_created", payload).await;
+    landed(t, sid).await;
+    let owner = t
+        .master
+        .inner_mirror()
+        .session(parent.unwrap_or(sid))
+        .unwrap()
+        .unwrap()
+        .owner_id;
+    assert!(owner.is_some() || parent.is_none());
+    let _ = who;
+    sid
+}
+
+/// A row for `blob` in chat `sid`, the way a send holds it, named by the
+/// chat's own log: what a node (or a bug) could plant.
+async fn plant(t: &T, sid: SessionId, owner: Option<String>, blob: &str, sha: &str, fid: &str) {
+    let taken = harness_store::chat_uploads::TakenUpload {
+        upload_id: fid.into(),
+        owner_id: owner,
+        blob_id: blob.into(),
+        name: "planted.docx".into(),
+        mime: "application/zip".into(),
+        size: 10,
+        sha256: sha.into(),
+    };
+    t.master
+        .inner_mirror()
+        .session_files_hold(&sid.to_string(), &[taken])
+        .unwrap();
+    t.chat
+        .emit(
+            sid,
+            "user_message",
+            json!({"turn_id": "p", "text": "planted", "attached": [{
+                "file_id": fid, "name": "planted.docx", "bytes": 10, "sha256": sha, "mime": "application/zip"}]}),
+        )
+        .await;
+    landed(t, sid).await;
+}
+
+fn blob_of(t: &T, sid: SessionId, fid: &str) -> (String, String) {
+    let f = t
+        .master
+        .inner_mirror()
+        .session_file(&sid.to_string(), fid)
+        .unwrap()
+        .unwrap();
+    (f.blob_id, f.sha256)
+}
+
+/// The blob must be the chat owner's, whatever a row says: a row of Alex's
+/// chat that points at Bob's blob (the row's account is Bob) is not served.
+#[tokio::test]
+async fn a_row_that_points_at_another_owners_blob_is_not_served() {
+    let t = start().await;
+    let [alex, bob] = users(&t).await;
+    let b1 = open(&t, &bob, "t1", json!({})).await;
+    let cb = t.chat.ask_docs(b1, doc("his", "# Bob's")).await.unwrap();
+    name_in_log(&t, b1, &cb).await;
+    let (blob, sha) = blob_of(&t, b1, &cb.file_id);
+    let bob_id = owner_of(&t, b1);
+    let a1 = open(&t, &alex, "t1", json!({})).await;
+    plant(&t, a1, Some(bob_id), &blob, &sha, "planted1").await;
+    assert!(
+        t.master
+            .inner_mirror()
+            .session_file(&a1.to_string(), "planted1")
+            .unwrap()
+            .is_some(),
+        "the row is there and logged"
+    );
+    assert_eq!(
+        download(&t, &alex, a1, "planted1").await.status(),
+        StatusCode::NOT_FOUND
+    );
+    // Bob's own copy still downloads.
+    assert_eq!(
+        download(&t, &bob, b1, &cb.file_id).await.status(),
+        StatusCode::OK
+    );
+}
+
+/// The service and the route refuse chats that are not plain top-level
+/// chats of the person: a sub-agent's chat, a chat with a folder, a
+/// temporary chat.
+#[tokio::test]
+async fn the_service_and_the_route_refuse_what_is_not_a_plain_chat() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let top = open(&t, &alex, "t1", json!({})).await;
+    let c = t.chat.ask_docs(top, doc("mine", "# Mine")).await.unwrap();
+    name_in_log(&t, top, &c).await;
+    let (blob, sha) = blob_of(&t, top, &c.file_id);
+    let owner = owner_of(&t, top);
+
+    // A sub-agent's chat of the plain chat.
+    let sub = raw_chat(&t, &alex, "chat", Some(top)).await;
+    t.master
+        .inner_mirror()
+        .claim_session(sub, Some(&owner), None)
+        .unwrap();
+    let e = t.chat.ask_docs(sub, doc("a", "# x")).await.unwrap_err();
+    assert!(e.contains("sub-agent"), "{e}");
+    plant(&t, sub, Some(owner.clone()), &blob, &sha, "p-sub").await;
+    assert_eq!(
+        download(&t, &alex, sub, "p-sub").await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    // A chat with a folder.
+    let dir = raw_chat(&t, &alex, "agentic", None).await;
+    t.master
+        .inner_mirror()
+        .claim_session(dir, Some(&owner), None)
+        .unwrap();
+    let e = t.chat.ask_docs(dir, doc("a", "# x")).await.unwrap_err();
+    assert!(e.contains("with a folder writes the file there"), "{e}");
+    plant(&t, dir, Some(owner.clone()), &blob, &sha, "p-dir").await;
+    assert_eq!(
+        download(&t, &alex, dir, "p-dir").await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    // A temporary chat.
+    let temp = chat(&t, &alex, json!({"incognito": true})).await;
+    plant(&t, temp, Some(owner), &blob, &sha, "p-temp").await;
+    assert_eq!(
+        download(&t, &alex, temp, "p-temp").await.status(),
+        StatusCode::NOT_FOUND
+    );
+    // The honest chat still serves its own.
+    assert_eq!(
+        download(&t, &alex, top, &c.file_id).await.status(),
+        StatusCode::OK
+    );
+}

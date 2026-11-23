@@ -202,6 +202,9 @@ export function SaveAsArtifact(props: { path?: string; onDone?: () => void; auto
   );
 }
 
+/** A made file's id as the server makes it: 32 hex characters, else no link. */
+const madeId = (id: string | undefined) => (id && /^[0-9a-f]{32}$/.test(id) ? id : undefined);
+
 /** The Word or Excel file a `doc_create` or `sheet_create` call made: its name and size, and where it is. In a chat without a folder the server keeps it and this is its download; in a chat with one it is in the folder and the path is shown, as `write` shows it. */
 export function MadeChip({ sessionId, made }: { sessionId: string; made: MadeFile }) {
   const Icon = /\.xlsx$/i.test(made.name) ? FileSpreadsheet : FileText;
@@ -217,8 +220,8 @@ export function MadeChip({ sessionId, made }: { sessionId: string; made: MadeFil
           </span>
         )}
       </span>
-      {made.file_id && (
-        <LinkedA className="link small" url={`/api/sessions/${sessionId}/made/${made.file_id}`} download={made.name}>
+      {madeId(made.file_id) && (
+        <LinkedA className="link small" url={`/api/sessions/${encodeURIComponent(sessionId)}/made/${madeId(made.file_id)}`} download={made.name}>
           Download
         </LinkedA>
       )}

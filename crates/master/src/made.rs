@@ -61,6 +61,19 @@ pub fn deny(spec: &mut harness_core::agent::AgentSpec) {
     }
 }
 
+/// Withhold the tools from the agents this one may hand work to, and leave
+/// its own: a sub-agent's chat has no files (`answer` refuses it), so a
+/// delegate offered the tools could only fail every call.
+pub fn deny_delegates(spec: &mut harness_core::agent::AgentSpec) {
+    for d in &mut spec.delegates {
+        for t in TOOLS {
+            if !d.deny_tools.iter().any(|x| x == t) {
+                d.deny_tools.push(t.into());
+            }
+        }
+    }
+}
+
 /// What a turn is told when its agent has no switch.
 pub const NOT_OFFERED: &str = "making documents is not available to this agent: its \"Create and edit documents\" switch is off";
 
@@ -329,3 +342,35 @@ async fn keep(
 
 /// The two tools' names, for the page that lists them.
 pub const NAMES: [&str; 2] = [DOC_TOOL, SHEET_TOOL];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use harness_core::agent::AgentSpec;
+
+    fn spec(delegates: Vec<AgentSpec>) -> AgentSpec {
+        let mut v = serde_json::json!({
+            "agent_id": "a", "name": "a", "system_prompt": "", "tools": ["doc_create", "sheet_create"],
+            "prompt_hash": "h"
+        });
+        v["delegates"] = serde_json::to_value(delegates).unwrap();
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// A delegate of a plain chat's agent never has the tools (it could
+    /// only fail), the agent itself keeps them; `deny` takes both away.
+    #[test]
+    fn delegates_lose_the_tools_and_the_agent_keeps_them() {
+        let child = || spec(vec![]);
+        let mut a = spec(vec![child(), child()]);
+        deny_delegates(&mut a);
+        assert!(a.allows_tool("doc_create") && a.allows_tool("sheet_create"));
+        for d in &a.delegates {
+            assert!(!d.allows_tool("doc_create") && !d.allows_tool("sheet_create"));
+        }
+        deny_delegates(&mut a);
+        assert_eq!(a.delegates[0].deny_tools.len(), 2, "once each");
+        deny(&mut a);
+        assert!(!a.allows_tool("doc_create") && !a.allows_tool("sheet_create"));
+    }
+}

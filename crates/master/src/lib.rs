@@ -2750,8 +2750,13 @@ impl Master {
             && !untrusted
             && !resume
             && self.node_has(&row.node_id, harness_protocol::CAP_DOCS);
-        if row.profile.as_deref() == Some("chat") && !may_make {
-            made::deny(&mut agent);
+        if row.profile.as_deref() == Some("chat") {
+            if may_make {
+                // Its sub-agents' chats keep no files: the tools would only fail.
+                made::deny_delegates(&mut agent);
+            } else {
+                made::deny(&mut agent);
+            }
         }
         // The project board tools (PLAN.md T78): only in a project chat
         // whose owner's turn runs it, on a node that offers them; not in an

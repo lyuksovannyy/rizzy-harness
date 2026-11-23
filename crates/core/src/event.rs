@@ -2049,7 +2049,9 @@ pub struct MadeFile {
     /// A chat without a folder: the id of the master's kept copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_id: Option<String>,
-    /// A chat with a folder: where the file is, as the folder's tools show it.
+    /// A chat with a folder: where the file is, relative to the folder (the
+    /// whole path when the call wrote outside it). The absolute path is in
+    /// the call's `seen` and result text, as for `write`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }

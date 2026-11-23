@@ -401,6 +401,13 @@ async fn in_folder(ctx: &ToolCtx, kind: Kind, path: &str, req: DocRequest) -> To
     let mut seen = ctx.seen.record_hash(&key, sha);
     seen.base = Some(String::new());
     let where_ = real.display().to_string();
+    // The chip shows where it is in the folder; the absolute path is in the
+    // result text and in `seen` already, as `write` has them.
+    let in_folder = ctx
+        .workspace_dir()
+        .ok()
+        .and_then(|ws| real.strip_prefix(&ws).ok().map(|r| r.display().to_string()))
+        .unwrap_or_else(|| where_.clone());
     let text = told(
         &format!("Created {where_} ({}).", human_bytes(bytes.len() as u64)),
         "It is a new file in this chat's folder.",
@@ -416,7 +423,7 @@ async fn in_folder(ctx: &ToolCtx, kind: Kind, path: &str, req: DocRequest) -> To
         size: bytes.len() as u64,
         sha256: crate::seen::hex(&sha),
         file_id: None,
-        path: Some(where_),
+        path: Some(in_folder),
     });
     o
 }
@@ -475,7 +482,7 @@ mod tests {
         assert_eq!(std::fs::read(d.path().join("report.docx")).unwrap(), mine);
         let made = o.made.clone().unwrap();
         assert_eq!(made.name, "report (2).docx");
-        assert!(made.path.as_deref().unwrap().ends_with("report (2).docx"));
+        assert_eq!(made.path.as_deref(), Some("report (2).docx"), "relative to the folder");
         assert!(made.file_id.is_none());
         let bytes = std::fs::read(d.path().join("report (2).docx")).unwrap();
         assert_eq!(made.size, bytes.len() as u64);
