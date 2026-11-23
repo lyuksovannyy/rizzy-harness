@@ -470,3 +470,160 @@ async fn a_folder_file_is_previewed_through_the_node_helper_and_a_hostile_one_is
     );
     assert_eq!(helper.free_slots(), harness_tools::doc_helper::CONCURRENT);
 }
+
+/// A person's text changes to a file of a folder, saved as a copy through the
+/// real confined helper (`harness_tools::folder_edit`, T100, X.60): a changed
+/// paragraph and a changed cell are in the copy, the original is
+/// byte-identical, a hostile file (a DOCTYPE, a renamed PDF) and a change the
+/// engine refuses write nothing.
+#[tokio::test]
+async fn a_folder_file_is_changed_into_a_copy_through_the_node_helper() {
+    use harness_docs::edit::preview::{Block, Preview, preview};
+    use harness_tools::doc_helper::ExeHelper;
+    use harness_tools::folder_edit::{Change, Edited, edit};
+    use harness_tools::folder_preview::Refusal;
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().canonicalize().unwrap();
+    let ctx = harness_tools::ToolCtx::new(&ws);
+    let helper = ExeHelper::new(EXE.into());
+    let doc = docx_bytes("# Title\n\nThe **quick** fox.\n");
+    std::fs::write(ws.join("a.docx"), &doc).unwrap();
+    let Preview::Doc { blocks, .. } = preview(&doc, None).unwrap() else {
+        panic!()
+    };
+    let at = blocks
+        .iter()
+        .find_map(|b| match b {
+            Block::P { at, .. } => Some(at.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let got = edit(
+        &ctx,
+        &helper,
+        "a.docx",
+        None,
+        vec![Change {
+            at: at.clone(),
+            text: "A <changed> & \"quoted\" line".into(),
+        }],
+    )
+    .await;
+    if got == Err(Refusal::NotAvailable) {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "doc-edit cannot confine itself on this CI kernel"
+        );
+        eprintln!("skipped: doc-edit cannot confine itself here (Landlock ABI 4 needed)");
+        return;
+    }
+    let Edited::Saved { path, results } = got.unwrap() else {
+        panic!()
+    };
+    assert_eq!(path, "a (edited).docx");
+    assert!(results.iter().all(|r| r.ok));
+    assert_eq!(std::fs::read(ws.join("a.docx")).unwrap(), doc);
+    let new = std::fs::read(ws.join(&path)).unwrap();
+    assert!(
+        format!("{:?}", preview(&new, None).unwrap()).contains("A <changed> & \\\"quoted\\\" line")
+    );
+    // A workbook: a number, a formula and text.
+    std::fs::write(ws.join("book.xlsx"), xlsx_bytes()).unwrap();
+    let Edited::Saved { path, .. } = edit(
+        &ctx,
+        &helper,
+        "book.xlsx",
+        Some(0),
+        vec![
+            Change {
+                at: "B2".into(),
+                text: "42".into(),
+            },
+            Change {
+                at: "C2".into(),
+                text: "=B2*2".into(),
+            },
+            Change {
+                at: "A2".into(),
+                text: "z".into(),
+            },
+        ],
+    )
+    .await
+    .unwrap() else {
+        panic!()
+    };
+    let Preview::Sheet { rows, .. } =
+        preview(&std::fs::read(ws.join(path)).unwrap(), Some(0)).unwrap()
+    else {
+        panic!()
+    };
+    let cell = |a: &str| {
+        rows.iter()
+            .flat_map(|r| r.c.iter())
+            .find(|c| c.a == a)
+            .cloned()
+    };
+    assert_eq!(cell("B2").unwrap().v, "42");
+    assert_eq!(cell("C2").unwrap().f.as_deref(), Some("=B2*2"));
+    assert_eq!(cell("A2").unwrap().v, "z");
+    // A formula the engine refuses: nothing is written.
+    let before = std::fs::read_dir(&ws).unwrap().count();
+    let refused = edit(
+        &ctx,
+        &helper,
+        "book.xlsx",
+        Some(0),
+        vec![Change {
+            at: "B2".into(),
+            text: "=WEBSERVICE(\"http://x\")".into(),
+        }],
+    )
+    .await
+    .unwrap();
+    assert!(matches!(refused, Edited::Refused(_)), "{refused:?}");
+    assert_eq!(std::fs::read_dir(&ws).unwrap().count(), before);
+    // A DOCTYPE, a renamed PDF, a file that is no zip.
+    let p = harness_attached::Package::open(&doc, Instant::now() + Duration::from_secs(5)).unwrap();
+    let mut w = ZipWriter::new(10 << 20);
+    for en in p.raw_entries().unwrap() {
+        let n = std::str::from_utf8(en.name).unwrap();
+        if n == "word/document.xml" {
+            w.add(n, b"<?xml version=\"1.0\"?><!DOCTYPE d [<!ENTITY x SYSTEM \"file:///etc/passwd\">]><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>&x;</w:t></w:r></w:p></w:body></w:document>").unwrap();
+        } else {
+            w.put_raw(
+                n,
+                en.method,
+                en.crc,
+                en.comp as u32,
+                en.size as u32,
+                en.time,
+                en.date,
+                en.data,
+            )
+            .unwrap();
+        }
+    }
+    std::fs::write(ws.join("xxe.docx"), w.finish().unwrap()).unwrap();
+    std::fs::write(ws.join("pdf.docx"), b"%PDF-1.4\n").unwrap();
+    let ch = || {
+        vec![Change {
+            at: at.clone(),
+            text: "x".into(),
+        }]
+    };
+    let n = std::fs::read_dir(&ws).unwrap().count();
+    assert_eq!(
+        edit(&ctx, &helper, "xxe.docx", None, ch()).await,
+        Err(Refusal::Damaged)
+    );
+    assert_eq!(
+        edit(&ctx, &helper, "pdf.docx", None, ch()).await,
+        Err(Refusal::NotOffice)
+    );
+    assert_eq!(
+        std::fs::read_dir(&ws).unwrap().count(),
+        n,
+        "nothing written"
+    );
+}
