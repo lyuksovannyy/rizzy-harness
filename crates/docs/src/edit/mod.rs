@@ -11,6 +11,7 @@ pub mod check;
 pub mod docx;
 pub mod para;
 pub mod pkg;
+pub mod preview;
 pub mod scan;
 pub mod serve;
 pub mod xlsx;
@@ -27,6 +28,8 @@ mod tests_docx;
 mod tests_fix;
 #[cfg(test)]
 mod tests_fuzz;
+#[cfg(test)]
+mod tests_preview;
 #[cfg(test)]
 mod tests_xlsx;
 

@@ -89,3 +89,28 @@ pub const MAX_EDIT_EVENTS: usize = 4_000_000;
 pub const MAX_VIEW_BYTES: usize = 30_000;
 /// Items (paragraphs or rows) one view page shows at most.
 pub const MAX_VIEW_ITEMS: usize = 400;
+
+// The preview of a file in the web page (PLAN.md T99). The page draws what
+// the helper says, so the reply is bounded here, not by the model's 30,000
+// byte view. Each is tested at its edge and one past it.
+
+/// Blocks (headings, paragraphs, list items, tables) one document preview
+/// holds.
+pub const MAX_PREVIEW_BLOCKS: usize = 2_000;
+/// Cells of all tables of one document preview.
+pub const MAX_PREVIEW_TABLE_CELLS: usize = 5_000;
+/// Rows of one sheet preview (rows that hold a value).
+pub const MAX_PREVIEW_ROWS: usize = 500;
+/// Columns of one sheet preview, and cells of one table row: a cell past
+/// column 50 (`AX`) is not shown.
+pub const MAX_PREVIEW_COLS: usize = 50;
+/// Characters of one paragraph in a preview.
+pub const MAX_PREVIEW_PARA_CHARS: usize = 5_000;
+/// Characters of one table or sheet cell in a preview.
+pub const MAX_PREVIEW_CELL_CHARS: usize = 500;
+/// Sheets listed in a preview.
+pub const MAX_PREVIEW_SHEETS: usize = 100;
+/// The JSON a preview holds, counted as it is built (each string as JSON
+/// writes it, plus the keys and brackets around it): the reply stays under
+/// 256 KB.
+pub const MAX_PREVIEW_BYTES: usize = 200_000;
