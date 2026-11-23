@@ -482,7 +482,11 @@ mod tests {
         assert_eq!(std::fs::read(d.path().join("report.docx")).unwrap(), mine);
         let made = o.made.clone().unwrap();
         assert_eq!(made.name, "report (2).docx");
-        assert_eq!(made.path.as_deref(), Some("report (2).docx"), "relative to the folder");
+        assert_eq!(
+            made.path.as_deref(),
+            Some("report (2).docx"),
+            "relative to the folder"
+        );
         assert!(made.file_id.is_none());
         let bytes = std::fs::read(d.path().join("report (2).docx")).unwrap();
         assert_eq!(made.size, bytes.len() as u64);
