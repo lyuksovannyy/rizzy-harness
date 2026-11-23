@@ -9,6 +9,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Builders of zips and office documents for tests of other crates (never in the binary).
+testkit = []
+
 [dependencies]
 flate2.workspace = true
 harness-core.workspace = true

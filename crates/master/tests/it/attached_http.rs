@@ -30,11 +30,11 @@ type Seen = Arc<Mutex<Vec<MasterToNode>>>;
 /// A fake node: acks every command, mirrors a `session_created` for each
 /// chat it is asked to create, keeps each session's seq so a test can append
 /// events, and records each `attached.result`.
-struct Fake {
+pub(crate) struct Fake {
     tx: mpsc::Sender<NodeToMaster>,
-    seqs: Arc<Mutex<HashMap<SessionId, u64>>>,
+    pub(crate) seqs: Arc<Mutex<HashMap<SessionId, u64>>>,
     answers: Answers,
-    seen: Seen,
+    pub(crate) seen: Seen,
 }
 
 fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Fake) {
@@ -127,7 +127,7 @@ impl Fake {
     }
 
     /// The newest prompt `sid` got.
-    fn last_prompt(&self, sid: SessionId) -> PromptMsg {
+    pub(crate) fn last_prompt(&self, sid: SessionId) -> PromptMsg {
         self.seen
             .lock()
             .unwrap()
@@ -143,7 +143,7 @@ impl Fake {
     /// Act as an honest node does with the newest prompt of `sid`: its turn
     /// starts with the agent as the master specified it (what it withheld
     /// included) and its message is recorded with the files it names.
-    async fn take_prompt(&self, sid: SessionId, turn: &str) {
+    pub(crate) async fn take_prompt(&self, sid: SessionId, turn: &str) {
         let p = self.last_prompt(sid);
         let agent = p.agent.as_ref().map(|a| a.agent_ref());
         self.emit(
@@ -246,15 +246,15 @@ impl Fake {
     }
 }
 
-struct T {
-    base: String,
-    master: Master,
+pub(crate) struct T {
+    pub(crate) base: String,
+    pub(crate) master: Master,
     /// The chat runtime (announces the capability unless a test says not).
-    chat: Fake,
-    dir: tempfile::TempDir,
+    pub(crate) chat: Fake,
+    pub(crate) dir: tempfile::TempDir,
 }
 
-async fn start() -> T {
+pub(crate) async fn start() -> T {
     start_with(&["profile:chat", CAP_ATTACHED]).await
 }
 
@@ -290,7 +290,7 @@ async fn start_with(caps: &[&str]) -> T {
     }
 }
 
-async fn req(
+pub(crate) async fn req(
     t: &T,
     method: Method,
     path: &str,
@@ -317,7 +317,7 @@ async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::
 }
 
 /// The admin "alex" and a member "bob".
-async fn users(t: &T) -> [String; 2] {
+pub(crate) async fn users(t: &T) -> [String; 2] {
     let alex = common::signed_in(
         post_anon(
             t,
@@ -363,7 +363,7 @@ async fn users(t: &T) -> [String; 2] {
     [alex, bob]
 }
 
-async fn chat(t: &T, c: &str, extra: Value) -> SessionId {
+pub(crate) async fn chat(t: &T, c: &str, extra: Value) -> SessionId {
     let mut body = json!({"profile": "chat"});
     for (k, v) in extra.as_object().unwrap() {
         body[k] = v.clone();
@@ -374,7 +374,7 @@ async fn chat(t: &T, c: &str, extra: Value) -> SessionId {
 }
 
 /// Wait until the mirror has `sid` at the node's latest seq.
-async fn landed(t: &T, sid: SessionId) {
+pub(crate) async fn landed(t: &T, sid: SessionId) {
     let want = *t.chat.seqs.lock().unwrap().get(&sid).unwrap();
     for _ in 0..300 {
         if t.master.inner_mirror().head_seq(sid).unwrap_or(0) >= want {
@@ -385,7 +385,13 @@ async fn landed(t: &T, sid: SessionId) {
     panic!("events of {sid} did not land");
 }
 
-async fn upload(t: &T, who: &str, name: &str, query: &str, bytes: Vec<u8>) -> (StatusCode, Value) {
+pub(crate) async fn upload(
+    t: &T,
+    who: &str,
+    name: &str,
+    query: &str,
+    bytes: Vec<u8>,
+) -> (StatusCode, Value) {
     let r = reqwest::Client::new()
         .post(format!(
             "{}/api/attachments?name={}{query}",
@@ -402,7 +408,13 @@ async fn upload(t: &T, who: &str, name: &str, query: &str, bytes: Vec<u8>) -> (S
     (st, r.json().await.unwrap_or(Value::Null))
 }
 
-async fn send(t: &T, who: &str, sid: SessionId, ids: &[&str], extra: Value) -> (StatusCode, Value) {
+pub(crate) async fn send(
+    t: &T,
+    who: &str,
+    sid: SessionId,
+    ids: &[&str],
+    extra: Value,
+) -> (StatusCode, Value) {
     let mut body = json!({"text": "what is in it?", "attachments": ids});
     for (k, v) in extra.as_object().unwrap() {
         body[k] = v.clone();

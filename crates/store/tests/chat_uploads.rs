@@ -205,3 +205,40 @@ fn deleting_an_account_removes_its_uploads() {
     s.delete_user("u1").unwrap();
     assert!(s.chat_uploads_take(&["a".into()], None).unwrap().is_none());
 }
+
+/// The files a document's text came with (X.55) are held when they can be
+/// and skipped, not refused, when they cannot: another account's, one
+/// already held, one that is gone.
+#[test]
+fn companions_are_taken_where_they_can_be_and_skipped_elsewhere() {
+    let s = Store::open_in_memory().unwrap();
+    user(&s, "u1");
+    user(&s, "u2");
+    assert!(put(&s, "a-f", "u1", "s1", 10).added());
+    assert!(put(&s, "b-f", "u2", "s2", 5).added());
+    assert!(put(&s, "c-f", "u1", "s3", 5).added());
+    // Hold c-f as another send would.
+    assert!(
+        s.chat_uploads_take(&["c-f".into()], Some("u1"))
+            .unwrap()
+            .is_some()
+    );
+    let ids: Vec<String> = ["a-f", "b-f", "c-f", "gone-f"].map(String::from).into();
+    let got = s.chat_uploads_take_available(&ids, Some("u1")).unwrap();
+    assert_eq!(
+        got.iter().map(|u| u.upload_id.as_str()).collect::<Vec<_>>(),
+        ["a-f"]
+    );
+    // Taken now: not twice.
+    assert!(
+        s.chat_uploads_take_available(&ids, Some("u1"))
+            .unwrap()
+            .is_empty()
+    );
+    // The other account's file was left alone and is still its own to take.
+    assert!(
+        s.chat_uploads_take(&["b-f".into()], Some("u2"))
+            .unwrap()
+            .is_some()
+    );
+}

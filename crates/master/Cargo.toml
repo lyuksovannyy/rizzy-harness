@@ -9,6 +9,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The document and PDF helpers answer a confinement probe when asked by
+# environment (tests/helper_confinement.rs); off in every shipped build.
+helper-probe = []
+
 [dependencies]
 anyhow.workspace = true
 harness-agent-native.workspace = true
@@ -52,6 +57,10 @@ flate2.workspace = true
 # PDF text for attachments (MIT). Runs only in the `pdf-text` helper process
 # (src/pdf.rs, FIX_PLAN 3.4), never inside the server.
 pdf-extract = "0.12.1"
+# XML pull parser for Word, Excel, PowerPoint and OpenDocument files (MIT,
+# no dependencies of its own that we do not already have). Runs only in the
+# `doc-text` helper process (src/doc.rs, X.55, T96), never inside the server.
+quick-xml = "=0.42.0"
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -63,6 +72,7 @@ toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+harness-attached = { workspace = true, features = ["testkit"] }
 # The tests build turn messages with `PromptMsg::test` and friends.
 harness-protocol = { workspace = true, features = ["test-support"] }
 # The fake MCP server of tests/logs/custom_connectors_http.rs speaks TLS (the

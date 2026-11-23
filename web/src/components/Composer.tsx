@@ -1,5 +1,5 @@
 import { ArrowUp, AtSign, CornerDownRight, FileText, Globe, Image, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
-import { type Dispatch, lazy, type SetStateAction, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type Dispatch, Fragment, lazy, type SetStateAction, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { isTag, marked, mentionable, pickable } from "../lib/agents";
 import { activeMention, filterAgents, matchedAlias, insertMention, isPathToken, leadingMention } from "../lib/mentions";
@@ -822,7 +822,8 @@ export function Composer(props: {
               </li>
             ))}
             {files.map((f) => (
-              <li key={f.attachment_id} className={f.saved || f.kept ? "chip saved" : "chip"} title={f.saved ? t("composer.savedHint") : f.kept ? t("composer.keptHint") : `${(f.chars ?? 0).toLocaleString()} ${t("composer.chars")}`}>
+              <Fragment key={f.attachment_id}>
+              <li className={f.saved || f.kept ? "chip saved" : "chip"} title={f.saved ? t("composer.savedHint") : f.kept ? t("composer.keptHint") : `${(f.chars ?? 0).toLocaleString()} ${t("composer.chars")}`}>
                 <FileText size={14} /> <span className="chip-name">{f.name}</span>
                 {f.saved && <span className="muted chip-note"> ({bytes(f.bytes ?? 0)}, {t("composer.saved")})</span>}
                 {f.kept && <span className="muted chip-note"> ({bytes(f.bytes ?? 0)}, {t("composer.kept")})</span>}
@@ -836,6 +837,8 @@ export function Composer(props: {
                   <X size={14} />
                 </button>
               </li>
+              {f.note && <li className="chip-sentence muted">{f.note}</li>}
+              </Fragment>
             ))}
           </ul>
         ) : null}

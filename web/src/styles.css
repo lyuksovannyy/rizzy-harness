@@ -3631,6 +3631,8 @@ button.swatch:hover:not(:disabled) {
 .chip.saved { max-width: min(380px, 100%); }
 .chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .chip-note { flex-shrink: 0; }
+/* Why a document is only a file (T96): its own line under the chip. */
+.chips .chip-sentence { flex-basis: 100%; font-size: var(--text-small); }
 .attach {
   font-size: 18px;
   line-height: 1;

@@ -1047,3 +1047,58 @@ fn a_tar_entry_of_the_largest_size_is_a_sentence_and_not_a_panic() {
     assert_eq!(l.entries[0].size, Some(u64::MAX), "{l:?}");
     assert!(l.note.as_deref().unwrap_or("").contains("damaged"), "{l:?}");
 }
+
+// -- named parts (office documents) -------------------------------------------
+
+#[test]
+fn a_package_reads_parts_by_name_as_bounded_streams() {
+    let z = zip(&[("a.xml", b"<a/>"), ("dir/b.txt", b"hello"), ("dir/", b"")]);
+    let p = Package::open(&z, soon()).unwrap();
+    assert!(p.has("a.xml") && p.has("dir/b.txt"));
+    assert!(!p.has("dir/"), "a folder is no part");
+    assert!(!p.has("nope") && !p.has("../a.xml"));
+    assert_eq!(p.read_small("dir/b.txt", 100).unwrap(), b"hello");
+    assert_eq!(
+        p.read_small("dir/b.txt", 3),
+        Err(PartError::Failed("a part is larger than it may be".into()))
+    );
+    assert!(matches!(p.read("nope"), Err(PartError::Missing)));
+}
+
+#[test]
+fn a_package_stops_a_bomb_at_its_ceiling_and_refuses_lying_or_encrypted_parts() {
+    // 200 MiB of zeros in 200 KB: stopped at the package ceiling.
+    let bomb = zip(&[("z", &zeros(200 << 20))]);
+    assert!(bomb.len() < 1 << 20);
+    let p = Package::open(&bomb, soon()).unwrap();
+    let mut sink = Vec::new();
+    let e = p.read("z").unwrap().read_to_end(&mut sink).unwrap_err();
+    assert!(sink.len() as u64 <= PACKAGE_CEILING);
+    assert!(p.failed(&e) != PartError::Missing);
+    assert!(p.stopped().is_some_and(|s| s.contains("MiB")));
+    // A directory that says 5 GiB for a few bytes.
+    let lie = zip_with(
+        &[Ent {
+            name: b"x",
+            data: b"abc",
+            deflate: true,
+        }],
+        Some(5 << 30),
+    );
+    let p = Package::open(&lie, soon()).unwrap();
+    assert!(matches!(p.read("x"), Err(PartError::Failed(_))));
+    // An encrypted entry.
+    let enc = crate::testkit::zip_with(
+        &[crate::testkit::Ent {
+            name: b"x",
+            data: b"abc",
+            deflate: true,
+        }],
+        None,
+        true,
+    );
+    let p = Package::open(&enc, soon()).unwrap();
+    assert!(matches!(p.read("x"), Err(PartError::Encrypted)));
+    // Not a zip.
+    assert!(Package::open(b"hello world, not a zip at all", soon()).is_err());
+}

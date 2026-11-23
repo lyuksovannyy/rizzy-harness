@@ -218,21 +218,113 @@ async fn upload(
         return Err(too_large(ceiling.min(text_max)));
     }
     let keep_copy = matches!(target, Target::Folder(_)).then(|| head.clone());
-    match attachments::extract(&q.name, head, m.pdf_reader()).await {
-        Ok(a) => store_text(&m, &who, a).await,
-        Err(e) if e.busy() => Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, e.to_string())),
-        // Not text, or a PDF that cannot be read: a coding chat keeps it
-        // as a file (never an empty one: the node saves none).
-        Err(e @ (ExtractError::Binary | ExtractError::Pdf(_))) => match (target, keep_copy) {
+    // One helper at a time per account (T96): a second PDF or zip of the same
+    // account waits here, holding no server-wide slot, so one account cannot
+    // keep both slots busy and starve the others.
+    let needs_helper = crate::pdf::is_pdf(&head) || crate::doc::is_zip(&head);
+    let (_own, busy) = match m.pdf_reader().filter(|_| needs_helper) {
+        Some(r) => match r
+            .account_slot(who.user_id.as_deref().unwrap_or("api-token"))
+            .await
+        {
+            Ok(p) => (Some(p), None),
+            Err(_) if crate::pdf::is_pdf(&head) => {
+                (None, Some(ExtractError::Pdf(crate::pdf::PdfError::Busy)))
+            }
+            Err(_) => (None, Some(ExtractError::Unsure(crate::pdf::DocError::Busy))),
+        },
+        None => (None, None),
+    };
+    let result = match busy {
+        Some(e) => Err(e),
+        None => attachments::extract(&q.name, head, m.pdf_reader()).await,
+    };
+    match result {
+        Ok(a) => {
+            let document = attachments::is_document_mime(&a.mime);
+            let stored = store_text(&m, &who, a).await?;
+            // A document is read as text and its file is kept as well, where
+            // this chat keeps files; where it cannot, the text alone goes and
+            // nothing is refused (X.55, T96).
+            let Some(mut body) = stored.0.as_object().cloned().filter(|_| document) else {
+                return Ok(stored);
+            };
+            if let (Target::Folder(dest), Some(bytes), Some(id)) = (
+                target,
+                keep_copy,
+                body.get("attachment_id").and_then(Value::as_str),
+            ) {
+                let len = bytes.len() as u64;
+                let file_id = attachments::file_id_of(id);
+                let kept = keep(
+                    &m,
+                    &who,
+                    &q,
+                    dest,
+                    Some(len),
+                    Body::from(bytes),
+                    AsFile {
+                        upload_id: Some(file_id),
+                        note: None,
+                    },
+                )
+                .await
+                .is_ok();
+                body.insert("file_kept".into(), json!(kept));
+            }
+            Ok(Json(Value::Object(body)))
+        }
+        // A zip the reader could not judge (busy, timed out, crashed, could
+        // not confine itself) is a plain file where files are kept, as it was
+        // before documents were read: no failure, no sentence (T96).
+        Err(ExtractError::Unsure(_)) if keep_copy.is_some() => match (target, keep_copy) {
             (Target::Folder(dest), Some(bytes)) => {
                 let len = bytes.len() as u64;
-                keep(&m, &who, &q, dest, Some(len), Body::from(bytes)).await
+                keep(
+                    &m,
+                    &who,
+                    &q,
+                    dest,
+                    Some(len),
+                    Body::from(bytes),
+                    AsFile::default(),
+                )
+                .await
             }
-            (Target::Plain(why), _) if matches!(e, ExtractError::Binary) => {
-                Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, why))
-            }
-            _ => Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string())),
+            _ => Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "the file could not be kept".into(),
+            )),
         },
+        Err(e) if e.busy() => Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, e.to_string())),
+        // Not text, or a PDF or document that cannot be read: a coding chat
+        // keeps it as a file (never an empty one: the node saves none); a
+        // document says that its text could not be read.
+        Err(e @ (ExtractError::Binary | ExtractError::Pdf(_) | ExtractError::Doc(_))) => {
+            match (target, keep_copy) {
+                (Target::Folder(dest), Some(bytes)) => {
+                    let len = bytes.len() as u64;
+                    let note = matches!(e, ExtractError::Doc(_)).then(|| e.to_string());
+                    keep(
+                        &m,
+                        &who,
+                        &q,
+                        dest,
+                        Some(len),
+                        Body::from(bytes),
+                        AsFile {
+                            upload_id: None,
+                            note,
+                        },
+                    )
+                    .await
+                }
+                (Target::Plain(why), _) if matches!(e, ExtractError::Binary) => {
+                    Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, why))
+                }
+                _ => Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string())),
+            }
+        }
         Err(e) => Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string())),
     }
 }
@@ -269,6 +361,16 @@ async fn store_text(
     })))
 }
 
+/// What a kept file is besides a file.
+#[derive(Default)]
+struct AsFile {
+    /// The id to store it under (a document's own file:
+    /// `attachments::file_id_of`).
+    upload_id: Option<String>,
+    /// A sentence for the person: why this file is only a file.
+    note: Option<String>,
+}
+
 /// Keep a file for the chat's folder: streamed into the blob store under
 /// `max` and the account's room, then recorded as the owner's unsent
 /// upload.
@@ -279,7 +381,9 @@ async fn keep(
     dest: Dest,
     length: Option<u64>,
     body: Body,
+    as_file: AsFile,
 ) -> ApiResult<Json<Value>> {
+    let AsFile { upload_id, note } = as_file;
     let Dest { max, session, kept } = dest;
     let refused = |(code, msg): storage::Refusal| ApiError(code, msg);
     let st = storage::get(m).ok_or_else(|| {
@@ -311,7 +415,7 @@ async fn keep(
         .map(|t| harness_core::text::clean_line(t, 80))
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| "application/octet-stream".into());
-    let id = harness_core::new_id();
+    let id = upload_id.unwrap_or_else(harness_core::new_id);
     let up = NewUpload {
         upload_id: id.clone(),
         owner_id: who.user_id.clone(),
@@ -341,21 +445,27 @@ async fn keep(
     })
     .await
     .map_err(refused)?;
+    let said = |mut v: Value| {
+        if let Some(n) = &note {
+            v["note"] = json!(n);
+        }
+        Ok(Json(v))
+    };
     match put {
-        Put::Added { .. } if kept => Ok(Json(json!({
+        Put::Added { .. } if kept => said(json!({
             "attachment_id": id,
             "name": name,
             "mime": mime,
             "bytes": size,
             "kept": true,
-        }))),
-        Put::Added { .. } => Ok(Json(json!({
+        })),
+        Put::Added { .. } => said(json!({
             "attachment_id": id,
             "name": name,
             "mime": mime,
             "bytes": size,
             "saved": true,
-        }))),
+        })),
         Put::TooMany => Err(ApiError(
             StatusCode::TOO_MANY_REQUESTS,
             format!(

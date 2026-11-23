@@ -564,6 +564,8 @@ export interface UploadedAttachment {
   saved?: boolean;
   /** A file kept on the server for the agent to read, read-only (T95). */
   kept?: boolean;
+  /** Why a document is only a file: its text could not be read (T96). */
+  note?: string;
 }
 
 export type Effort = "low" | "medium" | "high" | "max";
