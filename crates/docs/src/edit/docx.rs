@@ -899,6 +899,14 @@ fn markdown_paras(
         if k > 0 {
             s.push_str(&format!("<{p}strike/>"));
         }
+        if code {
+            // What a created document's inline code style carries, written
+            // on the run itself: this file may have no such style. The
+            // schema wants these after the font and the bold/italic/strike.
+            s.push_str(&format!(
+                "<{p}noProof/><{p}shd {p}val=\"clear\" {p}color=\"auto\" {p}fill=\"F2F2F2\"/>"
+            ));
+        }
         s.push_str(&format!("</{p}rPr>"));
         s
     };

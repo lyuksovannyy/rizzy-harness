@@ -473,10 +473,32 @@ fn inserts_follow_the_documents_styles_and_lists() {
     let new = part(&out, "word/document.xml");
     assert!(new.contains("<w:p><w:pPr><w:pStyle w:val=\"berschrift2\"/></w:pPr><w:r><w:t xml:space=\"preserve\">New part</w:t></w:r></w:p>"), "{new}");
     assert!(new.contains("<w:rPr><w:b/></w:rPr><w:t xml:space=\"preserve\">bold</w:t>"));
-    assert!(new.contains(
-        "<w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/></w:rPr>"
-    ));
+    // Inline code looks like a created document's: the code font, no
+    // spelling marks and the grey fill, as direct formatting, because this
+    // file has no style of ours to point at.
+    assert!(
+        new.contains(
+            "<w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/>\
+             <w:noProof/><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"F2F2F2\"/></w:rPr>\
+             <w:t xml:space=\"preserve\">code</w:t>"
+        ),
+        "{new}"
+    );
     assert!(new.contains("<w:rPr><w:strike/></w:rPr>"));
+    // Bold code keeps the schema's order: font, bold, no proofing, fill.
+    let loud = ok(run(
+        &b,
+        vec![op(
+            json!({"op": "insert_after", "at": t, "markdown": "A **`loud`** word."}),
+        )],
+    ));
+    assert!(
+        part(&loud, "word/document.xml").contains(
+            "<w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:cs=\"Consolas\"/><w:b/>\
+             <w:noProof/><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"F2F2F2\"/></w:rPr>"
+        ),
+        "bold code"
+    );
     assert!(
         !new.contains("w:val=\"berschrift1\"/></w:pPr><w:r><w:t xml:space=\"preserve\">Body"),
         "a body paragraph after a heading is not a heading"
