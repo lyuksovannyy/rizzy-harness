@@ -627,3 +627,61 @@ async fn a_folder_file_is_changed_into_a_copy_through_the_node_helper() {
         "nothing written"
     );
 }
+
+/// The gate is by the name and the edit by the content, so the helper is told
+/// the kind the name says and refuses a file of the other kind (X.60, T100): a
+/// workbook named `.docx` on a node that denies `sheet_edit`, and a document
+/// named `.xlsx`, write nothing; characters the page could not show are not
+/// changed from it either.
+#[tokio::test]
+async fn a_file_named_as_the_other_kind_or_with_hidden_characters_is_not_changed() {
+    use harness_tools::doc_helper::ExeHelper;
+    use harness_tools::folder_edit::{Change, edit};
+    use harness_tools::folder_preview::Refusal;
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().canonicalize().unwrap();
+    let ctx = harness_tools::ToolCtx::new(&ws);
+    let helper = ExeHelper::new(EXE.into());
+    std::fs::write(ws.join("book.docx"), xlsx_bytes()).unwrap();
+    std::fs::write(ws.join("doc.xlsx"), docx_bytes("# T\n\nBody\n")).unwrap();
+    let ch = |at: &str| {
+        vec![Change {
+            at: at.into(),
+            text: "x".into(),
+        }]
+    };
+    let got = edit(&ctx, &helper, "book.docx", None, ch("A2")).await;
+    if got == Err(Refusal::NotAvailable) {
+        assert!(std::env::var_os("CI").is_none(), "cannot confine here");
+        eprintln!("skipped: doc-edit cannot confine itself here (Landlock ABI 4 needed)");
+        return;
+    }
+    assert_eq!(got, Err(Refusal::NotOffice));
+    assert_eq!(
+        edit(&ctx, &helper, "doc.xlsx", None, ch("A1")).await,
+        Err(Refusal::NotOffice)
+    );
+    // Hidden characters in a paragraph and a cell: refused, not rewritten.
+    let hidden = harness_docs::docx::build("Body\u{200c}text\n", &Default::default())
+        .unwrap()
+        .bytes;
+    let view = harness_docs::edit::docx::view(&hidden, 1, 400).unwrap();
+    let tag = view
+        .lines()
+        .find(|l| l.contains("Body"))
+        .and_then(|l| l.split_whitespace().next())
+        .unwrap()
+        .to_string();
+    std::fs::write(ws.join("h.docx"), &hidden).unwrap();
+    let n = std::fs::read_dir(&ws).unwrap().count();
+    let r = edit(&ctx, &helper, "h.docx", None, ch(&tag)).await.unwrap();
+    assert!(
+        matches!(&r, harness_tools::folder_edit::Edited::Refused(v) if v[0].why == Some(harness_tools::folder_edit::ChangeWhy::NotEditable)),
+        "{r:?}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&ws).unwrap().count(),
+        n,
+        "nothing written"
+    );
+}

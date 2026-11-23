@@ -47,3 +47,80 @@ pub fn stem(name: &str, ext: &str, fallback: &str) -> String {
 pub fn file_name(name: &str, ext: &str, fallback: &str) -> String {
     format!("{}.{ext}", stem(name, ext, fallback))
 }
+
+/// The suffix a saved copy's name carries.
+pub const EDITED: &str = " (edited)";
+
+/// The stem of a copy of `name`: its own stem cut to leave room for
+/// ` (edited)` inside [`MAX_NAME_CHARS`], then the suffix, so the suffix always
+/// survives and the copy never carries the original's name.
+pub fn edited_stem(name: &str, ext: &str) -> String {
+    let own = stem(name, ext, "edited");
+    let room = MAX_NAME_CHARS - EDITED.chars().count();
+    // A file system takes 255 bytes in a name: the suffix, the extension and
+    // room for ` (999)` come out of it, so a stem of wide characters is cut
+    // by bytes too.
+    let mut bytes = 255 - EDITED.len() - ext.len() - ".".len() - " (999)".len();
+    let cut: String = own
+        .chars()
+        .take(room)
+        .take_while(|c| {
+            bytes = bytes.saturating_sub(c.len_utf8());
+            bytes > 0 || c.len_utf8() == 0
+        })
+        .collect();
+    let cut = cut.trim_end_matches(|c: char| c == '.' || c.is_whitespace());
+    let cut = if cut.is_empty() { "edited" } else { cut };
+    format!("{cut}{EDITED}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_suffix_always_survives_and_the_copy_is_never_the_original() {
+        for n in [1usize, 50, 90, 91, 92, 99, 100, 101, 120, 300] {
+            let name = format!("{}.docx", "a".repeat(n));
+            let s = edited_stem(&name, "docx");
+            assert!(s.ends_with(" (edited)"), "{n}: {s}");
+            assert!(
+                s.chars().count() <= MAX_NAME_CHARS,
+                "{n}: {}",
+                s.chars().count()
+            );
+            assert_ne!(s, stem(&name, "docx", "x"), "{n}");
+            if n <= 91 {
+                assert_eq!(s, format!("{} (edited)", "a".repeat(n)));
+            } else {
+                assert_eq!(s.chars().count(), MAX_NAME_CHARS, "{n}");
+            }
+        }
+        // Many bytes per character: counted in characters, cut on a boundary.
+        let name = format!("{}.xlsx", "é日".repeat(60));
+        let s = edited_stem(&name, "xlsx");
+        assert!(
+            s.ends_with(" (edited)") && s.chars().count() == MAX_NAME_CHARS,
+            "{s}"
+        );
+        // Wide characters: also within what a file system takes in a name.
+        let name = format!("{}.docx", "日".repeat(90));
+        let s = edited_stem(&name, "docx");
+        assert!(s.ends_with(" (edited)"), "{s}");
+        assert!(format!("{s} (999).docx").len() <= 255, "{}", s.len());
+        // A stem that ends in a dot or a space after the cut loses it.
+        let name = format!("{} .docx", "b".repeat(90));
+        assert_eq!(
+            edited_stem(&name, "docx"),
+            format!("{} (edited)", "b".repeat(90))
+        );
+        let name = format!("{}. x.docx", "c".repeat(90));
+        assert!(
+            !edited_stem(&name, "docx").contains(". ("),
+            "{}",
+            edited_stem(&name, "docx")
+        );
+        // Nothing left: the fallback.
+        assert_eq!(edited_stem(".docx", "docx"), "edited (edited)");
+    }
+}

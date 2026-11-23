@@ -21,13 +21,24 @@
 //! name or a path and never leave this module.
 
 use harness_core::docs::EditHelper;
-pub use harness_docs::edit::page::{Change, ChangeWhy};
+pub use harness_docs::edit::page::{Change, ChangeWhy, PageKind};
 use harness_docs::edit::preview::Why;
 use harness_docs::edit::serve::{Request, frame_request, parse_reply};
 use harness_docs::limits::{MAX_OUTPUT_BYTES, MAX_PAGE_CHANGES};
 
 use crate::ToolCtx;
 use crate::folder_preview::{Refusal, office_name, open_source};
+
+/// Whether the name says a workbook (else a document): what the caller
+/// expects the file to be, and what the helper checks the content against.
+pub fn sheet_name(name: &str) -> bool {
+    matches!(
+        name.rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("xlsx" | "xlsm")
+    )
+}
 
 /// One change's outcome, in the order sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +83,19 @@ pub async fn edit(
     if bytes.is_empty() {
         return Err(Refusal::Empty);
     }
-    let framed = frame_request(&Request::PageEdit { sheet, changes }, &bytes);
+    let kind = if sheet_name(path) {
+        PageKind::Sheet
+    } else {
+        PageKind::Doc
+    };
+    let framed = frame_request(
+        &Request::PageEdit {
+            kind,
+            sheet,
+            changes,
+        },
+        &bytes,
+    );
     drop(bytes);
     let out = helper.run(framed).await.map_err(|e| {
         if e == crate::doc_helper::BUSY {
@@ -126,15 +149,8 @@ pub async fn edit(
         Some(i) => (&path[..=i], &path[i + 1..]),
         None => ("", path),
     };
-    let sheet_kind = matches!(
-        base.rsplit_once('.')
-            .map(|(_, e)| e.to_ascii_lowercase())
-            .as_deref(),
-        Some("xlsx" | "xlsm")
-    );
-    let ext = crate::office_edit::ext_for(base, sheet_kind);
-    let stem0 = base.rsplit_once('.').map_or(base, |(s, _)| s);
-    let stem = harness_docs::name::stem(&format!("{stem0} (edited)"), ext, "edited");
+    let ext = crate::office_edit::ext_for(base, sheet_name(base));
+    let stem = harness_docs::name::edited_stem(base, ext);
     let placed = crate::office::create_free(ctx, dir, &stem, ext, new)
         .await
         // A file-system error names a path.
@@ -265,6 +281,39 @@ mod tests {
     /// followed or written through: a link to a file inside the folder is
     /// passed over (the next free name), one that leads out is refused (the
     /// path policy judges it before anything is written).
+    /// A long name is cut before ` (edited)` is added, so the suffix always
+    /// survives and the copy is never written over (or named as) the original.
+    #[tokio::test]
+    async fn a_long_name_keeps_the_suffix_and_never_names_the_original() {
+        for stem in [
+            "a".repeat(91),
+            "a".repeat(92),
+            "a".repeat(100),
+            "a".repeat(120),
+            "é日".repeat(45),
+        ] {
+            let r = rig();
+            let name = format!("{stem}.docx");
+            let src = std::fs::read(r.ws.join("docs/a.docx")).unwrap();
+            std::fs::write(r.ws.join("docs").join(&name), &src).unwrap();
+            let ch = change(&src, "Hello there.", "x");
+            let Edited::Saved { path, .. } = go(&r, &format!("docs/{name}"), ch).await.unwrap()
+            else {
+                panic!()
+            };
+            let made = path.strip_prefix("docs/").unwrap();
+            assert!(made.ends_with(" (edited).docx"), "{made}");
+            assert!(made.chars().count() <= 100 + ".docx".len(), "{made}");
+            assert_ne!(made, name);
+            // The original is as it was and the copy is a different file.
+            assert_eq!(std::fs::read(r.ws.join("docs").join(&name)).unwrap(), src);
+            assert!(r.ws.join(&path).exists());
+            if stem.chars().count() <= 91 {
+                assert_eq!(made, format!("{stem} (edited).docx"));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn an_existing_name_or_a_link_in_its_place_is_not_written_through() {
         let r = rig();

@@ -25,6 +25,17 @@ use crate::formula;
 use crate::limits::{MAX_EDIT_TEXT_CHARS, MAX_PAGE_CHANGES};
 use crate::xml;
 
+/// What kind of file the caller named it as (from its name's extension). The
+/// helper reads the file's own content, and a file of the other kind is not
+/// edited: a workbook named `.docx` is no document, so a node that denies the
+/// workbook tool cannot be led to write one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageKind {
+    Doc,
+    Sheet,
+}
+
 /// One change the page asks for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,7 +259,12 @@ fn classify_sheet(m: &str) -> ChangeWhy {
 /// The changes of a request on a file: `sheet` is the place among the
 /// visible sheets (a workbook only). `Err` is a reason for the whole file;
 /// otherwise one item per change, and the new file when all applied.
-pub fn apply(file: &[u8], sheet: Option<u32>, changes: &[Change]) -> Result<Applied, Why> {
+pub fn apply(
+    file: &[u8],
+    kind: PageKind,
+    sheet: Option<u32>,
+    changes: &[Change],
+) -> Result<Applied, Why> {
     if changes.is_empty() || changes.len() > MAX_PAGE_CHANGES {
         return Err(Why::Damaged);
     }
@@ -260,16 +276,26 @@ pub fn apply(file: &[u8], sheet: Option<u32>, changes: &[Change]) -> Result<Appl
         return Err(Why::NotOffice);
     }
     let src = Source::open(file).map_err(|e| why_of(&e))?;
-    if src.has("word/document.xml") {
-        document(file, changes)
-    } else if src.has(xlsx::WORKBOOK) {
+    if src.has("word/document.xml") && kind == PageKind::Doc {
+        document(&src, file, changes)
+    } else if src.has(xlsx::WORKBOOK) && kind == PageKind::Sheet {
         workbook(&src, file, sheet, changes)
     } else {
         Err(Why::NotOffice)
     }
 }
 
-fn document(file: &[u8], changes: &[Change]) -> Result<Applied, Why> {
+fn document(src: &Source<'_>, file: &[u8], changes: &[Change]) -> Result<Applied, Why> {
+    // What the page could not show as it is stays as it is: a paragraph with
+    // a character it dropped or replaced is not changed from here.
+    let part = read(src, "word/document.xml")?;
+    let idx = docx::index(&part).map_err(|e| why_of(&e))?;
+    let unfaithful: HashSet<String> = idx
+        .paras
+        .iter()
+        .filter(|p| !super::preview::faithful_text(&p.text))
+        .filter_map(docx::tag_text)
+        .collect();
     let mut items: Vec<Option<Item>> = vec![None; changes.len()];
     let mut ops = vec![];
     let mut at = vec![];
@@ -281,6 +307,8 @@ fn document(file: &[u8], changes: &[Change]) -> Result<Applied, Why> {
         };
         if c.text.chars().count() > MAX_EDIT_TEXT_CHARS {
             items[k] = Some(refused(ChangeWhy::TooLong));
+        } else if unfaithful.contains(&c.at) {
+            items[k] = Some(refused(ChangeWhy::NotEditable));
         } else if !seen.insert(key.to_string()) {
             items[k] = Some(refused(ChangeWhy::Duplicate));
         } else {
@@ -307,9 +335,10 @@ fn document(file: &[u8], changes: &[Change]) -> Result<Applied, Why> {
     Ok(finish(items, &at, o, classify_doc))
 }
 
-/// The name of the visible sheet at `place`, which must be the only sheet of
-/// that name (the edit takes a name; two of one name would not say which).
-fn visible_name(src: &Source<'_>, place: Option<u32>) -> Result<String, Why> {
+/// The name and part of the visible sheet at `place`, which must be the only
+/// sheet of that name (the edit takes a name; two of one name would not say
+/// which).
+fn visible_name(src: &Source<'_>, place: Option<u32>) -> Result<(String, String), Why> {
     let part = read(src, xlsx::WORKBOOK)?;
     let wb = xlsx::read_wb(src, &part).map_err(|e| why_of(&e))?;
     let visible: Vec<&xlsx::SheetRef> = wb.sheets.iter().filter(|s| s.state == "visible").collect();
@@ -320,7 +349,7 @@ fn visible_name(src: &Source<'_>, place: Option<u32>) -> Result<String, Why> {
     if wb.sheets.iter().filter(|s| same(&s.name, &sh.name)).count() != 1 {
         return Err(Why::Damaged);
     }
-    Ok(sh.name.clone())
+    Ok((sh.name.clone(), sh.path.clone()))
 }
 
 fn workbook(
@@ -329,7 +358,9 @@ fn workbook(
     sheet: Option<u32>,
     changes: &[Change],
 ) -> Result<Applied, Why> {
-    let name = visible_name(src, sheet)?;
+    let (name, path) = visible_name(src, sheet)?;
+    // The cells the page could not show as they are: not changed from here.
+    let unfaithful = unfaithful_cells(src, &path)?;
     let mut items: Vec<Option<Item>> = vec![None; changes.len()];
     let mut ops = vec![];
     let mut at = vec![];
@@ -342,6 +373,7 @@ fn workbook(
         let addr = xlsx::addr(col, row);
         match cell_value(&c.text) {
             Err(w) => items[k] = Some(refused(w)),
+            Ok(_) if unfaithful.contains(&addr) => items[k] = Some(refused(ChangeWhy::NotEditable)),
             Ok(_) if !seen.insert(addr.clone()) => items[k] = Some(refused(ChangeWhy::Duplicate)),
             Ok(v) => {
                 ops.push(SheetOp::Set(vec![(addr, v)]));
@@ -363,4 +395,23 @@ fn workbook(
     }
     let o = xlsx::edit(file, &name, &ops).map_err(|e| why_of_edit(&e))?;
     Ok(finish(items, &at, o, classify_sheet))
+}
+
+/// The addresses of the sheet's cells whose text or formula the preview shows
+/// changed or cut (what [`super::preview`] marks `x`).
+fn unfaithful_cells(src: &Source<'_>, path: &str) -> Result<HashSet<String>, Why> {
+    let part = read(src, path)?;
+    let ix = xlsx::index(&part).map_err(|e| why_of(&e))?;
+    let sst = xlsx::shared_strings(src).map_err(|e| why_of(&e))?;
+    let mut out = HashSet::new();
+    for rr in &ix.rows {
+        let rs =
+            xlsx::scan_row(&part[rr.start..rr.end], &ix.prefix, &sst).map_err(|e| why_of(&e))?;
+        for c in &rs.cells {
+            if !super::preview::faithful_cell(&c.val) {
+                out.insert(xlsx::addr(c.col, rr.r));
+            }
+        }
+    }
+    Ok(out)
 }

@@ -997,10 +997,9 @@ impl NodeRuntime {
                     capabilities.push(harness_protocol::CAP_DOC_PREVIEW.into());
                     // A person's text changes saved as a copy (X.60): only
                     // where the agent's own editing tools are on offer, since
-                    // node.toml's say over them is the say over this.
-                    let b = &self.inner.cfg.backend;
-                    let p = &self.inner.cfg.policy;
-                    let on = |t: &str| b.has_tool(t) && !p.denies(t);
+                    // node.toml's say over them (a denial, or the plan ceiling) is the say
+                    // over this.
+                    let on = |t: &str| docs::page_edit_usable(&self.inner.cfg, t);
                     if on(harness_core::docs::EDIT_DOC_TOOL)
                         || on(harness_core::docs::EDIT_SHEET_TOOL)
                     {

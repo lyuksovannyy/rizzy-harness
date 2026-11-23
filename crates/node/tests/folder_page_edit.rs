@@ -184,6 +184,21 @@ fn change() -> PageChange {
     }
 }
 
+/// The tag the preview names for the first paragraph of `file`.
+fn real_tag(file: &[u8]) -> String {
+    use harness_docs::edit::preview::{Block, Preview, preview};
+    let Preview::Doc { blocks, .. } = preview(file, None).unwrap() else {
+        panic!()
+    };
+    blocks
+        .iter()
+        .find_map(|b| match b {
+            Block::P { at, .. } | Block::H { at, .. } if !at.is_empty() => Some(at.clone()),
+            _ => None,
+        })
+        .unwrap()
+}
+
 fn names(dir: &std::path::Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
@@ -261,7 +276,16 @@ async fn a_node_that_denies_the_editing_tools_or_read_writes_nothing() {
         let mut n = start(&denied, Profile::Agentic).await;
         std::fs::write(n.ws.join(name), docx()).unwrap();
         let sid = n.create().await;
-        assert_eq!(n.ask(sid, name).await, Some(want), "{denied:?}");
+        // The file's own tag, so that the gate and not a stale tag refuses.
+        let valid = vec![harness_protocol::PageChange {
+            at: real_tag(&docx()),
+            text: "x".into(),
+        }];
+        assert_eq!(
+            n.ask_with(sid, name, valid).await.1,
+            Some(want),
+            "{denied:?}"
+        );
         assert_eq!(names(&n.ws), [name], "{denied:?}");
     }
     // Both denied: the capability is not announced (checked in `start`), and
@@ -269,7 +293,14 @@ async fn a_node_that_denies_the_editing_tools_or_read_writes_nothing() {
     let mut n = start(&["doc_edit", "sheet_edit"], Profile::Agentic).await;
     std::fs::write(n.ws.join("a.docx"), docx()).unwrap();
     let sid = n.create().await;
-    assert_eq!(n.ask(sid, "a.docx").await, Some(PreviewRefusal::NoWrite));
+    let valid = vec![harness_protocol::PageChange {
+        at: real_tag(&docx()),
+        text: "x".into(),
+    }];
+    assert_eq!(
+        n.ask_with(sid, "a.docx", valid).await.1,
+        Some(PreviewRefusal::NoWrite)
+    );
     assert_eq!(names(&n.ws), ["a.docx"]);
 }
 

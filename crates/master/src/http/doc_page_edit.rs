@@ -190,8 +190,7 @@ fn copy_name(name: &str) -> (String, &'static str, &'static str) {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     };
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
-    let stem0 = base.rsplit_once('.').map_or(base, |(s, _)| s);
-    let stem = harness_docs::name::stem(&format!("{stem0} (edited)"), ext, "edited");
+    let stem = harness_docs::name::edited_stem(base, ext);
     (format!("{stem}.{ext}"), ext, mime)
 }
 
@@ -278,6 +277,11 @@ async fn edit(
         let out = reader
             .edit(frame_request(
                 &Request::PageEdit {
+                    kind: if ext.starts_with('x') {
+                        harness_docs::edit::page::PageKind::Sheet
+                    } else {
+                        harness_docs::edit::page::PageKind::Doc
+                    },
                     sheet,
                     changes: asked,
                 },

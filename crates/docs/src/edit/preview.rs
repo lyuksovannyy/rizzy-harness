@@ -223,6 +223,33 @@ fn clean(text: &str, max: usize) -> (String, bool) {
     (o, false)
 }
 
+/// Whether the page shows `text` of a paragraph as the file has it: nothing
+/// dropped (an invisible, direction or private-use character), nothing
+/// replaced (a control read as a space, an object read as `[obj]`). A field of
+/// text that is not faithful would write back what the person saw, and the
+/// characters they could not see would be lost; so such a paragraph is not
+/// offered for change, and `page::apply` asks the same question.
+pub(super) fn faithful_text(text: &str) -> bool {
+    matches!(clean(text, usize::MAX), (c, false) if c == text)
+}
+
+/// The same for a cell's value or formula, which the page shows as one line
+/// (`clean_line`: newlines and runs of spaces become one space, the ends are
+/// trimmed) and not past `max` characters.
+fn faithful_line(text: &str, max: usize) -> bool {
+    text.chars().count() <= max && harness_core::text::clean_line(text, max + 1) == text
+}
+
+/// Whether a cell's text, formula or stand-in is shown whole and as it is.
+pub(super) fn faithful_cell(val: &Val) -> bool {
+    match val {
+        Val::Text(t) => faithful_line(t, MAX_PREVIEW_CELL_CHARS),
+        Val::Formula(f) if f.is_empty() => false,
+        Val::Formula(f) => faithful_line(f, MAX_PREVIEW_FORMULA_CHARS),
+        _ => true,
+    }
+}
+
 fn heading_level(name: &str) -> Option<u8> {
     match name {
         "title" => Some(1),
@@ -364,7 +391,7 @@ fn doc(src: &Source<'_>) -> std::result::Result<Preview, Why> {
         });
         // The address the edit tools take, only for a body paragraph shown
         // whole (a cut one would lose its end if its text were set).
-        let at = match (&p.tag, whole) {
+        let at = match (&p.tag, whole && faithful_text(&p.text)) {
             (Some(docx::Tag::P(_)), true) => docx::tag_text(p).unwrap_or_default(),
             _ => String::new(),
         };
@@ -428,6 +455,7 @@ fn sheet_of(src: &Source<'_>, sheet: Option<u32>) -> std::result::Result<Preview
                         v = v.chars().take(MAX_PREVIEW_CELL_CHARS).collect();
                         x = true;
                     }
+                    x |= !faithful_cell(&c.val);
                     (v, None)
                 }
                 Val::Formula(f) if f.is_empty() && c.shared_si.is_some() => {
@@ -436,7 +464,7 @@ fn sheet_of(src: &Source<'_>, sheet: Option<u32>) -> std::result::Result<Preview
                 }
                 Val::Formula(f) => {
                     let shown = harness_core::text::clean_line(f, MAX_PREVIEW_FORMULA_CHARS + 1);
-                    x = shown.chars().count() > MAX_PREVIEW_FORMULA_CHARS;
+                    x = shown.chars().count() > MAX_PREVIEW_FORMULA_CHARS || !faithful_cell(&c.val);
                     (
                         String::new(),
                         Some(format!(

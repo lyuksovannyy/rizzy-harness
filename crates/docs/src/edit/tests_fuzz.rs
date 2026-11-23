@@ -371,7 +371,12 @@ fn random_page_changes_never_panic_and_never_hand_out_a_bad_file() {
                 text: (*r.pick(&texts)).to_string(),
             })
             .collect();
-        match apply(&file, Some(r.below(2) as u32), &changes) {
+        let kind = if file.windows(17).any(|w| w == b"word/document.xml") {
+            super::page::PageKind::Doc
+        } else {
+            super::page::PageKind::Sheet
+        };
+        match apply(&file, kind, Some(r.below(2) as u32), &changes) {
             Err(_) => refused += 1,
             Ok(o) => {
                 assert_eq!(o.items.len(), changes.len());

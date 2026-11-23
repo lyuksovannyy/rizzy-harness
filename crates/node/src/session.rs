@@ -3340,8 +3340,7 @@ impl Session {
         // The same tools the agent's own edit is gated by. The extension
         // picks the tool; a name of neither kind needs one of them to
         // exist, and says nothing about the path.
-        let usable =
-            |tool: &str| self.node.cfg.backend.has_tool(tool) && !self.node.cfg.policy.denies(tool);
+        let usable = |tool: &str| crate::docs::page_edit_usable(&self.node.cfg, tool);
         let ext = path
             .rsplit_once('.')
             .map(|(_, e)| e.to_ascii_lowercase())

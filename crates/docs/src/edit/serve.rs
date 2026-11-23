@@ -40,6 +40,9 @@ pub enum Request {
     /// or a cell's address with the text typed for it. `sheet` is the place
     /// among the visible sheets.
     PageEdit {
+        /// The kind the file's name says; a file of the other kind is no
+        /// office file here.
+        kind: super::page::PageKind,
         #[serde(default)]
         sheet: Option<u32>,
         changes: Vec<super::page::Change>,
@@ -200,7 +203,11 @@ pub fn serve(input: &[u8]) -> Result<Vec<u8>> {
                 None,
             ))
         }
-        Request::PageEdit { sheet, changes } => {
+        Request::PageEdit {
+            kind,
+            sheet,
+            changes,
+        } => {
             if changes.is_empty() {
                 return Err("give at least one change".into());
             }
@@ -210,7 +217,7 @@ pub fn serve(input: &[u8]) -> Result<Vec<u8>> {
                     crate::limits::MAX_PAGE_CHANGES
                 ));
             }
-            Ok(match super::page::apply(file, sheet, &changes) {
+            Ok(match super::page::apply(file, kind, sheet, &changes) {
                 Ok(done) => reply(
                     &Reply {
                         results: done.items,

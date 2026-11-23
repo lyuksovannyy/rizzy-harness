@@ -7,12 +7,25 @@ use std::collections::HashMap;
 
 use super::docx;
 use super::fixtures::*;
-use super::page::{Change, ChangeWhy, apply, cell_value, strict_number};
+use super::page::{Change, ChangeWhy, PageKind, cell_value, strict_number};
 use super::preview::{Block, Preview, Run, Why, preview};
 use super::serve::{Reply, Request, frame_request, parse_reply, serve};
 use super::tests_preview::book;
 use super::xlsx::CellVal;
 use crate::limits::*;
+
+/// The kind a file's content says (what the caller names it as, in these tests).
+fn kind_of(file: &[u8]) -> PageKind {
+    if file.windows(17).any(|w| w == b"word/document.xml") {
+        PageKind::Doc
+    } else {
+        PageKind::Sheet
+    }
+}
+
+fn apply(file: &[u8], sheet: Option<u32>, changes: &[Change]) -> Result<super::page::Applied, Why> {
+    super::page::apply(file, kind_of(file), sheet, changes)
+}
 
 fn ch(at: &str, text: &str) -> Change {
     Change {
@@ -552,7 +565,14 @@ fn through(
     sheet: Option<u32>,
     changes: Vec<Change>,
 ) -> Result<(Reply, Vec<u8>), String> {
-    let out = serve(&frame_request(&Request::PageEdit { sheet, changes }, file))?;
+    let out = serve(&frame_request(
+        &Request::PageEdit {
+            kind: kind_of(file),
+            sheet,
+            changes,
+        },
+        file,
+    ))?;
     let (r, rest) = parse_reply(&out).expect("a reply");
     Ok((r, rest.to_vec()))
 }
@@ -604,4 +624,177 @@ fn a_request_with_a_field_it_does_not_know_is_refused() {
     framed.extend_from_slice(head);
     framed.extend_from_slice(&xlsx_real());
     assert!(serve(&framed).is_err());
+}
+
+// -- what the page could not show as it is is not changed from the page -------
+
+/// A paragraph document of one-run paragraphs with the given raw `w:t` texts.
+fn doc_of(paras: &[&str]) -> Vec<u8> {
+    let body: String = paras
+        .iter()
+        .map(|t| format!("<w:p><w:r><w:t xml:space=\"preserve\">{t}</w:t></w:r></w:p>"))
+        .collect();
+    docx_with(
+        &format!("{DECL}<w:document {W_NS}><w:body>{body}<w:sectPr/></w:body></w:document>"),
+        &[],
+    )
+}
+
+#[test]
+fn a_paragraph_with_characters_the_page_cannot_show_is_not_offered_and_not_changed() {
+    let file = doc_of(&[
+        "plain",
+        "zero\u{200c}width",
+        "private\u{e000}use",
+        "bidi\u{202e}text",
+        "ctl\u{1}char",
+    ]);
+    let bl = blocks(&file);
+    assert_eq!(bl.len(), 5);
+    assert!(!at_of_block(&bl[0]).is_empty(), "faithful text is offered");
+    // The text shown has lost something, so no place is named for it.
+    for b in &bl[1..] {
+        assert_eq!(at_of_block(b), "", "{b:?}");
+    }
+    // A request aimed at it anyway (the tag taken from the file itself, as
+    // doc_view names it) is refused by the helper, not by the page.
+    let idx = super::docx::view(&file, 1, 400).unwrap();
+    let tag_of = |needle: &str| -> String {
+        idx.lines()
+            .find(|l| l.contains(needle))
+            .and_then(|l| l.split_whitespace().next())
+            .unwrap_or_else(|| panic!("{needle}: {idx}"))
+            .to_string()
+    };
+    for needle in ["zero", "private", "bidi", "ctl"] {
+        let tag = tag_of(needle);
+        let o = apply(&file, None, &[ch(&tag, "new")]).unwrap();
+        assert_eq!(whys(&o), [Some(ChangeWhy::NotEditable)], "{needle} {tag}");
+        assert!(o.bytes.is_none());
+    }
+    // The faithful one still goes through.
+    let o = apply(&file, None, &[ch(&at_of(&file, "plain"), "ok")]).unwrap();
+    assert!(o.bytes.is_some());
+}
+
+#[test]
+fn an_object_placeholder_is_never_written_as_text() {
+    // A page break is an object to the preview and shows as `[obj]`.
+    let file = docx_with(
+        &format!(
+            "{DECL}<w:document {W_NS}><w:body><w:p><w:r><w:t>before</w:t></w:r><w:r><w:br w:type=\"page\"/></w:r><w:r><w:t>after</w:t></w:r></w:p><w:p><w:r><w:t>other</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"
+        ),
+        &[],
+    );
+    let bl = blocks(&file);
+    let shown: String = runs_of(&bl[0])
+        .unwrap()
+        .iter()
+        .map(|r| r.t.as_str())
+        .collect();
+    assert!(shown.contains("[obj]"), "{shown}");
+    assert_eq!(at_of_block(&bl[0]), "", "not offered");
+    // Aimed at anyway: refused, and `[obj]` is in no copy.
+    let view = super::docx::view(&file, 1, 400).unwrap();
+    let tag = view
+        .lines()
+        .find(|l| l.contains("before"))
+        .unwrap_or_else(|| panic!("{view}"))
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    let o = apply(&file, None, &[ch(&tag, &shown)]).unwrap();
+    assert_eq!(whys(&o), [Some(ChangeWhy::NotEditable)]);
+    // Another paragraph changed in the same file leaves this one as it was.
+    let o = apply(&file, None, &[ch(&at_of(&file, "other"), "changed")]).unwrap();
+    let new = o.bytes.unwrap();
+    assert_eq!(
+        texts(&new)[0],
+        shown,
+        "the paragraph with the break is shown the same, as an object"
+    );
+}
+
+fn sheet_with_cells(cells: &str) -> Vec<u8> {
+    xlsx_with(
+        &format!(
+            "{DECL}<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\">{cells}</row></sheetData></worksheet>"
+        ),
+        "",
+        &[],
+    )
+}
+
+#[test]
+fn a_cell_shown_changed_is_marked_and_not_changed() {
+    let file = sheet_with_cells(
+        "<c r=\"A1\" t=\"inlineStr\"><is><t xml:space=\"preserve\">two\nlines</t></is></c>\
+<c r=\"B1\" t=\"inlineStr\"><is><t xml:space=\"preserve\">double  space</t></is></c>\
+<c r=\"C1\" t=\"inlineStr\"><is><t>zero\u{200c}width</t></is></c>\
+<c r=\"D1\" t=\"inlineStr\"><is><t xml:space=\"preserve\"> lead</t></is></c>\
+<c r=\"E1\" t=\"inlineStr\"><is><t>fine</t></is></c>\
+<c r=\"F1\"><f>1+\n1</f><v>2</v></c>",
+    );
+    let Preview::Sheet { rows, .. } = preview(&file, None).unwrap() else {
+        panic!()
+    };
+    let by: HashMap<String, bool> = rows
+        .iter()
+        .flat_map(|r| r.c.iter().map(|c| (c.a.clone(), c.x)))
+        .collect();
+    for a in ["A1", "B1", "C1", "D1", "F1"] {
+        assert!(by[a], "{a} is not offered");
+    }
+    assert!(!by["E1"]);
+    for a in ["A1", "B1", "C1", "D1", "F1"] {
+        let o = apply(&file, None, &[ch(a, "new")]).unwrap();
+        assert_eq!(whys(&o), [Some(ChangeWhy::NotEditable)], "{a}");
+        assert!(o.bytes.is_none());
+    }
+    // One refused cell saves nothing, whatever else was asked.
+    let o = apply(&file, None, &[ch("E1", "ok"), ch("A1", "x")]).unwrap();
+    assert_eq!(
+        whys(&o),
+        [Some(ChangeWhy::Skipped), Some(ChangeWhy::NotEditable)]
+    );
+    let o = apply(&file, None, &[ch("E1", "ok"), ch("G1", "new")]).unwrap();
+    assert!(o.bytes.is_some());
+}
+
+// -- the kind the name says is the kind the file is ---------------------------
+
+#[test]
+fn a_file_of_the_other_kind_than_its_name_says_is_not_office_here() {
+    let doc = docx_real();
+    let book = xlsx_real();
+    let at = at_of(&doc, "The end.");
+    assert_eq!(
+        super::page::apply(&book, PageKind::Doc, None, &[ch(&at, "x")]).unwrap_err(),
+        Why::NotOffice
+    );
+    assert_eq!(
+        super::page::apply(&doc, PageKind::Sheet, None, &[ch("A1", "x")]).unwrap_err(),
+        Why::NotOffice
+    );
+    // Through the helper's framing too, and nothing is made.
+    let framed = frame_request(
+        &Request::PageEdit {
+            kind: PageKind::Doc,
+            sheet: None,
+            changes: vec![ch("A1", "x")],
+        },
+        &book,
+    );
+    let out = serve(&framed).unwrap();
+    let (r, rest) = parse_reply(&out).unwrap();
+    assert_eq!(r.why, Some(Why::NotOffice));
+    assert!(!r.file && rest.is_empty());
+    // The right kinds work.
+    assert!(
+        super::page::apply(&doc, PageKind::Doc, None, &[ch(&at, "x")])
+            .unwrap()
+            .bytes
+            .is_some()
+    );
 }
