@@ -517,7 +517,8 @@ fn replace_impl(
         _ => std::path::Path::new("."),
     };
     // A FIFO or device is refused before anything opens it.
-    if let Ok(md) = std::fs::symlink_metadata(path)
+    if !create_only
+        && let Ok(md) = std::fs::symlink_metadata(path)
         && !md.file_type().is_symlink()
     {
         crate::check_regular(path, md.file_type())?;
