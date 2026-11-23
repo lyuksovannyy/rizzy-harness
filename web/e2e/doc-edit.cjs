@@ -80,7 +80,7 @@ const DOC = JSON.stringify([{ tool: 'doc_create', input: { path: 'Plan', markdow
     await dl.saveAs(first);
     const firstHash = crypto.createHash('sha256').update(fs.readFileSync(first)).digest('hex');
 
-    await say([{ tool: 'doc_view', input: { file: made.file_id } }], '.tool-card:has-text("doc_view")');
+    await say([{ tool: 'doc_view', input: { file: made.file_id } }], '.tool-name:has-text("doc_view")');
     const view = (await finished(sid)).find((f) => /Ship the document tools/.test(f.output || '') && !f.made);
     if (view && /Landlock|cannot edit documents safely/.test(view.output)) {
       log('skipped: this machine cannot confine the document editor (Landlock ABI 4 needed)');
@@ -116,7 +116,7 @@ const DOC = JSON.stringify([{ tool: 'doc_create', input: { path: 'Plan', markdow
     log('plain chat edit:', edit.made.name, bytes.length, 'bytes');
 
     // A refused edit keeps nothing and says which edit and why.
-    await say([{ tool: 'doc_edit', input: { file: made.file_id, edits: [{ op: 'delete', at: 'p9#0000' }] } }], '.tool-card:has-text("no paragraph")');
+    await say([{ tool: 'doc_edit', input: { file: made.file_id, edits: [{ op: 'delete', at: 'p9#0000' }] } }], '.tool-name:has-text("doc_edit") >> nth=1');
     const refused = (await finished(sid)).pop();
     check(!refused.ok && !refused.made && /edit 1/.test(refused.output), 'a refusal: ' + refused.output);
 
@@ -127,7 +127,7 @@ const DOC = JSON.stringify([{ tool: 'doc_create', input: { path: 'Plan', markdow
     await p.click('.mode-switch button:has-text("Agentic")');
     await pickFolder(p, R);
     await pickAgent(p, 'Assistant');
-    await say([{ tool: 'doc_view', input: { file: 'plan.docx' } }], '.tool-card:has-text("doc_view")');
+    await say([{ tool: 'doc_view', input: { file: 'plan.docx' } }], '.tool-name:has-text("doc_view")');
     const sid2 = p.url().split('/').filter(Boolean).pop();
     const v2 = (await finished(sid2)).pop();
     const tag2 = v2.output.split('\n').find((l) => l.includes('Ship the document tools')).replace(/^\S+\s*/, '').split(/\s+/)[0];
