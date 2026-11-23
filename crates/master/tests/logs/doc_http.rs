@@ -53,7 +53,11 @@ async fn a_document_leaves_no_trace_in_the_logs() {
     let name = "DOCNAME-MARKER-9981.docx";
     let long = Duration::from_secs(20);
     // Read: the reader's text carries a marker.
-    let (ok, _d1) = start(&format!("cat >/dev/null; printf '{DOCX}\\nDOCTEXT-MARKER-7731\\n'"), long).await;
+    let (ok, _d1) = start(
+        &format!("cat >/dev/null; printf '{DOCX}\\nDOCTEXT-MARKER-7731\\n'"),
+        long,
+    )
+    .await;
     let (st, _) = upload(&ok, name, zip.clone()).await;
     assert_eq!(st, 200);
     // Failed: the reader's own words carry another, and the file is kept
@@ -61,12 +65,23 @@ async fn a_document_leaves_no_trace_in_the_logs() {
     let (bad, _d2) = start("cat >/dev/null; printf 'DOCFAIL-MARKER-3340'; exit 3", long).await;
     let (st, body) = upload(&bad, name, zip.clone()).await;
     assert_eq!(st, 200);
-    assert!(body.contains("could not be read"), "the kept path with its note ran: {body}");
+    assert!(
+        body.contains("could not be read"),
+        "the kept path with its note ran: {body}"
+    );
     // Killed on its timeout: it prints its marker only after the limit.
-    let (slow, _d3) = start("cat >/dev/null; sleep 5; printf 'DOCSLOW-MARKER-1127'", Duration::from_millis(300)).await;
+    let (slow, _d3) = start(
+        "cat >/dev/null; sleep 5; printf 'DOCSLOW-MARKER-1127'",
+        Duration::from_millis(300),
+    )
+    .await;
     let t = std::time::Instant::now();
     let (st, body) = upload(&slow, name, zip.clone()).await;
-    assert!(st == 200 && t.elapsed() < Duration::from_secs(4), "{st} {body} {:?}", t.elapsed());
+    assert!(
+        st == 200 && t.elapsed() < Duration::from_secs(4),
+        "{st} {body} {:?}",
+        t.elapsed()
+    );
     // Over the output cap: far more than the cap, with a marker in it.
     let (big, _d4) = start("cat >/dev/null; yes DOCOVER-MARKER-6648", long).await;
     let (st, body) = upload(&big, name, zip.clone()).await;

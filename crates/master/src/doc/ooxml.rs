@@ -8,7 +8,7 @@ use harness_attached::{Package, PartError};
 use harness_core::text::clean_line;
 use quick_xml::events::BytesStart;
 
-use super::flow::{CELL_CHARS, Flow, LINE_CHARS, Out};
+use super::flow::{CELL_CHARS, Flow, LINE_CHARS, Out, push_capped};
 use super::xml::{Ev, Xml, attr, end_name, name};
 use super::{MAX_COLS, MAX_ROWS, Res, fail, fail_part};
 
@@ -159,6 +159,9 @@ pub fn docx(pkg: &Package<'_>, out: &mut Out) -> Res {
     // (a tracked deletion, a fallback copy of a drawing).
     let (mut in_t, mut skip) = (false, 0usize);
     let mut in_num = false;
+    // Word's hidden text (`w:vanish` in a run's properties) is not on the
+    // person's screen and is left out.
+    let (mut in_run, mut hidden_run) = (false, false);
     while !out.full() {
         match x.next().map_err(|f| fail(pkg, f))? {
             Ev::Open(e) => {
@@ -198,9 +201,17 @@ pub fn docx(pkg: &Package<'_>, out: &mut Out) -> Res {
                             flow.list(l);
                         }
                     }
+                    "r" => {
+                        in_run = true;
+                        hidden_run = false;
+                    }
+                    "vanish" if in_run => {
+                        hidden_run =
+                            !matches!(attr(&e, "val").as_deref(), Some("0" | "false" | "off"));
+                    }
                     "t" => in_t = true,
-                    "tab" | "br" | "cr" => flow.text(" "),
-                    "noBreakHyphen" => flow.text("-"),
+                    "tab" | "br" | "cr" if !hidden_run => flow.text(" "),
+                    "noBreakHyphen" if !hidden_run => flow.text("-"),
                     "tbl" => flow.begin_table(),
                     "tr" => flow.begin_row(),
                     "tc" => flow.begin_cell(),
@@ -215,6 +226,10 @@ pub fn docx(pkg: &Package<'_>, out: &mut Out) -> Res {
                 match end_name(&e) {
                     "p" => flow.end_para(out),
                     "numPr" => in_num = false,
+                    "r" => {
+                        in_run = false;
+                        hidden_run = false;
+                    }
                     "t" => in_t = false,
                     "tc" => flow.end_cell(),
                     "tr" => flow.end_row(out),
@@ -222,7 +237,13 @@ pub fn docx(pkg: &Package<'_>, out: &mut Out) -> Res {
                     _ => {}
                 }
             }
-            Ev::Text(t) if in_t && skip == 0 => flow.text(&t),
+            Ev::Text(t) if in_t && skip == 0 => {
+                if hidden_run {
+                    out.hidden |= !t.trim().is_empty();
+                } else {
+                    flow.text(&t);
+                }
+            }
             Ev::Eof => break,
             _ => {}
         }
@@ -278,11 +299,21 @@ fn shared_strings(pkg: &Package<'_>, part: &str) -> Result<Shared, String> {
                 "t" => in_t = false,
                 _ => {}
             },
-            Ev::Text(t) if in_t && cur.len() < SHARED_CHARS * 4 => cur.push_str(&t),
+            Ev::Text(t) if in_t => push_capped(&mut cur, &t, SHARED_CHARS * 4),
             Ev::Eof => return Ok(s),
             _ => {}
         }
     }
+}
+
+/// Whether the flag attribute `key` is on (`1` or `true`).
+fn is_on(e: &BytesStart<'_>, key: &str) -> bool {
+    matches!(attr(e, key).as_deref(), Some("1" | "true"))
+}
+
+/// Whether the attribute `key` is explicitly off (`0` or `false`).
+fn is_off(e: &BytesStart<'_>, key: &str) -> bool {
+    matches!(attr(e, key).as_deref(), Some("0" | "false"))
 }
 
 /// The 0-based column of a cell reference (`B7` is 1, `AA1` is 26); `None`
@@ -331,9 +362,13 @@ pub fn xlsx(pkg: &Package<'_>, out: &mut Out) -> Res {
         .find(|r| r.kind == "sharedStrings")
         .map_or("xl/sharedStrings.xml", |r| r.target.as_str());
     let shared = shared_strings(pkg, sst)?;
-    for sh in sheets.iter().filter(|s| !s.hidden) {
+    for sh in &sheets {
         if out.full() {
             break;
+        }
+        if sh.hidden {
+            out.hidden = true;
+            continue;
         }
         let Some(rel) = rels.iter().find(|r| r.id == sh.rid) else {
             continue;
@@ -358,10 +393,21 @@ fn sheet(pkg: &Package<'_>, part: &str, shared: &Shared, out: &mut Out) -> Res {
     let (mut v, mut inline) = (String::new(), String::new());
     let (mut in_v, mut in_is, mut in_t, mut phonetic) = (false, false, false, 0usize);
     let mut row_no = 0usize;
+    // Hidden rows and columns are not on the person's screen: left out.
+    let mut row_hidden = false;
+    let mut hidden_cols: Vec<(usize, usize)> = Vec::new();
     while !out.full() {
         match x.next().map_err(|f| fail(pkg, f))? {
             Ev::Open(e) => match name(&e) {
+                "col" if hidden_cols.len() < 1000 && is_on(&e, "hidden") => {
+                    let from = attr(&e, "min").and_then(|v| v.parse::<usize>().ok());
+                    let to = attr(&e, "max").and_then(|v| v.parse::<usize>().ok());
+                    if let (Some(a), Some(b)) = (from, to) {
+                        hidden_cols.push((a.saturating_sub(1), b.saturating_sub(1)));
+                    }
+                }
                 "row" => {
+                    row_hidden = is_on(&e, "hidden");
                     row.clear();
                     row_no = attr(&e, "r")
                         .and_then(|r| r.parse::<usize>().ok())
@@ -400,7 +446,11 @@ fn sheet(pkg: &Package<'_>, part: &str, shared: &Shared, out: &mut Out) -> Res {
                         "b" => (if v.trim() == "1" { "TRUE" } else { "FALSE" }).to_string(),
                         _ => clean_line(&v, CELL_CHARS),
                     };
-                    if !value.is_empty() && col < MAX_COLS {
+                    let hidden =
+                        row_hidden || hidden_cols.iter().any(|(a, b)| (*a..=*b).contains(&col));
+                    if hidden && !value.is_empty() {
+                        out.hidden = true;
+                    } else if !value.is_empty() && col < MAX_COLS {
                         if row.len() <= col {
                             row.resize(col + 1, String::new());
                         }
@@ -430,10 +480,10 @@ fn sheet(pkg: &Package<'_>, part: &str, shared: &Shared, out: &mut Out) -> Res {
                 _ => {}
             },
             Ev::Text(t) => {
-                if in_v && v.len() < CELL_CHARS * 4 {
-                    v.push_str(&t);
-                } else if in_t && inline.len() < CELL_CHARS * 4 {
-                    inline.push_str(&t);
+                if in_v {
+                    push_capped(&mut v, &t, CELL_CHARS * 4);
+                } else if in_t {
+                    push_capped(&mut inline, &t, CELL_CHARS * 4);
                 }
             }
             Ev::Eof => break,
@@ -474,8 +524,14 @@ pub fn pptx(pkg: &Package<'_>, out: &mut Out) -> Res {
         let Some(rel) = rels.iter().find(|r| &r.id == rid) else {
             continue;
         };
+        let mark = out.mark();
         out.line(&format!("## Slide {}", n + 1));
-        slide_text(pkg, &rel.target, false, out)?;
+        if slide_text(pkg, &rel.target, false, out)? {
+            // A hidden slide is not shown when the deck is presented.
+            out.rewind(mark);
+            out.hidden = true;
+            continue;
+        }
         let notes = relationships(pkg, &rel.target)?
             .into_iter()
             .find(|r| r.kind == "notesSlide");
@@ -495,16 +551,17 @@ pub fn pptx(pkg: &Package<'_>, out: &mut Out) -> Res {
 
 /// The text of one slide, or of its notes (only the notes' body, not the
 /// slide image or the number).
-fn slide_text(pkg: &Package<'_>, part: &str, notes: bool, out: &mut Out) -> Res {
+fn slide_text(pkg: &Package<'_>, part: &str, notes: bool, out: &mut Out) -> Result<bool, String> {
     let mut x = match open(pkg, part) {
         Ok(x) => x,
-        Err(PartError::Missing) => return Ok(()),
+        Err(PartError::Missing) => return Ok(false),
         Err(e) => return Err(fail_part(pkg, e)),
     };
     let mut flow = Flow::default();
     let (mut in_t, mut skip) = (false, 0usize);
     // Whether the shape being read is one whose text counts.
     let mut shape_ok = !notes;
+    let mut hidden = false;
     while !out.full() {
         match x.next().map_err(|f| fail(pkg, f))? {
             Ev::Open(e) => {
@@ -513,6 +570,7 @@ fn slide_text(pkg: &Package<'_>, part: &str, notes: bool, out: &mut Out) -> Res 
                     continue;
                 }
                 match name(&e) {
+                    "sld" if is_off(&e, "show") => hidden = true,
                     "Fallback" => skip = 1,
                     "sp" => shape_ok = !notes,
                     "ph" => {
@@ -552,5 +610,5 @@ fn slide_text(pkg: &Package<'_>, part: &str, notes: bool, out: &mut Out) -> Res 
             _ => {}
         }
     }
-    Ok(())
+    Ok(hidden)
 }

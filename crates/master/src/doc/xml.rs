@@ -24,11 +24,17 @@ use quick_xml::reader::Reader;
 /// table in a text box); a file past this is not one.
 pub const MAX_DEPTH: usize = 64;
 
+/// Events read from one part, at most: a part of millions of empty elements
+/// (nine million `<w:tc/>` in 366 KB of zip) is cut, not read to its end.
+pub const MAX_EVENTS: usize = 4_000_000;
+
 /// Why the XML could not be read.
 #[derive(Debug)]
 pub enum Fail {
     /// Nested deeper than [`MAX_DEPTH`].
     Deep,
+    /// More than [`MAX_EVENTS`] events.
+    Budget,
     /// The stream failed (a limit of the package, a damaged entry).
     Io(io::Error),
     /// Not well-formed XML.
@@ -51,6 +57,7 @@ pub struct Xml<'p> {
     rd: Reader<BufReader<Box<dyn Read + 'p>>>,
     buf: Vec<u8>,
     depth: usize,
+    events: usize,
 }
 
 impl<'p> Xml<'p> {
@@ -65,12 +72,17 @@ impl<'p> Xml<'p> {
             rd,
             buf: Vec::new(),
             depth: 0,
+            events: 0,
         }
     }
 
     /// The next event. It borrows the parser: look at it before asking again.
     pub fn next(&mut self) -> Result<Ev<'_>, Fail> {
         self.buf.clear();
+        self.events += 1;
+        if self.events > MAX_EVENTS {
+            return Err(Fail::Budget);
+        }
         let ev = match self.rd.read_event_into(&mut self.buf) {
             Ok(ev) => ev,
             Err(quick_xml::Error::Io(e)) => {

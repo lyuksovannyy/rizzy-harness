@@ -33,6 +33,8 @@ fn cut_off(bytes: &[u8]) -> bool {
     matches!(read(bytes), Verdict::NotDocument)
 }
 
+const LEFT_OUT: &str = "[left out: hidden content (hidden text, rows, columns, sheets or slides)]";
+
 // -- what each format gives -----------------------------------------------------
 
 #[test]
@@ -133,7 +135,7 @@ fn cell_types_and_a_hidden_sheet() {
     b = rebuild(&b, "xl/workbook.xml", wb.as_bytes());
     assert_eq!(
         text(&b),
-        "## Sheet: Visible\ninline\tTRUE\t\tcached\t#DIV/0!\n"
+        format!("## Sheet: Visible\ninline\tTRUE\t\tcached\t#DIV/0!\n{LEFT_OUT}\n")
     );
 }
 
@@ -548,5 +550,175 @@ fn a_read_that_stops_midway_keeps_what_it_read_and_says_so() {
     assert!(
         t.starts_with("start of it\n[cut: reading stopped here:"),
         "{t:?}"
+    );
+}
+
+// -- hidden content (M10) ---------------------------------------------------------
+
+/// What the person cannot see in their editor does not reach the model, and
+/// the text says once that something was left out; nothing hidden, no line.
+#[test]
+fn hidden_text_rows_columns_sheets_and_slides_are_left_out_with_one_line() {
+    // Word: a hidden run (`w:vanish`); `w:vanish w:val="0"` is not hidden.
+    let body = concat!(
+        "<w:p><w:r><w:t>shown </w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t>SECRET-ONE</w:t></w:r>",
+        "<w:r><w:rPr><w:vanish w:val=\"0\"/></w:rPr><w:t>visible-again</w:t></w:r></w:p>"
+    );
+    assert_eq!(
+        text(&docx(body)),
+        format!("shown visible-again\n{LEFT_OUT}\n")
+    );
+    assert_eq!(
+        text(&docx(&p("plain"))),
+        "plain\n",
+        "no line when nothing is hidden"
+    );
+    // Excel: a hidden row and a hidden column.
+    let sheet = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
+        <cols><col min=\"2\" max=\"2\" hidden=\"1\"/></cols><sheetData>\
+        <row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>keep</t></is></c><c r=\"B1\" t=\"inlineStr\"><is><t>SECRET-COL</t></is></c><c r=\"C1\" t=\"inlineStr\"><is><t>tail</t></is></c></row>\
+        <row r=\"2\" hidden=\"1\"><c r=\"A2\" t=\"inlineStr\"><is><t>SECRET-ROW</t></is></c></row>\
+        </sheetData></worksheet>";
+    let b = xlsx_raw(
+        vec!["S"],
+        &[],
+        vec![("xl/worksheets/sheet1.xml".into(), sheet.into())],
+    );
+    let t = text(&b);
+    assert_eq!(t, format!("## Sheet: S\nkeep\t\ttail\n{LEFT_OUT}\n"));
+    // PowerPoint: a hidden slide (`show="0"`) leaves no heading either.
+    let b = pptx(&[
+        (&["one"], None),
+        (&["SECRET-SLIDE"], None),
+        (&["three"], None),
+    ]);
+    let hidden = String::from_utf8(
+        Package::open(&b, Instant::now() + std::time::Duration::from_secs(5))
+            .unwrap()
+            .read_small("ppt/slides/slide2.xml", 1 << 20)
+            .unwrap(),
+    )
+    .unwrap()
+    .replace("<p:sld ", "<p:sld show=\"0\" ");
+    let b = rebuild_parts(
+        &b,
+        &[
+            "[Content_Types].xml",
+            "ppt/presentation.xml",
+            "ppt/_rels/presentation.xml.rels",
+            "ppt/slides/slide1.xml",
+            "ppt/slides/slide2.xml",
+            "ppt/slides/slide3.xml",
+        ],
+        "ppt/slides/slide2.xml",
+        hidden.as_bytes(),
+    );
+    assert_eq!(
+        text(&b),
+        format!("## Slide 1\none\n## Slide 3\nthree\n{LEFT_OUT}\n")
+    );
+    // OpenDocument spreadsheet: a hidden sheet, row and column.
+    let body = concat!(
+        "<office:spreadsheet>",
+        "<table:table table:name=\"A\"><table:table-column/><table:table-column table:visibility=\"collapse\"/>",
+        "<table:table-row><table:table-cell office:value-type=\"string\"><text:p>keep</text:p></table:table-cell>",
+        "<table:table-cell office:value-type=\"string\"><text:p>SECRET-COL</text:p></table:table-cell></table:table-row>",
+        "<table:table-row table:visibility=\"collapse\"><table:table-cell office:value-type=\"string\"><text:p>SECRET-ROW</text:p></table:table-cell></table:table-row></table:table>",
+        "<table:table table:name=\"B\" table:display=\"false\"><table:table-row><table:table-cell office:value-type=\"string\"><text:p>SECRET-SHEET</text:p></table:table-cell></table:table-row></table:table>",
+        "</office:spreadsheet>"
+    );
+    assert_eq!(
+        text(&odf("spreadsheet", body)),
+        format!("## Sheet: A\nkeep\n{LEFT_OUT}\n")
+    );
+}
+
+/// The same archive with one part replaced, over the named parts.
+fn rebuild_parts(zip_bytes: &[u8], names: &[&str], part: &str, data: &[u8]) -> Vec<u8> {
+    let pkg = Package::open(
+        zip_bytes,
+        Instant::now() + std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    let owned: Vec<(String, Vec<u8>)> = names
+        .iter()
+        .filter(|n| pkg.has(n))
+        .map(|n| {
+            let d = if *n == part {
+                data.to_vec()
+            } else {
+                pkg.read_small(n, 1 << 20).unwrap()
+            };
+            (n.to_string(), d)
+        })
+        .collect();
+    let refs: Vec<(&str, &[u8])> = owned
+        .iter()
+        .map(|(n, d)| (n.as_str(), d.as_slice()))
+        .collect();
+    zip(&refs)
+}
+
+// -- memory is bounded by the reader's own caps (M7, M8) ----------------------------
+
+/// The review's two inputs: nine million `<w:tc/>` in one row (366 KB of zip)
+/// and 1.4 million paragraphs in one cell. Neither is read to its end: the
+/// reader's own event budget cuts them, fast, with a sentence.
+#[test]
+fn a_cell_flood_and_a_cell_of_a_million_paragraphs_are_cut_fast() {
+    let mut body = String::from("<w:tbl><w:tr>");
+    body.push_str(&"<w:tc/>".repeat(9_000_000));
+    body.push_str("</w:tr></w:tbl>");
+    let z = docx(&body);
+    drop(body);
+    assert!(z.len() < 1 << 20, "{}", z.len());
+    let t0 = Instant::now();
+    let m = read_doc(&z).expect_err("cut, not read");
+    assert!(m.contains("too large"), "{m}");
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(6),
+        "{:?}",
+        t0.elapsed()
+    );
+    let mut body = String::from("<w:tbl><w:tr><w:tc>");
+    body.push_str(&"<w:p><w:r><w:t>abcdefghij</w:t></w:r></w:p>".repeat(1_400_000));
+    body.push_str("</w:tc></w:tr></w:tbl>");
+    let z = docx(&body);
+    drop(body);
+    let t0 = Instant::now();
+    let m = read_doc(&z).expect_err("cut, not read");
+    assert!(m.contains("too large"), "{m}");
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(6),
+        "{:?}",
+        t0.elapsed()
+    );
+}
+
+/// A row of a thousand cells keeps the cap's worth and counts the rest; one
+/// 60 MiB text node gives one paragraph's worth, not 60 MiB.
+#[test]
+fn a_wide_row_and_a_huge_text_node_give_what_the_caps_allow() {
+    let cells: Vec<&str> = vec!["a"; 1000];
+    let t = text(&docx(&table(&[&cells])));
+    assert_eq!(t.matches(" | ").count(), MAX_COLS, "{t:?}");
+    assert!(
+        t.trim_end()
+            .ends_with(&format!("[+{} cells]", 1000 - MAX_COLS)),
+        "{t:?}"
+    );
+    let mut xml = String::from("<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>");
+    xml.push_str(&"a".repeat(60 << 20));
+    xml.push_str("</w:t></w:r></w:p></w:body></w:document>");
+    let z = zip(&[
+        ("[Content_Types].xml", b"<Types/>"),
+        ("word/document.xml", xml.as_bytes()),
+    ]);
+    drop(xml);
+    let t = text(&z);
+    assert_eq!(
+        t.trim_end().len(),
+        super::flow::LINE_CHARS,
+        "one paragraph's cap"
     );
 }

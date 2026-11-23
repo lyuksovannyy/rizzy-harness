@@ -15,6 +15,8 @@ use harness_core::text::clean_line;
 pub const LINE_CHARS: usize = 20_000;
 /// Characters kept of one spreadsheet cell.
 pub const CELL_CHARS: usize = 1_000;
+/// Cells of one table row that are kept; the rest are counted, not stored.
+pub const MAX_CELLS: usize = super::MAX_COLS;
 /// Raw bytes a paragraph collects before it stops taking more: what
 /// [`LINE_CHARS`] can need, with room for what cleaning drops.
 const RAW_MAX: usize = LINE_CHARS * 4 + 4096;
@@ -24,6 +26,25 @@ pub struct Out {
     pub s: String,
     chars: usize,
     cap: usize,
+    /// Something hidden in the document was left out (hidden text, rows,
+    /// columns, sheets, slides): the text ends with a line saying so.
+    pub hidden: bool,
+}
+
+/// Append at most `max` bytes in all to `dst`, cutting `src` while it is
+/// appended (at a character boundary), so one huge text event is never held
+/// whole by the reader.
+pub fn push_capped(dst: &mut String, src: &str, max: usize) {
+    let room = max.saturating_sub(dst.len());
+    if src.len() <= room {
+        dst.push_str(src);
+        return;
+    }
+    let mut end = room;
+    while !src.is_char_boundary(end) {
+        end -= 1;
+    }
+    dst.push_str(&src[..end]);
 }
 
 impl Out {
@@ -32,7 +53,19 @@ impl Out {
             s: String::new(),
             chars: 0,
             cap,
+            hidden: false,
         }
+    }
+
+    /// Where the output is now, to cut back to ([`Self::rewind`]).
+    pub fn mark(&self) -> (usize, usize) {
+        (self.s.len(), self.chars)
+    }
+
+    /// Take back what was written since `mark`.
+    pub fn rewind(&mut self, mark: (usize, usize)) {
+        self.s.truncate(mark.0);
+        self.chars = mark.1;
     }
 
     /// Enough has been written: the readers stop.
@@ -66,6 +99,8 @@ struct Para {
 #[derive(Default)]
 struct Table {
     cells: Vec<String>,
+    /// Cells past [`MAX_CELLS`] in this row: counted, not stored.
+    extra: usize,
     cell: Option<String>,
 }
 
@@ -95,10 +130,8 @@ impl Flow {
 
     /// Text of the innermost open paragraph; nothing without one.
     pub fn text(&mut self, t: &str) {
-        if let Some(p) = self.paras.last_mut()
-            && p.text.len() < RAW_MAX
-        {
-            p.text.push_str(t);
+        if let Some(p) = self.paras.last_mut() {
+            push_capped(&mut p.text, t, RAW_MAX);
         }
     }
 
@@ -111,9 +144,9 @@ impl Flow {
         // In a table cell the text is the cell's: no marker of its own.
         if let Some(cell) = self.tables.last_mut().and_then(|t| t.cell.as_mut()) {
             if !cell.is_empty() {
-                cell.push(' ');
+                push_capped(cell, " ", RAW_MAX);
             }
-            cell.push_str(&text);
+            push_capped(cell, &text, RAW_MAX);
             return;
         }
         let line = match (p.heading, p.list) {
@@ -131,6 +164,7 @@ impl Flow {
     pub fn begin_row(&mut self) {
         if let Some(t) = self.tables.last_mut() {
             t.cells.clear();
+            t.extra = 0;
             t.cell = None;
         }
     }
@@ -145,7 +179,11 @@ impl Flow {
         if let Some(t) = self.tables.last_mut()
             && let Some(c) = t.cell.take()
         {
-            t.cells.push(c);
+            if t.cells.len() < MAX_CELLS {
+                t.cells.push(c);
+            } else {
+                t.extra += 1;
+            }
         }
     }
 
@@ -156,10 +194,14 @@ impl Flow {
             return;
         };
         let cells = std::mem::take(&mut t.cells);
-        if cells.iter().all(String::is_empty) {
+        let extra = std::mem::take(&mut t.extra);
+        if extra == 0 && cells.iter().all(String::is_empty) {
             return;
         }
-        let line = cells.join(" | ");
+        let mut line = cells.join(" | ");
+        if extra > 0 {
+            line.push_str(&format!(" | [+{extra} cells]"));
+        }
         match self
             .tables
             .len()
@@ -169,9 +211,9 @@ impl Flow {
             Some(parent) if parent.cell.is_some() => {
                 let c = parent.cell.get_or_insert_with(String::new);
                 if !c.is_empty() {
-                    c.push(' ');
+                    push_capped(c, " ", RAW_MAX);
                 }
-                c.push_str(&line);
+                push_capped(c, &line, RAW_MAX);
             }
             _ => out.line(&line),
         }
@@ -196,6 +238,48 @@ mod tests {
         assert!(o.full());
         o.line("more");
         assert_eq!(o.s, "abc\ndefg");
+    }
+
+    /// What the reader holds is bounded by its own caps, whatever the file
+    /// holds: cells of a row past the cap are counted, a cell's text and a
+    /// paragraph stop growing, and one text event is cut as it is taken.
+    #[test]
+    fn what_is_held_is_bounded_by_the_readers_own_caps() {
+        let mut f = Flow::default();
+        let mut o = Out::new(1_000_000);
+        f.begin_table();
+        f.begin_row();
+        for _ in 0..100_000 {
+            f.begin_cell();
+            f.end_cell();
+        }
+        assert_eq!(f.tables[0].cells.len(), MAX_CELLS);
+        assert_eq!(f.tables[0].extra, 100_000 - MAX_CELLS);
+        f.begin_cell();
+        f.begin_para();
+        f.text("x");
+        f.end_para(&mut o);
+        f.end_cell();
+        f.end_row(&mut o);
+        assert!(
+            o.s.contains("[+99745 cells]"),
+            "{:?}",
+            &o.s[o.s.len().saturating_sub(40)..]
+        );
+        // A cell's text stops growing across paragraphs.
+        f.begin_row();
+        f.begin_cell();
+        for _ in 0..100_000 {
+            f.begin_para();
+            f.text(&"abcdefghij".repeat(10));
+            f.end_para(&mut o);
+        }
+        assert!(f.tables[0].cell.as_ref().unwrap().len() <= RAW_MAX + 1);
+        // One huge text event is cut while it is taken in.
+        f.begin_para();
+        f.text(&"é".repeat(10 << 20));
+        assert!(f.paras[0].text.len() <= RAW_MAX);
+        assert!(f.paras[0].text.is_char_boundary(f.paras[0].text.len()));
     }
 
     #[test]

@@ -158,8 +158,13 @@ fn read(bytes: &[u8]) -> Verdict {
         Format::Odp => odf::text(&pkg, true, &mut out),
         Format::Ods => odf::sheets(&pkg, &mut out),
     };
+    // What the person cannot see in their editor did not reach the model, and
+    // the text says so once.
+    if out.hidden {
+        out.line("[left out: hidden content (hidden text, rows, columns, sheets or slides)]");
+    }
     match done {
-        Err(m) if out.s.trim().is_empty() => {
+        Err(m) if out.s.trim().is_empty() && !out.hidden => {
             if m == ENCRYPTED {
                 Verdict::NotDocument
             } else {
@@ -183,6 +188,7 @@ const ENCRYPTED: &str = "a part of the document is encrypted";
 pub(crate) fn fail(pkg: &Package<'_>, f: xml::Fail) -> String {
     match f {
         xml::Fail::Deep => "the document nests its elements too deeply".into(),
+        xml::Fail::Budget => "the document is too large to read in full".into(),
         xml::Fail::Syntax => "the document's XML is damaged".into(),
         xml::Fail::Io(e) => fail_part(pkg, pkg.failed(&e)),
     }

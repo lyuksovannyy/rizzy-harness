@@ -4,7 +4,7 @@
 use harness_attached::Package;
 use harness_core::text::clean_line;
 
-use super::flow::{CELL_CHARS, Flow, LINE_CHARS, Out};
+use super::flow::{CELL_CHARS, Flow, LINE_CHARS, Out, push_capped};
 use super::xml::{Ev, Xml, attr, end_name, name};
 use super::{MAX_COLS, MAX_ROWS, Res, fail, fail_part};
 
@@ -142,6 +142,11 @@ pub fn sheets(pkg: &Package<'_>, out: &mut Out) -> Res {
     let mut repeat = 1usize;
     let mut in_p = false;
     let mut blank = false;
+    // Hidden sheets, rows and columns (`display="false"`, `visibility` that
+    // is not `visible`) are not on the person's screen: left out.
+    let mut row_hidden = false;
+    let (mut col_at, mut cell_at) = (0usize, 0usize);
+    let mut hidden_cols: Vec<(usize, usize)> = Vec::new();
     while !out.full() {
         match x.next().map_err(|f| fail(pkg, f))? {
             Ev::Open(e) => {
@@ -154,10 +159,24 @@ pub fn sheets(pkg: &Package<'_>, out: &mut Out) -> Res {
                     skip = 1;
                     continue;
                 }
+                if n == "table" && depth == 0 && attr(&e, "display").as_deref() == Some("false") {
+                    out.hidden = true;
+                    skip = 1;
+                    continue;
+                }
                 match n {
+                    "table-column" if depth == 1 => {
+                        let n = repeats(&e, "number-columns-repeated");
+                        if !is_visible(&e) && hidden_cols.len() < 1000 {
+                            hidden_cols.push((col_at, col_at.saturating_add(n - 1)));
+                        }
+                        col_at = col_at.saturating_add(n);
+                    }
                     "table" => {
                         depth += 1;
                         if depth == 1 {
+                            col_at = 0;
+                            hidden_cols.clear();
                             rows = 0;
                             cut = false;
                             blank = false;
@@ -166,6 +185,8 @@ pub fn sheets(pkg: &Package<'_>, out: &mut Out) -> Res {
                         }
                     }
                     "table-row" if depth == 1 => {
+                        row_hidden = !is_visible(&e);
+                        cell_at = 0;
                         row.clear();
                         row_repeat = repeats(&e, "number-rows-repeated");
                     }
@@ -203,6 +224,17 @@ pub fn sheets(pkg: &Package<'_>, out: &mut Out) -> Res {
                         let v = clean_line(&v, CELL_CHARS);
                         // An empty run only moves the column on; none goes past
                         // the column cap.
+                        let end = cell_at.saturating_add(repeat);
+                        let hidden = !v.is_empty()
+                            && (row_hidden
+                                || hidden_cols.iter().any(|(a, b)| *a < end && cell_at <= *b));
+                        cell_at = end;
+                        let v = if hidden {
+                            out.hidden = true;
+                            String::new()
+                        } else {
+                            v
+                        };
                         for _ in 0..repeat.min(MAX_COLS.saturating_sub(row.len())) {
                             row.push(v.clone());
                         }
@@ -236,14 +268,19 @@ pub fn sheets(pkg: &Package<'_>, out: &mut Out) -> Res {
                     _ => {}
                 }
             }
-            Ev::Text(t) if skip == 0 && depth == 1 && in_p && cell.len() < CELL_CHARS * 4 => {
-                cell.push_str(&t);
+            Ev::Text(t) if skip == 0 && depth == 1 && in_p => {
+                push_capped(&mut cell, &t, CELL_CHARS * 4);
             }
             Ev::Eof => break,
             _ => {}
         }
     }
     Ok(())
+}
+
+/// Whether a row or column is shown (`table:visibility` absent or `visible`).
+fn is_visible(e: &quick_xml::events::BytesStart<'_>) -> bool {
+    matches!(attr(e, "visibility").as_deref(), None | Some("visible"))
 }
 
 fn repeats(e: &quick_xml::events::BytesStart<'_>, key: &str) -> usize {
