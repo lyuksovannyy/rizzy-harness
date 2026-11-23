@@ -158,6 +158,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Diff { .. }
         | MasterToNode::Files { .. }
         | MasterToNode::DocPreview { .. }
+        | MasterToNode::DocPageEdit { .. }
         | MasterToNode::ProjectCreate { .. }
         | MasterToNode::ProjectClone { .. }
         | MasterToNode::ProjectMcp { .. } => None,
@@ -994,6 +995,17 @@ impl NodeRuntime {
                 // (X.59): only where the helper can be started.
                 if docs::shared_helper().is_some() {
                     capabilities.push(harness_protocol::CAP_DOC_PREVIEW.into());
+                    // A person's text changes saved as a copy (X.60): only
+                    // where the agent's own editing tools are on offer, since
+                    // node.toml's say over them is the say over this.
+                    let b = &self.inner.cfg.backend;
+                    let p = &self.inner.cfg.policy;
+                    let on = |t: &str| b.has_tool(t) && !p.denies(t);
+                    if on(harness_core::docs::EDIT_DOC_TOOL)
+                        || on(harness_core::docs::EDIT_SHEET_TOOL)
+                    {
+                        capabilities.push(harness_protocol::CAP_DOC_PAGE_EDIT.into());
+                    }
                 }
                 // New project folders (X.26, T77): only where node.toml's
                 // projects folder passed its checks at start. Never the path.
@@ -1156,6 +1168,16 @@ impl NodeRuntime {
                         path,
                         sheet,
                     } => this.doc_preview(req_id, session_id, path, sheet),
+                    // A person's text changes to such a file (X.60): the same
+                    // kind of task, answered by one
+                    // `session.doc_page_edit_result`; no event.
+                    MasterToNode::DocPageEdit {
+                        req_id,
+                        session_id,
+                        path,
+                        sheet,
+                        changes,
+                    } => this.doc_page_edit(req_id, session_id, path, sheet, changes),
                     // A new project's folder (T77): no session, its own
                     // task, answered by one `project.created`.
                     MasterToNode::ProjectCreate { req_id, name } => {
@@ -1521,6 +1543,68 @@ impl NodeRuntime {
                 Err(r) => NodeToMaster::DocPreviewResult {
                     req_id,
                     preview: None,
+                    refusal: Some(r),
+                },
+            };
+            inner.publish_wait(msg).await;
+        });
+    }
+
+    /// Answer `session.doc_page_edit` (X.60, T100) from a task of its own;
+    /// never acked, nothing logged but the node's audit line (the session id
+    /// only: never the path, a change or the new file's name), no event. It
+    /// takes the same one place as the preview, so a person's previews and
+    /// edits together hold at most one of the helper's two places. The
+    /// request is bounded here again, whatever the master checked.
+    fn doc_page_edit(
+        &self,
+        req_id: String,
+        sid: SessionId,
+        path: String,
+        sheet: Option<u32>,
+        changes: Vec<harness_protocol::PageChange>,
+    ) {
+        use harness_protocol::PreviewRefusal as R;
+        self.audit_inline("session.doc_page_edit", sid);
+        let refuse = |inner: &Arc<Inner>, req_id: String, r: R| {
+            inner.publish(NodeToMaster::DocPageEditResult {
+                req_id,
+                saved: None,
+                results: vec![],
+                refusal: Some(r),
+            })
+        };
+        if path.len() > harness_protocol::MAX_PREVIEW_PATH_BYTES
+            || changes.is_empty()
+            || changes.len() > harness_protocol::MAX_PAGE_EDIT_CHANGES
+            || changes.iter().any(|c| {
+                c.at.len() > harness_protocol::MAX_PAGE_EDIT_AT_BYTES
+                    || c.text.len() > harness_protocol::MAX_PAGE_EDIT_TEXT_BYTES
+            })
+        {
+            return refuse(&self.inner, req_id, R::NotFound);
+        }
+        let Ok(permit) = self.inner.previews.clone().try_acquire_owned() else {
+            return refuse(&self.inner, req_id, R::Busy);
+        };
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let res = match inner.session(sid) {
+                Some(s) => s.edit_folder_file(&path, sheet, changes).await,
+                None => Err(R::NotFound),
+            };
+            let msg = match res {
+                Ok(done) => NodeToMaster::DocPageEditResult {
+                    req_id,
+                    saved: done.path,
+                    results: done.results,
+                    refusal: None,
+                },
+                Err(r) => NodeToMaster::DocPageEditResult {
+                    req_id,
+                    saved: None,
+                    results: vec![],
                     refusal: Some(r),
                 },
             };
@@ -2313,6 +2397,16 @@ impl NodeRuntime {
                 sheet,
             } => {
                 self.doc_preview(req_id, session_id, path, sheet);
+                Ok(())
+            }
+            MasterToNode::DocPageEdit {
+                req_id,
+                session_id,
+                path,
+                sheet,
+                changes,
+            } => {
+                self.doc_page_edit(req_id, session_id, path, sheet, changes);
                 Ok(())
             }
             MasterToNode::ProjectCreate { req_id, name } => {
