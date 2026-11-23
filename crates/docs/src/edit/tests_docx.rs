@@ -367,8 +367,7 @@ fn set_text_keeps_the_first_runs_properties_and_the_bookmark() {
     assert!(!new.contains("ick bro"));
     let last = v
         .lines()
-        .filter(|l| l.starts_with('p'))
-        .last()
+        .rfind(|l| l.starts_with('p'))
         .unwrap()
         .split_whitespace()
         .next()
@@ -430,8 +429,7 @@ fn delete_keeps_page_setup_the_last_paragraph_and_anchors() {
     );
     let last = v
         .lines()
-        .filter(|l| l.starts_with('p'))
-        .last()
+        .rfind(|l| l.starts_with('p'))
         .unwrap()
         .split_whitespace()
         .next()

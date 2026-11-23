@@ -106,8 +106,7 @@ pub fn index(part: &[u8]) -> Result<Index> {
     let (mut np, mut nt) = (0u32, 0u32);
     let mut text_total = 0usize;
     let mut saw_doc = false;
-    loop {
-        let Some(t) = s.next()? else { break };
+    while let Some(t) = s.next()? {
         let (e, empty) = match &t.ev {
             Event::Start(e) => (e, false),
             Event::Empty(e) => (e, true),
@@ -273,6 +272,7 @@ fn tag_text(p: &Para) -> Option<String> {
 fn shown(text: &str, max: usize) -> String {
     let mut o = String::new();
     let mut n = 0;
+    #[allow(clippy::explicit_counter_loop)]
     for c in text.chars() {
         if n >= max {
             let more = text.chars().count() - n;
@@ -307,8 +307,7 @@ pub fn styles(src: &Source<'_>) -> Result<Styles> {
     let part = src.read("word/styles.xml", MAX_EDIT_PART_BYTES)?;
     let mut s = Scan::new(&part, NS_W, MAX_EDIT_EVENTS)?;
     let mut cur: Option<String> = None;
-    loop {
-        let Some(t) = s.next()? else { break };
+    while let Some(t) = s.next()? {
         match &t.ev {
             Event::Start(e) if s.local(e.name()) == Some("style") => {
                 cur = if attr(e, "type")?.as_deref() == Some("paragraph") {

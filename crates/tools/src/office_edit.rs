@@ -771,7 +771,7 @@ mod tests {
             .run(&c, json!({"file": "ab12-cd", "sheet": "Data", "edits": [{"op": "clear", "range": "A1"}]}))
             .await;
         assert!(o.ok);
-        let reqs = f.0.lock().unwrap();
+        let reqs = f.0.lock().unwrap().clone();
         assert!(
             matches!(&reqs[0], DocRequest::View { file, from: 3, limit: 10, .. } if file == "ab12-cd")
         );
@@ -779,7 +779,6 @@ mod tests {
             matches!(&reqs[1], DocRequest::DocEdit { file, save_as: Some(s), .. } if file == "ab12-cd" && s == "../../x/Final")
         );
         assert!(matches!(&reqs[2], DocRequest::SheetEdit { sheet, .. } if sheet == "Data"));
-        drop(reqs);
         // The master's refusal, with each edit's reason, stays quoted lines.
         c.docs = Some(Arc::new(Fake(
             Mutex::new(vec![]),

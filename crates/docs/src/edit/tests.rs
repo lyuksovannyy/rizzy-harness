@@ -18,7 +18,9 @@ pub(crate) fn crc(b: &[u8]) -> u32 {
 /// A zip with the entries exactly as given: `(name bytes, flags, method,
 /// stored data, crc, unpacked size)`. For files a well-behaved writer never
 /// makes (repeated names, encrypted entries, odd timestamps).
-pub(crate) fn raw_zip(items: &[(&[u8], u16, u16, &[u8], u32, u32)], stamp: (u16, u16)) -> Vec<u8> {
+pub(crate) type Item<'a> = (&'a [u8], u16, u16, &'a [u8], u32, u32);
+
+pub(crate) fn raw_zip(items: &[Item<'_>], stamp: (u16, u16)) -> Vec<u8> {
     let mut o = Vec::new();
     let mut central = Vec::new();
     for (name, flags, method, data, crc, size) in items {
@@ -70,10 +72,7 @@ pub(crate) fn raw_zip(items: &[(&[u8], u16, u16, &[u8], u32, u32)], stamp: (u16,
     o
 }
 
-pub(crate) fn stored<'a>(
-    name: &'a str,
-    data: &'a [u8],
-) -> (&'a [u8], u16, u16, &'a [u8], u32, u32) {
+pub(crate) fn stored<'a>(name: &'a str, data: &'a [u8]) -> Item<'a> {
     (name.as_bytes(), 0, 0, data, crc(data), data.len() as u32)
 }
 

@@ -102,6 +102,7 @@ impl<'a> Scan<'a> {
     /// The next event, or `None` at the end of the part. `DOCTYPE`, a
     /// non-UTF-8 declaration, a rebound main prefix, nesting past
     /// [`MAX_DEPTH`] and too many events are refusals.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Tok<'a>>> {
         self.events += 1;
         if self.events > self.max_events {

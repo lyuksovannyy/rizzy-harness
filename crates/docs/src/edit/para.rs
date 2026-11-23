@@ -135,8 +135,7 @@ pub fn scan(src: &[u8], prefix: &str, ns: &'static str) -> Result<ParaScan> {
     let mut simple_depth = 0i32;
     let mut run_hidden = false;
     let mut first = true;
-    loop {
-        let Some(t) = s.next()? else { break };
+    while let Some(t) = s.next()? {
         let (e, empty) = match &t.ev {
             Event::Start(e) => (Some(e), false),
             Event::Empty(e) => (Some(e), true),

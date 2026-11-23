@@ -84,6 +84,12 @@ fn adjoins(r: Rect, col: u32, row: u32) -> bool {
 
 // -- the workbook ------------------------------------------------------------
 
+/// An element's attributes in order.
+type Attrs = Vec<(String, String)>;
+
+/// A cell formula's `t`, `si` and whether it has a `ref`.
+type FAttrs = (Option<String>, Option<String>, bool);
+
 #[derive(Debug, Clone)]
 pub struct SheetRef {
     pub name: String,
@@ -95,7 +101,7 @@ pub struct Wb {
     pub sheets: Vec<SheetRef>,
     pub date1904: bool,
     pub names: Vec<(String, String)>,
-    calc_pr: Option<(usize, usize, Vec<(String, String)>)>,
+    calc_pr: Option<(usize, usize, Attrs)>,
     /// Where a new `calcPr` goes.
     calc_at: usize,
     pub has_calc_chain: bool,
@@ -526,12 +532,12 @@ pub fn index(part: &[u8]) -> Result<SheetIdx> {
                 };
                 match &c.ev {
                     Event::End(_) if c.depth == 2 => break,
-                    Event::Start(m) | Event::Empty(m) if s.local(m.name()) == Some("col") => {
-                        if truthy(attr(m, "hidden")?) {
-                            let lo = attr(m, "min")?.and_then(|x| x.parse().ok()).unwrap_or(1);
-                            let hi = attr(m, "max")?.and_then(|x| x.parse().ok()).unwrap_or(lo);
-                            ix.hidden_cols.push((lo, hi));
-                        }
+                    Event::Start(m) | Event::Empty(m)
+                        if s.local(m.name()) == Some("col") && truthy(attr(m, "hidden")?) =>
+                    {
+                        let lo = attr(m, "min")?.and_then(|x| x.parse().ok()).unwrap_or(1);
+                        let hi = attr(m, "max")?.and_then(|x| x.parse().ok()).unwrap_or(lo);
+                        ix.hidden_cols.push((lo, hi));
                     }
                     _ => {}
                 }
@@ -700,7 +706,7 @@ pub fn scan_row(src: &[u8], prefix: &str, sst: &[String]) -> Result<RowScan> {
             Option<String>,
             Option<String>,
             Option<String>,
-            Option<(Option<String>, Option<String>, bool)>,
+            Option<FAttrs>,
         ) = (None, None, None, None);
         let mut end = t.end;
         if !empty {
