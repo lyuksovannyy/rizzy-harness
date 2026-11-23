@@ -147,11 +147,11 @@ fn a_cell_the_preview_cut_or_stood_in_for_is_marked_not_editable() {
         .iter()
         .flat_map(|r| r.c.iter().map(|c| (c.a.clone(), c.x)))
         .collect();
-    assert_eq!(by["A1"], true, "cut text");
-    assert_eq!(by["B1"], false, "exactly the limit is whole");
-    assert_eq!(by["C1"], true, "cut formula");
-    assert_eq!(by["D1"], false);
-    assert_eq!(by["A3"], true, "a stand-in for a shared formula");
+    assert!(by["A1"], "cut text");
+    assert!(!by["B1"], "exactly the limit is whole");
+    assert!(by["C1"], "cut formula");
+    assert!(!by["D1"]);
+    assert!(by["A3"], "a stand-in for a shared formula");
 }
 
 // -- what a typed cell means --------------------------------------------------
