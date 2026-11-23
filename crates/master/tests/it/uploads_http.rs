@@ -1029,3 +1029,71 @@ async fn a_message_carries_at_most_ten_files_and_images_together() {
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(t.big.prompts()[0].len(), 5);
 }
+
+/// A document's text is never refused for its file's sake (X.55, T96): when
+/// the file's push fails (the node refuses a chunk) the message still goes,
+/// with the text and without the file; a required file that fails still
+/// stops the send, as above.
+#[tokio::test]
+async fn a_document_whose_file_cannot_be_pushed_still_sends_its_text() {
+    use harness_attached::testkit::{docx, p};
+    let t = start().await;
+    let mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    t.master
+        .set_pdf_reader(harness_master::pdf::PdfReader::with_command(
+            "/bin/sh".into(),
+            vec![
+                "-c".into(),
+                format!("cat >/dev/null; printf '%s' '{mime}\nthe words\n'").into(),
+            ],
+        ));
+    let sid = chat(&t, &t.alex, "big", "agentic").await;
+    let (st, v) = upload(
+        &t,
+        &t.alex,
+        "plan.docx",
+        &format!("&session={sid}"),
+        docx(&p("x")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["file_kept"], true, "{v}");
+    let id = v["attachment_id"].as_str().unwrap().to_string();
+    *t.big.knobs.fail_chunk.lock().unwrap() = Some(0);
+    let (st, v) = send(&t, &t.alex, &sid, &[&id]).await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "the text goes though its file cannot: {v}"
+    );
+    let prompts = t.big.prompts();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].is_empty(), "the file was dropped");
+    let attachments = t
+        .big
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|m| match m {
+            MasterToNode::Prompt(p) => Some(p.attachments.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].text, "the words\n");
+    // Without the failure the file goes along.
+    *t.big.knobs.fail_chunk.lock().unwrap() = None;
+    let (_, v) = upload(
+        &t,
+        &t.alex,
+        "plan.docx",
+        &format!("&session={sid}"),
+        docx(&p("x")),
+    )
+    .await;
+    let id = v["attachment_id"].as_str().unwrap().to_string();
+    let (st, v) = send(&t, &t.alex, &sid, &[&id]).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(t.big.prompts()[1].len(), 1, "the file went with its text");
+}

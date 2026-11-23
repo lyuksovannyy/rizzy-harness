@@ -97,6 +97,8 @@ pub struct PdfReader {
     /// The arguments of an office document's helper (`doc-text`).
     doc_args: Vec<OsString>,
     slots: Arc<Semaphore>,
+    /// One helper at a time per account (see [`Self::account_slot`]).
+    accounts: std::sync::Mutex<std::collections::HashMap<String, Arc<Semaphore>>>,
     timeout: Duration,
     queue_wait: Duration,
 }
@@ -116,6 +118,7 @@ impl PdfReader {
             doc_args: args.clone(),
             args,
             slots: Arc::new(Semaphore::new(CONCURRENT)),
+            accounts: Default::default(),
             timeout: TIMEOUT,
             queue_wait: QUEUE_WAIT,
         }
@@ -126,6 +129,29 @@ impl PdfReader {
         self.timeout = timeout;
         self.queue_wait = queue_wait;
         self
+    }
+
+    /// The one helper an account may hold at a time: a second file of the
+    /// same account waits here (at most the queue bound, then
+    /// [`PdfError::Busy`]) without holding a server-wide slot, so one account
+    /// cannot keep both slots busy and starve the others. Take it before
+    /// [`Self::extract`] or [`Self::extract_doc`] and keep it until they end.
+    pub async fn account_slot(
+        &self,
+        account: &str,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, PdfError> {
+        let sem = {
+            let mut m = self.accounts.lock().unwrap_or_else(|e| e.into_inner());
+            // Forget the accounts nobody holds or waits on.
+            m.retain(|_, s| Arc::strong_count(s) > 1);
+            m.entry(account.to_string())
+                .or_insert_with(|| Arc::new(Semaphore::new(1)))
+                .clone()
+        };
+        tokio::time::timeout(self.queue_wait, sem.acquire_owned())
+            .await
+            .map_err(|_| PdfError::Busy)?
+            .map_err(|_| PdfError::Busy)
     }
 
     /// Free helper slots now (tests).
@@ -556,6 +582,27 @@ mod tests {
                 "helper survived cancel"
             );
         }
+    }
+
+    /// One helper per account at a time; another account is not held up, and
+    /// a forgotten account leaves nothing behind.
+    #[tokio::test]
+    async fn an_account_holds_one_helper_slot_and_others_are_not_starved() {
+        let r = sh("true").with_limits(Duration::from_secs(5), Duration::from_millis(200));
+        let a = r.account_slot("alex").await.unwrap();
+        // His second file waits its bound, then is told the server is busy.
+        let t = std::time::Instant::now();
+        assert_eq!(r.account_slot("alex").await.err(), Some(PdfError::Busy));
+        assert!(t.elapsed() >= Duration::from_millis(150));
+        // Bob is not waiting behind him, and no server-wide slot was used.
+        let b = r.account_slot("bob").await.unwrap();
+        assert_eq!(r.free_slots(), CONCURRENT);
+        drop(a);
+        let _again = r.account_slot("alex").await.unwrap();
+        drop(b);
+        // Accounts nobody holds are forgotten on the next call.
+        let _c = r.account_slot("carol").await.unwrap();
+        assert!(r.accounts.lock().unwrap().len() <= 2);
     }
 
     const DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";

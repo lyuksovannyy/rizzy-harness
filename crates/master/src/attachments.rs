@@ -7,6 +7,8 @@
 
 use harness_core::event::Attachment;
 
+use crate::pdf::DocError;
+
 /// Largest upload accepted.
 pub const MAX_UPLOAD: usize = 10 * 1024 * 1024;
 /// Extracted text kept per document (about 25k tokens).
@@ -39,13 +41,19 @@ pub enum ExtractError {
     /// this sentence (X.55, T96).
     #[error("{0}")]
     Doc(crate::pdf::DocError),
+    /// The reader could not say whether a zip is a document (busy, timed
+    /// out, crashed, could not confine itself): not worth a sentence about
+    /// documents. Kept as a plain file where files are kept, as before
+    /// documents were read (503 when busy and nothing is kept).
+    #[error("{0}")]
+    Unsure(crate::pdf::DocError),
 }
 
 impl ExtractError {
     pub fn busy(&self) -> bool {
         matches!(
             self,
-            Self::Pdf(crate::pdf::PdfError::Busy) | Self::Doc(crate::pdf::DocError::Busy)
+            Self::Pdf(crate::pdf::PdfError::Busy) | Self::Unsure(crate::pdf::DocError::Busy)
         )
     }
 }
@@ -90,7 +98,12 @@ pub async fn extract(
             Ok(Some((mime, text))) => (mime, text),
             // Not a document by its parts, or encrypted: whatever it was.
             Ok(None) => return Err(ExtractError::Binary),
-            Err(e) => return Err(ExtractError::Doc(e)),
+            // Only what the reader positively found to be a document gets a
+            // document's sentence.
+            Err(e @ (DocError::Unreadable(_) | DocError::NoText)) => {
+                return Err(ExtractError::Doc(e));
+            }
+            Err(e) => return Err(ExtractError::Unsure(e)),
         }
     } else {
         let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
@@ -144,7 +157,7 @@ pub fn clean_name(name: &str) -> String {
 mod tests {
     use super::*;
 
-    use crate::pdf::{DocError, PdfError, PdfReader};
+    use crate::pdf::{PdfError, PdfReader};
 
     #[tokio::test]
     async fn text_files_and_rejections() {

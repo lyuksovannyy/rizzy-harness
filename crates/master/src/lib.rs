@@ -2605,6 +2605,11 @@ impl Master {
         let features = r.agents().get(&agent.agent_id).map(|a| a.features);
         // Files for a plain chat (T95): kept here for `attached_file`, and
         // only an agent with the switch is sent the message that names them.
+        // The kept files of documents (X.55): never a reason to refuse the
+        // message. In a plain chat they are only named (nothing to push); in
+        // a coding chat they are pushed on their own and dropped when the
+        // push fails (`companions`).
+        let mut companions: Vec<harness_store::chat_uploads::TakenUpload> = Vec::new();
         let uploads = {
             let mut all = uploads;
             if !optional_uploads.is_empty()
@@ -2617,7 +2622,11 @@ impl Master {
                 let mut with = all.clone();
                 with.extend(optional_uploads);
                 if uploads::check(self, &row, &with).is_ok() {
-                    all = with;
+                    if uploads::lane(&row) == uploads::Lane::Attached {
+                        all = with;
+                    } else {
+                        companions = with.split_off(all.len());
+                    }
                 }
             }
             all
@@ -2896,8 +2905,22 @@ impl Master {
         // The files go ahead of the prompt that names them, once nothing
         // else can refuse it here: the node holds them until that prompt
         // takes them (or its staging expires).
-        if !uploads.is_empty() && !attached_lane {
-            let refs = uploads::push(self, &row.node_id, sid, &uploads).await?;
+        if (!uploads.is_empty() || !companions.is_empty()) && !attached_lane {
+            let mut refs = if uploads.is_empty() {
+                Vec::new()
+            } else {
+                uploads::push(self, &row.node_id, sid, &uploads).await?
+            };
+            // A document's file that cannot be pushed (gone from the store,
+            // the node's refusal or timeout) is dropped: the text goes.
+            if !companions.is_empty() {
+                match uploads::push(self, &row.node_id, sid, &companions).await {
+                    Ok(more) => refs.extend(more),
+                    Err(e) => {
+                        tracing::info!(error = %e, "a document's file was not pushed; its text goes alone")
+                    }
+                }
+            }
             if let MasterToNode::Prompt(p) = &mut msg {
                 p.uploads = refs;
             }

@@ -178,25 +178,13 @@ async fn an_unreadable_document_is_a_file_with_a_sentence() {
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
 }
 
-/// The helper that never finishes is killed at its timeout; the document is
-/// then a plain file with the sentence, and the slot comes back.
+/// A helper killed on its timeout could not say what the file is: a plain
+/// file, silently (T96), and the slot comes back.
 #[tokio::test]
-async fn a_helper_killed_on_timeout_leaves_a_file_with_a_sentence() {
+async fn a_helper_killed_on_timeout_leaves_a_plain_file_without_a_sentence() {
     let t = start().await;
-    t.master.set_pdf_reader(
-        PdfReader::with_command(
-            "/bin/sh".into(),
-            vec![
-                "-c".into(),
-                format!(
-                    "while read -r _ _ _ p _ </proc/$$/stat && [ \"$p\" = {} ]; do :; done",
-                    std::process::id()
-                )
-                .into(),
-            ],
-        )
-        .with_limits(Duration::from_millis(700), Duration::from_secs(1)),
-    );
+    t.master
+        .set_pdf_reader(stuck(Duration::from_millis(700), Duration::from_secs(1)));
     let [alex, _] = users(&t).await;
     let sid = chat(&t, &alex, json!({})).await;
     let (st, v) = upload(
@@ -208,40 +196,143 @@ async fn a_helper_killed_on_timeout_leaves_a_file_with_a_sentence() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    assert!(v["note"].as_str().unwrap().contains("too long"), "{v}");
+    assert_eq!(v["kept"], true, "{v}");
+    assert!(
+        v.get("note").is_none(),
+        "no document sentence for what was not found to be one: {v}"
+    );
     let r = t.master.pdf_reader().unwrap();
     assert_eq!(r.free_slots(), harness_master::pdf::CONCURRENT);
 }
 
-/// Two helpers busy: a third document waits its bound and gets 503, as a PDF.
+/// A helper that runs until it is killed (while this test lives).
+fn stuck(timeout: Duration, queue: Duration) -> PdfReader {
+    PdfReader::with_command(
+        "/bin/sh".into(),
+        vec![
+            "-c".into(),
+            format!(
+                "while read -r _ _ _ p _ </proc/$$/stat && [ \"$p\" = {} ]; do :; done",
+                std::process::id()
+            )
+            .into(),
+        ],
+    )
+    .with_limits(timeout, queue)
+}
+
+/// A plain zip uploaded where files are kept is kept as it always was,
+/// whatever the reader did: crashed, could not confine itself, timed out.
+/// Never a failure, never a sentence about documents (T96).
 #[tokio::test]
-async fn two_busy_helpers_make_a_third_document_wait_and_get_503() {
-    let t = start().await;
-    t.master.set_pdf_reader(
-        PdfReader::with_command(
+async fn a_plain_zip_is_kept_silently_whatever_the_reader_did() {
+    for script in ["kill -ABRT $$", "exit 125", "exit 7"] {
+        let t = start().await;
+        t.master.set_pdf_reader(PdfReader::with_command(
             "/bin/sh".into(),
-            vec![
-                "-c".into(),
-                format!(
-                    "while read -r _ _ _ p _ </proc/$$/stat && [ \"$p\" = {} ]; do :; done",
-                    std::process::id()
-                )
-                .into(),
-            ],
-        )
-        .with_limits(Duration::from_secs(4), Duration::from_millis(300)),
+            vec!["-c".into(), script.into()],
+        ));
+        let [alex, _] = users(&t).await;
+        let sid = chat(&t, &alex, json!({})).await;
+        for q in [format!("&session={sid}"), "&agentic=1".to_string()] {
+            let (st, v) = upload(&t, &alex, "src.zip", &q, zip(&[("a.txt", b"x")])).await;
+            assert_eq!(st, StatusCode::OK, "{script}: {v}");
+            assert!(
+                v.get("note").is_none() && v.get("chars").is_none(),
+                "{script}: {v}"
+            );
+            assert!(
+                v.get("kept").is_some() || v.get("saved").is_some(),
+                "{script}: {v}"
+            );
+        }
+    }
+}
+
+/// One account holds one helper at a time, and the others are not starved:
+/// alex's second file waits at his own door (holding no server-wide slot) and
+/// is kept as a plain file when the wait runs out; bob's file starts at once.
+#[tokio::test]
+async fn one_account_cannot_keep_both_helper_slots_busy() {
+    let t = start().await;
+    t.master
+        .set_pdf_reader(stuck(Duration::from_secs(4), Duration::from_millis(400)));
+    let [alex, bob] = users(&t).await;
+    let (base, a1) = (t.base.clone(), alex.clone());
+    let first = tokio::spawn(async move {
+        use crate::common::{Login as _, SameOrigin as _};
+        reqwest::Client::new()
+            .post(format!("{base}/api/attachments?name=a.docx&agentic=1"))
+            .login(&a1)
+            .same_origin()
+            .body(docx(&p("x")))
+            .send()
+            .await
+            .unwrap()
+            .status()
+    });
+    let r = t.master.pdf_reader().unwrap();
+    for _ in 0..300 {
+        if r.free_slots() < harness_master::pdf::CONCURRENT {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(r.free_slots(), harness_master::pdf::CONCURRENT - 1);
+    // Alex again: waits at his own door, takes no slot, ends as a plain file.
+    let t0 = std::time::Instant::now();
+    let (st, v) = upload(&t, &alex, "b.docx", "&agentic=1", docx(&p("y"))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(v.get("note").is_none() && v.get("chars").is_none(), "{v}");
+    assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
+    assert_eq!(
+        r.free_slots(),
+        harness_master::pdf::CONCURRENT - 1,
+        "alex held one slot only"
     );
-    let [alex, _] = users(&t).await;
-    let base = t.base.clone();
-    let cookie = alex.clone();
+    // Bob gets the other slot at once.
+    let (base, b1) = (t.base.clone(), bob.clone());
+    let second = tokio::spawn(async move {
+        use crate::common::{Login as _, SameOrigin as _};
+        reqwest::Client::new()
+            .post(format!("{base}/api/attachments?name=c.docx&agentic=1"))
+            .login(&b1)
+            .same_origin()
+            .body(docx(&p("z")))
+            .send()
+            .await
+            .unwrap()
+            .status()
+    });
+    for _ in 0..300 {
+        if r.free_slots() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(r.free_slots(), 0, "bob was not starved");
+    assert_eq!(first.await.unwrap(), StatusCode::OK);
+    assert_eq!(second.await.unwrap(), StatusCode::OK);
+    assert_eq!(r.free_slots(), harness_master::pdf::CONCURRENT);
+}
+
+/// Where nothing is kept, a busy server is a 503 as for a PDF: two accounts
+/// hold the slots, and a third file of the first (a chat whose agent cannot
+/// keep files) waits at its account's door and is told to try again.
+#[tokio::test]
+async fn where_nothing_is_kept_a_busy_server_is_a_503() {
+    let t = start().await;
+    t.master
+        .set_pdf_reader(stuck(Duration::from_secs(4), Duration::from_millis(300)));
+    let [alex, bob] = users(&t).await;
     let mut busy = Vec::new();
-    for _ in 0..harness_master::pdf::CONCURRENT {
-        let (base, cookie) = (base.clone(), cookie.clone());
+    for who in [alex.clone(), bob.clone()] {
+        let base = t.base.clone();
         busy.push(tokio::spawn(async move {
             use crate::common::{Login as _, SameOrigin as _};
             reqwest::Client::new()
                 .post(format!("{base}/api/attachments?name=a.docx&agentic=1"))
-                .login(&cookie)
+                .login(&who)
                 .same_origin()
                 .body(docx(&p("x")))
                 .send()
@@ -258,7 +349,7 @@ async fn two_busy_helpers_make_a_third_document_wait_and_get_503() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(r.free_slots(), 0);
-    let (st, v) = upload(&t, &alex, "c.docx", "&agentic=1", docx(&p("z"))).await;
+    let (st, v) = upload(&t, &alex, "c.docx", "&agent=researcher", docx(&p("z"))).await;
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
     for b in busy {
         b.await.unwrap();
