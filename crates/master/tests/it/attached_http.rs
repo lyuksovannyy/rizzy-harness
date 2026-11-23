@@ -538,7 +538,7 @@ fn zip() -> Vec<u8> {
     out
 }
 
-fn blob_files(t: &T) -> usize {
+pub(crate) fn blob_files(t: &T) -> usize {
     let mut n = 0;
     let root = t.dir.path().join("blobs");
     for shard in std::fs::read_dir(&root).into_iter().flatten().flatten() {

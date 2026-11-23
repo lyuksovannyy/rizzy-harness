@@ -55,7 +55,7 @@ fn unknown() -> ApiError {
 }
 
 /// A Word or Excel name: the only ones the preview spends a helper on.
-fn office_name(name: &str) -> bool {
+pub(super) fn office_name(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, e)| {
         matches!(
             e.to_ascii_lowercase().as_str(),
@@ -185,6 +185,10 @@ pub(super) fn why(w: Why) -> ApiError {
             StatusCode::BAD_REQUEST,
             "there is no such sheet in this file",
         ),
+        Why::Locked => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this file is protected against editing, so a copy cannot be changed here",
+        ),
     };
     ApiError(code, text.into())
 }
@@ -221,6 +225,16 @@ pub(super) fn refusal(r: PreviewRefusal, folder: bool) -> ApiError {
         PreviewRefusal::Protected => why(Why::Protected),
         PreviewRefusal::Damaged => why(Why::Damaged),
         PreviewRefusal::NoSheet => why(Why::NoSheet),
+        PreviewRefusal::Locked => why(Why::Locked),
+        PreviewRefusal::NoWrite => ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this chat's node does not let a copy be saved here: it does not allow editing documents, or the folder cannot be written to".into(),
+        ),
+        // A word of a newer node: not understood, not a broken link.
+        PreviewRefusal::Unknown => ApiError(
+            StatusCode::BAD_GATEWAY,
+            "the node's answer was not understood".into(),
+        ),
         PreviewRefusal::Busy => ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "the node is busy reading other files; try again in a minute".into(),

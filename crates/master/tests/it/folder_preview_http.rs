@@ -17,26 +17,27 @@ use harness_master::auth::{Auth, Claim};
 use harness_master::{Master, router};
 use harness_node::NodeLink;
 use harness_protocol::{
-    CAP_DOC_PREVIEW, MasterToNode, NodeToMaster, PROTOCOL_VERSION, PreviewRefusal,
+    CAP_DOC_PAGE_EDIT, CAP_DOC_PREVIEW, ChangeFailure, ChangeResult, MasterToNode, NodeToMaster,
+    PROTOCOL_VERSION, PreviewRefusal,
 };
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
-const TOKEN: &str = "api-secret";
+pub(crate) const TOKEN: &str = "api-secret";
 
-struct Fake {
-    seen: Arc<Mutex<Vec<MasterToNode>>>,
+pub(crate) struct Fake {
+    pub(crate) seen: Arc<Mutex<Vec<MasterToNode>>>,
     /// Answers to `slow.docx` wait for `true`.
-    release: watch::Sender<bool>,
-    tx: mpsc::Sender<NodeToMaster>,
-    _leave: mpsc::UnboundedSender<()>,
+    pub(crate) release: watch::Sender<bool>,
+    pub(crate) tx: mpsc::Sender<NodeToMaster>,
+    pub(crate) _leave: mpsc::UnboundedSender<()>,
 }
 
 impl Fake {
     /// The `req_id` of every `session.doc_preview` this node was sent.
-    fn req_ids(&self) -> Vec<String> {
+    pub(crate) fn req_ids(&self) -> Vec<String> {
         self.seen
             .lock()
             .unwrap()
@@ -48,18 +49,49 @@ impl Fake {
             .collect()
     }
 
+    /// `(path, sheet, changes as JSON)` of every `session.doc_page_edit` this
+    /// node was sent, and their request ids.
+    pub(crate) fn edits(&self) -> Vec<(String, Option<u32>, Value)> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                MasterToNode::DocPageEdit {
+                    path,
+                    sheet,
+                    changes,
+                    ..
+                } => Some((path.clone(), *sheet, serde_json::to_value(changes).unwrap())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn edit_req_ids(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                MasterToNode::DocPageEdit { req_id, .. } => Some(req_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// This node says something unasked.
-    fn say(&self, m: NodeToMaster) {
+    pub(crate) fn say(&self, m: NodeToMaster) {
         self.tx.try_send(m).unwrap();
     }
 
     /// The node's link closes.
-    fn go_away(&self) {
+    pub(crate) fn go_away(&self) {
         let _ = self._leave.send(());
     }
 
     /// `(path, sheet)` of every `session.doc_preview` this node was sent.
-    fn asked(&self) -> Vec<(String, Option<u32>)> {
+    pub(crate) fn asked(&self) -> Vec<(String, Option<u32>)> {
         self.seen
             .lock()
             .unwrap()
@@ -72,7 +104,7 @@ impl Fake {
     }
 }
 
-fn doc_json() -> Value {
+pub(crate) fn doc_json() -> Value {
     json!({"kind": "doc", "blocks": [{"k": "p", "r": [{"t": "Hello"}]}], "more": false, "notes": []})
 }
 
@@ -104,7 +136,85 @@ async fn answer(
     }
 }
 
-fn fake(id: &str, caps: &[&str], profile: Profile) -> (NodeLink, Fake) {
+fn ok_results(n: usize) -> Vec<ChangeResult> {
+    vec![
+        ChangeResult {
+            ok: true,
+            why: None
+        };
+        n
+    ]
+}
+
+/// What the fake node answers to a page edit of a path: `ok.docx` a copy
+/// beside it, `stale.docx` a refused first change, and the other names each a
+/// misbehaving or refusing node.
+#[allow(clippy::type_complexity)]
+async fn edit_answer(
+    path: &str,
+    n: usize,
+    mut rel: watch::Receiver<bool>,
+) -> (Option<String>, Vec<ChangeResult>, Option<PreviewRefusal>) {
+    let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+    let beside = |name: &str| {
+        if dir.is_empty() {
+            name.to_string()
+        } else {
+            format!("{dir}/{name}")
+        }
+    };
+    let base = path.rsplit('/').next().unwrap_or(path);
+    match base {
+        "ok.docx" => (Some(beside("ok (edited).docx")), ok_results(n), None),
+        "slow.docx" => {
+            let _ = rel.wait_for(|r| *r).await;
+            (Some(beside("slow (edited).docx")), ok_results(n), None)
+        }
+        "stale.docx" => {
+            let mut r = vec![
+                ChangeResult {
+                    ok: false,
+                    why: Some(ChangeFailure::Stale),
+                };
+                1
+            ];
+            r.extend((1..n).map(|_| ChangeResult {
+                ok: false,
+                why: Some(ChangeFailure::Skipped),
+            }));
+            (None, r, None)
+        }
+        // A node that misbehaves.
+        "dotdot.docx" => (Some("../x (edited).docx".into()), ok_results(n), None),
+        "abs.docx" => (Some("/etc/x.docx".into()), ok_results(n), None),
+        "ctrl.docx" => (Some("a\nb.docx".into()), ok_results(n), None),
+        "long.docx" => (Some("a".repeat(1025)), ok_results(n), None),
+        "empty.docx" => (Some(String::new()), ok_results(n), None),
+        "more.docx" => (Some(beside("m.docx")), ok_results(n + 1), None),
+        "fewer.docx" => (
+            Some(beside("m.docx")),
+            ok_results(n.saturating_sub(1)),
+            None,
+        ),
+        "mixed.docx" => {
+            let mut r = ok_results(n);
+            r[0] = ChangeResult {
+                ok: false,
+                why: Some(ChangeFailure::Other),
+            };
+            (Some(beside("m.docx")), r, None)
+        }
+        "nofile.docx" => (None, ok_results(n), None),
+        "locked.docx" => (None, vec![], Some(PreviewRefusal::Locked)),
+        "nowrite.docx" => (None, vec![], Some(PreviewRefusal::NoWrite)),
+        "newer.docx" => (None, vec![], Some(PreviewRefusal::Unknown)),
+        "toolarge.docx" => (None, vec![], Some(PreviewRefusal::TooLarge)),
+        "full.docx" => (None, vec![], Some(PreviewRefusal::Busy)),
+        _ => (None, vec![], Some(PreviewRefusal::NotFound)),
+    }
+}
+
+pub(crate) fn fake(id: &str, caps: &[&str], profile: Profile) -> (NodeLink, Fake) {
     fake_with(id, caps, profile, false)
 }
 
@@ -181,6 +291,26 @@ fn fake_with(id: &str, caps: &[&str], profile: Profile, incognito: bool) -> (Nod
                                     .await;
                             });
                         }
+                        MasterToNode::DocPageEdit {
+                            req_id,
+                            path,
+                            changes,
+                            ..
+                        } => {
+                            let (req_id, path, rel, tx, n) =
+                                (req_id.clone(), path.clone(), rel.clone(), tx.clone(), changes.len());
+                            tokio::spawn(async move {
+                                let (saved, results, refusal) = edit_answer(&path, n, rel).await;
+                                let _ = tx
+                                    .send(NodeToMaster::DocPageEditResult {
+                                        req_id,
+                                        saved,
+                                        results,
+                                        refusal,
+                                    })
+                                    .await;
+                            });
+                        }
                         _ => {}
                     }
                     if let Some(req_id) = msg.req_id() {
@@ -202,19 +332,19 @@ fn fake_with(id: &str, caps: &[&str], profile: Profile, incognito: bool) -> (Nod
     )
 }
 
-struct T {
-    base: String,
-    master: Master,
-    alex: String,
-    local: Fake,
-    old: Fake,
-    plain: Fake,
-    remote: Fake,
-    inc: Fake,
-    _dir: tempfile::TempDir,
+pub(crate) struct T {
+    pub(crate) base: String,
+    pub(crate) master: Master,
+    pub(crate) alex: String,
+    pub(crate) local: Fake,
+    pub(crate) old: Fake,
+    pub(crate) plain: Fake,
+    pub(crate) remote: Fake,
+    pub(crate) inc: Fake,
+    pub(crate) _dir: tempfile::TempDir,
 }
 
-async fn start() -> T {
+pub(crate) async fn start() -> T {
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -226,14 +356,22 @@ async fn start() -> T {
             path: claim_path,
         });
     let master = Master::new(Store::open_in_memory().unwrap(), auth);
-    let (l, local) = fake("local", &[CAP_DOC_PREVIEW], Profile::Agentic);
+    let (l, local) = fake(
+        "local",
+        &[CAP_DOC_PREVIEW, CAP_DOC_PAGE_EDIT],
+        Profile::Agentic,
+    );
     master.add_link(l, true).await.unwrap();
     let (l, old) = fake("old", &[], Profile::Agentic);
     master.add_link(l, false).await.unwrap();
     let (l, plain) = fake("plain", &[CAP_DOC_PREVIEW], Profile::Chat);
     master.add_link(l, false).await.unwrap();
     // A member's own coding chats are on a remote node, not the server's.
-    let (l, remote) = fake("remote", &[CAP_DOC_PREVIEW, "exec:host"], Profile::Agentic);
+    let (l, remote) = fake(
+        "remote",
+        &[CAP_DOC_PREVIEW, CAP_DOC_PAGE_EDIT, "exec:host"],
+        Profile::Agentic,
+    );
     master.add_link(l, false).await.unwrap();
     // A node whose coding chats say they are temporary.
     let (l, inc) = fake_with("inc", &[CAP_DOC_PREVIEW], Profile::Agentic, true);
@@ -262,7 +400,7 @@ async fn start() -> T {
     }
 }
 
-async fn req(
+pub(crate) async fn req(
     t: &T,
     method: Method,
     path: &str,
@@ -290,12 +428,12 @@ async fn req(
     (st, v)
 }
 
-async fn account(t: &T, name: &str, role: &str) -> String {
+pub(crate) async fn account(t: &T, name: &str, role: &str) -> String {
     account_with_id(t, name, role).await.0
 }
 
 /// The account's cookie and its user id.
-async fn account_with_id(t: &T, name: &str, role: &str) -> (String, String) {
+pub(crate) async fn account_with_id(t: &T, name: &str, role: &str) -> (String, String) {
     let (st, v) = req(
         t,
         Method::POST,
@@ -328,7 +466,7 @@ async fn account_with_id(t: &T, name: &str, role: &str) -> (String, String) {
     )
 }
 
-async fn chat(t: &T, who: &str, node: &str, extra: Value) -> SessionId {
+pub(crate) async fn chat(t: &T, who: &str, node: &str, extra: Value) -> SessionId {
     let mut body = json!({"cwd": "/w", "title": "t", "node_id": node});
     if let (Some(b), Some(e)) = (body.as_object_mut(), extra.as_object()) {
         b.extend(e.clone());

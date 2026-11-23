@@ -15,9 +15,7 @@ use harness_core::SessionId;
 use harness_core::event::Profile;
 use harness_core::policy::ApprovalMode;
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{
-    CAP_DOC_PAGE_EDIT, MasterToNode, NodeToMaster, PageChange, PreviewRefusal,
-};
+use harness_protocol::{CAP_DOC_PAGE_EDIT, MasterToNode, NodeToMaster, PageChange, PreviewRefusal};
 use harness_store::{Durability, Store};
 
 struct Node {
@@ -212,7 +210,12 @@ async fn paths_that_leave_the_folder_or_are_not_files_are_one_answer_and_write_n
     nix::unistd::mkfifo(&n.ws.join("pipe.docx"), nix::sys::stat::Mode::S_IRWXU).unwrap();
     let sid = n.create().await;
     let before = n.events(sid);
-    let snap = (names(&n.ws), names(&n.base), names(&n.data), names(&n.ws.join(".git")));
+    let snap = (
+        names(&n.ws),
+        names(&n.base),
+        names(&n.data),
+        names(&n.ws.join(".git")),
+    );
     let gone = Some(PreviewRefusal::NotFound);
     assert_eq!(n.ask(sid, "missing.docx").await, gone);
     let abs = n.base.join("secret.docx").display().to_string();
@@ -234,7 +237,12 @@ async fn paths_that_leave_the_folder_or_are_not_files_are_one_answer_and_write_n
     assert_eq!(n.events(sid), before, "a page edit appends no event");
     assert_eq!(
         snap,
-        (names(&n.ws), names(&n.base), names(&n.data), names(&n.ws.join(".git")))
+        (
+            names(&n.ws),
+            names(&n.base),
+            names(&n.data),
+            names(&n.ws.join(".git"))
+        )
     );
     // An unknown chat is the same answer.
     assert_eq!(n.ask(SessionId::new(), "a.docx").await, gone);
