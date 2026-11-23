@@ -819,13 +819,14 @@ async fn the_service_and_the_route_refuse_what_is_not_a_plain_chat() {
 fn helper_says(t: &T, frame: &[u8]) {
     let path = t.dir.path().join("helper-reply");
     std::fs::write(&path, frame).unwrap();
-    t.master.set_pdf_reader(harness_master::pdf::PdfReader::with_command(
-        "/bin/sh".into(),
-        vec![
-            "-c".into(),
-            format!("cat >/dev/null; cat '{}'", path.display()).into(),
-        ],
-    ));
+    t.master
+        .set_pdf_reader(harness_master::pdf::PdfReader::with_command(
+            "/bin/sh".into(),
+            vec![
+                "-c".into(),
+                format!("cat >/dev/null; cat '{}'", path.display()).into(),
+            ],
+        ));
 }
 
 fn reply(text: &str, results: &[(bool, &str)], notes: &[&str], file: Option<&[u8]>) -> Vec<u8> {
@@ -833,7 +834,10 @@ fn reply(text: &str, results: &[(bool, &str)], notes: &[&str], file: Option<&[u8
         text: text.into(),
         results: results
             .iter()
-            .map(|(ok, m)| harness_docs::edit::serve::Item { ok: *ok, msg: (*m).into() })
+            .map(|(ok, m)| harness_docs::edit::serve::Item {
+                ok: *ok,
+                msg: (*m).into(),
+            })
             .collect(),
         notes: notes.iter().map(|s| s.to_string()).collect(),
         file: file.is_some(),
@@ -862,22 +866,51 @@ async fn an_edit_of_the_chats_own_file_is_kept_as_a_new_made_file() {
     let t = start().await;
     let [alex, _] = users(&t).await;
     let sid = open(&t, &alex, "t1", json!({})).await;
-    let made = t.chat.ask_docs(sid, doc("plan", "# Plan\n\ntext")).await.unwrap();
+    let made = t
+        .chat
+        .ask_docs(sid, doc("plan", "# Plan\n\ntext"))
+        .await
+        .unwrap();
     name_in_log(&t, sid, &made).await;
     let blobs = blob_paths(&t).len();
     // A view.
     helper_says(&t, &reply("p1#a3f Plan", &[], &[], None));
     let v = t
         .chat
-        .ask_docs(sid, DocRequest::View { file: made.file_id.clone(), sheet: None, from: 0, limit: 0 })
+        .ask_docs(
+            sid,
+            DocRequest::View {
+                file: made.file_id.clone(),
+                sheet: None,
+                from: 0,
+                limit: 0,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(v.text, "p1#a3f Plan");
-    assert!(v.file_id.is_empty() && blob_paths(&t).len() == blobs, "a view keeps nothing");
+    assert!(
+        v.file_id.is_empty() && blob_paths(&t).len() == blobs,
+        "a view keeps nothing"
+    );
     // An edit: the helper's file is the new made file.
-    let new = harness_docs::docx::build("# Plan\n\nedited", &Default::default()).unwrap().bytes;
-    helper_says(&t, &reply("", &[(true, "edit 1 (delete): p2: deleted")], &["a note"], Some(&new)));
-    let c = t.chat.ask_docs(sid, edit_req(&made.file_id, None)).await.unwrap();
+    let new = harness_docs::docx::build("# Plan\n\nedited", &Default::default())
+        .unwrap()
+        .bytes;
+    helper_says(
+        &t,
+        &reply(
+            "",
+            &[(true, "edit 1 (delete): p2: deleted")],
+            &["a note"],
+            Some(&new),
+        ),
+    );
+    let c = t
+        .chat
+        .ask_docs(sid, edit_req(&made.file_id, None))
+        .await
+        .unwrap();
     assert_eq!(c.name, "plan (edited).docx");
     assert_ne!(c.file_id, made.file_id);
     assert_eq!(c.mime, harness_core::docs::DOCX_MIME);
@@ -890,24 +923,64 @@ async fn an_edit_of_the_chats_own_file_is_kept_as_a_new_made_file() {
     let r = download(&t, &alex, sid, &made.file_id).await;
     assert_eq!(r.status(), StatusCode::OK, "the original is still there");
     // save_as; a name is only a name.
-    let c = t.chat.ask_docs(sid, edit_req(&made.file_id, Some("../../etc/Final.DOCX"))).await.unwrap();
-    assert_eq!(c.name, "Final.docx");
-    // Refused: no file, every reason.
-    helper_says(&t, &reply("", &[(true, "edit 1: ok (not applied)"), (false, "edit 2: no paragraph p9")], &[], None));
-    let n = blob_paths(&t).len();
-    let e = t.chat.ask_docs(sid, edit_req(&made.file_id, None)).await.unwrap_err();
-    assert!(e.starts_with("nothing was changed.") && e.contains("edit 2: no paragraph p9"), "{e}");
-    assert_eq!(blob_paths(&t).len(), n);
-    // A sheet gets xlsx; macros keep their extension.
-    let x = t.chat.ask_docs(sid, sheet("book", json!({"sheets": [{"rows": [[1]]}]}))).await.unwrap();
-    name_in_log(&t, sid, &x).await;
-    helper_says(&t, &reply("", &[(true, "ok")], &[], Some(b"PK\x03\x04 bytes")));
     let c = t
         .chat
-        .ask_docs(sid, DocRequest::SheetEdit { file: x.file_id.clone(), sheet: "Sheet1".into(), edits: vec![json!({"op": "clear", "range": "A1"})], save_as: None })
+        .ask_docs(sid, edit_req(&made.file_id, Some("../../etc/Final.DOCX")))
         .await
         .unwrap();
-    assert_eq!((c.name.as_str(), c.mime.as_str()), ("book (edited).xlsx", harness_core::docs::XLSX_MIME));
+    assert_eq!(c.name, "Final.docx");
+    // Refused: no file, every reason.
+    helper_says(
+        &t,
+        &reply(
+            "",
+            &[
+                (true, "edit 1: ok (not applied)"),
+                (false, "edit 2: no paragraph p9"),
+            ],
+            &[],
+            None,
+        ),
+    );
+    let n = blob_paths(&t).len();
+    let e = t
+        .chat
+        .ask_docs(sid, edit_req(&made.file_id, None))
+        .await
+        .unwrap_err();
+    assert!(
+        e.starts_with("nothing was changed.") && e.contains("edit 2: no paragraph p9"),
+        "{e}"
+    );
+    assert_eq!(blob_paths(&t).len(), n);
+    // A sheet gets xlsx; macros keep their extension.
+    let x = t
+        .chat
+        .ask_docs(sid, sheet("book", json!({"sheets": [{"rows": [[1]]}]})))
+        .await
+        .unwrap();
+    name_in_log(&t, sid, &x).await;
+    helper_says(
+        &t,
+        &reply("", &[(true, "ok")], &[], Some(b"PK\x03\x04 bytes")),
+    );
+    let c = t
+        .chat
+        .ask_docs(
+            sid,
+            DocRequest::SheetEdit {
+                file: x.file_id.clone(),
+                sheet: "Sheet1".into(),
+                edits: vec![json!({"op": "clear", "range": "A1"})],
+                save_as: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (c.name.as_str(), c.mime.as_str()),
+        ("book (edited).xlsx", harness_core::docs::XLSX_MIME)
+    );
 }
 
 /// The id is the chat's own: another chat's file, a made-up id, an id with
@@ -921,14 +994,31 @@ async fn an_edit_names_only_this_chats_own_files() {
     let theirs = t.chat.ask_docs(other, doc("secret", "# s")).await.unwrap();
     name_in_log(&t, other, &theirs).await;
     // A helper that would say yes to anything: the service must not ask it.
-    let new = harness_docs::docx::build("x", &Default::default()).unwrap().bytes;
+    let new = harness_docs::docx::build("x", &Default::default())
+        .unwrap()
+        .bytes;
     helper_says(&t, &reply("leaked", &[(true, "ok")], &[], Some(&new)));
     let n = blob_paths(&t).len();
-    for id in [theirs.file_id.as_str(), "nope", "../../etc/passwd", "", "a b"] {
+    for id in [
+        theirs.file_id.as_str(),
+        "nope",
+        "../../etc/passwd",
+        "",
+        "a b",
+    ] {
         let e = t.chat.ask_docs(sid, edit_req(id, None)).await.unwrap_err();
         assert!(e.contains("no such file"), "{id}: {e}");
-        let e = t.chat
-            .ask_docs(sid, DocRequest::View { file: id.into(), sheet: None, from: 0, limit: 0 })
+        let e = t
+            .chat
+            .ask_docs(
+                sid,
+                DocRequest::View {
+                    file: id.into(),
+                    sheet: None,
+                    from: 0,
+                    limit: 0,
+                },
+            )
             .await
             .unwrap_err();
         assert!(e.contains("no such file"), "{id}: {e}");
@@ -954,17 +1044,30 @@ async fn a_failing_helper_keeps_nothing_and_says_why() {
     let script = t.dir.path().join("helper.sh");
     let says = |body: &str| std::fs::write(&script, body).unwrap();
     says("exit 125");
-    t.master.set_pdf_reader(harness_master::pdf::PdfReader::with_command(
-        "/bin/sh".into(),
-        vec![script.clone().into_os_string()],
-    ));
-    let e = t.chat.ask_docs(sid, edit_req(&made.file_id, None)).await.unwrap_err();
+    t.master
+        .set_pdf_reader(harness_master::pdf::PdfReader::with_command(
+            "/bin/sh".into(),
+            vec![script.clone().into_os_string()],
+        ));
+    let e = t
+        .chat
+        .ask_docs(sid, edit_req(&made.file_id, None))
+        .await
+        .unwrap_err();
     assert!(e.contains("Landlock"), "{e}");
     says("cat >/dev/null; printf 'a part is damaged'; exit 3");
-    let e = t.chat.ask_docs(sid, edit_req(&made.file_id, None)).await.unwrap_err();
+    let e = t
+        .chat
+        .ask_docs(sid, edit_req(&made.file_id, None))
+        .await
+        .unwrap_err();
     assert_eq!(e, "a part is damaged");
     says("cat >/dev/null; printf 'garbage'");
-    let e = t.chat.ask_docs(sid, edit_req(&made.file_id, None)).await.unwrap_err();
+    let e = t
+        .chat
+        .ask_docs(sid, edit_req(&made.file_id, None))
+        .await
+        .unwrap_err();
     assert!(e.contains("not understood"), "{e}");
     assert_eq!(blob_paths(&t).len(), n);
 }

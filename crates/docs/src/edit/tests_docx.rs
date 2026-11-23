@@ -713,7 +713,11 @@ fn inserts_are_counted_while_they_are_made() {
     let start = std::time::Instant::now();
     let o = docx::edit(&b, &ops).unwrap();
     assert!(o.bytes.is_none());
-    assert!(o.results.iter().any(|r| r.as_ref().err().is_some_and(|e| e.contains("more text than a document part may hold"))));
+    assert!(o.results.iter().any(|r| {
+        r.as_ref()
+            .err()
+            .is_some_and(|e| e.contains("more text than a document part may hold"))
+    }));
     assert!(start.elapsed().as_secs() < 30);
 }
 
@@ -723,15 +727,30 @@ fn inserts_are_counted_while_they_are_made() {
 fn a_missing_calc_pr_is_added_in_schema_order() {
     use super::xlsx::{self, SheetOp};
     let b = super::fixtures::xlsx_real();
-    let wb = part(&b, "xl/workbook.xml").replace("<calcPr calcId=\"191029\"/>", "<oleSize ref=\"A1\"/>");
+    let wb =
+        part(&b, "xl/workbook.xml").replace("<calcPr calcId=\"191029\"/>", "<oleSize ref=\"A1\"/>");
     let mut w = crate::zip::ZipWriter::new(8 << 20);
     let src = Source::open(&b).unwrap();
     for n in src.names().to_vec() {
-        let data = if n == "xl/workbook.xml" { wb.clone().into_bytes() } else { src.read(&n, 1 << 20).unwrap() };
+        let data = if n == "xl/workbook.xml" {
+            wb.clone().into_bytes()
+        } else {
+            src.read(&n, 1 << 20).unwrap()
+        };
         w.add(&n, &data).unwrap();
     }
     let b2 = w.finish().unwrap();
-    let out = xlsx::edit(&b2, "Data", &[SheetOp::parse(&json!({"op": "set", "cells": {"B2": 1}})).unwrap()]).unwrap().bytes.unwrap();
+    let out = xlsx::edit(
+        &b2,
+        "Data",
+        &[SheetOp::parse(&json!({"op": "set", "cells": {"B2": 1}})).unwrap()],
+    )
+    .unwrap()
+    .bytes
+    .unwrap();
     let new = part(&out, "xl/workbook.xml");
-    assert!(new.contains("</definedNames><calcPr fullCalcOnLoad=\"1\"/><oleSize"), "{new}");
+    assert!(
+        new.contains("</definedNames><calcPr fullCalcOnLoad=\"1\"/><oleSize"),
+        "{new}"
+    );
 }

@@ -26,11 +26,16 @@ impl Rng {
     }
 }
 
-const WORDS: &[&str] = &["alpha", "beta", "x", "  ", "a b", "é", "<&>", "\"q\"", "end", "12", "fox"];
+const WORDS: &[&str] = &[
+    "alpha", "beta", "x", "  ", "a b", "é", "<&>", "\"q\"", "end", "12", "fox",
+];
 
 fn run_xml(r: &mut Rng) -> String {
     let t = r.pick(WORDS);
-    let esc = t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let esc = t
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
     match r.below(9) {
         0 => format!("<w:r><w:rPr><w:b/></w:rPr><w:t xml:space=\"preserve\">{esc}</w:t></w:r>"),
         1 => format!("<w:r><w:t>{esc}</w:t></w:r>"),
@@ -68,7 +73,10 @@ fn random_doc(r: &mut Rng) -> String {
                 para_xml(r),
                 para_xml(r)
             )),
-            1 => body.push_str(&format!("<w:sdt><w:sdtContent>{}</w:sdtContent></w:sdt>", para_xml(r))),
+            1 => body.push_str(&format!(
+                "<w:sdt><w:sdtContent>{}</w:sdtContent></w:sdt>",
+                para_xml(r)
+            )),
             _ => body.push_str(&para_xml(r)),
         }
     }
@@ -86,7 +94,9 @@ fn random_word_files_and_edits_never_panic_and_never_hand_out_a_bad_file() {
     let (mut made, mut refused) = (0, 0);
     for _ in 0..400 {
         let file = docx_with(&random_doc(&mut r), &[]);
-        let Ok(view) = docx::view(&file, 1, 400) else { continue };
+        let Ok(view) = docx::view(&file, 1, 400) else {
+            continue;
+        };
         let tags: Vec<String> = view
             .lines()
             .filter_map(|l| l.split_whitespace().next())
@@ -95,12 +105,20 @@ fn random_word_files_and_edits_never_panic_and_never_hand_out_a_bad_file() {
             .collect();
         let mut ops = vec![];
         for _ in 0..(if r.below(3) == 0 { 1 + r.below(4) } else { 1 }) {
-            let at = if tags.is_empty() || r.below(8) == 0 { "p99#0000".to_string() } else { r.pick(&tags).clone() };
+            let at = if tags.is_empty() || r.below(8) == 0 {
+                "p99#0000".to_string()
+            } else {
+                r.pick(&tags).clone()
+            };
             let w = r.pick(WORDS).to_string();
             let v: Value = match r.below(6) {
-                0 => json!({"op": "replace_text", "at": at, "find": w, "replace": r.pick(WORDS), "all": r.below(2) == 0}),
+                0 => {
+                    json!({"op": "replace_text", "at": at, "find": w, "replace": r.pick(WORDS), "all": r.below(2) == 0})
+                }
                 1 => json!({"op": "set_text", "at": at, "text": format!("{}\t{}\n{}", w, w, w)}),
-                2 => json!({"op": "insert_after", "at": at, "markdown": format!("**{w}** and *{w}*\n\n- item {w}")}),
+                2 => {
+                    json!({"op": "insert_after", "at": at, "markdown": format!("**{w}** and *{w}*\n\n- item {w}")})
+                }
                 3 => json!({"op": "insert_before", "at": at, "markdown": format!("## {w}")}),
                 4 => json!({"op": "delete", "at": at}),
                 _ => json!({"op": "replace_text", "at": at, "find": "", "replace": "x"}),
@@ -119,7 +137,10 @@ fn random_word_files_and_edits_never_panic_and_never_hand_out_a_bad_file() {
             },
         }
     }
-    assert!(made > 40 && refused > 40, "made {made}, refused {refused}: the generator must cover both");
+    assert!(
+        made > 40 && refused > 40,
+        "made {made}, refused {refused}: the generator must cover both"
+    );
 }
 
 fn random_sheet(r: &mut Rng) -> String {
@@ -131,24 +152,46 @@ fn random_sheet(r: &mut Rng) -> String {
         let mut c = 0;
         for _ in 0..r.below(4) {
             c += 1 + r.below(3);
-            let a = format!("{}{n}", ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"][c.min(9)]);
+            let a = format!(
+                "{}{n}",
+                ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"][c.min(9)]
+            );
             cells.push_str(&match r.below(5) {
-                0 => format!("<c r=\"{a}\" s=\"{}\"><v>{}</v></c>", r.below(4), r.below(99)),
+                0 => format!(
+                    "<c r=\"{a}\" s=\"{}\"><v>{}</v></c>",
+                    r.below(4),
+                    r.below(99)
+                ),
                 1 => format!("<c r=\"{a}\" t=\"s\"><v>{}</v></c>", r.below(4)),
                 2 => format!("<c r=\"{a}\"><f>1+{}</f><v>3</v></c>", r.below(9)),
-                3 => format!("<c r=\"{a}\" t=\"inlineStr\"><is><t>{}</t></is></c>", r.pick(WORDS).replace('&', "&amp;").replace('<', "&lt;")),
+                3 => format!(
+                    "<c r=\"{a}\" t=\"inlineStr\"><is><t>{}</t></is></c>",
+                    r.pick(WORDS).replace('&', "&amp;").replace('<', "&lt;")
+                ),
                 _ => format!("<c r=\"{a}\"/>"),
             });
         }
-        let attrs = if r.below(4) == 0 { " hidden=\"1\"" } else if r.below(3) == 0 { " spans=\"1:3\"" } else { "" };
+        let attrs = if r.below(4) == 0 {
+            " hidden=\"1\""
+        } else if r.below(3) == 0 {
+            " spans=\"1:3\""
+        } else {
+            ""
+        };
         if cells.is_empty() && r.below(2) == 0 {
             rows.push_str(&format!("<row r=\"{n}\"{attrs}/>"));
         } else {
             rows.push_str(&format!("<row r=\"{n}\"{attrs}>{cells}</row>"));
         }
     }
-    let merge = if r.below(2) == 0 { "<mergeCells count=\"1\"><mergeCell ref=\"B1:C2\"/></mergeCells>" } else { "" };
-    format!("{DECL}<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><dimension ref=\"A1:C3\"/><sheetData>{rows}</sheetData>{merge}</worksheet>")
+    let merge = if r.below(2) == 0 {
+        "<mergeCells count=\"1\"><mergeCell ref=\"B1:C2\"/></mergeCells>"
+    } else {
+        ""
+    };
+    format!(
+        "{DECL}<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><dimension ref=\"A1:C3\"/><sheetData>{rows}</sheetData>{merge}</worksheet>"
+    )
 }
 
 #[test]
@@ -159,12 +202,18 @@ fn random_sheets_and_edits_never_panic_and_never_hand_out_a_bad_file() {
         let file = xlsx_with(&random_sheet(&mut r), "", &[]);
         let mut ops = vec![];
         for _ in 0..1 + r.below(4) {
-            let a = format!("{}{}", ["A", "B", "C", "D", "Z", "AA"][r.below(6)], 1 + r.below(9));
+            let a = format!(
+                "{}{}",
+                ["A", "B", "C", "D", "Z", "AA"][r.below(6)],
+                1 + r.below(9)
+            );
             let v: Value = match r.below(5) {
                 0 => json!({"op": "set", "cells": {a: r.below(100) as i64}}),
                 1 => json!({"op": "set", "cells": {a: r.pick(WORDS)}}),
                 2 => json!({"op": "set", "cells": {a: {"f": "SUM(A1:A3)"}}}),
-                3 => json!({"op": "append_rows", "rows": [[1, r.pick(WORDS), null]], "like_row_above": r.below(2) == 0}),
+                3 => {
+                    json!({"op": "append_rows", "rows": [[1, r.pick(WORDS), null]], "like_row_above": r.below(2) == 0})
+                }
                 _ => json!({"op": "clear", "range": format!("A1:{a}")}),
             };
             ops.push(SheetOp::parse(&v).unwrap());
@@ -175,8 +224,21 @@ fn random_sheets_and_edits_never_panic_and_never_hand_out_a_bad_file() {
                 None => refused += 1,
                 Some(out) => {
                     made += 1;
-                    assert!(xlsx::view(&out, Some("Data"), 1, 400).is_ok(), "the output reads back");
-                    rows_equal_outside(&file, &out, &["xl/worksheets/sheet1.xml", "xl/workbook.xml", "[Content_Types].xml", "xl/_rels/workbook.xml.rels", "xl/calcChain.xml"]);
+                    assert!(
+                        xlsx::view(&out, Some("Data"), 1, 400).is_ok(),
+                        "the output reads back"
+                    );
+                    rows_equal_outside(
+                        &file,
+                        &out,
+                        &[
+                            "xl/worksheets/sheet1.xml",
+                            "xl/workbook.xml",
+                            "[Content_Types].xml",
+                            "xl/_rels/workbook.xml.rels",
+                            "xl/calcChain.xml",
+                        ],
+                    );
                 }
             },
         }
@@ -189,7 +251,10 @@ fn random_sheets_and_edits_never_panic_and_never_hand_out_a_bad_file() {
 #[test]
 fn damaged_parts_are_refused_or_read_back_and_never_panic() {
     let mut r = Rng(0xA076_1D64_78BD_642F);
-    let ops = [DocOp::parse(&json!({"op": "replace_text", "at": "p2#0000", "find": "a", "replace": "b"})).unwrap()];
+    let ops = [DocOp::parse(
+        &json!({"op": "replace_text", "at": "p2#0000", "find": "a", "replace": "b"}),
+    )
+    .unwrap()];
     for _ in 0..300 {
         let mut doc = document_xml().into_bytes();
         match r.below(3) {
@@ -205,7 +270,8 @@ fn damaged_parts_are_refused_or_read_back_and_never_panic() {
         }
         let file = {
             let mut w = crate::zip::ZipWriter::new(8 << 20);
-            w.add("[Content_Types].xml", docx_real_types().as_bytes()).unwrap();
+            w.add("[Content_Types].xml", docx_real_types().as_bytes())
+                .unwrap();
             w.add("word/document.xml", &doc).unwrap();
             w.finish().unwrap()
         };
@@ -219,10 +285,16 @@ fn damaged_parts_are_refused_or_read_back_and_never_panic() {
         };
         let wb = xlsx_with(&String::from_utf8_lossy(&sheet), "", &[]);
         let _ = xlsx::view(&wb, None, 1, 400);
-        let _ = xlsx::edit(&wb, "Data", &[SheetOp::parse(&json!({"op": "set", "cells": {"B2": 1}})).unwrap()]);
+        let _ = xlsx::edit(
+            &wb,
+            "Data",
+            &[SheetOp::parse(&json!({"op": "set", "cells": {"B2": 1}})).unwrap()],
+        );
     }
 }
 
 fn docx_real_types() -> String {
-    format!("{DECL}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/></Types>")
+    format!(
+        "{DECL}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"xml\" ContentType=\"application/xml\"/></Types>"
+    )
 }
