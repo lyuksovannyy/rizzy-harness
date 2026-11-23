@@ -44,6 +44,11 @@ pub(crate) struct Raw {
     pub local: u64,
     /// The CRC-32 of the unpacked data, as the directory says.
     pub crc: u32,
+    /// The entry's name exactly as the directory holds it.
+    pub name: Vec<u8>,
+    /// The entry's DOS time and date, as the directory says.
+    pub time: u16,
+    pub date: u16,
 }
 
 /// Where the central directory is: `(offset, size)`.
@@ -183,6 +188,9 @@ pub(crate) fn walk(
         };
         n += 1;
         let go = f(Raw {
+            name: name.to_vec(),
+            time: u16le(b, at + 12).unwrap_or(0),
+            date: u16le(b, at + 14).unwrap_or(0),
             entry,
             method,
             flags,

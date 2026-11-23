@@ -19,6 +19,7 @@
 //! The editing tools that follow build on the same writer and helpers.
 
 pub mod docx;
+pub mod edit;
 pub mod formula;
 pub mod limits;
 pub mod name;

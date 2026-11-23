@@ -24,7 +24,7 @@ mod tarball;
 pub mod testkit;
 mod zip;
 
-pub use parts::{PACKAGE_CEILING, Package, PartError};
+pub use parts::{PACKAGE_CEILING, Package, PartError, RawEntry};
 
 use std::cell::Cell;
 use std::io::{self, Read};
