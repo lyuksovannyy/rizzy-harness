@@ -231,6 +231,7 @@ impl Node {
                 turn: Some("Person: Ann".into()),
                 standing: vec![],
                 unattended: false,
+                push: None,
             })),
             agent,
             files,

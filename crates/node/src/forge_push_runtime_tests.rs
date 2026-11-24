@@ -9,7 +9,7 @@
 //! token is in no event, log line, audit line or file of the node.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock};
@@ -19,9 +19,7 @@ use harness_core::policy::{ApprovalMode, Decision};
 use harness_core::{Secret, SessionId};
 use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 
-use crate::forge_clone::tests::{
-    CANARY, Logs, Mode, Server, USER, bare, files_with_token, git_in, server,
-};
+use crate::forge_clone::tests::{CANARY, Logs, Mode, USER, bare, files_with_token, git_in, server};
 use crate::policy::NodePolicy;
 
 const SCRIPT: &str = r#"script: [{"tool": "push", "input": {}}]"#;
@@ -532,6 +530,4 @@ async fn a_second_push_while_one_runs_is_refused() {
     let seen = n.until_end(a, Answer::Allow, &r.folder).await;
     let (_, ok, out) = &seen.results[0];
     assert!(!ok && out.contains("clone_timeout_s"), "{out}");
-    let _: &Server = &stall;
-    let _ = Mutex::new(());
 }

@@ -271,7 +271,7 @@ pub(crate) fn stage(
                 b.max_files
             ));
         }
-        if (st.linked + st.copied) % 1000 == 0 && started.elapsed() > b.stage_time {
+        if (st.linked + st.copied).is_multiple_of(100) && started.elapsed() > b.stage_time {
             return Err(format!(
                 "reading the folder's objects took longer than {} s; pack them first (`git gc` \
                  in the folder) and push again",

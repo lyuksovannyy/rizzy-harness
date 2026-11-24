@@ -70,6 +70,7 @@ async fn a_child_gets_personalisation_only_when_its_own_switch_is_on() {
             text: format!("How the person wants replies to sound: {MARK}"),
         }],
         unattended: false,
+        push: None,
     });
     let (_, outs) = r
         .lead_turn(&delegate(&[
@@ -146,6 +147,7 @@ async fn a_background_child_follows_its_own_switch() {
             text: format!("How the person wants replies to sound: {MARK}"),
         }],
         unattended: false,
+        push: None,
     });
     let (_, outs) = r
         .lead_turn(&delegate(&[
@@ -205,6 +207,7 @@ async fn the_builtin_scout_never_gets_personalisation_from_its_lead() {
             text: format!("How the person wants replies to sound: {MARK}"),
         }],
         unattended: false,
+        push: None,
     });
     let (_, outs) = r
         .lead_turn(&delegate(&[

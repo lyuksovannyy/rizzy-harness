@@ -7,7 +7,7 @@ use super::*;
 use crate::forge_clone::tests::{
     CANARY, Mode, USER, bare, basic, files_with_token, git_in, pids_with, server,
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 struct Rig {
     _tmp: tempfile::TempDir,
@@ -639,5 +639,42 @@ async fn no_file_holds_the_token() {
     let pin = pin(&r.folder, None).unwrap();
     r.push(&forge.host(), "t", &pin.commit).await.unwrap();
     assert_eq!(files_with_token(&r.root), Vec::<PathBuf>::new());
-    let _ = Path::new("");
+}
+
+/// (b) Measured by hand, not in CI: the link step over the repository at
+/// `HARNESS_PUSH_MEASURE_REPO` (its top folder), into a staging folder
+/// beside it, with the shipped bounds; prints the count and the time.
+#[test]
+#[ignore]
+fn measure_the_link_step() {
+    let Some(top) = std::env::var_os("HARNESS_PUSH_MEASURE_REPO") else {
+        return;
+    };
+    let top = PathBuf::from(top).canonicalize().unwrap();
+    let staging = top.parent().unwrap().join("measure-staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let b = Bounds {
+        timeout: Duration::from_secs(600),
+        max_copy: 2048 * 1024 * 1024,
+        max_files: MAX_FILES,
+        stage_time: STAGE_TIME,
+    };
+    for links in [true, false] {
+        refuse_links(!links);
+        let t = std::time::Instant::now();
+        let r = stage(&staging, &top, "sha1", &b);
+        let took = t.elapsed();
+        match &r {
+            Ok(s) => eprintln!(
+                "MEASURE links={links}: linked {} copied {} ({} bytes) in {took:?}",
+                s.linked, s.copied, s.copied_bytes
+            ),
+            Err(e) => eprintln!("MEASURE links={links}: refused after {took:?}: {e}"),
+        }
+        let t = std::time::Instant::now();
+        drop(r);
+        eprintln!("MEASURE links={links}: removed in {:?}", t.elapsed());
+    }
+    refuse_links(false);
+    let _ = std::fs::remove_dir_all(&staging);
 }

@@ -302,6 +302,7 @@ impl Node {
                 turn: Some("Person: Ann".into()),
                 standing: vec![],
                 unattended: false,
+                push: None,
             })),
             agent,
             ..PromptMsg::test(sid, text)
@@ -719,6 +720,7 @@ impl Node {
                     turn: Some("Person: Ann".into()),
                     standing: vec![],
                     unattended: false,
+                    push: None,
                 })),
                 agent,
                 ..PromptMsg::test(sid, text)
