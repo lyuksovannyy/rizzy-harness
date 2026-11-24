@@ -8,13 +8,14 @@
 //! title the chat was created with, and its one writer stays the node.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::put;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, acting_session, require};
+use super::caller::User;
+use super::{ApiError, ApiResult, acting_session};
 use crate::{Audience, Live, Master};
 
 pub(super) fn routes() -> Router<Master> {
@@ -29,12 +30,11 @@ struct RenameBody {
 /// Control and hidden characters are dropped, surrounding blanks trimmed;
 /// empty or over `MAX_TITLE_CHARS` characters is refused.
 async fn rename(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<RenameBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let sid = acting_session(&m, &who, &id).await?.session_id;
     let title = crate::projects::clean_required("title", &b.title, harness_store::MAX_TITLE_CHARS)
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;

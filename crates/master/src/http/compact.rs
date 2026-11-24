@@ -14,13 +14,14 @@
 //! never a tool.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, acting_session, agentic_gate, require};
+use super::caller::User;
+use super::{ApiError, ApiResult, acting_session, agentic_gate};
 use crate::{CommandError, Master};
 
 pub(super) fn routes() -> Router<Master> {
@@ -39,12 +40,11 @@ struct CompactBody {
 }
 
 async fn compact(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<CompactBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = acting_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     if b.focus.as_ref().is_some_and(|f| f.len() > FOCUS_MAX_BYTES) {

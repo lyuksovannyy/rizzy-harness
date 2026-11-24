@@ -1,8 +1,28 @@
 # Authentication by construction (FIX_PLAN 4.1, second half)
 
 Goal: on every route, the caller is identified before anything of the request is read, and a new route cannot forget it.
-Status: stage 0 (design and spike), 2026-11-24.
-The spike is kept: it already makes the route walk's `BODY_FIRST` and `QUERY_FIRST` lists empty.
+Status: done, 2026-11-24 (design and spike, the layer in pull request 244, the conversion and the deletion of `require*` in the pull requests after it).
+The layer made the route walk's `BODY_FIRST` and `QUERY_FIRST` lists empty; the conversion moved every handler to the extractors and `require`, `require_any`, `require_admin` and `require_bytes` are deleted.
+Sections below that speak of `require*` describe the code as it was when the design was made.
+
+## The rules for a route from now on
+
+1. A route on the private router (`http::private_routes`) takes one of `Caller`, `User`, `Admin` or `ByteCaller` (`http/caller.rs`) as its FIRST argument, before `State`, `Path`, `Query` and the body.
+   Nothing else decides who the caller is; a handler never looks at the headers to find out.
+   A route that must be open goes in `http::public()` with a line in the route walk's `PUBLIC` list saying why.
+2. A handler whose need depends on its body or query (a chat approval: an allow needs a login with no pending password change, a denial any login; the agent editor's `?scope=server`) takes `Caller` or `User` and applies the rest by hand after it knows (`caller::settled`, `require_agent_editor`), with the same sentence.
+3. A route that serves bytes to an element or a download takes `ByteCaller` (a link counts there, on GET and HEAD only); `ViaLink` tells a link from a key.
+4. The class lists in `crates/master/tests/it/member_walk_http.rs` (`ADMIN_ONLY`, `ANY_LOGIN`, `BYTE_ROUTES`) and `VALID_BODIES` are written by hand and compared with what the code says.
+   A new route fails them until it is added; an edit needs a line of reason in the pull request.
+   An admin-only or any-login route that takes a body needs a `VALID_BODIES` entry (a test fails without one), so that `the_written_lists_hold_over_http` can send it and see 403 for a member or a must-change login without reading any handler.
+   Nothing checks that a list and a handler were changed together; for a body route whose valid body is missing, the lists are the only guard.
+5. The golden file `crates/master/tests/it/auth_golden.txt` records what `require*` answered, one line per request, written once from the router as it was before the layer.
+   `the_layer_answers_as_require_did` compares the live router with it and allows two classes of difference.
+   It is frozen and cannot be regenerated: the router it was written from, the writer and the `testing` feature of `harness-master` were deleted with `require*`, since a converted handler refuses everyone on that router.
+   The only allowed edit is deleting the lines of a route that is removed.
+   A route added after it is listed by the test, not compared.
+
+**One reordering the conversion made beyond decision 2:** `projects/mcp.rs` `approve` and `remove` now answer 401 or 403 before validating the server name and the digest (they used to validate first, then call `asker`, which checked the caller); the review found no other.
 
 ## What authenticates a request today
 
@@ -81,7 +101,7 @@ A member no longer learns an admin route's fields that way.
 The member walk lists the handlers still in the old order (72 routes for one caller kind or another today); the list shrinks as they convert.
 Until a handler converts, it still calls `require` after the layer: two lookups per request (the second is a read, the login's expiry moves at most once a minute), which goes away with the conversion.
 
-## Splitting the work
+## Splitting the work (done)
 
 1. **The layer** (this spike, ~+140 lines in `http/caller.rs`, +38/-17 in `http.rs`, the tests): fixes every route at once; the walk's lists are empty from here on, so the later steps cannot be proven by those lists shrinking.
 2. **Convert the handlers by area**, one pull request each, mechanical: the `require*` call and the `headers`/`uri` arguments go, an extractor comes first in the arguments.
@@ -115,7 +135,7 @@ Proven able to fail: an `Admin` extractor that let members through made it fail 
 The "admin" in module docs was tried as a second source and dropped: 83 open routes match it, because the docs say "admins included" of rules that keep admins out of other people's things; the `ADMIN_ONLY` snapshot does that job.
 
 **The golden file.** `tests/it/auth_golden.txt` (4,296 lines, 262 KB) holds what `require*` answered before the layer, one line per request: caller kind, method, path, body (none, empty, `{}`), status and error sentence.
-It was written by `write_the_auth_golden` (`HARNESS_WRITE_GOLDEN=1 cargo test -p harness-master --features testing --test it write_the_auth_golden`) against `router_before_identify`, with `storage.rs` and `made_files.rs` put back to their bodies before conversion (from `59c8b3c9`) for the run, so every line is an answer of `require*`; two runs gave the same file.
+It was written by `write_the_auth_golden` (since deleted, with the `testing` feature it needed) against `router_before_identify` (also deleted), with `storage.rs` and `made_files.rs` put back to their bodies before conversion (from `59c8b3c9`) for the run, so every line is an answer of `require*`; two runs gave the same file.
 Kinds: nobody, a wrong token, a made-up cookie, a member's cookie alone, a foreign page, a member, an admin, a login that must change its password, a disabled account's login, an expired login, the API token, and a cookie with a link (its own on a byte route, carried elsewhere), with HEAD on the byte routes.
 `the_layer_answers_as_require_did` sends the same requests to the router with the layer and allows only two differences, matched by rule: a caller who is nobody gets 401 where a body error came first (896 lines today), and decision 2, a member or a login that must change its password gets 403 "admins only" or "change your password first" where a body error came first (2 today, the converted `PUT /api/admin/storage`).
 Every other change fails it: widening `storage.rs`'s `mine` from `User` to `Caller` failed with `now must-change GET /api/me/storage none 200 / was ... 403 change your password first` (the review's mutation E, which the member walk alone missed).
@@ -137,7 +157,7 @@ Its findings, each closed in this pull request:
 - Mutations A (the layer takes a cookie alone as a link) and C (a link on every method) were each caught by one test: `the_layer_takes_a_link_only_to_read` (a unit test of the layer's own verdict, seen by a handler that does not check again) is the second catch for both; for A the golden test (a member's cookie alone on the made-file download: 404 where it was 401) and the store-read test fail too.
   No walk over the real routes can catch C, since every handler on a linkable URL that writes checks again; that is the defence in depth, and the unit test is the catch.
 
-## Rules for the conversion pull requests
+## Rules for the conversion pull requests (done; for later routes see the rules at the top)
 
 - Keep `the_layer_answers_as_require_did` green with only its two difference classes; never edit `auth_golden.txt` (the only allowed edit is deleting the lines of a route that is removed).
 - Edit `ADMIN_ONLY`, `ANY_LOGIN`, `BYTE_ROUTES` or `VALID_BODIES` only with a line of reason in the pull request.

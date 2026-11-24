@@ -19,7 +19,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -33,8 +33,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::attachments::{AsFile, Target, UploadQuery, keep, target};
+use super::caller::User;
 use super::doc_preview::{refusal, why};
-use super::{ApiError, ApiResult, acting_session, require};
+use super::{ApiError, ApiResult, acting_session};
 use crate::pdf::DocError;
 use crate::{Master, attached};
 
@@ -195,12 +196,11 @@ fn copy_name(name: &str) -> (String, &'static str, &'static str) {
 }
 
 async fn edit(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, file_id)): Path<(String, String)>,
     body: Bytes,
 ) -> ApiResult<Response> {
-    let who = require(&m, &headers).await?;
     let row = acting_session(&m, &who, &id).await?;
     // Only a plain chat keeps files: a coding chat's are in its folder.
     if row.profile.as_deref() != Some("chat") || row.parent_id.is_some() || row.incognito {

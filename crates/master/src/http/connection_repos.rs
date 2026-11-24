@@ -19,13 +19,14 @@
 //! Listing is a read: no audit line, as for the other reads.
 
 use axum::extract::{Path, RawQuery, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 use super::ApiResult;
+use super::caller::User;
 use super::connections::{err, person, sealing_failed};
 use crate::Master;
 use crate::forge::CheckError;
@@ -59,12 +60,12 @@ fn parse_query(raw: Option<&str>) -> Result<(Option<String>, u32), &'static str>
 }
 
 async fn list(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
 ) -> ApiResult<Json<Value>> {
-    let me = person(&m, &headers).await?;
+    let me = person(who)?;
     let (q, page) = parse_query(raw.as_deref()).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     let (u, i) = (me.clone(), id.clone());
     let (row, sealed) = m

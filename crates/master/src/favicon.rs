@@ -9,15 +9,15 @@ use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::extract::Query;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use harness_web::favicon::FaviconFetcher;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::Semaphore;
 
-use crate::{Master, auth};
+use crate::http::ByteCaller;
 
 const MAX_ORIGINS: usize = 512;
 /// Total icon bytes kept; older entries go first when it is exceeded.
@@ -54,27 +54,11 @@ pub struct FaviconQuery {
     url: String,
 }
 
-pub async fn favicon(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    uri: Uri,
-    Query(q): Query<FaviconQuery>,
-) -> Response {
-    // The login key, or (for the `<img>` that draws it, which cannot send
-    // one) a link minted for this login and this exact URL, like every
-    // other byte route. The cookie alone used to do: it made the server
-    // fetch from the network for whoever held it, and told them whether
-    // the login was live (Gate 3 fix review 2, R2-1).
-    let who = match auth::authenticate(&m, &headers).await {
-        Some(who) => who,
-        None => match auth::link_principal(&m, &headers, &uri).await {
-            Some(who) => who,
-            None => return error(StatusCode::UNAUTHORIZED, "not logged in"),
-        },
-    };
-    if who.must_change_password {
-        return error(StatusCode::FORBIDDEN, "change your password first");
-    }
+pub async fn favicon(ByteCaller(who): ByteCaller, Query(q): Query<FaviconQuery>) -> Response {
+    // The caller is a `ByteCaller`: the login key, or (for the `<img>`
+    // that draws it, which cannot send one) a link minted for this login
+    // and this exact URL, like every other byte route (Gate 3 fix review
+    // 2, R2-1).
     let origin = match harness_web::favicon::origin(&q.url) {
         Ok(o) => o,
         Err(e) => return error(StatusCode::BAD_REQUEST, &e),

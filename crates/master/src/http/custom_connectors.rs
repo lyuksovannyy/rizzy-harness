@@ -32,14 +32,16 @@ use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::{get, put};
 use harness_core::Secret;
 use harness_store::custom_connectors::{AccountPut, ConnectorAdd, ConnectorRow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require};
+use super::caller::User;
+use super::{ApiError, ApiResult};
+use crate::auth::Principal;
 use crate::connectors::{self, Checked, Offer};
 use crate::sealed::Binding;
 use crate::workspaces::{Access, Perm, access};
@@ -90,12 +92,7 @@ fn parse<T: for<'de> Deserialize<'de>>(body: &[u8]) -> ApiResult<T> {
 
 /// The caller in workspace `id`, their account id when they have one, and
 /// whether they may see the local node's servers (the Plugins rule).
-async fn caller(
-    m: &Master,
-    headers: &HeaderMap,
-    id: &str,
-) -> ApiResult<(Access, Option<String>, bool)> {
-    let who = require(m, headers).await?;
+async fn caller(m: &Master, who: Principal, id: &str) -> ApiResult<(Access, Option<String>, bool)> {
     let a = access(m, &who, id).await?;
     let local_ok = crate::workspaces::may_use_local_node(m, &who);
     Ok((a, who.user_id, local_ok))
@@ -180,11 +177,11 @@ async fn available(m: &Master) -> ApiResult<bool> {
 }
 
 async fn list(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let (a, me, local) = caller(&m, &headers, &id).await?;
+    let (a, me, local) = caller(&m, who, &id).await?;
     let ws = a.id().to_string();
     let w = ws.clone();
     let rows = m.inner.mirror.call(move |s| s.connectors_of(&w)).await?;
@@ -286,12 +283,12 @@ async fn audit(m: &Master, detail: Value) {
 }
 
 async fn create(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let (a, me, local) = caller(&m, &headers, &id).await?;
+    let (a, me, local) = caller(&m, who, &id).await?;
     a.require(Perm::Settings)?;
     let d: Definition = parse(&body)?;
     let name = d.name.clone().unwrap_or_default();
@@ -357,12 +354,12 @@ async fn create(
 }
 
 async fn edit(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, cid)): Path<(String, String)>,
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let (a, me, local) = caller(&m, &headers, &id).await?;
+    let (a, me, local) = caller(&m, who, &id).await?;
     a.require(Perm::Settings)?;
     let d: Definition = parse(&body)?;
     let old = row(&m, a.id(), &cid).await?;
@@ -397,11 +394,11 @@ async fn edit(
 }
 
 async fn remove(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, cid)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let (a, me, _) = caller(&m, &headers, &id).await?;
+    let (a, me, _) = caller(&m, who, &id).await?;
     a.require(Perm::Settings)?;
     let old = row(&m, a.id(), &cid).await?;
     let (w, c) = (a.id().to_string(), cid.clone());
@@ -504,12 +501,12 @@ struct CheckBody {
 }
 
 async fn connect(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, cid)): Path<(String, String)>,
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let (a, me, local) = caller(&m, &headers, &id).await?;
+    let (a, me, local) = caller(&m, who, &id).await?;
     let me = person(me)?;
     let b: TokenBody = parse(&body)?;
     let token = connectors::clean_token(&b.token).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
@@ -594,11 +591,11 @@ async fn connect(
 }
 
 async fn disconnect(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, cid)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let (a, me, _) = caller(&m, &headers, &id).await?;
+    let (a, me, _) = caller(&m, who, &id).await?;
     let me = person(me)?;
     let (u, w, c) = (me.clone(), a.id().to_string(), cid.clone());
     if !m
@@ -623,12 +620,12 @@ async fn disconnect(
 }
 
 async fn check(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, cid)): Path<(String, String)>,
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let (a, me, local) = caller(&m, &headers, &id).await?;
+    let (a, me, local) = caller(&m, who, &id).await?;
     let me = person(me)?;
     let b: CheckBody = parse(&body)?;
     let r = row(&m, a.id(), &cid).await?;

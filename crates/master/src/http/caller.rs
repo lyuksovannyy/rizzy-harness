@@ -8,12 +8,20 @@
 //! leaves it in the request's extensions; the handler takes it with one of
 //! the extractors below, which only read it and add the route's own rule:
 //!
-//! | extractor | who passes | replaces |
-//! |---|---|---|
-//! | [`Caller`] | any login with its key, or the API token | `require_any` |
-//! | [`User`] | the same, with no pending password change | `require` |
-//! | [`Admin`] | a [`User`] who is a server admin | `require_admin` |
-//! | [`ByteCaller`] | a [`User`], or a live login's cookie with a link minted for this URL (GET and HEAD only) | `require_bytes` |
+//! | extractor | who passes |
+//! |---|---|
+//! | [`Caller`] | any login with its key, or the API token, even one that must change its password |
+//! | [`User`] | the same, with no pending password change |
+//! | [`Admin`] | a [`User`] who is a server admin (the API token is one) |
+//! | [`ByteCaller`] | a [`User`], or a live login's cookie with a link minted for this URL (GET and HEAD only) |
+//!
+//! Every handler on a private route takes one of these as its FIRST
+//! argument (before `State`, `Path`, `Query` and the body), so the role
+//! answers before anything of the request is parsed. A handler whose need
+//! depends on its body or query takes [`Caller`] or [`User`] and applies
+//! the rest itself (a chat approval's allow, [`settled`]; the agent
+//! editor's `?scope=server`). [`ViaLink`] only says whether a link, not a
+//! key, vouched for a [`ByteCaller`].
 //!
 //! The answers are today's, word for word: 401 "not logged in", 403
 //! "change your password first", 403 "admins only".
@@ -72,7 +80,9 @@ fn found(parts: &Parts) -> Result<&Identified, ApiError> {
         .ok_or_else(not_logged_in)
 }
 
-fn settled(who: &Principal) -> Result<(), ApiError> {
+/// The rule of a [`User`]: no pending password change. A handler whose
+/// need depends on its body (a chat approval) applies it by hand.
+pub(super) fn settled(who: &Principal) -> Result<(), ApiError> {
     if who.must_change_password {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -95,7 +105,20 @@ pub(super) struct Admin(pub Principal);
 
 /// A [`User`], or a login vouched for by a link: what serves bytes to an
 /// element or a download.
-pub(super) struct ByteCaller(pub Principal);
+pub(crate) struct ByteCaller(pub Principal);
+
+/// Whether the caller came by a link (no login key, no token), as the layer
+/// found it: for a byte route that must tell the two apart (the latest
+/// download's redirect carries a fresh link only for a link). It says
+/// nothing about who may call; take a [`ByteCaller`] first.
+pub(super) struct ViaLink(pub bool);
+
+impl<S: Send + Sync> FromRequestParts<S> for ViaLink {
+    type Rejection = ApiError;
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, ApiError> {
+        Ok(ViaLink(found(parts)?.by_link))
+    }
+}
 
 impl<S: Send + Sync> FromRequestParts<S> for Caller {
     type Rejection = ApiError;

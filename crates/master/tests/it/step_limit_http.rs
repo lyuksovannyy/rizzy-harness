@@ -532,3 +532,60 @@ async fn a_raise_in_the_window_after_a_lowering_is_refused() {
         .collect();
     assert_eq!(flags, [true, true], "both were sent as lowerings");
 }
+
+/// `id`'s login after an admin reset: it must change its password first.
+async fn must_change(t: &T, name: &str, id: &str) -> String {
+    let (st, v) = req(
+        t,
+        Method::POST,
+        &format!("/api/users/{id}/password"),
+        None,
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/login", t.base))
+        .json(&json!({"username": name, "password": v["password"]}))
+        .send()
+        .await
+        .unwrap();
+    let cookie = common::signed_in(r).await;
+    let (_, me) = req(t, Method::GET, "/api/me", None, &cookie).await;
+    assert_eq!(me["user"]["must_change_password"], true);
+    cookie
+}
+
+/// A login that must change its password may lower a chat's step limit but
+/// not raise it: 403 "change your password first", with a real chat it
+/// owns (the golden walk cannot see this: on a fresh rig `acting_session`
+/// answers 404 first).
+#[tokio::test]
+async fn a_login_that_must_change_its_password_cannot_raise_the_limit() {
+    let t = start().await;
+    let (bob, bob_id) = account(&t, "bob", "member").await;
+    // The remote node's maximum (20) is the limit the chat has.
+    let sid = chat(&t, &bob, "remote", None).await;
+    let bob = must_change(&t, "bob", &bob_id).await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &path(sid),
+        Some(json!({"max_steps": 30})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["error"], "change your password first");
+    assert!(changes(&t.remote).is_empty());
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &path(sid),
+        Some(json!({"max_steps": 5})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(changes(&t.remote), [(sid, 5)]);
+}

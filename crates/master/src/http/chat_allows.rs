@@ -7,12 +7,13 @@
 //! does not hold.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::delete;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, acting_session, require_any};
+use super::caller::Caller;
+use super::{ApiError, ApiResult, acting_session};
 use crate::Master;
 
 pub(super) fn routes() -> Router<Master> {
@@ -25,11 +26,10 @@ fn is_grant_id(s: &str) -> bool {
 }
 
 async fn revoke(
+    Caller(who): Caller,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, grant)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let who = require_any(&m, &headers).await?;
     let row = acting_session(&m, &who, &id).await?;
     if !is_grant_id(&grant) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad grant id".into()));

@@ -1,5 +1,5 @@
 # What require* answered before the caller layer (FIX_PLAN 4.1). One line per request:
-# kind, method, path, body, status, error. Written by write_the_auth_golden; never edit by hand.
+# kind, method, path, body, status, error. Frozen: written once from the router before the layer, when every handler still called require*; that router and the writer are gone, so this file cannot be regenerated (docs/auth-by-construction.md). Never edit the lines by hand.
 none	PUT	/api/admin/agent-models	empty	400	
 bearer	PUT	/api/admin/agent-models	empty	400	
 made-up-cookie	PUT	/api/admin/agent-models	empty	400	

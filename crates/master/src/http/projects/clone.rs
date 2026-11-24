@@ -55,7 +55,7 @@
 //! never one the person names.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::delete;
 use axum::{Json, Router};
 use harness_core::{Secret, SecretSet};
@@ -69,8 +69,8 @@ use super::{ApiError, ApiResult, changed, folder, store_err};
 use crate::auth::Principal;
 use crate::forge::{CheckError, ForgeHost};
 use crate::forge_repos;
+use crate::http::caller::User;
 use crate::http::connections::{err, sealing_failed};
-use crate::http::require;
 use crate::project_folder::{self, CloneSource, FolderError};
 use crate::projects::{self as p, ProjectSettings};
 use crate::workspaces::{self as ws, WsError};
@@ -586,11 +586,10 @@ fn secrets_of(login: &str, token: &str) -> SecretSet {
 /// Dismiss the caller's own failed clone: anyone else's, a running one or
 /// an unknown id is 404 (a running one: 409, to its starter).
 async fn dismiss(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let me = who
         .user_id
         .clone()

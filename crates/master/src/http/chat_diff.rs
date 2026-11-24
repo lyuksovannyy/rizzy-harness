@@ -12,13 +12,14 @@
 //! the node's answer passed on as it came, nothing kept.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use harness_protocol::TurnDiff;
 
+use super::caller::User;
 use super::diff::error;
-use super::{ApiError, ApiResult, require, visible_session};
+use super::{ApiError, ApiResult, visible_session};
 use crate::Master;
 
 pub(super) fn routes() -> Router<Master> {
@@ -26,11 +27,10 @@ pub(super) fn routes() -> Router<Master> {
 }
 
 async fn chat_diff(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<TurnDiff>> {
-    let who = require(&m, &headers).await?;
     let row = visible_session(&m, &who, &id).await?;
     if row.profile.as_deref() == Some("chat") {
         return Err(ApiError(StatusCode::NOT_FOUND, "unknown session".into()));

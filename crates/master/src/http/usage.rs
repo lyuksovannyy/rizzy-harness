@@ -8,14 +8,15 @@
 use std::time::Duration;
 
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use harness_store::usage::{Bucket, UsageTotals};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require_admin};
+use super::caller::Admin;
+use super::{ApiError, ApiResult};
 use crate::Master;
 
 /// Merged into the API router by `http::router`.
@@ -77,11 +78,10 @@ fn body(from: i64, to: i64, t: &UsageTotals) -> Value {
 }
 
 async fn usage(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<Period>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(&m, &headers).await?;
     let bad = |e: &str| ApiError(StatusCode::BAD_REQUEST, e.into());
     let (Some(from), Some(to)) = (q.from, q.to) else {
         return Err(bad("from and to (ms since 1970) are required"));

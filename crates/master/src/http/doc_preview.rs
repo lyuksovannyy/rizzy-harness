@@ -14,7 +14,7 @@
 //! navigates to. A page of another origin cannot read it.
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use harness_docs::edit::preview::{Preview, Why};
@@ -22,7 +22,8 @@ use harness_docs::edit::serve::{Request, frame_request, parse_reply};
 use harness_protocol::PreviewRefusal;
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, ApiResult, require, visible_session};
+use super::caller::User;
+use super::{ApiError, ApiResult, visible_session};
 use crate::pdf::DocError;
 use crate::{Master, attached};
 
@@ -75,12 +76,11 @@ pub(super) fn sentence(e: DocError) -> ApiError {
 }
 
 async fn preview(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, file_id)): Path<(String, String)>,
     Query(q): Query<PreviewQuery>,
 ) -> ApiResult<Json<Answer>> {
-    let who = require(&m, &headers).await?;
     let row = visible_session(&m, &who, &id).await?;
     // Only a plain chat keeps files: a coding chat's are in its folder.
     if row.profile.as_deref() != Some("chat") || row.parent_id.is_some() || row.incognito {

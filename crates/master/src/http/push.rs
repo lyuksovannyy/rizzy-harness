@@ -8,12 +8,13 @@
 //! latest turn named no target. A read; nothing secret.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require, visible_session};
+use super::caller::User;
+use super::{ApiError, ApiResult, visible_session};
 use crate::Master;
 
 pub(super) fn routes() -> Router<Master> {
@@ -21,11 +22,10 @@ pub(super) fn routes() -> Router<Master> {
 }
 
 async fn target(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = visible_session(&m, &who, &id).await?;
     let none = || ApiError(StatusCode::NOT_FOUND, "no push target".into());
     if who.user_id.is_none() || row.owner_id != who.user_id {

@@ -743,3 +743,68 @@ async fn a_chat_someone_else_acted_in_adds_nothing_to_a_shared_file() {
         "{rows:?}"
     );
 }
+
+/// The latest-download redirect: a key download is sent to the plain
+/// version URL (the caller's key goes along with the next request); a
+/// link download, which has no key, is sent to a fresh link for that
+/// version URL, which works with the cookie alone.
+#[tokio::test]
+async fn the_latest_download_redirect_tells_a_link_from_a_key() {
+    let t = start().await;
+    let alex = alex(&t).await;
+    let bytes: Vec<u8> = (0..5_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(t.work.join("app.bin"), &bytes).unwrap();
+    let sid = chat(&t, &alex, None).await;
+    prompt(&t, &alex, &sid, "publish: app.bin as myapp").await;
+    settled(&t, &alex, &sid, 1).await;
+    let (_, list) = send(&t, Method::GET, "/api/artifacts", None, &alex).await;
+    let id = list["artifacts"][0]["artifact_id"].as_str().unwrap();
+    let vid = list["artifacts"][0]["latest"]["version_id"]
+        .as_str()
+        .unwrap();
+    let latest = format!("/api/artifacts/{id}/latest/download");
+    let plain = format!("/api/artifacts/{id}/versions/{vid}/download");
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let r = client
+        .get(format!("{}{latest}", t.base))
+        .login(&alex)
+        .same_origin()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FOUND);
+    assert_eq!(r.headers()["location"], plain.as_str());
+
+    let (st, v) = send(
+        &t,
+        Method::POST,
+        "/api/links",
+        Some(json!({"urls": [latest]})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let link = v["links"][&latest].as_str().unwrap().to_string();
+    // What a browser download sends: the cookie, no key.
+    let r = client
+        .get(format!("{}{link}", t.base))
+        .header("cookie", &alex)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FOUND);
+    let to = r.headers()["location"].to_str().unwrap().to_string();
+    assert!(to.starts_with(&format!("{plain}?link=")), "{to}");
+    let r = client
+        .get(format!("{}{to}", t.base))
+        .header("cookie", &alex)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.bytes().await.unwrap().as_ref(), &bytes[..]);
+}

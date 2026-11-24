@@ -189,16 +189,18 @@ async fn an_account_that_must_change_its_password_can_still_deny_and_cancel() {
         status(&t, Method::POST, &prompt, Some(json!({"text": "hi"})), &bob).await,
         StatusCode::FORBIDDEN
     );
+    let allow = req(
+        &t,
+        Method::POST,
+        &approval,
+        Some(json!({"decision": "allow"})),
+        Some(&bob),
+    )
+    .await;
+    assert_eq!(allow.status(), StatusCode::FORBIDDEN);
     assert_eq!(
-        status(
-            &t,
-            Method::POST,
-            &approval,
-            Some(json!({"decision": "allow"})),
-            &bob
-        )
-        .await,
-        StatusCode::FORBIDDEN
+        allow.json::<Value>().await.unwrap()["error"],
+        "change your password first"
     );
     // ...stopping it is not. (The node knows no approval a1: it says so,
     // which is not the password gate's 403.)

@@ -15,14 +15,15 @@
 //! that event.
 
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
+
 use axum::routing::post;
 use axum::{Json, Router};
 use harness_core::policy::ApprovalMode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiResult, acting_session, agentic_gate, require, require_any};
+use super::caller::{self, Caller};
+use super::{ApiResult, acting_session, agentic_gate};
 use crate::Master;
 
 pub(super) fn routes() -> Router<Master> {
@@ -36,18 +37,17 @@ struct ModeBody {
 }
 
 async fn set_mode(
+    Caller(who): Caller,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<ModeBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require_any(&m, &headers).await?;
     let row = acting_session(&m, &who, &id).await?;
     let now = m.approval_mode_of(row.session_id).await?;
     // Unknown: treated as a raise (checked), never as a lowering.
     let raise = now.is_none_or(|n| b.mode > n);
     if raise {
-        let who = require(&m, &headers).await?;
+        caller::settled(&who)?;
         agentic_gate(&m, &who, &row).await?;
     }
     tracing::info!(session = %row.session_id, mode = b.mode.id(), raise, "the approval mode changes");

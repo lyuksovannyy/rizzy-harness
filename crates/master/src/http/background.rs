@@ -16,13 +16,15 @@
 //! arrives as the event, as every end does.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use harness_protocol::{CAP_BACKGROUND, StopBackgroundBy};
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, acting_session, require_any};
+use super::caller::Caller;
+use super::{ApiError, ApiResult, acting_session};
+use crate::auth::Principal;
 use crate::{CommandError, Master};
 
 pub(super) fn routes() -> Router<Master> {
@@ -32,19 +34,19 @@ pub(super) fn routes() -> Router<Master> {
 }
 
 async fn stop_all(
+    Caller(who): Caller,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    stop(&m, &headers, &id, None).await
+    stop(&m, who, &id, None).await
 }
 
 async fn stop_one(
+    Caller(who): Caller,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, bg)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    stop(&m, &headers, &id, Some(bg)).await
+    stop(&m, who, &id, Some(bg)).await
 }
 
 /// `bg-<n>` as the node numbers them (at most nine digits).
@@ -66,13 +68,7 @@ fn away(node: &str) -> ApiError {
     )
 }
 
-async fn stop(
-    m: &Master,
-    headers: &HeaderMap,
-    id: &str,
-    bg: Option<String>,
-) -> ApiResult<Json<Value>> {
-    let who = require_any(m, headers).await?;
+async fn stop(m: &Master, who: Principal, id: &str, bg: Option<String>) -> ApiResult<Json<Value>> {
     let row = acting_session(m, &who, id).await?;
     if let Some(b) = &bg
         && !is_bg_id(b)

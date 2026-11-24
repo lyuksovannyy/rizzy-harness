@@ -18,12 +18,13 @@
 //! it has.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require, visible_session};
+use super::caller::User;
+use super::{ApiError, ApiResult, visible_session};
 use crate::Master;
 use crate::skills_menu::MenuError;
 
@@ -32,11 +33,10 @@ pub(super) fn routes() -> Router<Master> {
 }
 
 async fn menu(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = visible_session(&m, &who, &id).await?;
     let user = who.user_id.clone().unwrap_or_else(|| "(api token)".into());
     match crate::skills_menu::ask(&m, &user, &row).await {

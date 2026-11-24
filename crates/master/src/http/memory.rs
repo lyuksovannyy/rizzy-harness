@@ -8,7 +8,7 @@
 //! else); a chat's calls answer only its owner (PLAN.md T49, T54).
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use harness_memory::{Fact, MemoryStore, NewFact, Status};
@@ -16,7 +16,8 @@ use harness_store::SessionRow;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require, visible_session};
+use super::caller::User;
+use super::{ApiError, ApiResult, visible_session};
 use crate::auth::Principal;
 use crate::memory::{
     Place, audience_of, fact_place, is_own, memory_changed, place_audience, workspace_owner,
@@ -91,8 +92,7 @@ fn fact_json(f: &Fact) -> Value {
 /// The caller's own facts and their Personal workspace's memory (where
 /// their private details stay); newest first. A team's memory is on that
 /// workspace's own Memory tab.
-async fn list(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
+async fn list(User(who): User, State(m): State<Master>) -> ApiResult<Json<Value>> {
     let mem = memory_store(&m)?;
     let mut facts = mem.list(who.user_id.as_deref()).await.map_err(memory_err)?;
     if let Some(ws) = home(&m, &who).await {
@@ -145,11 +145,10 @@ struct NewMemoryBody {
 
 /// Added by the person: active at once.
 async fn add(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<NewMemoryBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let mem = memory_store(&m)?;
     let owner = match (&who.user_id, b.workspace_id.as_deref()) {
         (None, None) => None,
@@ -222,12 +221,11 @@ async fn kept(
 }
 
 async fn update(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<MemoryPatch>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (mem, cur) = own_fact(&m, &who, &id).await?;
     let before = audience_of(&m, &cur).await;
     if b.text.is_some() {
@@ -288,11 +286,10 @@ async fn update(
 }
 
 async fn remove(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (mem, cur) = own_fact(&m, &who, &id).await?;
     let to = audience_of(&m, &cur).await;
     mem.delete(&id).await.map_err(memory_err)?;
@@ -389,11 +386,10 @@ pub(super) fn credit(
 /// person sent it on (review F2: their chat is private). The source chat is
 /// named only to its owner.
 async fn ws_list(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (ws, may, admin) = ws_standing(&m, &who, &id).await?;
     let mem = memory_store(&m)?;
     let facts = mem
@@ -449,12 +445,11 @@ struct NewWsFact {
 /// Added by hand: those who may change the memory; active at once, with
 /// its author recorded.
 async fn ws_add(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<NewWsFact>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (ws, may, _) = ws_standing(&m, &who, &id).await?;
     if !may {
         return Err(forbidden(
@@ -539,12 +534,11 @@ struct WsPatch {
 }
 
 async fn ws_update(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, fact)): Path<(String, String)>,
     Json(b): Json<WsPatch>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (mem, cur, right, _, _) = ws_fact(&m, &who, &id, &fact).await?;
     let before = audience_of(&m, &cur).await;
     if right == WsRight::Own && b.status.is_some() {
@@ -583,11 +577,10 @@ async fn ws_update(
 /// and owners. Everyone else retires (PATCH `retired`), which keeps it
 /// listed with who retired it.
 async fn ws_remove(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, fact)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (mem, cur, _, admin, _) = ws_fact(&m, &who, &id, &fact).await?;
     let to = audience_of(&m, &cur).await;
     match cur.status {
@@ -629,12 +622,11 @@ struct WsMemorySettings {
 /// The one switch (admins and owners): every member may change the
 /// workspace's memory, and their agents' saves there apply at once.
 async fn ws_settings(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<WsMemorySettings>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (ws, _, admin) = ws_standing(&m, &who, &id).await?;
     if !admin {
         return Err(forbidden("only the workspace's admins and owners set this"));
@@ -767,23 +759,21 @@ async fn state_json(
 }
 
 async fn call_state(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, call_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (row, input) = own_call(&m, &who, &id, &call_id).await?;
     Ok(Json(state_json(&m, &who, &row, &call_id, &input).await?))
 }
 
 async fn decide(
+    who: Principal,
     m: Master,
-    headers: HeaderMap,
     id: String,
     call_id: String,
     d: crate::memory::Decision,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (row, input) = own_call(&m, &who, &id, &call_id).await?;
     let uid = who.user_id.clone().unwrap_or_default();
     crate::memory::decide(&m, &uid, row.session_id, &call_id, d)
@@ -795,28 +785,28 @@ async fn decide(
 /// Keep what the call asked for (a save, a replacement, a forgetting), for
 /// one who may decide it.
 async fn keep(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, call_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    decide(m, headers, id, call_id, crate::memory::Decision::Keep).await
+    decide(who, m, id, call_id, crate::memory::Decision::Keep).await
 }
 
 /// Withdraw what the call asked for (the chat's owner always may).
 async fn dismiss(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, call_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    decide(m, headers, id, call_id, crate::memory::Decision::Dismiss).await
+    decide(who, m, id, call_id, crate::memory::Decision::Dismiss).await
 }
 
 /// Undo what the call did, as recorded: delete the fact it saved, restore
 /// the one it retired; nothing else.
 async fn undo(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, call_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    decide(m, headers, id, call_id, crate::memory::Decision::Undo).await
+    decide(who, m, id, call_id, crate::memory::Decision::Undo).await
 }

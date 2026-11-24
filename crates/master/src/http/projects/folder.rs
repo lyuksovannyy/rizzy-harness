@@ -7,7 +7,7 @@
 //! (the defaults every chat started in the project takes).
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use harness_store::ProjectPatch;
@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use super::{ApiError, ApiResult, bad, changed, detail_json, managed, member_of, not_found};
 use crate::auth::Principal;
+use crate::http::caller::User;
 use crate::project_folder::{self, FolderError};
 use crate::projects::ProjectSettings;
 use crate::workspaces::{self as ws, Access};
@@ -123,12 +124,12 @@ struct GiveFolder {
 /// folder gets a new one on that node. Managers only, as every change to a
 /// project; refused when it has a folder already.
 async fn give_folder(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<GiveFolder>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row) = managed(&m, &headers, &id).await?;
+    let (who, row) = managed(&m, who, &id).await?;
     let a = member_of(&m, &who, &row.workspace_id, "project").await?;
     // One request per project at a time, before any node is asked; then
     // the project as it is now (another request may have given it one).
