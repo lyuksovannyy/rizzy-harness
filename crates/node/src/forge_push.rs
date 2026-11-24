@@ -642,3 +642,7 @@ fn porcelain(out: &str, branch: &str) -> Option<Pushed> {
 #[cfg(test)]
 #[path = "forge_push_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "forge_push_runtime_tests.rs"]
+mod runtime_tests;

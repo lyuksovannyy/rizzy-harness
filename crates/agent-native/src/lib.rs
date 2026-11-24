@@ -393,6 +393,11 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.board()
     }
 
+    // Not forwarding it would offer no push (the trait's default).
+    fn push(&self) -> Option<Arc<dyn harness_core::forge::PushHost>> {
+        self.host.push()
+    }
+
     fn stored_skills(&self) -> Option<Arc<dyn harness_core::skills::StoredSkillSource>> {
         self.host.stored_skills()
     }
