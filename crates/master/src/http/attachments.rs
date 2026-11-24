@@ -27,7 +27,8 @@ use harness_store::chat_uploads::{NewUpload, Put};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require};
+use super::caller::User;
+use super::{ApiError, ApiResult};
 use crate::attachments::{self, ExtractError, MAX_UPLOAD};
 use crate::{Master, storage, uploads};
 
@@ -170,12 +171,12 @@ pub(super) async fn target(
 }
 
 async fn upload(
+    User(who): User,
     State(m): State<Master>,
     headers: HeaderMap,
     Query(q): Query<UploadQuery>,
     body: Body,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let target = target(&m, &who, &q).await?;
     let text_max = MAX_UPLOAD as u64;
     let ceiling = match &target {
