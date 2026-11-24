@@ -479,11 +479,18 @@ impl Repo {
             return false;
         }
         let mut c = command(self, Some(&tmp));
+        // `--ignore-submodules=all`: without it, a gitlink in the index
+        // (the user's own, or a `160000` entry the folder's owner wrote)
+        // makes git run `git status` inside that folder, which reads the
+        // nested repository's `info/attributes` and `config` (agent-written)
+        // and runs a `filter.<x>.clean` program from it. No `-c` key stops
+        // that for the plumbing command; only the flag does.
         c.args([
             "diff-index",
             "--quiet",
             "--no-ext-diff",
             "--no-textconv",
+            "--ignore-submodules=all",
             commit,
         ]);
         matches!(exec(c, None, GIT_TIMEOUT).await, Ok(o) if o.status.code() == Some(1))
@@ -3992,6 +3999,12 @@ mod ignore_bench;
 #[cfg(test)]
 #[path = "git_check_tests.rs"]
 mod check_tests;
+
+/// A nested repository or a gitlink in the folder never runs its own
+/// filter on the node (T19). Test-only; lives in its own file.
+#[cfg(test)]
+#[path = "git_submodule_tests.rs"]
+mod submodule_tests;
 
 /// Undo's invariants on random small trees. Test-only; lives in its own
 /// file.

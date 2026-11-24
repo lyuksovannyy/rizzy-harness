@@ -11,6 +11,9 @@ mod environment;
 pub mod exec;
 mod forge_clone;
 mod git;
+#[cfg(test)]
+#[path = "git_state_busy_tests.rs"]
+mod git_state_busy_tests;
 mod history;
 mod images;
 mod instructions;

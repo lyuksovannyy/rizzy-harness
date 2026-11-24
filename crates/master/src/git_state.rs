@@ -64,14 +64,14 @@ impl From<crate::CommandError> for GitError {
 }
 
 /// Removes a request's entry however its wait ends.
-struct Entry<'a> {
-    m: &'a Master,
-    req_id: &'a str,
+struct Entry {
+    m: Master,
+    req_id: String,
 }
 
-impl Drop for Entry<'_> {
+impl Drop for Entry {
     fn drop(&mut self) {
-        lock(&self.m.inner.git_states.0).remove(self.req_id);
+        lock(&self.m.inner.git_states.0).remove(&self.req_id);
     }
 }
 
@@ -102,7 +102,6 @@ pub async fn ask(m: &Master, user: &str, sid: SessionId) -> Result<Option<GitSta
             },
         );
     }
-    let _entry = Entry { m, req_id: &req_id };
     let sent = m.send_raw(
         &node,
         MasterToNode::GitState {
@@ -111,14 +110,28 @@ pub async fn ask(m: &Master, user: &str, sid: SessionId) -> Result<Option<GitSta
         },
     );
     if !sent {
+        lock(&m.inner.git_states.0).remove(&req_id);
         return Err(GitError::Away);
     }
-    match tokio::time::timeout(WAIT, rx).await {
-        Ok(Ok(Answer::State(s))) => Ok(s.and_then(bounded)),
-        Ok(Ok(Answer::Busy)) => Err(GitError::Busy),
+    // The wait is a task of its own, so a page that gives up (an abort, a
+    // retry) does not free the place while the node is still working: the
+    // place is held until the node answers or the wait ends, and an account
+    // cannot keep a node's places busy by aborting and asking again.
+    let entry = Entry {
+        m: m.clone(),
+        req_id,
+    };
+    let wait = tokio::spawn(async move {
+        let _entry = entry;
+        tokio::time::timeout(WAIT, rx).await
+    });
+    match wait.await {
+        Ok(Ok(Ok(Answer::State(s)))) => Ok(s.and_then(bounded)),
+        Ok(Ok(Ok(Answer::Busy))) => Err(GitError::Busy),
         // The node's link closed while it worked (`node_down`).
-        Ok(Err(_)) => Err(GitError::Away),
-        Err(_) => Err(GitError::Timeout),
+        Ok(Ok(Err(_))) => Err(GitError::Away),
+        Ok(Err(_)) => Err(GitError::Timeout),
+        Err(_) => Err(GitError::Unknown),
     }
 }
 
@@ -131,7 +144,10 @@ fn bounded(s: GitState) -> Option<GitState> {
         let mut out: String = b
             .chars()
             .map(|c| {
-                if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                if c.is_control()
+                    || matches!(c, '\u{2028}' | '\u{2029}')
+                    || harness_core::text::is_hidden(c)
+                {
                     '\u{FFFD}'
                 } else {
                     c
@@ -209,6 +225,14 @@ mod tests {
         let s = bounded(state(Some("a\u{1b}[0m\nb\u{2028}c"), Some("ABCDEF0"), None)).unwrap();
         assert_eq!(s.branch.as_deref(), Some("a\u{FFFD}[0m\u{FFFD}b\u{FFFD}c"));
         assert_eq!(s.commit, None, "upper case is not a hex id here");
+        // Direction overrides, zero-width and private-use characters too.
+        let s = bounded(state(
+            Some("a\u{202E}b\u{200B}c\u{E000}d"),
+            Some("abcdef0"),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(s.branch.as_deref(), Some("a\u{FFFD}b\u{FFFD}c\u{FFFD}d"));
         assert_eq!(bounded(state(None, Some("<img src=x>"), Some(1))), None);
         assert_eq!(bounded(state(None, None, Some(1))), None);
         assert!(bounded(state(None, Some(&"a".repeat(65)), None)).is_none());

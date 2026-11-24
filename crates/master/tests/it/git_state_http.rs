@@ -57,6 +57,20 @@ impl Fake {
             })
     }
 
+    /// The request id of the `n`th `session.git_state` this node got.
+    fn seen_req(&self, n: usize) -> String {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                MasterToNode::GitState { req_id, .. } => Some(req_id.clone()),
+                _ => None,
+            })
+            .nth(n)
+            .unwrap()
+    }
+
     /// The chat of every `session.git_state` this node got.
     fn asks(&self) -> Vec<SessionId> {
         self.seen
@@ -526,4 +540,51 @@ async fn one_account_has_two_waiting_places() {
     for h in held {
         assert_eq!(h.await.unwrap(), Value::Null);
     }
+}
+
+/// A page that gives up (an abort, then a retry) does not free its place
+/// while the node is still working: the places stay held until the node
+/// answers or the link drops, so one account cannot keep the node busy by
+/// aborting and asking again.
+#[tokio::test]
+async fn an_aborted_request_keeps_its_place_until_the_node_answers() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "local", None).await;
+    HELD.lock().unwrap().push(sid);
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        let (base, alex) = (t.base.clone(), t.alex.clone());
+        held.push(tokio::spawn(async move {
+            reqwest::Client::new()
+                .get(format!("{base}/api/sessions/{sid}/git"))
+                .login(&alex)
+                .same_origin()
+                .send()
+                .await
+        }));
+    }
+    for _ in 0..400 {
+        if t.local.asks().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(t.local.asks().len(), 2);
+    for h in &held {
+        h.abort();
+    }
+    for h in held {
+        let _ = h.await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (st, v) = req(&t, Method::GET, &url(sid), None, &t.alex).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert_eq!(t.local.asks().len(), 2, "no third request reached the node");
+    // The node answers the first: its place is free again.
+    let first = t.local.seen_req(0);
+    t.local.say.send(answer(&first, "late")).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    HELD.lock().unwrap().retain(|s| *s != sid);
+    let (st, v) = req(&t, Method::GET, &url(sid), None, &t.alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
 }

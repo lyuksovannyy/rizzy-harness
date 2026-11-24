@@ -418,9 +418,12 @@ worktree or a submodule (`.git` is a file), or on a node that does not allow the
 `read` tool. The branch name is the repository's own text, so it is cut at 80
 characters and shown as text, its hidden characters as codes; the hover text
 has it whole. The node reads the branch from the repository's files and counts
-from its own checkpoint copy, so no program the repository names runs; it is
-not `git status` (your global ignore file is not followed, and a file a filter
-would change counts by its bytes). The download
+from its own checkpoint copy, so no program named by the repository's config,
+hooks or attributes, or by a repository nested in it, runs (a nested
+repository's config is read, nothing more, and changes inside it are not
+counted; if that config is broken the count is left out); it is not `git
+status` (your global ignore file is not followed, and a file a filter would
+change counts by its bytes). The download
 button at the right saves the chat as a Markdown file: your messages, the
 answers, and each tool call as one line (tick **Include tool outputs** for
 their full output). The file is made in your browser from what the chat
