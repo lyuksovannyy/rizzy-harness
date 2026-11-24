@@ -241,6 +241,7 @@ export const pages = {
   "approval.push": "From the folder (the agent's repository)",
   "approval.pushTo": "Pushes to {target} as {login} (as the server knows it)",
   "approval.pushNone": "The server names no push target for this chat: this push cannot go anywhere, so only Deny is offered.",
+  "approval.reused": "This card is not valid: the node announced its request or its call more than once. Only Deny is offered.",
   "approval.mismatch": "This card is not valid: it asks about {asked} for a {call} call. Only Deny is offered.",
   "approval.waits": "A {tool} call waits for your answer. What it will run is above; the buttons are below it.",
   "approval.scroll": "What the call will run (scrolls)",

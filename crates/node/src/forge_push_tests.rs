@@ -1105,3 +1105,59 @@ async fn the_pushs_git_dumps_no_core() {
     assert!(!limits.is_empty(), "no git process was seen");
     assert!(limits.iter().all(|l| l == "0"), "{limits:?}");
 }
+
+/// (N2) Junk names count against the bound too: a folder of many entries
+/// that are not objects is refused with the bound's sentence, not listed
+/// whole before any bound.
+#[test]
+fn junk_names_count_against_the_bound() {
+    let r = rig();
+    let junk = r.folder.join(".git/objects/pack");
+    std::fs::create_dir_all(&junk).unwrap();
+    for i in 0..500 {
+        std::fs::write(junk.join(format!("junk-{i}")), b"").unwrap();
+    }
+    let few = Bounds {
+        max_files: 100,
+        ..bounds()
+    };
+    let e = stage(&r.staging, &r.open(), "sha1", &few)
+        .err()
+        .expect("refused");
+    assert!(e.contains("git gc"), "{e}");
+    assert!(r.staging_empty());
+}
+
+/// (N2) Measured by hand: a pack folder of `HARNESS_PUSH_JUNK` (default
+/// 300,000) junk names, with the shipped bounds; prints the time.
+#[test]
+#[ignore]
+fn measure_a_junk_folder() {
+    let n: usize = std::env::var("HARNESS_PUSH_JUNK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300_000);
+    let r = rig();
+    let junk = r.folder.join(".git/objects/pack");
+    std::fs::create_dir_all(&junk).unwrap();
+    for i in 0..n {
+        std::fs::File::create(junk.join(format!("junk-{i}"))).unwrap();
+    }
+    let hwm = || {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find(|l| l.starts_with("VmHWM"))
+            .unwrap_or("")
+            .to_string()
+    };
+    eprintln!("MEASURE before: {}", hwm());
+    let t = std::time::Instant::now();
+    let res = stage(&r.staging, &r.open(), "sha1", &bounds());
+    eprintln!(
+        "MEASURE junk={n}: {:?} in {:?}; after: {}",
+        res.as_ref().map(|_| ()),
+        t.elapsed(),
+        hwm()
+    );
+}

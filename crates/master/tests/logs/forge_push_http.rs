@@ -591,3 +591,108 @@ async fn the_page_gets_the_masters_destination_for_the_owner_only() {
         "an admin sees no other person's target"
     );
 }
+
+// ---------------------------------------------- second review: N1
+
+impl Chat {
+    async fn started(&self, call: &str, tool: &str) {
+        let input = if tool == "bash" {
+            json!({"command": "ls"})
+        } else {
+            json!({})
+        };
+        self.emit(
+            "tool_call_started",
+            json!({"turn_id": "t1", "call_id": call, "tool": tool, "input": input}),
+        )
+        .await;
+    }
+
+    async fn requested(&self, approval: &str, call: &str, tool: &str) {
+        self.emit(
+            "approval_requested",
+            json!({"approval_id": approval, "call_id": call, "tool": tool,
+                   "input": {}, "reason": "r"}),
+        )
+        .await;
+    }
+
+    /// The owner allows `approval` and the node asks: whether a token came.
+    async fn allowed_gets_token(&self, approval: &str) -> bool {
+        assert_eq!(
+            self.click(&self.alice, approval, "allow").await,
+            StatusCode::OK
+        );
+        self.ask(approval).await.1.is_some()
+    }
+}
+
+/// A chat with a turn running and a target named.
+async fn running() -> Chat {
+    let c = chat().await;
+    assert!(c.turn(Chat::owner()).await.is_some());
+    c.card("t1", "push", "warm").await;
+    c
+}
+
+/// N1: one approval id on two calls, in both orders: the page's first card
+/// may be the `bash ls` one; no token whatever was clicked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reused_approval_id_gets_nothing_in_either_order() {
+    let c = running().await;
+    c.started("cb", "bash").await;
+    c.requested("r1", "cb", "bash").await;
+    c.started("cp", "push").await;
+    c.requested("r1", "cp", "push").await;
+    assert!(!c.allowed_gets_token("r1").await, "bash first, then push");
+    let c = running().await;
+    c.started("cp", "push").await;
+    c.requested("r2", "cp", "push").await;
+    c.started("cb", "bash").await;
+    c.requested("r2", "cb", "bash").await;
+    assert!(!c.allowed_gets_token("r2").await, "push first, then bash");
+}
+
+/// N1: a call announced twice (retitled), in both orders.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retitled_call_gets_nothing_in_either_order() {
+    let c = running().await;
+    c.started("c1", "bash").await;
+    c.requested("r1", "c1", "push").await;
+    c.started("c1", "push").await;
+    assert!(!c.allowed_gets_token("r1").await, "bash, then push");
+    let c = running().await;
+    c.started("c2", "push").await;
+    c.requested("r2", "c2", "push").await;
+    c.started("c2", "bash").await;
+    assert!(!c.allowed_gets_token("r2").await, "push, then bash");
+}
+
+/// N1: three requests with one id on one push call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_requests_with_one_id_get_nothing() {
+    let c = running().await;
+    c.started("cp", "push").await;
+    for _ in 0..3 {
+        c.requested("r1", "cp", "push").await;
+    }
+    assert!(!c.allowed_gets_token("r1").await);
+}
+
+/// N1: the duplicate arrives after the click, before the request: refused
+/// when the credential is asked for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_duplicate_after_the_click_is_refused_at_the_request() {
+    let c = running().await;
+    c.started("cp", "push").await;
+    c.requested("r1", "cp", "push").await;
+    assert_eq!(c.click(&c.alice, "r1", "allow").await, StatusCode::OK);
+    assert!(
+        c.t.master.push_click_pending(c.sid, "r1"),
+        "the click was taken"
+    );
+    c.started("cb", "bash").await;
+    c.requested("r1", "cb", "bash").await;
+    let (_, token, error) = c.ask("r1").await;
+    assert!(token.is_none(), "{error:?}");
+}

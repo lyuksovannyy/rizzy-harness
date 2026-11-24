@@ -4450,7 +4450,7 @@ words; the tool cannot fetch or merge.
 
 How it works: the server hands your token to the chat's node only after you
 allowed that very card (it checks the click it passed on itself, that the card
-and its call both are a push, once per card ever, within ten minutes), and only while you may still run the chat, the project's source
+and its call both are a push and were each announced once, once per card ever, within ten minutes), and only while you may still run the chat, the project's source
 and your connection are unchanged and the chat had fewer than 20 pushes in the
 last hour. The node never runs git in the folder's own repository (whose
 settings and hooks the agent can write): it links the folder's objects into a

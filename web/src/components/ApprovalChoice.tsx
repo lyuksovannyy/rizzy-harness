@@ -65,8 +65,10 @@ export function ApprovalChoice({
   // A card whose approval names another tool than its call (a node that
   // labels one call's card as another's): drawn as invalid, Deny only.
   const mismatch = ap.tool !== undefined && ap.tool !== item.tool;
+  // A card whose approval id or call was announced twice (review N1).
+  const reused = ap.invalid === true;
   // A push card's destination is the server's, never the node's text.
-  const push = !mismatch && item.tool === "push";
+  const push = !mismatch && !reused && item.tool === "push";
   const [target, setTarget] = useState<{ host: string; full_name: string; login: string } | null | undefined>(
     undefined,
   );
@@ -81,7 +83,7 @@ export function ApprovalChoice({
       live = false;
     };
   }, [push, sessionId, ap.approval_id]);
-  const noAllow = !!blocked || mismatch || (push && !target);
+  const noAllow = !!blocked || mismatch || reused || (push && !target);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   // The person's note for a denial (T51): kept while they type, sent only
@@ -147,7 +149,11 @@ export function ApprovalChoice({
   }, [!place, measure, shown, openFields]);
   // The announcement is put in an empty live region after it is there.
   const [said, setSaid] = useState("");
-  const words = place ? t("approval.waits", { tool: shownName(ap.tool ?? item.tool) }) : "";
+  const words = place
+    ? reused
+      ? t("approval.reused")
+      : t("approval.waits", { tool: shownName(ap.tool ?? item.tool) })
+    : "";
   useEffect(() => setSaid(words), [words]);
 
   const decide = async (d: Decision) => {
@@ -205,7 +211,12 @@ export function ApprovalChoice({
         ref={scroll}
         {...(place ? { role: "region", tabIndex: 0, "aria-label": t("approval.scroll"), onScroll: measure } : {})}
       >
-        {mismatch && (
+        {reused && (
+          <div className="error-text approval-invalid" role="note">
+            {t("approval.reused")}
+          </div>
+        )}
+        {mismatch && !reused && (
           <div className="error-text approval-invalid" role="note">
             {t("approval.mismatch", { asked: shownName(ap.tool!), call: shownName(item.tool) })}
           </div>

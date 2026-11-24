@@ -48,6 +48,34 @@ describe("fold", () => {
     expect(tools[1]!.approval).not.toHaveProperty("tool");
   });
 
+  it("marks every card of a reused approval id or call invalid, in either order (review N1)", () => {
+    const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
+    const start = (c: string, t: string) => ({ turn_id: "t", call_id: c, tool: t, input: {} });
+    const ask = (a: string, c: string, t: string) => ({ approval_id: a, call_id: c, tool: t, input: {}, reason: "r" });
+    const marks = (evs: [string, object][]) => {
+      const v = fold([ev(1, "turn_started", { turn_id: "t" }), ...evs.map(([k, p], i) => ev(i + 2, k, p))]);
+      return {
+        v,
+        invalid: v.items.flatMap((i) => (i.type === "tool" && i.approval ? [i.approval.invalid === true] : [])),
+      };
+    };
+    // The reviewer's probe: the composer's first card is the bash one.
+    const probe = marks([
+      ["tool_call_started", start("cb", "bash")],
+      ["approval_requested", ask("r1", "cb", "bash")],
+      ["tool_call_started", start("cp", "push")],
+      ["approval_requested", ask("r1", "cp", "push")],
+    ]);
+    expect(probe.v.pending_approvals).toEqual(["r1", "r1"]);
+    expect(probe.invalid).toEqual([true, true]);
+    expect(marks([["tool_call_started", start("c", "bash")], ["approval_requested", ask("r", "c", "push")], ["tool_call_started", start("c", "push")]]).invalid).toEqual([true]);
+    expect(marks([["tool_call_started", start("c", "push")], ["tool_call_started", start("c", "bash")], ["approval_requested", ask("r", "c", "push")]]).invalid).toEqual([true]);
+    const ok = marks([["tool_call_started", start("c", "push")], ["approval_requested", ask("r", "c", "push")]]);
+    expect(ok.invalid).toEqual([false]);
+    expect(ok.v.items[0]).toMatchObject({ approval: { approval_id: "r" } });
+    expect((ok.v.items[0] as { approval: object }).approval).not.toHaveProperty("invalid");
+  });
+
   it("shows the file a doc_create call made on its result (T97)", () => {
     const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
     const made = { name: "plan.docx", size: 1234, sha256: "ab".repeat(32), file_id: "f1" };

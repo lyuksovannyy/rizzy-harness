@@ -146,19 +146,53 @@ fn sub(dir: &impl AsFd, name: &str) -> Result<Option<OwnedFd>, String> {
     }
 }
 
+/// What the walk may still read: every listed entry, object or not,
+/// counts against the file bound, and the clock is read at every entry
+/// (review N2: a folder of millions of junk names was listed whole first).
+struct Budget {
+    listed: std::cell::Cell<usize>,
+    max: usize,
+    started: Instant,
+    limit: Duration,
+}
+
+impl Budget {
+    fn one_more(&self) -> Result<(), String> {
+        let n = self.listed.get() + 1;
+        self.listed.set(n);
+        if n > self.max {
+            return Err(format!(
+                "the folder's repository has more than {} entries in its object store; pack \
+                 them first (`git gc` in the folder) and push again",
+                self.max
+            ));
+        }
+        if self.started.elapsed() > self.limit {
+            return Err(format!(
+                "reading the folder's objects took longer than {} s; pack them first (`git gc` \
+                 in the folder) and push again",
+                self.limit.as_secs()
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The names in directory `dir` (not `.` or `..`), read through a fresh
-/// descriptor of that same directory.
-fn names(dir: &impl AsFd) -> Result<Vec<String>, String> {
+/// descriptor of that same directory, each counted against `budget`.
+fn names(dir: &impl AsFd, budget: &Budget) -> Result<Vec<String>, String> {
     let fd = nix::fcntl::openat(dir, ".", dir_flags(), Mode::empty())
         .map_err(|e| format!("cannot read the folder's repository: {e}"))?;
     let mut d = nix::dir::Dir::from_fd(fd).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for e in d.iter() {
         let e = e.map_err(|e| e.to_string())?;
-        if let Ok(n) = e.file_name().to_str()
-            && n != "."
-            && n != ".."
-        {
+        let name = e.file_name().to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        budget.one_more()?;
+        if let Ok(n) = e.file_name().to_str() {
             out.push(n.to_string());
         }
     }
@@ -450,14 +484,9 @@ pub(crate) fn stage(
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
     };
     let take = |src: &OwnedFd, name: &str, dst: &OwnedFd, st: &mut Staged| -> Result<(), String> {
-        if st.linked + st.copied >= b.max_files {
-            return Err(format!(
-                "the folder's repository has more than {} object files; pack them first (`git \
-                 gc` in the folder) and push again",
-                b.max_files
-            ));
-        }
-        if (st.linked + st.copied).is_multiple_of(100) && started.elapsed() > b.stage_time {
+        // The bounds: every entry was counted when it was listed; the
+        // clock again here, as a link or copy takes time of its own.
+        if started.elapsed() > b.stage_time {
             return Err(format!(
                 "reading the folder's objects took longer than {} s; pack them first (`git gc` \
                  in the folder) and push again",
@@ -516,7 +545,13 @@ pub(crate) fn stage(
         }
         Ok(())
     };
-    for name in names(&objects)? {
+    let budget = Budget {
+        listed: std::cell::Cell::new(0),
+        max: b.max_files,
+        started,
+        limit: b.stage_time,
+    };
+    for name in names(&objects, &budget)? {
         race(&format!("descend {name}"));
         let loose = name.len() == 2 && is_hex(&name);
         if !loose && name != "pack" {
@@ -529,7 +564,7 @@ pub(crate) fn stage(
         };
         let dst_name = if loose { name.as_str() } else { "pack" };
         let mut dst: Option<OwnedFd> = None;
-        for f in names(&src)? {
+        for f in names(&src, &budget)? {
             let wanted = if loose {
                 f.len() == hexlen - 2 && is_hex(&f)
             } else {

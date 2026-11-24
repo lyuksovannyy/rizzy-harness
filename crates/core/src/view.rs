@@ -420,6 +420,11 @@ pub struct ApprovalState {
     /// What the call would change, for the person (`ApprovalRequested::preview`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// Its approval id was announced more than once, or its call's
+    /// `tool_call_started` was (a node that reuses an id to make one card
+    /// stand for another): drawn as invalid, Deny only (review N1).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub invalid: bool,
     /// The tool the approval itself names, only when it is not its call's
     /// tool (a node that labels one call's card as another's): the page
     /// draws such a card as invalid, Deny only (X.27 step 4, review F2).
@@ -515,6 +520,16 @@ pub struct SessionView {
     /// `live` (X.39). Not part of the view's wire shape.
     #[serde(skip)]
     settled: Usage,
+    /// Every approval id and call id the log announced, and the call ids it
+    /// announced more than once (X.27 step 4, review N1): a card whose
+    /// approval id or call id is not unique is drawn as invalid. Not part
+    /// of the view's wire shape.
+    #[serde(skip)]
+    approval_ids: std::collections::HashSet<String>,
+    #[serde(skip)]
+    call_ids: std::collections::HashSet<String>,
+    #[serde(skip)]
+    dup_calls: std::collections::HashSet<String>,
     /// The running turn's latest `turn_usage` (its id and running total).
     #[serde(skip)]
     live: Option<(String, Usage)>,
@@ -690,6 +705,21 @@ impl SessionView {
     fn no_more_undo(&mut self) {
         for r in &mut self.rewinds {
             r.can_undo = false;
+        }
+    }
+
+    /// Mark invalid every card whose (call id, approval id) `hit` matches.
+    fn invalidate(&mut self, hit: impl Fn(&str, &str) -> bool) {
+        for i in self.items.iter_mut() {
+            if let Item::Tool {
+                call_id,
+                approval: Some(ap),
+                ..
+            } = i
+                && hit(call_id, &ap.approval_id)
+            {
+                ap.invalid = true;
+            }
         }
     }
 
@@ -882,16 +912,22 @@ impl SessionView {
                     }
                 }
             }
-            EventKind::ToolCallStarted(t) => self.items.push(Item::Tool {
-                call_id: t.call_id,
-                author: t.author,
-                tool: t.tool,
-                input: t.input,
-                live_output: String::new(),
-                result: None,
-                approval: None,
-                staged: None,
-            }),
+            EventKind::ToolCallStarted(t) => {
+                if !self.call_ids.insert(t.call_id.clone()) {
+                    self.dup_calls.insert(t.call_id.clone());
+                    self.invalidate(|c, _| c == t.call_id);
+                }
+                self.items.push(Item::Tool {
+                    call_id: t.call_id,
+                    author: t.author,
+                    tool: t.tool,
+                    input: t.input,
+                    live_output: String::new(),
+                    result: None,
+                    approval: None,
+                    staged: None,
+                });
+            }
             EventKind::ToolOutputDelta(d) => {
                 if let Some(Item::Tool { live_output, .. }) = self.tool_mut(&d.call_id) {
                     live_output.push_str(&d.text);
@@ -922,6 +958,12 @@ impl SessionView {
             }
             EventKind::ApprovalRequested(a) => {
                 self.pending_approvals.push(a.approval_id.clone());
+                let dup = !self.approval_ids.insert(a.approval_id.clone())
+                    || self.dup_calls.contains(&a.call_id);
+                if dup {
+                    let id = a.approval_id.clone();
+                    self.invalidate(|_, ap| ap == id);
+                }
                 if let Some(Item::Tool { approval, tool, .. }) = self.tool_mut(&a.call_id) {
                     let other = (a.tool != *tool).then(|| a.tool.clone());
                     *approval = Some(ApprovalState {
@@ -931,6 +973,7 @@ impl SessionView {
                         chat_allow: a.chat_allow,
                         preview: a.preview,
                         tool: other,
+                        invalid: dup,
                         decision: None,
                         by: None,
                         note: None,
@@ -1365,6 +1408,79 @@ mod tests {
             kind,
             payload,
         }
+    }
+
+    /// Review N1: an approval id announced twice, or a call announced
+    /// twice, makes every card carrying it invalid (in either order); a
+    /// card of its own stays valid.
+    #[test]
+    fn a_reused_approval_or_call_id_makes_its_cards_invalid() {
+        let sid = SessionId::new();
+        let fold = |evs: &[(&str, serde_json::Value)]| {
+            let raw: Vec<RawEvent> = std::iter::once(("turn_started", json!({"turn_id": "t"})))
+                .chain(evs.iter().cloned())
+                .enumerate()
+                .map(|(i, (kind, payload))| RawEvent {
+                    session_id: sid,
+                    seq: i as u64 + 1,
+                    ts_ms: 0,
+                    kind: kind.into(),
+                    payload,
+                })
+                .collect();
+            let v = SessionView::fold(&raw).unwrap();
+            v.items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Tool { approval, .. } => approval.as_ref().map(|a| a.invalid),
+                    _ => None,
+                })
+                .collect::<Vec<bool>>()
+        };
+        let start = |c: &str, t: &str| {
+            (
+                "tool_call_started",
+                json!({"turn_id": "t", "call_id": c, "tool": t, "input": {}}),
+            )
+        };
+        let ask = |a: &str, c: &str, t: &str| {
+            (
+                "approval_requested",
+                json!({"approval_id": a, "call_id": c, "tool": t, "input": {}, "reason": "r"}),
+            )
+        };
+        // The reviewer's probe: bash card r1, then a push call reusing r1.
+        assert_eq!(
+            fold(&[
+                start("cb", "bash"),
+                ask("r1", "cb", "bash"),
+                start("cp", "push"),
+                ask("r1", "cp", "push")
+            ]),
+            vec![true, true]
+        );
+        // A call retitled after its approval, and before it.
+        assert_eq!(
+            fold(&[
+                start("c", "bash"),
+                ask("r", "c", "push"),
+                start("c", "push")
+            ]),
+            vec![true]
+        );
+        assert_eq!(
+            fold(&[
+                start("c", "push"),
+                start("c", "bash"),
+                ask("r", "c", "push")
+            ]),
+            vec![true]
+        );
+        // Unique: valid, and the field is absent on the wire.
+        assert_eq!(
+            fold(&[start("c", "push"), ask("r", "c", "push")]),
+            vec![false]
+        );
     }
 
     /// X.27 step 4, review F2: an approval whose tool is not its call's

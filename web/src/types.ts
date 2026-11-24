@@ -196,6 +196,10 @@ export interface ApprovalState {
    * call's tool (a node that labels one call's card as another's): such a
    * card is drawn as invalid and only Deny is offered (review F2). */
   tool?: string;
+  /** Its approval id or its call was announced more than once (a node that
+   * reuses an id to make one card stand for another): drawn as invalid,
+   * Deny only, whatever the tool (review N1). Present only when true. */
+  invalid?: true;
   decision: Decision | null;
   by: ResolvedBy | null;
   /** The person's note with a denial; absent otherwise. */

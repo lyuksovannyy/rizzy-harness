@@ -9,6 +9,7 @@ import { apply, emptyView } from "../fold";
 import { fields } from "../lib/callText";
 import type { Item } from "../types";
 import { ToolCard } from "./ToolCard";
+import { ApprovalChoice } from "./ApprovalChoice";
 
 const pushTarget = vi.fn(async () => ({ host: "github.com", full_name: "ada/harness", login: "ada" }));
 vi.mock("../apiPages", () => ({ pageApi: { approve: vi.fn(async () => ({})), pushTarget: () => pushTarget() } }));
@@ -185,5 +186,40 @@ describe("a push's card (PLAN.md T101)", () => {
     const card = host.querySelector(".approval")!;
     expect(card.querySelector(".approval-invalid")!.textContent).toContain("is not valid");
     expect([...card.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Deny"]);
+  });
+
+  test("a card whose id was announced twice is invalid for any tool: Deny only, in the composer's place too", async () => {
+    const reused: Tool = { ...call(), tool: "bash", input: { command: "ls" }, approval: { ...call().approval!, invalid: true } };
+    const host = await mount(reused);
+    await act(async () => {});
+    const card = host.querySelector(".approval")!;
+    expect(card.querySelector(".approval-invalid")!.textContent).toContain("more than once");
+    expect([...card.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Deny"]);
+  });
+
+  test("the composer's card for the reviewer's probe is the bash one, and it offers Deny only", async () => {
+    const ev = (seq: number, kind: string, payload: object) => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as Parameters<typeof apply>[1];
+    const v = emptyView();
+    [
+      ev(1, "turn_started", { turn_id: "t" }),
+      ev(2, "tool_call_started", { turn_id: "t", call_id: "cb", tool: "bash", input: { command: "ls" } }),
+      ev(3, "approval_requested", { approval_id: "r1", call_id: "cb", tool: "bash", input: {}, reason: "r" }),
+      ev(4, "tool_call_started", { turn_id: "t", call_id: "cp", tool: "push", input: {} }),
+      ev(5, "approval_requested", { approval_id: "r1", call_id: "cp", tool: "push", input: {}, reason: "r" }),
+    ].forEach((e) => apply(v, e));
+    // As Conversation.tsx picks the composer's card.
+    const holding = v.pending_approvals.flatMap((id) =>
+      v.items.filter((x): x is Tool => x.type === "tool" && x.approval?.approval_id === id),
+    );
+    expect(holding[0]!.tool).toBe("bash");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => root.render(<ApprovalChoice sessionId="s" item={holding[0]!} place />));
+    await act(async () => {});
+    expect([...host.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Deny"]);
+    expect(host.textContent).toContain("more than once");
+    act(() => root.unmount());
+    host.remove();
   });
 });

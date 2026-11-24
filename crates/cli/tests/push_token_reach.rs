@@ -228,3 +228,34 @@ async fn the_push_jail_reaches_the_network_and_not_the_data_directory() {
         "the jail did not reach the network: {text}"
     );
 }
+
+/// (Review N3) A sandboxed command cannot hard-link a file outside what it
+/// may write (here the data directory's token and a file of another folder
+/// of the same user) into its folder, where a push would take it.
+#[tokio::test]
+async fn a_sandboxed_shell_cannot_hard_link_outside_files_into_its_folder() {
+    if !landlock() {
+        return;
+    }
+    for f in fixtures() {
+        eprintln!("contained: {}", f.contained);
+        let other = f.data.parent().unwrap().join("other-repo");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("pack-x.pack"), "OTHER-REPO-PACK\n").unwrap();
+        let out = f
+            .bash(&format!(
+                "ln {}/api-token ./a 2>&1; echo a=$?; ln {}/pack-x.pack ./b 2>&1; echo b=$?; echo end",
+                f.data.display(),
+                other.display()
+            ))
+            .await;
+        assert!(out.contains("end"), "{out}");
+        assert!(
+            !f.ws.join("a").exists() && !f.ws.join("b").exists(),
+            "contained={}: {out}",
+            f.contained
+        );
+        // The calibration: unconfined, the same link is allowed.
+        std::fs::hard_link(other.join("pack-x.pack"), f.ws.join("c")).unwrap();
+    }
+}
