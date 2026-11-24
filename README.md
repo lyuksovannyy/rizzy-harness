@@ -2043,7 +2043,8 @@ without a click. The picker in the composer shows it and offers four, each
 with one line saying what runs unasked:
 
 - **Auto** (the default for every new chat, sandbox and host alike, and for
-  routines that set none): nothing asks. In a sandbox chat the sandbox is
+  routines that set none): nothing asks, except a push to a forge, which asks
+  in every mode (see "Pushing to the repository"). In a sandbox chat the sandbox is
   the boundary (its own processes, its own file view). **In a host chat on
   Auto every command runs as the node's own user, with no sandbox and no
   question asked**: nothing stands between an agent that a web page or a
@@ -2276,6 +2277,7 @@ dir = "~/rizzy-projects"             # where "New project" makes folders (see "P
 
 [forge]
 clone = true                         # clone repositories into new project folders (see "Cloning a repository"); false: never
+push = true                          # let the push tool push a cloned project's branch back to its repository (see "Pushing to the repository"); false: never
 hosts = ["github.com", "gitlab.com"] # the only hosts this node clones from, exactly as written: a lower-case name or IPv4 address, ":<port>" only where you add one
 
 [web]                                # a REMOTE node's web tools for Agentic chats; off unless you say so. On the server's own node a table here only takes away (see "Web tools in Agentic chats")
@@ -4424,6 +4426,48 @@ person who can paste a token can make the server send requests there (to
 that host's `/user` path, with what they pasted). Over a plain-http bind on a
 network (`--insecure-bind` without `--tls`), the pasted token travels in clear
 text like the login password; the server warns about that at start.
+
+**Pushing to the repository.** In a chat of a project that was cloned from a
+forge, an agent with the **Push to the repository** switch (on the agent's
+page; on for the built-in Software Developer and Senior Teamlead, off for the
+others; a custom or file agent has it only when it names `push`, never through
+`tools: all`) can push one branch of the project's folder back to the
+repository it was cloned from, as you, with your own connection to that forge
+(your newest one for that host, if you have several). It takes a branch name
+and nothing else: the branch the folder is on by default, pushed to the forge
+branch of the same name. No other repository, no tag, no delete and no force
+push can be asked for. **Every push asks**, in every approval mode, Auto
+included: the card says the repository, the branch, your forge login and the
+commit (its short id and first line), and only "Allow once" or "Deny"; there
+is no "for this turn" or "for this chat". Plan mode refuses it, and so does a
+routine, a callback turn of background work, a sub-agent, a temporary or
+forked chat, a message sent with the API token or by a webhook, and a chat
+someone other than you acted in: the tool is not offered there. Commit first:
+the tool pushes the commit the card showed; if the branch moved before you
+answered, nothing is pushed and the agent is told so. A refusal by the forge
+(the branch moved there, a protected branch) comes back in the forge's own
+words; the tool cannot fetch or merge.
+
+How it works: the server hands your token to the chat's node only after you
+allowed that very card (it checks the click it passed on itself, once, within
+ten minutes), and only while you may still run the chat, the project's source
+and your connection are unchanged and the chat had fewer than 20 pushes in the
+last hour. The node never runs git in the folder's own repository (whose
+settings and hooks the agent can write): it links the folder's objects into a
+repository of its own and pushes the commit from there to
+`https://<host>/<owner>/<name>.git`, with the token handed to that one git
+through a pipe as for a clone, redirects refused, within `[limits]
+clone_timeout_s`, one push at a time per node. `node.toml` decides: `[forge]
+push = false` turns it off, and only hosts in `[forge] hosts` are pushed to.
+Each push is an audit line on the node and on the server, never with the
+token. Details: `docs/forge-push.md`.
+
+**What is weaker in a host chat.** A host chat's shell is the node's own user:
+the agent can run its own `git push` with whatever credentials the machine has
+(ssh keys, a credential store, `gh`), which the push tool neither stops nor
+sees, and while the tool's git runs, a background command of that chat could
+read your connection's token from it. In a sandbox chat the agent's shell
+cannot read it.
 
 ## Custom connectors: a workspace's remote MCP servers
 

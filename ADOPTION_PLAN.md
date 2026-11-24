@@ -10,8 +10,9 @@ and B.5 and notes C.12, C.13 and C.14. What comes first is under "After Gate 3" 
 **2026-11-24:** the sentence above that phases C, T, N, X and W have not started is of
 2026-11-11 and no longer holds: most T, X and W rows are built and merged (each row's file under
 `docs/plan/` says what is done and what is left). Not built: X.4 hooks, X.6 per-command rules,
-T.4, T.5, T.6, the N phase apart from the parts named in its rows, step 2 of X.37, the push tool
-of X.27 step 4, OAuth for connectors (X.35), spending limits (X.18, X.39).
+T.4, T.5, T.6, the N phase apart from the parts named in its rows, step 2 of X.37, OAuth for
+connectors (X.35), spending limits (X.18, X.39). (The push tool of X.27 step 4 followed on
+2026-11-24.)
 
 Brings what the two-round harness study found into our own code. Inputs, by authority:
 `research/round2/final-review-ours.md` (what is true about our code; it wins every
@@ -323,7 +324,7 @@ Each row's full text is in `docs/plan/`.
 | [X.24 **sec** (T72)](docs/plan/X.24.md) | Background sub-agents (research round 2, synth/09-subagents-models-retry.md "Delivery timing": Claude Code run_in_background, OpenCode background, Codex… |
 | [X.25 **sec** (T73)](docs/plan/X.25.md) | The model's thinking kept and sent back the way each provider needs, so thinking models can use tools… |
 | [X.26](docs/plan/X.26.md) | **Built (2026-11-17, branch `feat/project-button`), but for the forge entry (X.27).** |
-| [X.27 **sec**](docs/plan/X.27.md) | **Steps 1, 2 and 3 of 4 done (2026-11-18, 2026-11-19); step 4 (push) left, so the row is not Done:** (1) a person's own connection by a pasted token, sealed… |
+| [X.27 **sec**](docs/plan/X.27.md) | **All four steps done (2026-11-18, 2026-11-19, 2026-11-24):** (1) a person's own connection by a pasted token, sealed… |
 | [X.28](docs/plan/X.28.md) | Agent switch as state, not history… |
 | [X.29 **sec** (T74)](docs/plan/X.29.md) | Account menu, Profile and Personalisation… |
 | [X.30 **sec** (T75)](docs/plan/X.30.md) | Streamed text without the secret scrubber's lag… |
