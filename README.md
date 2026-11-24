@@ -4494,22 +4494,36 @@ first) into a base branch of the same repository (default: the repository's
 default branch), with a title, a description and whether it is a draft. No
 other repository and no fork. **Every one asks**, in every mode, Auto
 included: the card says "Opens a pull request in `<host>/<owner>/<name>` as
-`<login>`" (from the server) and shows the branches, the whole title and the
-description exactly as the agent wrote them (long text is cut on the card
-with how many characters you have not expanded). The server, not the node,
+`<login>`" (from the server), "Into the repository's default branch (asked
+from the forge after you allow)" when the agent named no base, and the
+branches, the whole title and the description exactly as the agent wrote
+them, as raw text. Nothing on it is the node's own text. A long description
+is collapsed in the middle; while it is, the card offers **Show all to
+allow** in Allow's place, and Allow appears only after every collapsed part
+was shown once (and waits a moment, so the same click doubled does not
+answer). The same holds for a push's card. **The description is Markdown
+that the forge renders** for everyone who opens the pull request: an
+`@name` notifies that person, `Closes #12` closes that issue when the pull
+request is merged, and an image in it is fetched by each viewer's browser
+from wherever it points (GitHub proxies images; GitLab, Gitea and Forgejo
+may not, so the image's server sees who looked). The card shows the raw
+text, not how the forge will draw it: read it as what will be posted. The server, not the node,
 opens it, with your connection: from exactly the request the card showed
 (it reads that request from its own copy of the chat), once per card, at
 most five per chat in an hour. The answer is the pull request's number and
 address (shown as plain text in the tool's result, never made a link; an
-address on another host than the project's source is left out and only the
-number given), the forge's own words when it refuses (no commits between the
+address that is not https on the project's source host, on its default port
+or the port of the host entry's API there, with no user name, at most 300
+characters, is left out and only the number given), the forge's own words when it refuses (no commits between the
 branches, a missing scope), or that one is already open (with its number and
 address, from one lookup on GitHub and GitLab). A draft is GitHub's own
 flag, and on GitLab, Gitea and Forgejo a `Draft: ` or `WIP: ` title prefix
 (not added twice; a title that would then pass 255 characters is refused).
 The token never goes to the node for this. On a node, `[forge] push = false`
 turns it off together with pushing, and `denied_tools = ["pull_request"]`
-turns off only this tool. Details: `docs/forge-pr.md`.
+turns off only this tool; the node's `[forge] hosts` list does not limit
+pull requests (the server makes that call, to the project's source host).
+Details: `docs/forge-pr.md`.
 
 ## Custom connectors: a workspace's remote MCP servers
 

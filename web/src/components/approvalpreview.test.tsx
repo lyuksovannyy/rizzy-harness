@@ -268,3 +268,114 @@ describe("a push's card (PLAN.md T101)", () => {
     expect([...card.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Allow once", "Deny"]);
   });
 });
+
+describe("a forge card shows what is allowed (review R6)", () => {
+  const prCard = (input: Record<string, unknown>, approvalId = "p9"): Tool => ({
+    ...call(),
+    tool: "pull_request",
+    input,
+    approval: { approval_id: approvalId, reason: "NODE TEXT: open a pull request in evil.test", decision: null, by: null },
+  });
+  const long = Array.from({ length: 120 }, (_, i) => `line ${i} @someone Closes #${i}`).join("\n");
+  const unmount = () => {
+    cleanup?.();
+    cleanup = null;
+  };
+  const buttons = (el: Element) => [...el.querySelectorAll(".approval-actions button")].map((b) => b.textContent);
+
+  test("no base: the card says the default branch, asked after the Allow; a base: no such line", async () => {
+    let host = await mount(prCard({ head: "feat", title: "t" }));
+    await act(async () => {});
+    expect(host.textContent).toContain("Into the repository's default branch (asked from the forge after you allow)");
+    unmount();
+    host = await mount(prCard({ head: "feat", base: "main", title: "t" }));
+    await act(async () => {});
+    expect(host.textContent).not.toContain("default branch");
+  });
+
+  test("the node's reason is not drawn on a forge card; other cards keep it", async () => {
+    let host = await mount(prCard({ head: "feat", title: "t" }));
+    await act(async () => {});
+    expect(host.textContent).not.toContain("NODE TEXT");
+    expect(host.querySelector(".approval-reason")).toBeNull();
+    unmount();
+    host = await mount({ ...call(), tool: "push", input: {}, approval: { ...call().approval!, reason: "NODE TEXT push", turn_allow: undefined } });
+    await act(async () => {});
+    expect(host.textContent).not.toContain("NODE TEXT");
+    unmount();
+    host = await mount(call());
+    expect(host.querySelector(".approval-reason")!.textContent).toBe("`edit` can change files");
+  });
+
+  test("a collapsed body: Allow only after Show all, and not by the same click doubled", async () => {
+    const { pageApi } = await import("../apiPages");
+    const approve = vi.mocked(pageApi.approve);
+    approve.mockClear();
+    const host = await mount(prCard({ head: "feat", title: "t", body: long }));
+    await act(async () => {});
+    const card = host.querySelector(".approval")!;
+    expect(buttons(card)).toEqual(["Show all to allow", "Deny"]);
+    expect(card.textContent).toContain("characters of this request are collapsed");
+    const show = [...card.querySelectorAll<HTMLButtonElement>(".approval-actions button")][0]!;
+    // Reachable by keyboard and named for a screen reader: a real, enabled button.
+    expect(show.disabled).toBe(false);
+    show.focus();
+    expect(document.activeElement).toBe(show);
+    expect(show.getAttribute("aria-describedby")).toBeTruthy();
+    expect(document.getElementById(show.getAttribute("aria-describedby")!)!.textContent).toContain("collapsed");
+    vi.useFakeTimers();
+    try {
+      await act(async () => show.click());
+      expect(card.textContent).not.toContain("in the middle not shown");
+      expect(card.textContent).toContain("line 60 @someone Closes #60");
+      expect(buttons(card)).toEqual(["Allow once", "Deny"]);
+      const allow = [...card.querySelectorAll<HTMLButtonElement>(".approval-actions button")][0]!;
+      expect(allow.getAttribute("aria-disabled")).toBe("true");
+      await act(async () => allow.click());
+      expect(approve).not.toHaveBeenCalled();
+      await act(async () => {
+        vi.advanceTimersByTime(800);
+      });
+      expect(allow.getAttribute("aria-disabled")).toBeNull();
+      await act(async () => allow.click());
+      expect(approve).toHaveBeenCalledWith("s", "p9", "allow");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("opening the field by its own toggle counts, and collapsing it again keeps Allow", async () => {
+    const host = await mount(prCard({ head: "feat", title: "t", body: long }));
+    await act(async () => {});
+    const card = host.querySelector(".approval")!;
+    const toggle = card.querySelector<HTMLButtonElement>(".call-toggle")!;
+    await act(async () => toggle.click());
+    expect(buttons(card)).toEqual(["Allow once", "Deny"]);
+    await act(async () => toggle.click());
+    expect(card.textContent).toContain("in the middle not shown");
+    expect(buttons(card)).toEqual(["Allow once", "Deny"]);
+  });
+
+  test("a push whose preview is collapsed waits for Show all too; Deny never waits", async () => {
+    const { pageApi } = await import("../apiPages");
+    const approve = vi.mocked(pageApi.approve);
+    approve.mockClear();
+    const host = await mount({
+      ...call(),
+      tool: "push",
+      input: {},
+      approval: { approval_id: "a7", reason: "r", preview: `branch: main\n${long}`, decision: null, by: null },
+    });
+    await act(async () => {});
+    const card = host.querySelector(".approval")!;
+    expect(buttons(card)).toEqual(["Show all to allow", "Deny"]);
+    await act(async () => [...card.querySelectorAll<HTMLButtonElement>(".approval-actions button")][1]!.click());
+    expect(approve).toHaveBeenCalledWith("s", "a7", "deny");
+  });
+
+  test("a short request is not collapsed: Allow at once", async () => {
+    const host = await mount(prCard({ head: "feat", base: "main", title: "t", body: "short" }));
+    await act(async () => {});
+    expect(buttons(host.querySelector(".approval")!)).toEqual(["Allow once", "Deny"]);
+  });
+});

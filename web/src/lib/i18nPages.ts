@@ -241,6 +241,10 @@ export const pages = {
   "approval.push": "From the folder (the agent's repository)",
   "approval.pushTo": "Pushes to {target} as {login} (as the server knows it)",
   "approval.prIn": "Opens a pull request in {target} as {login} (as the server knows it)",
+  "approval.prDefaultBase": "Into the repository's default branch (asked from the forge after you allow)",
+  "approval.showAll": "Show all to allow",
+  "approval.showToAllow":
+    "{n} characters of this request are collapsed. Show them all before you can allow it: what you allow is sent to the forge as it is.",
   "approval.pushNone": "The server names no push target for this chat: this push cannot go anywhere, so only Deny is offered.",
   "approval.reused": "This card is not valid: the node announced its request or its call more than once. Only Deny is offered.",
   "approval.mismatch": "This card is not valid: it asks about {asked} for a {call} call. Only Deny is offered.",
