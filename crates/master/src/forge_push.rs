@@ -49,29 +49,50 @@ pub const CLICK_TTL: Duration = Duration::from_secs(10 * 60);
 /// closed: a forgotten offer or click hands out nothing).
 const KEPT: usize = 4096;
 
+/// How long a used approval id is remembered (the click window and a
+/// margin): within it, no second Allow of that card is taken.
+const USED_TTL: Duration = Duration::from_secs(15 * 60);
+
 /// What the master keeps for pushes.
 #[derive(Default)]
 pub struct State {
-    /// The target named in each chat's latest turn, and its owner.
-    offers: Mutex<HashMap<SessionId, (PushTarget, String)>>,
+    /// The target named in each chat's latest turn, its owner, and when.
+    offers: Mutex<HashMap<SessionId, (PushTarget, String, Instant)>>,
     /// Allows of push cards the master relayed from the chat's owner, not
     /// yet used: (chat, approval id) → when.
     clicks: Mutex<HashMap<(SessionId, String), Instant>>,
+    /// Approval ids whose credential was handed out: one click, one token,
+    /// ever (review F3).
+    used: Mutex<HashMap<(SessionId, String), Instant>>,
     /// Chats with a request being answered.
     busy: Mutex<HashSet<SessionId>>,
     /// Credentials handed out per chat in the last hour.
     hour: Mutex<HashMap<SessionId, VecDeque<Instant>>>,
 }
 
+/// Make room for one more entry in `m` (at most [`KEPT`]): the oldest goes
+/// (review F7: never the whole table).
+fn evict_oldest<K: Clone + Eq + std::hash::Hash, V>(
+    m: &mut HashMap<K, V>,
+    at: impl Fn(&V) -> Instant,
+) {
+    while m.len() >= KEPT {
+        let Some(k) = m.iter().min_by_key(|(_, v)| at(v)).map(|(k, _)| k.clone()) else {
+            return;
+        };
+        m.remove(&k);
+    }
+}
+
 impl State {
     fn offered(&self, sid: SessionId, t: Option<(PushTarget, String)>) {
         let mut o = lock(&self.offers);
         match t {
-            Some(t) => {
-                if o.len() >= KEPT && !o.contains_key(&sid) {
-                    o.clear();
+            Some((t, owner)) => {
+                if !o.contains_key(&sid) {
+                    evict_oldest(&mut o, |v| v.2);
                 }
-                o.insert(sid, t);
+                o.insert(sid, (t, owner, Instant::now()));
             }
             None => {
                 o.remove(&sid);
@@ -79,20 +100,45 @@ impl State {
         }
     }
 
+    fn was_used(&self, sid: SessionId, approval_id: &str) -> bool {
+        let mut u = lock(&self.used);
+        u.retain(|_, at| at.elapsed() < USED_TTL);
+        u.contains_key(&(sid, approval_id.to_string()))
+    }
+
     fn click(&self, sid: SessionId, approval_id: String) {
-        let mut c = lock(&self.clicks);
-        c.retain(|_, at| at.elapsed() < CLICK_TTL);
-        if c.len() >= KEPT {
+        if self.was_used(sid, &approval_id) {
             return;
         }
+        let mut c = lock(&self.clicks);
+        c.retain(|_, at| at.elapsed() < CLICK_TTL);
+        evict_oldest(&mut c, |at| *at);
         c.insert((sid, approval_id), Instant::now());
     }
 
-    /// Take the click once: `true` when it was there and fresh.
+    /// Take the click once: `true` when it was there, fresh, and its card
+    /// was never used; it is then marked used.
     fn take_click(&self, sid: SessionId, approval_id: &str) -> bool {
-        lock(&self.clicks)
+        let fresh = lock(&self.clicks)
             .remove(&(sid, approval_id.to_string()))
-            .is_some_and(|at| at.elapsed() < CLICK_TTL)
+            .is_some_and(|at| at.elapsed() < CLICK_TTL);
+        if !fresh || self.was_used(sid, approval_id) {
+            return false;
+        }
+        let mut u = lock(&self.used);
+        evict_oldest(&mut u, |at| *at);
+        u.insert((sid, approval_id.to_string()), Instant::now());
+        true
+    }
+
+    /// A credential that never reached its node: the click is usable again
+    /// and the hour does not count it (review F7).
+    fn give_back(&self, sid: SessionId, approval_id: &str) {
+        lock(&self.used).remove(&(sid, approval_id.to_string()));
+        lock(&self.clicks).insert((sid, approval_id.to_string()), Instant::now());
+        if let Some(q) = lock(&self.hour).get_mut(&sid) {
+            q.pop_back();
+        }
     }
 
     fn room_this_hour(&self, sid: SessionId) -> bool {
@@ -102,6 +148,7 @@ impl State {
                 q.back()
                     .is_some_and(|t| t.elapsed() < Duration::from_secs(3600))
             });
+            evict_oldest(&mut h, |q| q.back().copied().unwrap_or_else(Instant::now));
         }
         let q = h.entry(sid).or_default();
         while q
@@ -117,9 +164,9 @@ impl State {
         true
     }
 
-    /// Tests: the chat's target as kept.
+    /// The chat's target as kept (the page's destination line, tests).
     pub fn offer_of(&self, sid: SessionId) -> Option<PushTarget> {
-        lock(&self.offers).get(&sid).map(|(t, _)| t.clone())
+        lock(&self.offers).get(&sid).map(|(t, _, _)| t.clone())
     }
 }
 
@@ -215,14 +262,20 @@ impl Master {
             return;
         }
         let (sid, a) = (row.session_id, approval_id.to_string());
-        let tool = self
+        let card = self
             .inner
             .mirror
-            .call(move |s| s.approval_tool(sid, &a))
+            .call(move |s| s.approval_card(sid, &a))
             .await
             .ok()
             .flatten();
-        if tool.as_deref() == Some(PUSH_TOOL) {
+        // The card as the page draws it: its call a `push`, its approval a
+        // `push`, and not answered yet (review F2, F3).
+        if let Some((tool, call_tool, resolved)) = card
+            && tool == PUSH_TOOL
+            && call_tool.as_deref() == Some(PUSH_TOOL)
+            && !resolved
+        {
             self.inner.pushes.click(sid, approval_id.to_string());
         }
     }
@@ -237,11 +290,11 @@ pub fn handle(m: &Master, node_id: &str, req_id: String, sid: SessionId, approva
         if let Err(e) = &a {
             tracing::info!(node = %node_id, session = %sid, why = %e, "push credential refused");
         }
-        let (username, token, error) = match a {
-            Ok((u, t)) => (Some(u), Some(t), None),
-            Err(e) => (None, None, Some(e)),
+        let (username, token, error, audit) = match a {
+            Ok((u, t, d)) => (Some(u), Some(t), None, Some(d)),
+            Err(e) => (None, None, Some(e), None),
         };
-        m.send_unacked(
+        let sent = m.send_unacked(
             &node_id,
             MasterToNode::PushCredentialResult {
                 req_id,
@@ -250,6 +303,16 @@ pub fn handle(m: &Master, node_id: &str, req_id: String, sid: SessionId, approva
                 error,
             },
         );
+        match (audit, sent) {
+            // Handed out: one audit line, never the token.
+            (Some(d), true) => crate::levels::audit(&m, "forge.push_credential", d).await,
+            // It never reached the node: nothing was handed out (review F7).
+            (Some(_), false) => {
+                tracing::info!(node = %node_id, session = %sid, "a push credential could not be sent; the click stays usable");
+                m.inner.pushes.give_back(sid, &approval_id);
+            }
+            _ => {}
+        }
     });
 }
 
@@ -268,7 +331,7 @@ pub async fn answer(
     node_id: &str,
     sid: SessionId,
     approval_id: &str,
-) -> Result<(String, harness_core::Secret<String>), String> {
+) -> Result<(String, harness_core::Secret<String>, serde_json::Value), String> {
     let st = &m.inner.pushes;
     if !m.node_has(node_id, harness_protocol::CAP_FORGE_PUSH) {
         return Err("this node does not push".into());
@@ -304,8 +367,20 @@ pub async fn answer(
     }
     let (target, owner) = lock(&st.offers)
         .get(&sid)
-        .cloned()
+        .map(|(t, o, _)| (t.clone(), o.clone()))
         .ok_or("this chat's turn has no push target")?;
+    // The card still a push card as the page draws it (its call's tool).
+    let a = approval_id.to_string();
+    let card = m
+        .inner
+        .mirror
+        .call(move |s| s.approval_card(sid, &a))
+        .await
+        .ok()
+        .flatten();
+    if !card.is_some_and(|(t, c, _)| t == PUSH_TOOL && c.as_deref() == Some(PUSH_TOOL)) {
+        return Err("that card is not a push card".into());
+    }
     if row.owner_id.as_deref() != Some(owner.as_str()) {
         return Err("the chat's owner changed".into());
     }
@@ -381,17 +456,40 @@ pub async fn answer(
         .await
         .map_err(|_| "the server's sealed storage could not open the token".to_string())?
         .ok_or("the connection was removed")?;
-    crate::levels::audit(
-        m,
-        "forge.push_credential",
-        serde_json::json!({
-            "user_id": owner,
-            "session_id": sid,
-            "connection_id": target.connection_id,
-            "host": target.host,
-            "full_name": target.full_name,
-        }),
-    )
-    .await;
-    Ok((conn.login, token))
+    let detail = serde_json::json!({
+        "user_id": owner,
+        "session_id": sid,
+        "connection_id": target.connection_id,
+        "host": target.host,
+        "full_name": target.full_name,
+    });
+    Ok((conn.login, token, detail))
+}
+
+/// A chat's request place, held by a test (`Master::hold_push_request`).
+#[doc(hidden)]
+pub struct PushHold(Master, SessionId);
+
+impl Drop for PushHold {
+    fn drop(&mut self) {
+        lock(&self.0.inner.pushes.busy).remove(&self.1);
+    }
+}
+
+impl Master {
+    /// Tests: take chat `sid`'s request place as a request being answered
+    /// would; `None` when it is taken.
+    #[doc(hidden)]
+    pub fn hold_push_request(&self, sid: SessionId) -> Option<PushHold> {
+        lock(&self.inner.pushes.busy)
+            .insert(sid)
+            .then(|| PushHold(self.clone(), sid))
+    }
+
+    /// Tests: whether an Allow of `approval_id` in `sid` is recorded and
+    /// not yet used.
+    #[doc(hidden)]
+    pub fn push_click_pending(&self, sid: SessionId, approval_id: &str) -> bool {
+        lock(&self.inner.pushes.clicks).contains_key(&(sid, approval_id.to_string()))
+    }
 }

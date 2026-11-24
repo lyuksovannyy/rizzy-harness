@@ -46,6 +46,7 @@ mod pricing;
 mod profile;
 mod projects;
 mod providers;
+mod push;
 mod retry;
 mod rewind;
 mod routines;
@@ -260,6 +261,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(folder_preview::routes())
         .merge(folder_file::routes())
         .merge(git_state::routes())
+        .merge(push::routes())
         .merge(skills_menu::routes())
         .merge(approval_mode::routes())
         .merge(exec_mode::routes())

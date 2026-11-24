@@ -131,6 +131,9 @@ pub(crate) struct Node {
     /// Each session's last seq (the node mirrors a `session_created` for
     /// every chat it is asked to create).
     pub(crate) seqs: Arc<Mutex<std::collections::HashMap<harness_core::SessionId, u64>>>,
+    /// Notified: the node stops reading commands and drops its end, so
+    /// every later send to it fails (a link whose writer is gone).
+    pub(crate) deaf: Arc<tokio::sync::Notify>,
 }
 
 /// What a `project.clone` carried, the token opened for the test.
@@ -250,15 +253,22 @@ pub(crate) fn fake(id: &str, caps: &[&str]) -> (NodeLink, Node) {
         held: Arc::default(),
         tx: tx.clone(),
         seqs: Arc::default(),
+        deaf: Arc::default(),
     };
-    let (keep, held, node, seqs) = (
+    let (keep, held, node, seqs, deaf) = (
         n.seen.clone(),
         n.held.clone(),
         id.to_string(),
         n.seqs.clone(),
+        n.deaf.clone(),
     );
     tokio::spawn(async move {
-        while let Some(msg) = commands.recv().await {
+        loop {
+            let msg = tokio::select! {
+                m = commands.recv() => m,
+                _ = deaf.notified() => None,
+            };
+            let Some(msg) = msg else { break };
             keep.lock().unwrap().push(msg.clone());
             if let MasterToNode::Create {
                 session_id,

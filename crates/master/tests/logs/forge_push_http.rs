@@ -382,3 +382,212 @@ async fn a_callback_turn_gets_nothing() {
     let (_, token, error) = c.ask("a1").await;
     assert!(token.is_none() && error.unwrap().contains("not available in this turn"));
 }
+
+// ------------------------------------------------- the review's findings
+
+/// (F2) The page draws a card from its call's `tool_call_started`; a node
+/// that labels a `bash ls` call's approval as `push` gets nothing for the
+/// owner's Allow of what she saw as `bash`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_card_whose_call_is_not_a_push_gets_nothing() {
+    let c = chat().await;
+    assert!(c.turn(Chat::owner()).await.is_some());
+    c.card("t1", "push", "warm").await;
+    c.emit(
+        "tool_call_started",
+        json!({"turn_id": "t1", "call_id": "cx", "tool": "bash", "input": {"command": "ls"}}),
+    )
+    .await;
+    c.emit(
+        "approval_requested",
+        json!({"approval_id": "m1", "call_id": "cx", "tool": "push",
+               "input": {}, "reason": "`bash` can change files or run programs"}),
+    )
+    .await;
+    assert_eq!(c.click(&c.alice, "m1", "allow").await, StatusCode::OK);
+    let (_, token, error) = c.ask("m1").await;
+    assert!(
+        token.is_none(),
+        "a bash card's Allow was a push Allow: {error:?}"
+    );
+}
+
+/// (F3) One click, one token, ever: a second Allow of a used card, and an
+/// Allow of a card already answered, hand out nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_used_or_answered_card_hands_out_nothing_again() {
+    let c = chat().await;
+    assert!(c.turn(Chat::owner()).await.is_some());
+    c.card("t1", "push", "a1").await;
+    assert_eq!(c.click(&c.alice, "a1", "allow").await, StatusCode::OK);
+    assert_eq!(c.ask("a1").await.1.as_deref(), Some(TOKEN_A));
+    assert_eq!(c.click(&c.alice, "a1", "allow").await, StatusCode::OK);
+    let (_, token, error) = c.ask("a1").await;
+    assert!(token.is_none(), "a used card re-armed: {error:?}");
+    // A card the node already recorded as answered.
+    c.card("t1", "push", "a2").await;
+    c.emit(
+        "approval_resolved",
+        json!({"approval_id": "a2", "decision": "deny", "by": "user"}),
+    )
+    .await;
+    assert_eq!(c.click(&c.alice, "a2", "allow").await, StatusCode::OK);
+    assert!(c.ask("a2").await.1.is_none());
+}
+
+/// A chat someone else acted in after the turn started (here the API
+/// token's answer to another card): the owner's Allow gets nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_chat_marked_after_the_turn_started_gets_nothing() {
+    let c = chat().await;
+    assert!(c.turn(Chat::owner()).await.is_some());
+    c.card("t1", "push", "a0").await;
+    let _ = c.click("api", "a0", "deny").await;
+    c.card("t1", "push", "a1").await;
+    assert_eq!(c.click(&c.alice, "a1", "allow").await, StatusCode::OK);
+    let (_, token, error) = c.ask("a1").await;
+    assert!(token.is_none());
+    assert!(error.unwrap().contains("someone other than"));
+}
+
+/// A forked chat names no target.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forked_chat_names_no_target() {
+    let c = chat().await;
+    let db = rusqlite::Connection::open(c.t.dir.path().join("master.db")).unwrap();
+    db.execute(
+        "INSERT INTO session_forks (session_id, parent_id, through_seq, created_ms)
+         VALUES (?1, ?2, 1, 1)",
+        rusqlite::params![c.sid.to_string(), SessionId::new().to_string()],
+    )
+    .unwrap();
+    assert!(c.turn(Chat::owner()).await.is_none());
+}
+
+/// A sub-agent's session (and so a temporary chat's, which is refused the
+/// same way) is refused before anything else, by its own rule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sub_agents_session_is_refused_by_its_own_rule() {
+    let c = chat().await;
+    assert!(c.turn(Chat::owner()).await.is_some());
+    let kid = SessionId::new();
+    c.node
+        .tx
+        .send(NodeToMaster::Event {
+            event: harness_core::RawEvent {
+                session_id: kid,
+                seq: 1,
+                ts_ms: 1,
+                kind: "session_created".into(),
+                payload: json!({"title": "@coder", "cwd": "/", "model": "m", "backend": "native",
+                    "node_id": "pusher", "profile": "agentic", "approval_mode": "auto",
+                    "exec_mode": "sandbox", "parent_session": c.sid}),
+            },
+        })
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        if c.t.master.inner_mirror().session(kid).unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let kc = Chat {
+        t: c.t,
+        alice: c.alice,
+        alice_id: c.alice_id,
+        sid: kid,
+        node: c.node,
+    };
+    let (_, token, error) = kc.ask("a1").await;
+    assert!(token.is_none());
+    assert!(
+        error
+            .unwrap()
+            .contains("only for a project chat's own turn")
+    );
+}
+
+/// One request per chat at a time: while one is being answered, another
+/// is refused with its own sentence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_request_of_the_chat_meanwhile_is_refused() {
+    let c = chat().await;
+    assert!(c.turn(Chat::owner()).await.is_some());
+    c.card("t1", "push", "a1").await;
+    assert_eq!(c.click(&c.alice, "a1", "allow").await, StatusCode::OK);
+    let held =
+        c.t.master
+            .hold_push_request(c.sid)
+            .expect("the chat's place");
+    let (_, token, error) = c.ask("a1").await;
+    assert!(token.is_none());
+    assert!(error.unwrap().contains("being answered"));
+    drop(held);
+    assert_eq!(
+        c.ask("a1").await.1.as_deref(),
+        Some(TOKEN_A),
+        "the click was kept"
+    );
+}
+
+/// (F7) A token the master could not send to the node is taken back: the
+/// click stays usable, nothing counts against the hour, no audit line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_token_that_could_not_be_sent_is_given_back() {
+    let c = chat().await;
+    assert!(c.turn(Chat::owner()).await.is_some());
+    c.card("t1", "push", "a1").await;
+    assert_eq!(c.click(&c.alice, "a1", "allow").await, StatusCode::OK);
+    c.node.deaf.notify_one();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    c.node
+        .tx
+        .send(NodeToMaster::PushCredential {
+            req_id: "lost".into(),
+            session_id: c.sid,
+            approval_id: "a1".into(),
+        })
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        c.t.master.push_click_pending(c.sid, "a1"),
+        "the click was spent"
+    );
+    let audit =
+        c.t.master
+            .inner_mirror()
+            .audit_lines("forge.push_credential")
+            .unwrap();
+    assert!(audit.is_empty(), "{audit:?}");
+}
+
+/// (F2c) The page shows the destination the master knows for the chat's
+/// open push card: its owner only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_page_gets_the_masters_destination_for_the_owner_only() {
+    let c = chat().await;
+    let path = format!("/api/sessions/{}/push-target", c.sid);
+    let (st, _) = req(&c.t, Method::GET, &path, None, &c.alice).await;
+    assert_eq!(
+        st,
+        StatusCode::NOT_FOUND,
+        "no target before a turn names one"
+    );
+    assert!(c.turn(Chat::owner()).await.is_some());
+    let (st, v) = req(&c.t, Method::GET, &path, None, &c.alice).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        v,
+        json!({"host": "127.0.0.1", "full_name": "ada/secret", "login": "ada"})
+    );
+    let (st, _) = req(&c.t, Method::GET, &path, None, &c.t.alex).await;
+    assert_eq!(
+        st,
+        StatusCode::NOT_FOUND,
+        "an admin sees no other person's target"
+    );
+}
