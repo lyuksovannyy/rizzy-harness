@@ -11,6 +11,7 @@ pub mod docs;
 pub mod event;
 pub mod exec_mode;
 pub mod folder;
+pub mod forge;
 pub mod fork;
 pub mod handoff;
 pub mod history;

@@ -338,6 +338,12 @@ pub const MAX_PROJECT_NAME: usize = 256;
 /// The master waits for the answer longer than that limit.
 pub const CAP_FORGE_CLONE_PREFIX: &str = "forge-clone:";
 
+/// The node capability that announces the `push` tool (ADOPTION_PLAN X.27
+/// step 4, PLAN.md T101): its node.toml lets it push (`[forge] push`, a
+/// host in `[forge] hosts`, a usable staging folder). Never the hosts. The
+/// master names a push target in a turn only for a node with it.
+pub const CAP_FORGE_PUSH: &str = "forge-push";
+
 /// The clone time limit a node announces in [`CAP_FORGE_CLONE_PREFIX`], if
 /// it announces one: `None` for a node that does not clone.
 /// A value over [`MAX_CLONE_TIMEOUT_S`] counts as that maximum, so a node
@@ -1251,6 +1257,19 @@ pub enum NodeToMaster {
         #[serde(default)]
         arguments: serde_json::Value,
     },
+    /// The token for one `push` of a session this node runs (X.27 step 4,
+    /// PLAN.md T101), after the person allowed it on its card: the card's
+    /// approval id and nothing else. The master decides from `session_id`
+    /// alone whose connection (the turn's push target, the chat owner's),
+    /// checks that it relayed an Allow of that very card from the chat's
+    /// owner, uses that approval once, and answers with one
+    /// `forge.push_credential_result`.
+    #[serde(rename = "forge.push_credential")]
+    PushCredential {
+        req_id: String,
+        session_id: SessionId,
+        approval_id: String,
+    },
     /// The call `req_id` is no longer waited for (its turn stopped): the
     /// master drops it if it still runs. Nothing is answered.
     #[serde(rename = "connector.cancel")]
@@ -2063,6 +2082,20 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The answer to a `forge.push_credential`: the connection's login and
+    /// token, or why not. The token is handed to one git process through a
+    /// pipe and never written anywhere on the node. Only to nodes whose
+    /// hello listed [`CAP_FORGE_PUSH`]; never acked.
+    #[serde(rename = "forge.push_credential_result")]
+    PushCredentialResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "wire_secret")]
+        token: Option<harness_core::Secret<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// What one turn changed (X.12): read from the turn's checkpoints,
     /// answered by one `session.diff_result`, never by an ack, handled
     /// outside the node's command loop, and nothing is logged. `rewind`:
@@ -2257,6 +2290,7 @@ impl MasterToNode {
             | MasterToNode::BoardResult { .. }
             | MasterToNode::SkillResult { .. }
             | MasterToNode::ConnectorResult { .. }
+            | MasterToNode::PushCredentialResult { .. }
             | MasterToNode::Diff { .. }
             | MasterToNode::BackgroundOutput { .. }
             | MasterToNode::Files { .. }
@@ -2395,6 +2429,43 @@ mod tests {
     /// `project.clone` (T86): its wire shape, never acked; the token is on
     /// the wire only when sent, and never in `Debug`; a URL, a scheme or a
     /// path sent beside it is dropped by the parse.
+    #[test]
+    fn a_push_credential_names_the_approval_only_and_its_answer_is_redacted() {
+        const CANARY: &str = "ghp_CANARYpush000000000000000000000001";
+        let sid = SessionId::new();
+        let r = NodeToMaster::PushCredential {
+            req_id: "r".into(),
+            session_id: sid,
+            approval_id: "a1".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({"type": "forge.push_credential", "req_id": "r",
+                   "session_id": sid.to_string(), "approval_id": "a1"})
+        );
+        let m = MasterToNode::PushCredentialResult {
+            req_id: "r".into(),
+            username: Some("ada".into()),
+            token: Some(harness_core::Secret::new(CANARY.into())),
+            error: None,
+        };
+        assert_eq!(m.req_id(), None, "answered, never acked");
+        assert!(!format!("{m:?}").contains(CANARY), "{m:?}");
+        let back: MasterToNode = serde_json::from_value(serde_json::to_value(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+        let refused = MasterToNode::PushCredentialResult {
+            req_id: "r".into(),
+            username: None,
+            token: None,
+            error: Some("no".into()),
+        };
+        let v = serde_json::to_value(&refused).unwrap();
+        assert!(
+            v.get("token").is_none() && v.get("username").is_none(),
+            "{v}"
+        );
+    }
+
     #[test]
     fn project_clone_carries_names_and_a_redacted_token() {
         const CANARY: &str = "ghp_CANARYwire000000000000000000000001";

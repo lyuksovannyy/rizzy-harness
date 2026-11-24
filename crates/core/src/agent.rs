@@ -300,6 +300,11 @@ impl AgentSpec {
     /// `deny_tools`) stands for every MCP tool (`mcp__<server>__<tool>`,
     /// whose names come from the node's servers and cannot be listed ahead).
     pub fn allows_tool(&self, tool: &str) -> bool {
+        // `push` acts as the person on their forge account (X.27 step 4):
+        // only an agent that names it, never through `all`.
+        if tool == crate::forge::PUSH_TOOL && matches!(self.tools, ToolSelection::All(_)) {
+            return false;
+        }
         let mcp = tool.starts_with(MCP_PREFIX);
         (self.tools.allows(tool) || (mcp && self.tools.allows(MCP_ALL)))
             && !self
@@ -489,6 +494,22 @@ mod tests {
             }))
             .unwrap()
         }
+    }
+
+    /// `push` is offered only to an agent that names it: `all` never
+    /// brings it, a deny removes it (X.27 step 4).
+    #[test]
+    fn push_needs_its_own_name() {
+        let every = AgentSpec {
+            tools: ToolSelection::All(AllTools::All),
+            ..listed(&[], &[])
+        };
+        assert!(every.allows_tool("bash") && !every.allows_tool(crate::forge::PUSH_TOOL));
+        assert!(listed(&["bash", "push"], &[]).allows_tool("push"));
+        assert!(!listed(&["bash", "push"], &["push"]).allows_tool("push"));
+        assert!(!listed(&["bash"], &[]).allows_tool("push"));
+        // It changes things (plan mode refuses it, a read-only agent never has it).
+        assert!(tool_changes("push", false));
     }
 
     /// The shared rule's truth table (PLAN.md T70): odd agents a person can

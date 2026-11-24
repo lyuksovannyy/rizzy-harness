@@ -200,6 +200,12 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
+    /// Where this session's `push` runs (the node, bound to this session
+    /// and its open turn, X.27 step 4); `None` where there is none.
+    fn push(&self) -> Option<std::sync::Arc<dyn crate::forge::PushHost>> {
+        None
+    }
+
     /// Where this session's `attached_file` calls go (the node's link to
     /// the master, bound to this session); `None` where there is none
     /// (tests, a runtime without a master).
@@ -438,6 +444,9 @@ pub struct TurnExtra {
     pub standing: Option<Vec<StandingPart>>,
     /// `standing` is a callback turn's ([`MasterContext::unattended`]).
     pub standing_partial: bool,
+    /// [`MasterContext::push`] of this turn's message; never set for a
+    /// callback turn or a turn that reads queued messages.
+    pub push: Option<crate::forge::PushTarget>,
     /// The repository's instruction files (`AGENTS.md`, `CLAUDE.md`), read
     /// by the node at the start of this turn. Set only by the node, never
     /// from the protocol. A standing section of the context block (X.1):
@@ -550,6 +559,12 @@ pub struct MasterContext {
     /// their place changed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unattended: bool,
+    /// Where this turn may push (X.27 step 4, PLAN.md T101): set by the
+    /// master only for a project chat's own turn its owner sent signed in,
+    /// whose agent names `push` and whose owner has a connection for the
+    /// project's source host. No secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<crate::forge::PushTarget>,
 }
 
 impl MasterContext {
