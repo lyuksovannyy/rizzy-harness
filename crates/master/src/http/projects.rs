@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use harness_core::SessionId;
@@ -16,9 +16,9 @@ use harness_store::{
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
+use super::caller::User;
 use super::{
-    ApiError, ApiResult, CreateBody, acting_session, memory_err, memory_store, require,
-    visible_session,
+    ApiError, ApiResult, CreateBody, acting_session, memory_err, memory_store, visible_session,
 };
 use crate::auth::Principal;
 use crate::memory::{audience_of, memory_changed};
@@ -123,10 +123,9 @@ fn may_not_change(a: &Access, what: &str) -> ApiError {
 /// otherwise).
 async fn visible(
     m: &Master,
-    headers: &HeaderMap,
+    who: Principal,
     id: &str,
 ) -> ApiResult<(Principal, ProjectRow, Access)> {
-    let who = require(m, headers).await?;
     let pid = id.to_string();
     let row = m
         .inner
@@ -139,8 +138,8 @@ async fn visible(
 }
 
 /// The project, if the caller may also change it.
-async fn managed(m: &Master, headers: &HeaderMap, id: &str) -> ApiResult<(Principal, ProjectRow)> {
-    let (who, row, a) = visible(m, headers, id).await?;
+async fn managed(m: &Master, who: Principal, id: &str) -> ApiResult<(Principal, ProjectRow)> {
+    let (who, row, a) = visible(m, who, id).await?;
     if !p::may_manage(&a) {
         return Err(may_not_change(&a, "projects"));
     }
@@ -203,11 +202,10 @@ async fn detail_json(m: &Master, who: &Principal, a: &Access, r: &ProjectRow) ->
 }
 
 async fn list(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<WorkspaceQuery>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let scope = p::current_workspace(&m, &who, q.workspace.as_deref()).await?;
     let ws = scope.as_ref().map(|a| a.id().to_string());
     let filter = ws.clone();
@@ -290,11 +288,10 @@ struct CreateProject {
 }
 
 async fn create(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<CreateProject>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    let who = require(&m, &headers).await?;
     let a = p::current_workspace(&m, &who, b.workspace_id.as_deref())
         .await?
         .ok_or_else(|| bad("pass workspace_id"))?;
@@ -399,11 +396,11 @@ async fn create(
 }
 
 async fn detail(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row, a) = visible(&m, &headers, &id).await?;
+    let (who, row, a) = visible(&m, who, &id).await?;
     Ok(Json(detail_json(&m, &who, &a, &row).await?))
 }
 
@@ -426,12 +423,12 @@ struct UpdateProject {
 }
 
 async fn update(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<UpdateProject>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row, a) = visible(&m, &headers, &id).await?;
+    let (who, row, a) = visible(&m, who, &id).await?;
     if !p::may_manage(&a) {
         return Err(may_not_change(&a, "projects"));
     }
@@ -481,11 +478,11 @@ async fn update(
 
 /// Delete a project: its chats return to no project, its board and facts go.
 async fn remove(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let (_, row) = managed(&m, &headers, &id).await?;
+    let (_, row) = managed(&m, who, &id).await?;
     let pid = row.project_id.clone();
     m.inner.mirror.call(move |s| s.delete_project(&pid)).await?;
     p::delete_memory(&m, &row.project_id).await;
@@ -520,12 +517,11 @@ struct ChatProject {
 
 /// Put one of your chats into a project, or take it out (`null`).
 async fn set_chat_project(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<ChatProject>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = acting_session(&m, &who, &id).await?;
     let sid = row.session_id;
     let project = match b.project_id {
@@ -653,11 +649,11 @@ async fn board_json(m: &Master, who: &Principal, project: &str) -> ApiResult<Val
 }
 
 async fn board(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row, _) = visible(&m, &headers, &id).await?;
+    let (who, row, _) = visible(&m, who, &id).await?;
     Ok(Json(board_json(&m, &who, &row.project_id).await?))
 }
 
@@ -676,12 +672,12 @@ struct NewColumnBody {
 }
 
 async fn add_column(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<NewColumnBody>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row) = managed(&m, &headers, &id).await?;
+    let (who, row) = managed(&m, who, &id).await?;
     let col = NewColumn {
         name: p::clean_required("column name", &b.name, p::COLUMN_NAME_MAX).map_err(bad)?,
         done: b.done,
@@ -707,12 +703,12 @@ struct ColumnPatchBody {
 }
 
 async fn update_column(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, col)): Path<(String, String)>,
     Json(b): Json<ColumnPatchBody>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row) = managed(&m, &headers, &id).await?;
+    let (who, row) = managed(&m, who, &id).await?;
     let name = b
         .name
         .map(|n| p::clean_required("column name", &n, p::COLUMN_NAME_MAX))
@@ -731,11 +727,11 @@ async fn update_column(
 }
 
 async fn delete_column(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, col)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row) = managed(&m, &headers, &id).await?;
+    let (who, row) = managed(&m, who, &id).await?;
     let pid = row.project_id.clone();
     let found = m
         .inner
@@ -773,12 +769,12 @@ struct NewCardBody {
 }
 
 async fn add_card(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<NewCardBody>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row) = managed(&m, &headers, &id).await?;
+    let (who, row) = managed(&m, who, &id).await?;
     if let Some(sid) = &b.session_id {
         check_card_chat(&m, &who, &row.project_id, sid).await?;
     }
@@ -820,12 +816,12 @@ struct CardPatchBody {
 }
 
 async fn update_card(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, card)): Path<(String, String)>,
     Json(b): Json<CardPatchBody>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row) = managed(&m, &headers, &id).await?;
+    let (who, row) = managed(&m, who, &id).await?;
     if let Some(Some(sid)) = &b.session_id {
         check_card_chat(&m, &who, &row.project_id, sid).await?;
     }
@@ -857,11 +853,11 @@ async fn update_card(
 }
 
 async fn delete_card(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, card)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row) = managed(&m, &headers, &id).await?;
+    let (who, row) = managed(&m, who, &id).await?;
     let pid = row.project_id.clone();
     if !m
         .inner
@@ -882,12 +878,12 @@ struct TemplateChoice {
 
 /// Replace an empty board's columns with a template's.
 async fn apply_template(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<TemplateChoice>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row) = managed(&m, &headers, &id).await?;
+    let (who, row) = managed(&m, who, &id).await?;
     let cols = template_columns(&m, &b.template_id, &row.workspace_id).await?;
     let pid = row.project_id.clone();
     m.inner
@@ -906,11 +902,10 @@ fn template_json(id: &str, name: &str, builtin: bool, columns: &[NewColumn]) -> 
 
 /// Built-in templates first, then the ones saved in the workspace.
 async fn templates(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<WorkspaceQuery>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let mut out: Vec<Value> = p::TEMPLATES
         .iter()
         .map(|t| template_json(t.id, t.name, true, &t.new_columns()))
@@ -934,11 +929,11 @@ struct SaveTemplate {
 }
 
 async fn save_template(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<SaveTemplate>,
 ) -> ApiResult<Json<Value>> {
-    let (_, row) = managed(&m, &headers, &b.project_id).await?;
+    let (_, row) = managed(&m, who, &b.project_id).await?;
     let name = p::clean_required("name", &b.name, p::NAME_MAX).map_err(bad)?;
     let pid = row.project_id.clone();
     let (cols, _) = m.inner.mirror.call(move |s| s.board(&pid)).await?;
@@ -969,11 +964,10 @@ async fn save_template(
 }
 
 async fn delete_template(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     if p::builtin_template(&id).is_some() {
         return Err(bad("built-in templates cannot be deleted"));
     }
@@ -1071,11 +1065,11 @@ fn fact_json(who: &Principal, f: &harness_memory::Fact, c: &Credits) -> Value {
 }
 
 async fn list_memory(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row, a) = visible(&m, &headers, &id).await?;
+    let (who, row, a) = visible(&m, who, &id).await?;
     let mem = memory_store(&m)?;
     let facts = mem
         .list(Some(&p::memory_owner(&row.project_id)))
@@ -1103,12 +1097,12 @@ struct NewFactBody {
 }
 
 async fn add_memory(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<NewFactBody>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row) = managed(&m, &headers, &id).await?;
+    let (who, row) = managed(&m, who, &id).await?;
     let mem = memory_store(&m)?;
     let f = mem
         .add(harness_memory::NewFact {
@@ -1136,7 +1130,7 @@ async fn add_memory(
 /// the project's `members_activate_facts` switch).
 async fn own_project_fact(
     m: &Master,
-    headers: &HeaderMap,
+    who: Principal,
     id: &str,
     fact: &str,
 ) -> ApiResult<(
@@ -1145,7 +1139,7 @@ async fn own_project_fact(
     bool,
     harness_memory::Fact,
 )> {
-    let (who, row, a) = visible(m, headers, id).await?;
+    let (who, row, a) = visible(m, who, id).await?;
     let mem = memory_store(m)?;
     let f = mem.get(fact).await.map_err(memory_err)?;
     let owners = chat_owners(m).await?;
@@ -1178,12 +1172,12 @@ struct FactPatch {
 }
 
 async fn update_memory(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, fact)): Path<(String, String)>,
     Json(b): Json<FactPatch>,
 ) -> ApiResult<Json<Value>> {
-    let (who, mem, may_activate, cur) = own_project_fact(&m, &headers, &id, &fact).await?;
+    let (who, mem, may_activate, cur) = own_project_fact(&m, who, &id, &fact).await?;
     let before = audience_of(&m, &cur).await;
     if b.status == Some(harness_memory::Status::Active) && !may_activate {
         return Err(ApiError(
@@ -1237,11 +1231,11 @@ async fn update_memory(
 }
 
 async fn delete_memory(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, fact)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let (_, mem, _, cur) = own_project_fact(&m, &headers, &id, &fact).await?;
+    let (_, mem, _, cur) = own_project_fact(&m, who, &id, &fact).await?;
     let to = audience_of(&m, &cur).await;
     // Retire, never delete, a fact in use (review F5): a proposal may be
     // withdrawn or dismissed, a retired fact purged by a manager

@@ -15,7 +15,7 @@
 //! `folder::may_make_on`); the API token has no approvals.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use harness_protocol::{ProjectMcpList, ProjectMcpRequest, ProjectMcpState};
@@ -24,6 +24,8 @@ use serde_json::{Value, json};
 
 use super::{ApiError, ApiResult, bad, visible};
 use crate::Master;
+use crate::auth::Principal;
+use crate::http::caller::User;
 use crate::project_mcp::{self, McpError};
 use crate::projects::ProjectSettings;
 
@@ -42,8 +44,8 @@ struct Asker {
     folder: String,
 }
 
-async fn asker(m: &Master, headers: &HeaderMap, id: &str) -> ApiResult<Asker> {
-    let (who, row, a) = visible(m, headers, id).await?;
+async fn asker(m: &Master, who: Principal, id: &str) -> ApiResult<Asker> {
+    let (who, row, a) = visible(m, who, id).await?;
     let Some(user) = who.user_id.clone() else {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -104,11 +106,11 @@ async fn audit(m: &Master, kind: &'static str, who: &Asker, server: &str, outcom
 }
 
 async fn list(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = asker(&m, &headers, &id).await?;
+    let who = asker(&m, who, &id).await?;
     let l = ask(&m, &who, ProjectMcpRequest::List).await?;
     Ok(answer(&who, &l))
 }
@@ -129,8 +131,8 @@ struct ApproveBody {
 }
 
 async fn approve(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<ApproveBody>,
 ) -> ApiResult<Json<Value>> {
@@ -138,7 +140,7 @@ async fn approve(
     if b.digest.len() != 64 || !b.digest.bytes().all(|c| c.is_ascii_hexdigit()) {
         return Err(bad("digest: the 64 hex characters the list gave"));
     }
-    let who = asker(&m, &headers, &id).await?;
+    let who = asker(&m, who, &id).await?;
     let l = ask(
         &m,
         &who,
@@ -164,13 +166,13 @@ struct RemoveBody {
 }
 
 async fn remove(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<RemoveBody>,
 ) -> ApiResult<Json<Value>> {
     check_name(&b.name)?;
-    let who = asker(&m, &headers, &id).await?;
+    let who = asker(&m, who, &id).await?;
     let l = ask(
         &m,
         &who,
