@@ -420,3 +420,22 @@ describe("files an agent made (T97)", () => {
     expect(odd).toContain("Download");
   });
 });
+
+describe("Open on a file card (X.63)", () => {
+  const card = (tool: string, input: object, ok = true, cwd?: string) =>
+    renderToStaticMarkup(<ToolCard sessionId="s1" cwd={cwd} item={web(tool, input, { ok, output: "done", exit_code: null })} />);
+
+  test("read, write and edit with a path offer it; the others and a failed call do not", () => {
+    for (const tool of ["read", "write", "edit"]) expect(card(tool, { path: "src/a.rs" })).toContain('aria-label="Open a.rs"');
+    expect(card("read", { path: "src/a.rs" }, false)).not.toContain("Open a.rs");
+    expect(card("bash", { path: "src/a.rs", command: "ls" })).not.toContain("Open a.rs");
+    expect(card("grep", { path: "src", pattern: "x" })).not.toContain("Open");
+    expect(card("read", {})).not.toContain("Open");
+    expect(card("read", { path: 3 })).not.toContain("Open");
+  });
+
+  test("a path outside the chat's folder is not offered", () => {
+    expect(card("read", { path: "/w/a.rs" }, true, "/w")).toContain("Open a.rs");
+    expect(card("read", { path: "/etc/passwd" }, true, "/w")).not.toContain("Open");
+  });
+});

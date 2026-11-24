@@ -73,6 +73,27 @@ fn whole_range(cps: impl Iterator<Item = Checkpoint>) -> (Vec<String>, Option<St
 }
 
 impl Session {
+    /// The chat's folder as a path inside the folder the diff's paths are
+    /// relative to (`repo.root`: the repository the checkpoints follow, which
+    /// may contain the chat's folder), `/`-separated; empty when they are the
+    /// same (or the folder cannot be told: then the paths are as they were).
+    fn folder_in(&self, repo: &crate::git::Repo) -> String {
+        let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let Ok(dir) = self.checked_folder() else {
+            return String::new();
+        };
+        canon(&dir)
+            .strip_prefix(canon(&repo.root))
+            .ok()
+            .map(|r| {
+                r.components()
+                    .filter_map(|c| c.as_os_str().to_str())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .unwrap_or_default()
+    }
+
     /// Everything this chat changed in its folder (X.61): the oldest
     /// checkpoint still kept against the latest finished state. Scrubbed as
     /// a turn's diff is.
@@ -141,6 +162,7 @@ impl Session {
         match crate::git::turn_diff(&repo, start, &latest, scrub).await {
             Ok(mut d) => {
                 d.since_pruned = lo > 0;
+                d.folder = self.folder_in(&repo);
                 Ok(d)
             }
             Err(_)
@@ -224,6 +246,7 @@ impl Session {
                 let foreign = self.foreign_work(&repo, &span, &shown).await;
                 d.others_wrote = foreign.wrote.iter().cloned().collect();
                 d.others_may = foreign.maybe().into_iter().collect();
+                d.folder = self.folder_in(&repo);
                 Ok(d)
             }
             // Pruned between the check and the read (review D12): the

@@ -39,13 +39,13 @@ struct PreviewQuery {
     sheet: Option<u32>,
 }
 
-fn unknown() -> ApiError {
+pub(super) fn unknown() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "unknown file".into())
 }
 
 /// The last component of a path, for the panel's title: the file's name as
 /// the page's own text (the node never sends it).
-fn base_name(path: &str) -> String {
+pub(super) fn base_name(path: &str) -> String {
     path.rsplit('/')
         .next()
         .unwrap_or(path)
@@ -93,7 +93,7 @@ async fn preview(
                 "the node did not read the file in time".into(),
             ),
             PreviewError::Refused(r) => refusal(r, true),
-            PreviewError::Unknown => unknown(),
+            PreviewError::File(_) | PreviewError::Unknown => unknown(),
         })?;
     // The node's answer is read once into the typed preview: anything else
     // is a node that misbehaves, and is not forwarded.

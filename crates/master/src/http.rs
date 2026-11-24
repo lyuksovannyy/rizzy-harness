@@ -29,6 +29,7 @@ mod doc_page_edit;
 mod doc_preview;
 mod exec_mode;
 mod files;
+mod folder_file;
 mod folder_page_edit;
 mod folder_preview;
 mod fork;
@@ -255,6 +256,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(doc_page_edit::routes())
         .merge(folder_page_edit::routes())
         .merge(folder_preview::routes())
+        .merge(folder_file::routes())
         .merge(approval_mode::routes())
         .merge(exec_mode::routes())
         .merge(chat_allows::routes())

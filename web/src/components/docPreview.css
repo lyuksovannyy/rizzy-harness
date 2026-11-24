@@ -187,3 +187,50 @@
   margin: 0;
   padding: 6px 12px 0;
 }
+
+/* A text file of the folder (FolderFile.tsx): the code in monospace with a
+   gutter of line numbers; long lines scroll, nothing wraps, so a line keeps
+   its number. Rizzy Glass tokens only. */
+.fv-path {
+  overflow-wrap: anywhere;
+}
+.fv-body {
+  padding: 0;
+}
+.fv-body > p,
+.fv-body > div[role="alert"] {
+  padding: 6px 12px;
+  margin: 0;
+}
+/* The panel's body scrolls both ways; the gutter stays at its left edge. */
+.fv-code {
+  display: flex;
+  width: max-content;
+  min-width: 100%;
+  font-family: var(--mono, monospace);
+  font-size: var(--text-xs, 0.8em);
+  line-height: 1.5;
+}
+.fv-code pre {
+  margin: 0;
+  padding: 8px 0;
+  font: inherit;
+  white-space: pre;
+  background: none;
+  border: 0;
+}
+.fv-gutter {
+  position: sticky;
+  left: 0;
+  flex: none;
+  padding-inline: 12px 8px !important;
+  text-align: right;
+  color: var(--fg-3, var(--fg-2));
+  background: var(--bg-2);
+  user-select: none;
+  border-right: 1px solid var(--hairline);
+}
+.fv-text {
+  flex: 1 0 auto;
+  padding-inline: 10px 16px !important;
+}

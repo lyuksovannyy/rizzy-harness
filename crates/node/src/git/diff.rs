@@ -585,6 +585,7 @@ async fn turn_diff_inner(
         others_wrote: vec![],
         others_may: vec![],
         since_pruned: false,
+        folder: String::new(),
     })
 }
 

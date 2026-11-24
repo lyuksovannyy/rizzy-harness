@@ -17,8 +17,8 @@ use harness_master::auth::{Auth, Claim};
 use harness_master::{Master, router};
 use harness_node::NodeLink;
 use harness_protocol::{
-    CAP_DOC_PAGE_EDIT, CAP_DOC_PREVIEW, ChangeFailure, ChangeResult, MasterToNode, NodeToMaster,
-    PROTOCOL_VERSION, PreviewRefusal,
+    CAP_DOC_PAGE_EDIT, CAP_DOC_PREVIEW, CAP_FOLDER_FILE, ChangeFailure, ChangeResult, FileRefusal,
+    FolderFileText, MasterToNode, NodeToMaster, PROTOCOL_VERSION, PreviewRefusal,
 };
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
@@ -90,6 +90,32 @@ impl Fake {
         let _ = self._leave.send(());
     }
 
+    /// The `req_id` of every `session.folder_file` this node was sent.
+    pub(crate) fn file_req_ids(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                MasterToNode::FolderFile { req_id, .. } => Some(req_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The path of every `session.folder_file` this node was sent.
+    pub(crate) fn files_asked(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                MasterToNode::FolderFile { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// `(path, sheet)` of every `session.doc_preview` this node was sent.
     pub(crate) fn asked(&self) -> Vec<(String, Option<u32>)> {
         self.seen
@@ -133,6 +159,34 @@ async fn answer(
         "hurt.docx" => (None, Some(PreviewRefusal::Damaged)),
         "full.docx" => (None, Some(PreviewRefusal::Busy)),
         _ => (None, Some(PreviewRefusal::NotFound)),
+    }
+}
+
+/// What the fake node answers to a text file: `a.rs` its text, `bin.dat`,
+/// `denied.txt`, `busy.txt` and `newer.txt` a refusal, `huge.txt` more text
+/// than may be sent, `slow.txt` waits.
+async fn file_answer(
+    path: &str,
+    mut rel: watch::Receiver<bool>,
+) -> (Option<FolderFileText>, Option<FileRefusal>) {
+    let text = |t: String| FolderFileText {
+        size: t.len() as u64,
+        text: t,
+        truncated: false,
+        lossy: false,
+    };
+    match path.rsplit('/').next().unwrap_or(path) {
+        "a.rs" => (Some(text("fn main() {}\n".into())), None),
+        "huge.txt" => (Some(text("x".repeat(300 * 1024))), None),
+        "slow.txt" => {
+            let _ = rel.wait_for(|r| *r).await;
+            (Some(text("late\n".into())), None)
+        }
+        "bin.dat" => (None, Some(FileRefusal::Binary)),
+        "denied.txt" => (None, Some(FileRefusal::Denied)),
+        "busy.txt" => (None, Some(FileRefusal::Busy)),
+        "newer.txt" => (None, Some(FileRefusal::Unknown)),
+        _ => (None, Some(FileRefusal::NotFound)),
     }
 }
 
@@ -296,6 +350,20 @@ fn fake_with(id: &str, caps: &[&str], profile: Profile, incognito: bool) -> (Nod
                                     .await;
                             });
                         }
+                        MasterToNode::FolderFile { req_id, path, .. } => {
+                            let (req_id, path, rel, tx) =
+                                (req_id.clone(), path.clone(), rel.clone(), tx.clone());
+                            tokio::spawn(async move {
+                                let (file, refusal) = file_answer(&path, rel).await;
+                                let _ = tx
+                                    .send(NodeToMaster::FolderFileResult {
+                                        req_id,
+                                        file,
+                                        refusal,
+                                    })
+                                    .await;
+                            });
+                        }
                         MasterToNode::DocPageEdit {
                             req_id,
                             path,
@@ -363,23 +431,33 @@ pub(crate) async fn start() -> T {
     let master = Master::new(Store::open_in_memory().unwrap(), auth);
     let (l, local) = fake(
         "local",
-        &[CAP_DOC_PREVIEW, CAP_DOC_PAGE_EDIT],
+        &[CAP_DOC_PREVIEW, CAP_DOC_PAGE_EDIT, CAP_FOLDER_FILE],
         Profile::Agentic,
     );
     master.add_link(l, true).await.unwrap();
     let (l, old) = fake("old", &[], Profile::Agentic);
     master.add_link(l, false).await.unwrap();
-    let (l, plain) = fake("plain", &[CAP_DOC_PREVIEW], Profile::Chat);
+    let (l, plain) = fake("plain", &[CAP_DOC_PREVIEW, CAP_FOLDER_FILE], Profile::Chat);
     master.add_link(l, false).await.unwrap();
     // A member's own coding chats are on a remote node, not the server's.
     let (l, remote) = fake(
         "remote",
-        &[CAP_DOC_PREVIEW, CAP_DOC_PAGE_EDIT, "exec:host"],
+        &[
+            CAP_DOC_PREVIEW,
+            CAP_DOC_PAGE_EDIT,
+            CAP_FOLDER_FILE,
+            "exec:host",
+        ],
         Profile::Agentic,
     );
     master.add_link(l, false).await.unwrap();
     // A node whose coding chats say they are temporary.
-    let (l, inc) = fake_with("inc", &[CAP_DOC_PREVIEW], Profile::Agentic, true);
+    let (l, inc) = fake_with(
+        "inc",
+        &[CAP_DOC_PREVIEW, CAP_FOLDER_FILE],
+        Profile::Agentic,
+        true,
+    );
     master.add_link(l, false).await.unwrap();
     let m2 = master.clone();
     tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });

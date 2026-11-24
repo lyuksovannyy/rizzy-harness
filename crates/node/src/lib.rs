@@ -159,6 +159,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::BackgroundOutput { .. }
         | MasterToNode::Files { .. }
         | MasterToNode::DocPreview { .. }
+        | MasterToNode::FolderFile { .. }
         | MasterToNode::DocPageEdit { .. }
         | MasterToNode::ProjectCreate { .. }
         | MasterToNode::ProjectClone { .. }
@@ -276,6 +277,8 @@ pub(crate) struct Inner {
     /// places, and a person's previews take at most one, so they cannot
     /// starve the agent's own `doc_view`.
     previews: Arc<tokio::sync::Semaphore>,
+    /// The one place a person's text-file views take (X.63).
+    file_views: Arc<tokio::sync::Semaphore>,
     /// New project folders made in the last hour (T77), and room for the
     /// ones being made (one at a time).
     projects_made: projects::Made,
@@ -708,6 +711,7 @@ impl NodeRuntime {
             file_lists: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             bg_outputs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             previews: Arc::new(tokio::sync::Semaphore::new(1)),
+            file_views: Arc::new(tokio::sync::Semaphore::new(1)),
             projects_made: Default::default(),
             project_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             clone_slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1001,6 +1005,8 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_BG_OUTPUT.into());
                 // `@` file mentions and their completion (T63).
                 capabilities.push(harness_protocol::CAP_FILES.into());
+                // A text file of a folder for the page's panel (X.63).
+                capabilities.push(harness_protocol::CAP_FOLDER_FILE.into());
                 // A Word or Excel file of a folder for the page's panel
                 // (X.59): only where the helper can be started.
                 if docs::shared_helper().is_some() {
@@ -1186,6 +1192,13 @@ impl NodeRuntime {
                         path,
                         sheet,
                     } => this.doc_preview(req_id, session_id, path, sheet),
+                    // A text file for the page's panel (X.63): the same kind
+                    // of task, answered by one `session.folder_file_result`.
+                    MasterToNode::FolderFile {
+                        req_id,
+                        session_id,
+                        path,
+                    } => this.folder_file(req_id, session_id, path),
                     // A person's text changes to such a file (X.60): the same
                     // kind of task, answered by one
                     // `session.doc_page_edit_result`; no event.
@@ -1613,6 +1626,46 @@ impl NodeRuntime {
                 Err(r) => NodeToMaster::DocPreviewResult {
                     req_id,
                     preview: None,
+                    refusal: Some(r),
+                },
+            };
+            inner.publish_wait(msg).await;
+        });
+    }
+
+    /// Answer `session.folder_file` (X.63, T99) from a task of its own; never
+    /// acked, nothing logged but the node's audit line (the session id only,
+    /// never the path), no event. One at a time on the node, in a place of its
+    /// own: a text file's read is not held up by a document's helper.
+    fn folder_file(&self, req_id: String, sid: SessionId, path: String) {
+        use harness_protocol::FileRefusal as R;
+        self.audit_inline("session.folder_file", sid);
+        let refuse = |inner: &Arc<Inner>, req_id: String, r: R| {
+            inner.publish(NodeToMaster::FolderFileResult {
+                req_id,
+                file: None,
+                refusal: Some(r),
+            })
+        };
+        let Ok(permit) = self.inner.file_views.clone().try_acquire_owned() else {
+            return refuse(&self.inner, req_id, R::Busy);
+        };
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let res = match inner.session(sid) {
+                Some(s) => s.view_folder_file(&path).await,
+                None => Err(R::NotFound),
+            };
+            let msg = match res {
+                Ok(f) => NodeToMaster::FolderFileResult {
+                    req_id,
+                    file: Some(f),
+                    refusal: None,
+                },
+                Err(r) => NodeToMaster::FolderFileResult {
+                    req_id,
+                    file: None,
                     refusal: Some(r),
                 },
             };
@@ -2476,6 +2529,14 @@ impl NodeRuntime {
                 sheet,
             } => {
                 self.doc_preview(req_id, session_id, path, sheet);
+                Ok(())
+            }
+            MasterToNode::FolderFile {
+                req_id,
+                session_id,
+                path,
+            } => {
+                self.folder_file(req_id, session_id, path);
                 Ok(())
             }
             MasterToNode::DocPageEdit {

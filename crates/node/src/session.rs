@@ -3341,6 +3341,41 @@ impl Session {
             })
     }
 
+    /// The page's view of a text file of this chat's folder (X.63, T99): found
+    /// as the preview finds it (the pinned folder, a sub-agent's own, the
+    /// protected places, never outside the folder, never `.git`), read-only,
+    /// the text scrubbed of the node's secrets as a `read` result is before it
+    /// is an event. A node that denies `read` shows nothing (said, not told as
+    /// a missing file: the person owns the question, not the target).
+    pub(crate) async fn view_folder_file(
+        &self,
+        path: &str,
+    ) -> Result<harness_protocol::FolderFileText, harness_protocol::FileRefusal> {
+        use harness_protocol::FileRefusal as R;
+        if self.profile != Profile::Agentic || self.check_cwd_still_allowed().is_err() {
+            return Err(R::NotFound);
+        }
+        if self.node.cfg.policy.denies("read") {
+            return Err(R::Denied);
+        }
+        let mut ctx = self.read_ctx();
+        ctx.allow_outside_workspace = false;
+        let secrets = self.node.cfg.secrets.clone();
+        use harness_tools::folder_file::Refusal as F;
+        harness_tools::folder_file::read_text(&ctx, path, move |s: &str| secrets.scrub(s))
+            .await
+            .map(|f| harness_protocol::FolderFileText {
+                text: f.text,
+                size: f.size,
+                truncated: f.truncated,
+                lossy: f.lossy,
+            })
+            .map_err(|r| match r {
+                F::NotFound => R::NotFound,
+                F::Binary => R::Binary,
+            })
+    }
+
     /// A person's text changes to a Word or Excel file of this chat's folder,
     /// saved as a new file beside it (X.60, T100). Read as the preview reads
     /// it (the pinned folder, a sub-agent's own, the protected places, never

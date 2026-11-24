@@ -123,7 +123,7 @@ async fn edit(
                     .into(),
             ),
             PreviewError::Refused(r) => refusal(r, true),
-            PreviewError::Unknown => unknown(),
+            PreviewError::File(_) | PreviewError::Unknown => unknown(),
         })?;
     if done.results.len() != n {
         return Err(bad());
