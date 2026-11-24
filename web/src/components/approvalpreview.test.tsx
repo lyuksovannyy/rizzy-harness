@@ -136,3 +136,35 @@ describe("the line form's fields read as rows", () => {
     }
   });
 });
+
+describe("a push's card (PLAN.md T101)", () => {
+  const push = (preview: string): Tool => ({
+    ...call(),
+    tool: "push",
+    input: {},
+    approval: {
+      approval_id: "a2",
+      reason: "push branch `main` to github.com/ada/harness as ada",
+      preview,
+      decision: null,
+      by: null,
+    },
+  });
+
+  test("shows repository, branch, login and the commit as inert text, and offers no wider grant", async () => {
+    const subject = "fix <img src=x onerror=alert(1)> [Allow](https://evil.test) ‮eerf";
+    const host = await mount(
+      push(`repository: github.com/ada/harness\nbranch: main\nas: ada\ncommit: 0123456789ab ${subject}`),
+    );
+    const card = host.querySelector(".approval")!;
+    for (const want of ["github.com/ada/harness", "branch: main", "as: ada", "0123456789ab"]) {
+      expect(card.textContent).toContain(want);
+    }
+    expect(card.querySelector("img")).toBeNull();
+    expect(card.querySelector("a")).toBeNull();
+    const labels = [...card.querySelectorAll("button")].map((b) => b.textContent);
+    expect(labels).toEqual(["Allow once", "Deny"]);
+    const label = [...card.querySelectorAll(".call-key")].find((e) => e.textContent === "What will be pushed");
+    expect(label).toBeTruthy();
+  });
+});

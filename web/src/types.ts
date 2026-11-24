@@ -638,6 +638,8 @@ export interface AgentFeatures {
   office: boolean;
   /** The project's task board in project chats (`board`, `board_edit`); its own switch (PLAN.md T78). */
   board: boolean;
+  /** `push`: one branch of a cloned project back to its forge repository, a card every time (PLAN.md T101); its own switch. */
+  push?: boolean;
   web: boolean;
   read_files: boolean;
   edit_files: boolean;

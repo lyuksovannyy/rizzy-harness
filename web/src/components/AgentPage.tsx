@@ -117,6 +117,11 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
         label: "Board",
         hint: "In a project's chats: lists the task board; also adds cards, moves them and appends notes (never deletes or rewrites) where the chat's owner may manage projects, except for a read-only agent, which only lists",
       },
+      {
+        key: "push",
+        label: "Push to the repository",
+        hint: "In a chat of a project cloned from a forge: pushes one branch back to that repository with your connection, after you allow each push on its card (every time, in every approval mode, Auto included)",
+      },
       { key: "delegate", label: "Launch sub-agents", hint: "Hands sub-tasks to the agents available as sub-agents" },
       {
         key: "background_subagents",
@@ -138,6 +143,7 @@ export const NEW_FEATURES: AgentFeatures = {
   office: false,
   recall: false,
   board: false,
+  push: false,
   web: true,
   read_files: false,
   edit_files: false,

@@ -238,6 +238,7 @@ export const pages = {
   "settings.backdropChats": "Also in chats",
   "settings.backdropChatsHint": "A quiet, still version beside chats on wide screens.",
   "approval.rows": "Rows this changes",
+  "approval.push": "What will be pushed",
   "approval.waits": "A {tool} call waits for your answer. What it will run is above; the buttons are below it.",
   "approval.scroll": "What the call will run (scrolls)",
   "approval.more": "More below: scroll",

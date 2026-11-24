@@ -35,7 +35,9 @@ export function useShown(item: Tool) {
   const preview = item.approval?.preview;
   return useMemo(() => {
     const f = fieldsOf(item.tool, item.input);
-    return preview ? [...f, previewField(preview, t("approval.rows"))] : f;
+    // A push's card (PLAN.md T101): what will be pushed, as plain text.
+    const label = item.tool === "push" ? t("approval.push") : t("approval.rows");
+    return preview ? [...f, previewField(preview, label)] : f;
   }, [item.tool, item.input, preview]);
 }
 
