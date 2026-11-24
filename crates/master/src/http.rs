@@ -71,11 +71,12 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
     assemble(master, timeouts, private)
 }
 
-/// Tests only (FIX_PLAN 4.1, `docs/auth-by-construction.md`): the router as
-/// it was before `caller::identify`, the same routes with no caller layer,
-/// so the agreement walk can show that the layer and each handler's own
-/// `require*` decide alike. Goes with `require*`.
-#[doc(hidden)]
+/// Tests only, with the `testing` feature (FIX_PLAN 4.1,
+/// `docs/auth-by-construction.md`): the router as it was before
+/// `caller::identify`, the same routes with no caller layer. It wrote the
+/// golden file of what `require*` answered; a handler converted to the
+/// extractors refuses everyone here. Goes with `require*`.
+#[cfg(feature = "testing")]
 pub fn router_before_identify(master: Master) -> Router {
     assemble(master, crate::limits::Timeouts::default(), private_routes())
 }

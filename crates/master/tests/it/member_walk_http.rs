@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use harness_core::Secret;
 use harness_core::policy::ExecLevel;
 use harness_master::auth::{Auth, cookie_name, sha256_hex};
-use harness_master::{Master, router, router_before_identify};
+use harness_master::{Master, router};
 use harness_store::{NewUser, Role, Store, UserPatch};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -171,18 +171,70 @@ const BODY_OR_QUERY: &[&str] = &[
     "Option",
 ];
 
-/// Calls `name(` that are not method calls (`a.require(..)` is not ours).
+/// Calls `name(` that are not method calls (`a.require(..)` is not ours)
+/// and lie on the function's straight-line path, so a dead check does not
+/// count. A lexer's reading of "straight-line": a call inside a block
+/// opened by `if`, `else`, `while`, `for`, `loop` or a closure (`|..|`)
+/// does not count, nor one after a `return` at the top of the body. A
+/// `match` arm counts (the helpers choose there: `require_agent_editor`).
+/// What a lexer cannot see (a branch that never runs because of a value,
+/// a check inside a `match` arm that is never taken) is left to the golden
+/// file and the member walk, which ask the server.
 fn calls(body: &Toks) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    for i in 0..body.len().saturating_sub(1) {
-        if let Tok::Id(n) = &body[i].0
-            && body[i + 1].0 == Tok::P('(')
-            && (i == 0 || body[i - 1].0 != Tok::P('.'))
-        {
-            out.insert(n.clone());
+    // One entry per open block: whether the code in it always runs.
+    let mut live: Vec<bool> = Vec::new();
+    let mut returned = false;
+    for i in 0..body.len() {
+        match &body[i].0 {
+            Tok::P('{') => {
+                let parent = live.last().copied().unwrap_or(true);
+                let gate = !live.is_empty() && opens_a_branch(body, i);
+                live.push(parent && !gate);
+            }
+            Tok::P('}') => {
+                live.pop();
+            }
+            Tok::Id(r) if r == "return" && live.len() == 1 => returned = true,
+            Tok::Id(n)
+                if !returned
+                    && live.iter().all(|l| *l)
+                    && body.get(i + 1).map(|t| &t.0) == Some(&Tok::P('('))
+                    && (i == 0 || body[i - 1].0 != Tok::P('.')) =>
+            {
+                out.insert(n.clone());
+            }
+            _ => {}
         }
     }
     out
+}
+
+/// Whether the `{` at `open` starts a block that may not run: the
+/// statement it ends has `if`, `else`, `while`, `for`, `loop` or a
+/// closure's `|` outside any parentheses.
+fn opens_a_branch(t: &Toks, open: usize) -> bool {
+    let mut depth = 0i32;
+    for j in (0..open).rev() {
+        match &t[j].0 {
+            Tok::P(')' | ']') => depth += 1,
+            Tok::P('(' | '[') => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            Tok::P(';' | '{' | '}') if depth == 0 => return false,
+            Tok::P('|') if depth == 0 => return true,
+            Tok::Id(k)
+                if depth == 0 && ["if", "else", "while", "for", "loop"].contains(&k.as_str()) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The names a file brings in with `use a::b::name;` or
@@ -364,6 +416,21 @@ fn handlers_are_read_from_the_code() {
         )),
         ["State", "HeaderMap", "Path", "Bytes", "Json"]
     );
+    // A dead check does not count.
+    let live = |src: &str| calls(&lex(src));
+    assert!(live("{ require_admin(m, h)?; }").contains("require_admin"));
+    assert!(
+        live("{ let w = match a { X => require_admin(m, h), _ => y }; }").contains("require_admin")
+    );
+    for dead in [
+        "{ if false { require_admin(m, h)?; } }",
+        "{ if x { a } else { require_admin(m, h)?; } }",
+        "{ let f = |m| { require_admin(m, h) }; }",
+        "{ return ok(); require_admin(m, h)?; }",
+        "{ for x in y { require_admin(m, h)?; } }",
+    ] {
+        assert!(!live(dead).contains("require_admin"), "{dead}");
+    }
     let t = read_table(&src_dir()).unwrap_or_else(|p| panic!("{p:?}"));
     let (c, problems) = classify(&t);
     assert!(problems.is_empty(), "\n{}\n", problems.join("\n"));
@@ -438,7 +505,7 @@ struct People {
     expired: Login,
 }
 
-async fn start(before_identify: bool) -> (Rig, People) {
+async fn start(app: fn(Master) -> axum::Router) -> (Rig, People) {
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -467,11 +534,7 @@ async fn start(before_identify: bool) -> (Rig, People) {
             },
         )
         .unwrap();
-    let app = if before_identify {
-        router_before_identify(master)
-    } else {
-        router(master)
-    };
+    let app = app(master);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (
         Rig {
@@ -499,6 +562,35 @@ enum As {
     CookieOnly(Login),
     Foreign,
 }
+
+/// A body each admin-only route parses (its required fields, read from
+/// its body type), so a member's request gets past the body extractor to
+/// the handler's own admin check, which then refuses it before acting.
+const VALID_BODIES: &[(&str, &str, &str)] = &[
+    ("PATCH", "/api/admin/workspaces/{id}", r#"{"owner":"x"}"#),
+    (
+        "POST",
+        "/api/admin/providers/models/test",
+        r#"{"model":"x"}"#,
+    ),
+    ("POST", "/api/admin/providers/test", r#"{"preset":"x"}"#),
+    ("POST", "/api/agent-summary", r#"{"prompt":"x"}"#),
+    ("POST", "/api/users", r#"{"username":"x"}"#),
+    ("PUT", "/api/admin/memory", r#"{"recall":"keywords"}"#),
+    ("PUT", "/api/admin/pricing", r#"{"currency":"x"}"#),
+    ("PUT", "/api/admin/providers/demo", r#"{"preset":"x"}"#),
+    ("PUT", "/api/admin/providers/test", r#"{"preset":"x"}"#),
+    ("PUT", "/api/admin/providers/{id}", r#"{"preset":"x"}"#),
+    (
+        "PUT",
+        "/api/admin/workspaces/policy",
+        r#"{"members_can_create":true}"#,
+    ),
+    ("PUT", "/api/users/{id}/exec-ceiling", r#"{"level":"none"}"#),
+    ("POST", "/api/agents", NEW_AGENT),
+];
+
+const NEW_AGENT: &str = "{\"id\":\"x\",\"name\":\"x\",\"prompt\":\"x\",\"features\":{\"memory\":false,\"project_memory\":false,\"personalisation\":false,\"history\":false,\"recall\":false,\"attached_files\":false,\"office\":false,\"board\":false,\"push\":false,\"pull_requests\":false,\"web\":false,\"read_files\":false,\"edit_files\":false,\"commands\":false,\"read_only_commands\":false,\"mcp\":false,\"skills\":false,\"delegate\":false,\"background_subagents\":false,\"as_agent\":false,\"as_subagent\":false}}";
 
 const SMALL_JSON: &[u8] = br#"{"name":"x"}"#;
 
@@ -574,9 +666,6 @@ fn linked(links: &BTreeMap<String, String>, url: &str, other: &str) -> String {
     }
 }
 
-/// A converted route's answer per kind of caller.
-type Pinned = (&'static str, &'static str, &'static [(&'static str, u16)]);
-
 const BODY_CODES: &[u16] = &[400, 413, 415, 422];
 const CHANGE_FIRST: &str = "change your password first";
 const ADMINS_ONLY: &str = "admins only";
@@ -600,6 +689,35 @@ const ADMIN_LOOKING_BUT_OPEN: &[(&str, &str, &str)] = &[];
 /// `Admin`, or `require_agent_editor`'s `?scope=server`), as read today.
 /// A route that loses its admin check when its handler converts, or a new
 /// admin route, fails until this list is changed on purpose.
+/// Every route that lets in a login whose password must still change
+/// (`require_any` or `Caller`), as read today.
+const ANY_LOGIN: &[(&str, &str)] = &[
+    ("DELETE", "/api/sessions/{id}/allows/{grant}"),
+    ("GET", "/api/me"),
+    ("POST", "/api/me/password"),
+    ("POST", "/api/sessions/{id}/approval-mode"),
+    ("POST", "/api/sessions/{id}/approvals/{approval_id}"),
+    ("POST", "/api/sessions/{id}/background/stop"),
+    ("POST", "/api/sessions/{id}/background/{bg}/stop"),
+    ("POST", "/api/sessions/{id}/cancel"),
+    ("POST", "/api/sessions/{id}/step-limit"),
+];
+
+/// Every route that takes a link (`require_bytes`, `ByteCaller` or
+/// `link_principal`), as read today.
+const BYTE_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/api/artifacts/{id}/latest/download"),
+    ("GET", "/api/artifacts/{id}/versions/{vid}/download"),
+    ("GET", "/api/artifacts/{id}/versions/{vid}/preview"),
+    ("GET", "/api/artifacts/{id}/versions/{vid}/thumb"),
+    ("GET", "/api/favicon"),
+    ("GET", "/api/media/{id}/content"),
+    ("GET", "/api/media/{id}/thumb"),
+    ("GET", "/api/sessions/{id}/made/{file_id}"),
+    ("GET", "/api/users/{id}/avatar"),
+    ("GET", "/api/users/{id}/banner"),
+];
+
 const ADMIN_ONLY: &[(&str, &str)] = &[
     ("DELETE", "/api/admin/nodes/{id}"),
     ("DELETE", "/api/admin/providers/demo"),
@@ -654,9 +772,12 @@ async fn each_kind_of_caller_gets_what_the_code_allows() {
     let t = read_table(&src_dir()).unwrap_or_else(|p| panic!("{p:?}"));
     let (class, problems) = classify(&t);
     assert!(problems.is_empty(), "\n{}\n", problems.join("\n"));
-    let (rig, people) = start(false).await;
+    let (rig, people) = start(router).await;
     let mut findings: Vec<String> = Vec::new();
     let mut pending: BTreeSet<String> = BTreeSet::new();
+    // Admin-only routes where no body sent got past the body extractor to
+    // the admin check (1c of the review): the check is not asked over HTTP.
+    let mut unreached: BTreeSet<String> = BTreeSet::new();
     let mut note = |kind: &str, m: &str, p: &str, what: String| {
         if !KNOWN
             .iter()
@@ -681,25 +802,38 @@ async fn each_kind_of_caller_gets_what_the_code_allows() {
         }
     }
 
-    let derived: BTreeSet<(String, String)> = class
-        .iter()
-        .filter(|(_, c)| c.admin || c.editor)
-        .map(|(k, _)| k.clone())
-        .collect();
-    let listed: BTreeSet<(String, String)> = ADMIN_ONLY
-        .iter()
-        .map(|(m, p)| (m.to_string(), p.to_string()))
-        .collect();
-    assert_eq!(
-        derived,
-        listed,
-        "\nthe admin-only routes changed; read from the code now:\n{}\n",
-        derived
+    // Each class read from the code must equal its written list.
+    let mut moved = Vec::new();
+    for (name, listed, pick) in [
+        (
+            "ADMIN_ONLY",
+            ADMIN_ONLY,
+            (|c: &Checks| c.admin || c.editor) as fn(&Checks) -> bool,
+        ),
+        ("ANY_LOGIN", ANY_LOGIN, |c: &Checks| c.any),
+        ("BYTE_ROUTES", BYTE_ROUTES, |c: &Checks| c.bytes),
+    ] {
+        let derived: BTreeSet<(String, String)> = class
             .iter()
-            .map(|(m, p)| format!("    (\"{m}\", \"{p}\"),"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
+            .filter(|(_, c)| pick(c))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let listed: BTreeSet<(String, String)> = listed
+            .iter()
+            .map(|(m, p)| (m.to_string(), p.to_string()))
+            .collect();
+        if derived != listed {
+            moved.push(format!(
+                "{name} changed; read from the code now:\n{}",
+                derived
+                    .iter()
+                    .map(|(m, p)| format!("    (\"{m}\", \"{p}\"),"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+    }
+    assert!(moved.is_empty(), "\n{}\n", moved.join("\n"));
 
     let all = pairs(&t);
     let urls: Vec<String> = t.routes.keys().map(|p| fill(p)).collect();
@@ -764,7 +898,13 @@ async fn each_kind_of_caller_gets_what_the_code_allows() {
         let bodies: Vec<Option<&[u8]>> = if get {
             vec![None]
         } else {
-            vec![Some(b""), Some(SMALL_JSON), Some(&big)]
+            let mut v: Vec<Option<&[u8]>> =
+                vec![Some(b""), Some(b"{}"), Some(SMALL_JSON), Some(&big)];
+            if let Some((_, _, body)) = VALID_BODIES.iter().find(|(vm, vp, _)| *vm == m && *vp == p)
+            {
+                v.push(Some(body.as_bytes()));
+            }
+            v
         };
         let admin_only = c.admin || c.editor;
         let target = if c.editor && !c.admin {
@@ -772,10 +912,12 @@ async fn each_kind_of_caller_gets_what_the_code_allows() {
         } else {
             url.clone()
         };
+        let mut reached = false;
         for b in bodies {
             let (code, err) = send(&rig, &As::Cookie(people.member.clone()), m, &target, b).await;
             if admin_only {
                 if code == 403 || code == 404 {
+                    reached = true;
                     continue;
                 }
                 if c.input && !c.converted && BODY_CODES.contains(&code) {
@@ -791,6 +933,9 @@ async fn each_kind_of_caller_gets_what_the_code_allows() {
                     note("admin-by-answer-only", m, p, format!("{code}"));
                 }
             }
+        }
+        if admin_only && !reached {
+            unreached.insert(format!("{m} {p}"));
         }
         if p.starts_with("/api/admin/")
             && !admin_only
@@ -832,6 +977,11 @@ async fn each_kind_of_caller_gets_what_the_code_allows() {
         .collect();
     admin_doc_routes.sort();
     eprintln!(
+        "member walk: admin-only routes whose admin check no body reached: {}\n{}",
+        unreached.len(),
+        unreached.iter().cloned().collect::<Vec<_>>().join("\n")
+    );
+    eprintln!(
         "member walk: {} routes; role answered after the body (pending conversion, decision 2): {}\n{}\nopen routes in files whose doc speaks of admins: {}\n{}",
         all.len(),
         pending.len(),
@@ -841,259 +991,205 @@ async fn each_kind_of_caller_gets_what_the_code_allows() {
     );
     let _ = &rig.store;
     assert!(
+        unreached.is_empty(),
+        "admin-only routes whose admin check no body reached (add a body to VALID_BODIES):\n{}",
+        unreached.iter().cloned().collect::<Vec<_>>().join("\n")
+    );
+    assert!(
         findings.is_empty(),
         "\nFINDINGS:\n{}\n",
         findings.join("\n")
     );
 }
 
-/// The layer and each handler's own `require*` decide alike: the same
-/// requests, in the same order, to a server with the layer and one built
-/// without it (`router_before_identify`), from every kind of caller. The
-/// only difference allowed is the one the layer exists for: a caller who
-/// is nobody gets 401 where the old order answered the body first. The
-/// handlers already converted to the extractors cannot run without the
-/// layer, so theirs are pinned against what `require*` would answer.
-#[tokio::test]
-async fn the_layer_and_the_handlers_checks_agree() {
-    let t = read_table(&src_dir()).unwrap_or_else(|p| panic!("{p:?}"));
-    let (class, problems) = classify(&t);
-    assert!(problems.is_empty(), "{problems:?}");
-    let (new, pn) = start(false).await;
-    let (old, po) = start(true).await;
-    let urls: Vec<String> = t.routes.keys().map(|p| fill(p)).collect();
-    let links_new = mint(&new, &pn.member, &urls).await;
-    let links_old = mint(&old, &po.member, &urls).await;
-    let made = |l: &BTreeMap<String, String>| {
-        l.iter()
-            .find(|(u, _)| u.contains("/made/"))
-            .map(|(_, v)| v.clone())
-            .unwrap()
-    };
-    let (made_new, made_old) = (made(&links_new), made(&links_old));
+// ------------------------------------------------------------- golden
 
-    let mut diffs = Vec::new();
-    let mut converted = BTreeMap::new();
-    let mut n = 0;
-    for (m, p) in pairs(&t) {
-        let c = &class[&(m.clone(), p.clone())];
+/// Today's answers, as `require*` gave them before the caller layer and
+/// before any handler converted to the extractors: one line per request,
+/// `kind  METHOD  path  body  status  error`, in the walk's order.
+const GOLDEN: &str = "tests/it/auth_golden.txt";
+
+/// The kinds of caller the golden walk sends, in order.
+const KINDS: &[&str] = &[
+    "none",
+    "bearer",
+    "made-up-cookie",
+    "cookie-only",
+    "foreign-origin",
+    "member",
+    "admin",
+    "must-change",
+    "disabled",
+    "expired",
+    "api-token",
+    "link",
+];
+
+/// Kinds that are nobody: the layer answers them 401 where the old order
+/// may have parsed the body first.
+const NOBODY: &[&str] = &[
+    "none",
+    "bearer",
+    "made-up-cookie",
+    "cookie-only",
+    "disabled",
+    "expired",
+    "link",
+];
+
+/// Every request of the golden walk with its answer, in order. Admins and
+/// the token act on the server (an empty object can be a valid body), so
+/// the walk runs on a fresh rig and in one fixed order.
+async fn golden_walk(rig: &Rig, people: &People, t: &Table) -> Vec<String> {
+    let urls: Vec<String> = t.routes.keys().map(|p| fill(p)).collect();
+    let links = mint(rig, &people.member, &urls).await;
+    let made = links
+        .iter()
+        .find(|(u, _)| u.contains("/made/"))
+        .map(|(_, l)| l.clone())
+        .expect("a made file's download is linkable");
+    let mut out = Vec::new();
+    for (m, p) in pairs(t) {
         let url = fill(&p);
         let mut methods = vec![m.clone()];
-        if m == "GET" && links_new.contains_key(&url) {
+        if m == "GET" && links.contains_key(&url) {
             methods.push("HEAD".into());
         }
         for m in methods {
-            let body: Option<&[u8]> = if matches!(m.as_str(), "GET" | "HEAD") {
-                None
+            let bodies: &[(&str, Option<&[u8]>)] = if matches!(m.as_str(), "GET" | "HEAD") {
+                &[("none", None)]
             } else {
-                Some(b"")
+                &[("empty", Some(b"")), ("object", Some(b"{}"))]
             };
-            let read = matches!(m.as_str(), "GET" | "HEAD");
-            let byte_url = links_new.contains_key(&url);
-            // (name, caller on new, caller on old, url on new, url on old, nobody?)
-            let kinds: Vec<(&str, As, As, String, String, bool)> = vec![
-                (
-                    "none",
-                    As::Nobody,
-                    As::Nobody,
-                    url.clone(),
-                    url.clone(),
-                    true,
-                ),
-                (
-                    "bearer",
-                    As::Bearer("nope"),
-                    As::Bearer("nope"),
-                    url.clone(),
-                    url.clone(),
-                    true,
-                ),
-                (
-                    "made-up-cookie",
-                    As::Cookie(Login {
-                        cookie: "ab".repeat(32),
-                        key: "cd".repeat(32),
-                    }),
-                    As::Cookie(Login {
-                        cookie: "ab".repeat(32),
-                        key: "cd".repeat(32),
-                    }),
-                    url.clone(),
-                    url.clone(),
-                    true,
-                ),
-                (
-                    "foreign-origin",
-                    As::Foreign,
-                    As::Foreign,
-                    url.clone(),
-                    url.clone(),
-                    true,
-                ),
-                (
-                    "member",
-                    As::Cookie(pn.member.clone()),
-                    As::Cookie(po.member.clone()),
-                    url.clone(),
-                    url.clone(),
-                    false,
-                ),
-                (
-                    "admin",
-                    As::Cookie(pn.admin.clone()),
-                    As::Cookie(po.admin.clone()),
-                    url.clone(),
-                    url.clone(),
-                    false,
-                ),
-                (
-                    "must-change",
-                    As::Cookie(pn.must_change.clone()),
-                    As::Cookie(po.must_change.clone()),
-                    url.clone(),
-                    url.clone(),
-                    false,
-                ),
-                (
-                    "api-token",
-                    As::Bearer(TOKEN),
-                    As::Bearer(TOKEN),
-                    url.clone(),
-                    url.clone(),
-                    false,
-                ),
-                (
-                    if byte_url { "link" } else { "link-elsewhere" },
-                    As::CookieOnly(pn.member.clone()),
-                    As::CookieOnly(po.member.clone()),
-                    linked(&links_new, &url, &made_new),
-                    linked(&links_old, &url, &made_old),
-                    !(byte_url && read && c.bytes),
-                ),
-            ];
-            for (kind, wn, wo, un, uo, nobody) in kinds {
-                n += 1;
-                let (a, ea) = send(&new, &wn, &m, &un, body).await;
-                if c.converted {
-                    converted.insert(format!("{m} {p} [{kind}]"), (a, ea));
-                    continue;
-                }
-                let (b, eb) = send(&old, &wo, &m, &uo, body).await;
-                let ok = a == b || nobody && a == 401 && BODY_CODES.contains(&b);
-                if !ok {
-                    diffs.push(format!(
-                        "{m} {p} [{kind}]: layer {a} {ea} / before {b} {eb}"
-                    ));
-                }
-                if kind == "foreign-origin" && a != 403 {
-                    diffs.push(format!(
-                        "{m} {p} [foreign-origin]: {a}, not the guard's 403"
-                    ));
+            for (body_kind, body) in bodies {
+                for kind in KINDS {
+                    let (who, u) = match *kind {
+                        "none" => (As::Nobody, url.clone()),
+                        "bearer" => (As::Bearer("nope"), url.clone()),
+                        "made-up-cookie" => (
+                            As::Cookie(Login {
+                                cookie: "ab".repeat(32),
+                                key: "cd".repeat(32),
+                            }),
+                            url.clone(),
+                        ),
+                        "cookie-only" => (As::CookieOnly(people.member.clone()), url.clone()),
+                        "foreign-origin" => (As::Foreign, url.clone()),
+                        "member" => (As::Cookie(people.member.clone()), url.clone()),
+                        "admin" => (As::Cookie(people.admin.clone()), url.clone()),
+                        "must-change" => (As::Cookie(people.must_change.clone()), url.clone()),
+                        "disabled" => (As::Cookie(people.disabled.clone()), url.clone()),
+                        "expired" => (As::Cookie(people.expired.clone()), url.clone()),
+                        "api-token" => (As::Bearer(TOKEN), url.clone()),
+                        _ => (
+                            As::CookieOnly(people.member.clone()),
+                            linked(&links, &url, &made),
+                        ),
+                    };
+                    let (code, err) = send(rig, &who, &m, &u, *body).await;
+                    let err = err.replace(['\t', '\n'], " ");
+                    out.push(format!("{kind}\t{m}\t{p}\t{body_kind}\t{code}\t{err}"));
                 }
             }
         }
     }
-    // The converted handlers, against what `require*` answered: `require`
-    // for /api/me/storage, `require_admin` for /api/admin/storage, and
-    // `require_bytes` for a made file (a chat that does not exist: 404).
-    // A signed-in caller without the right now gets 403 before the body
-    // (decision 2): PUT /api/admin/storage with an empty body.
-    let want: &[Pinned] = &[
-        (
-            "GET",
-            "/api/me/storage",
-            &[
-                ("none", 401),
-                ("bearer", 401),
-                ("made-up-cookie", 401),
-                ("foreign-origin", 403),
-                ("member", 200),
-                ("admin", 200),
-                ("must-change", 403),
-                ("api-token", 200),
-                ("link-elsewhere", 401),
-            ],
-        ),
-        (
-            "GET",
-            "/api/admin/storage",
-            &[
-                ("none", 401),
-                ("bearer", 401),
-                ("made-up-cookie", 401),
-                ("foreign-origin", 403),
-                ("member", 403),
-                ("admin", 200),
-                ("must-change", 403),
-                ("api-token", 200),
-                ("link-elsewhere", 401),
-            ],
-        ),
-        (
-            "PUT",
-            "/api/admin/storage",
-            &[
-                ("none", 401),
-                ("bearer", 401),
-                ("made-up-cookie", 401),
-                ("foreign-origin", 403),
-                ("member", 403),
-                ("admin", 400),
-                ("must-change", 403),
-                ("api-token", 400),
-                ("link-elsewhere", 401),
-            ],
-        ),
-        (
-            "GET",
-            "/api/sessions/{id}/made/{file_id}",
-            &[
-                ("none", 401),
-                ("bearer", 401),
-                ("made-up-cookie", 401),
-                ("foreign-origin", 403),
-                ("member", 404),
-                ("admin", 404),
-                ("must-change", 403),
-                ("api-token", 404),
-                ("link", 404),
-            ],
-        ),
-        (
-            "HEAD",
-            "/api/sessions/{id}/made/{file_id}",
-            &[
-                ("none", 401),
-                ("bearer", 401),
-                ("made-up-cookie", 401),
-                ("foreign-origin", 403),
-                ("member", 404),
-                ("admin", 404),
-                ("must-change", 403),
-                ("api-token", 404),
-                ("link", 404),
-            ],
-        ),
-    ];
-    let mut pinned = 0;
-    for (m, p, codes) in want {
-        for (kind, code) in *codes {
-            let k = format!("{m} {p} [{kind}]");
-            pinned += 1;
-            match converted.get(&k) {
-                Some((got, _)) if got == code => {}
-                other => diffs.push(format!("{k}: {other:?}, want {code}")),
-            }
+    out
+}
+
+/// Write the golden file from the router without the caller layer. Only
+/// on purpose: `HARNESS_WRITE_GOLDEN=1 cargo test -p harness-master
+/// --features testing --test it write_the_auth_golden`, and only on code
+/// whose handlers all still call `require*` (see the design note: once
+/// handlers convert, this router refuses them, and the file is frozen).
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn write_the_auth_golden() {
+    if std::env::var("HARNESS_WRITE_GOLDEN").as_deref() != Ok("1") {
+        return;
+    }
+    let t = read_table(&src_dir()).unwrap_or_else(|p| panic!("{p:?}"));
+    let (rig, people) = start(harness_master::router_before_identify).await;
+    let lines = golden_walk(&rig, &people, &t).await;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDEN);
+    let head = "# What require* answered before the caller layer (FIX_PLAN 4.1). One line per request:\n# kind, method, path, body, status, error. Written by write_the_auth_golden; never edit by hand.\n";
+    std::fs::write(&path, format!("{head}{}\n", lines.join("\n"))).unwrap();
+}
+
+/// The caller layer answers every request of the golden walk as `require*`
+/// did, except the two written classes of difference, matched by rule:
+/// a caller who is nobody gets 401 where a body error came first, and
+/// (decision 2) a member or a login that must change its password gets the
+/// 403 "admins only" or "change your password first" where a body error
+/// came first. A route the golden does not know is listed, not compared (a
+/// route added after it); a golden line whose route is gone fails.
+#[tokio::test]
+async fn the_layer_answers_as_require_did() {
+    let t = read_table(&src_dir()).unwrap_or_else(|p| panic!("{p:?}"));
+    let golden = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDEN))
+        .expect("the golden file");
+    let want: Vec<&str> = golden.lines().filter(|l| !l.starts_with('#')).collect();
+    let (rig, people) = start(router).await;
+    let got = golden_walk(&rig, &people, &t).await;
+    let key = |l: &str| l.splitn(5, '\t').take(4).collect::<Vec<_>>().join("\t");
+    let mut by_key: BTreeMap<String, &str> = BTreeMap::new();
+    for l in &want {
+        by_key.insert(key(l), l);
+    }
+    let mut diffs = Vec::new();
+    let mut unknown = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let (mut nobody_401, mut decision_2) = (0, 0);
+    for l in &got {
+        let k = key(l);
+        let Some(w) = by_key.get(&k) else {
+            let f: Vec<&str> = l.split('\t').collect();
+            unknown.insert(format!("{} {}", f[1], f[2]));
+            continue;
+        };
+        seen.insert(k);
+        if l == w {
+            continue;
+        }
+        let g: Vec<&str> = l.split('\t').collect();
+        let o: Vec<&str> = w.split('\t').collect();
+        let (kind, new, old) = (
+            g[0],
+            g[4].parse::<u16>().unwrap(),
+            o[4].parse::<u16>().unwrap(),
+        );
+        let body_first = BODY_CODES.contains(&old);
+        if body_first && new == 401 && NOBODY.contains(&kind) {
+            nobody_401 += 1;
+        } else if body_first
+            && new == 403
+            && matches!(kind, "member" | "must-change")
+            && [ADMINS_ONLY, CHANGE_FIRST].contains(&g[5])
+        {
+            decision_2 += 1;
+        } else {
+            diffs.push(format!("now   {l}\nwas   {w}"));
         }
     }
-    assert_eq!(
-        pinned,
-        converted.len(),
-        "a converted handler with no pinned answers: {:?}",
-        converted.keys().collect::<Vec<_>>()
+    let gone: Vec<&str> = by_key
+        .iter()
+        .filter(|(k, _)| !seen.contains(*k))
+        .map(|(_, l)| *l)
+        .collect();
+    eprintln!(
+        "golden walk: {} requests, {} as before, {nobody_401} nobody now 401, {decision_2} decision-2 403s; routes not in the golden: {unknown:?}",
+        got.len(),
+        got.len() - nobody_401 - decision_2 - diffs.len() - unknown.len()
     );
-    eprintln!("agreement walk: {n} request pairs");
-    assert!(diffs.is_empty(), "\nDISAGREE:\n{}\n", diffs.join("\n"));
+    assert!(
+        gone.is_empty(),
+        "golden lines for routes that are gone:\n{}",
+        gone.join("\n")
+    );
+    assert!(
+        diffs.is_empty(),
+        "\nANSWERS CHANGED:\n{}\n",
+        diffs.join("\n")
+    );
 }
 
 /// The Origin guard answers before the layer, as it answered before the
@@ -1102,7 +1198,7 @@ async fn the_layer_and_the_handlers_checks_agree() {
 /// flows pass.
 #[tokio::test]
 async fn the_origin_guard_answers_first() {
-    let (rig, people) = start(false).await;
+    let (rig, people) = start(router).await;
     let c = client();
     let cookie = format!("{}={}", cookie_name(), people.member.cookie);
     // Another site, no credentials, a write: the guard's 403, not 401.

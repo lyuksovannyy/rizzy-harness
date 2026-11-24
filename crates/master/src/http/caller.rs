@@ -193,4 +193,92 @@ mod tests {
                 .is_err()
         );
     }
+
+    /// The layer's own verdict, seen by a handler that only reports what
+    /// the layer left (no extractor checks again): a link counts on a GET
+    /// or HEAD of a linkable URL with its login's cookie, and nowhere else;
+    /// a cookie alone is nobody.
+    #[tokio::test]
+    async fn the_layer_takes_a_link_only_to_read() {
+        use axum::Router;
+        use axum::routing::{any, get};
+        use harness_core::Secret;
+        use harness_store::{NewUser, Role, Store};
+
+        let store = Store::open_in_memory().unwrap();
+        let m = Master::new(
+            store.clone(),
+            auth::Auth::new(Secret::new("t".into()), vec![], false),
+        );
+        let uid = harness_core::new_id();
+        store
+            .create_user(&NewUser {
+                user_id: uid.clone(),
+                username: "mo".into(),
+                password_hash: "x".into(),
+                role: Role::Member,
+                exec_ceiling: harness_core::policy::ExecLevel::None,
+                must_change_password: false,
+            })
+            .unwrap();
+        let (cookie, key) = ("a1".repeat(32), "b2".repeat(32));
+        let now = harness_core::now_ms();
+        store
+            .ui_session_create(
+                &auth::sha256_hex(&cookie),
+                &auth::sha256_hex(&key),
+                &uid,
+                now,
+                now + 3_600_000,
+            )
+            .unwrap();
+        let thumb = "/api/media/m1/thumb";
+        let link = m
+            .inner
+            .auth
+            .links()
+            .mint(&auth::sha256_hex(&cookie), thumb, now)
+            .unwrap();
+        async fn probe(req: Request) -> String {
+            match req.extensions().get::<Identified>() {
+                Some(f) if f.by_link => "link".into(),
+                Some(_) => "key".into(),
+                None => "nothing".into(),
+            }
+        }
+        let app = Router::new()
+            .route("/api/media/{id}/thumb", any(probe))
+            .route("/api/me", get(probe))
+            .route_layer(axum::middleware::from_fn_with_state(m.clone(), identify))
+            .with_state(m);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let c = reqwest::Client::new();
+        let jar = format!("{}={cookie}", auth::cookie_name());
+        let ask = |m: Method, url: String, with_key: bool| {
+            let mut r = c.request(m, format!("{base}{url}")).header("cookie", &jar);
+            if with_key {
+                r = r.header(auth::LOGIN_HEADER, &key);
+            }
+            async move {
+                let r = r.send().await.unwrap();
+                (r.status().as_u16(), r.text().await.unwrap())
+            }
+        };
+        assert_eq!(
+            ask(Method::GET, link.clone(), false).await,
+            (200, "link".into())
+        );
+        assert_eq!(ask(Method::HEAD, link.clone(), false).await.0, 200);
+        for w in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert_eq!(ask(w.clone(), link.clone(), false).await.0, 401, "{w}");
+            assert_eq!(ask(w, thumb.into(), true).await, (200, "key".into()));
+        }
+        // A cookie alone, and a link carried to a URL it was not made for.
+        assert_eq!(ask(Method::GET, thumb.into(), false).await.0, 401);
+        let carried = format!("/api/me?{}", &link[link.find('?').unwrap() + 1..]);
+        assert_eq!(ask(Method::GET, carried, false).await.0, 401);
+        server.abort();
+    }
 }

@@ -413,6 +413,35 @@ pub(crate) fn module_file(from: &Path, segs: &[String]) -> Option<PathBuf> {
     Some(cur)
 }
 
+/// The tokens without the `#[cfg(test)] mod name { .. }` blocks: a unit
+/// test's own small router is not served.
+pub(crate) fn without_test_modules(t: Vec<(Tok, usize)>) -> Vec<(Tok, usize)> {
+    let head = [
+        Tok::P('#'),
+        Tok::P('['),
+        Tok::Id("cfg".into()),
+        Tok::P('('),
+        Tok::Id("test".into()),
+        Tok::P(')'),
+        Tok::P(']'),
+        Tok::Id("mod".into()),
+    ];
+    let mut out = Vec::with_capacity(t.len());
+    let mut i = 0;
+    while i < t.len() {
+        let at_head = t.len() > i + head.len() + 1
+            && head.iter().enumerate().all(|(k, h)| t[i + k].0 == *h)
+            && t[i + head.len() + 1].0 == Tok::P('{');
+        if at_head && let Some(end) = close_of(&t, i + head.len() + 1) {
+            i = end + 1;
+            continue;
+        }
+        out.push(t[i].clone());
+        i += 1;
+    }
+    out
+}
+
 /// Every registration the master's `router()` serves, or the problems.
 pub(crate) fn read_table(src_dir: &Path) -> Result<Table, Vec<String>> {
     let mut files = Vec::new();
@@ -421,7 +450,7 @@ pub(crate) fn read_table(src_dir: &Path) -> Result<Table, Vec<String>> {
     let mut problems = Vec::new();
     let mut per_file: BTreeMap<PathBuf, (Table, Vec<Vec<String>>)> = BTreeMap::new();
     for f in &files {
-        let toks = lex(&std::fs::read_to_string(f).unwrap());
+        let toks = without_test_modules(lex(&std::fs::read_to_string(f).unwrap()));
         let mut t = Table::default();
         let merges = read_file(f, &toks, &mut t, &mut problems);
         per_file.insert(f.clone(), (t, merges));
@@ -518,6 +547,12 @@ fn route_table_is_read_strictly() {
         ));
         assert_eq!(p.len(), 1, "{why}: {p:?}");
     }
+    // A unit test's module is not served.
+    let toks = without_test_modules(lex(
+        "fn a() {} #[cfg(test)] mod tests { fn t() { Router::new().route(\"/x\", any(h)); } } fn b() {}",
+    ));
+    assert!(!toks.iter().any(|(t, _)| *t == Tok::Str("/x".into())));
+    assert!(toks.iter().any(|(t, _)| *t == Tok::Id("b".into())));
     let (_, p, merges) = m("use axum::Router; fn f() { Router::new().merge(a::b::routes()) }");
     assert!(p.is_empty(), "{p:?}");
     assert_eq!(merges, [vec!["a".to_string(), "b".to_string()]]);
@@ -646,6 +681,7 @@ pub(crate) fn fill(path: &str) -> String {
 
 struct Rig {
     base: String,
+    auth: Auth,
     _dir: tempfile::TempDir,
 }
 
@@ -664,7 +700,7 @@ async fn start() -> Rig {
         code: Secret::new("CLAIM".into()),
         path: claim_path,
     });
-    let master = Master::new(Store::open_in_memory().unwrap(), auth);
+    let master = Master::new(Store::open_in_memory().unwrap(), auth.clone());
     tokio::spawn(async move { axum::serve(listener, router(master)).await.unwrap() });
     let base = format!("http://{addr}");
     // An admin exists, so the walk does not stand in front of an open setup.
@@ -675,7 +711,11 @@ async fn start() -> Rig {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
-    Rig { base, _dir: dir }
+    Rig {
+        base,
+        auth,
+        _dir: dir,
+    }
 }
 
 const NO_BODY: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
@@ -1013,4 +1053,107 @@ async fn a_link_counts_only_for_the_byte_routes() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "a link never writes");
+}
+
+/// A link is checked (a MAC over the cookie's hash, the URL and a time)
+/// before the store is read for its login: a GET with a cookie and no key
+/// on a route that takes no link, or on a byte route with a bad link,
+/// costs no store read (the layer tries a link on every private GET).
+#[tokio::test]
+async fn a_link_is_checked_before_the_store_is_read() {
+    let rig = start().await;
+    let c = reqwest::Client::new();
+    let r = c
+        .post(format!("{}/api/login", rig.base))
+        .json(&json!({"username": "alex", "password": "admin password"}))
+        .send()
+        .await
+        .unwrap();
+    let cookie = r.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let key = r.json::<serde_json::Value>().await.unwrap()["login_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let made = format!("/api/sessions/{}/made/f1", fill("{id}"));
+    let links: serde_json::Value = c
+        .post(format!("{}/api/links", rig.base))
+        .header("cookie", &cookie)
+        .header(common::LOGIN_HEADER, &key)
+        .same_origin()
+        .json(&json!({"urls": [made]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let good = links["links"][&made].as_str().unwrap().to_string();
+    let before = rig.auth.link_store_reads();
+    let bad = good.replace("link=", "link=1");
+    for url in ["/api/me/storage", "/api/me", made.as_str(), bad.as_str()] {
+        let r = c
+            .get(format!("{}{url}", rig.base))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "{url}");
+    }
+    assert_eq!(
+        rig.auth.link_store_reads(),
+        before,
+        "a store read for no valid link"
+    );
+    let r = c
+        .get(format!("{}{good}", rig.base))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    assert_eq!(rig.auth.link_store_reads(), before + 1);
+}
+
+/// No request smuggling past the layer: an unauthenticated POST whose
+/// body is itself a request, with `Content-Length` or chunked framing, then
+/// a real pipelined request. The body arrived whole, so hyper drains it by
+/// its framing and keeps the connection: exactly two answers, the 401 and
+/// the real request's, and the request inside the body is never answered.
+#[tokio::test]
+async fn a_refused_body_is_never_read_as_a_request() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let rig = start().await;
+    let addr = rig.base.trim_start_matches("http://").to_string();
+    let inner = format!("GET /api/setup?smuggled=1 HTTP/1.1\r\nHost: {addr}\r\n\r\n");
+    let chunked = format!("{:x}\r\n{inner}\r\n0\r\n\r\n", inner.len());
+    for (framing, body) in [
+        (format!("content-length: {}", inner.len()), inner.clone()),
+        ("transfer-encoding: chunked".to_string(), chunked),
+    ] {
+        let mut s = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        let req = format!(
+            "POST /api/sessions HTTP/1.1\r\nHost: {addr}\r\ncontent-type: application/json\r\n{framing}\r\n\r\n{body}GET /api/setup HTTP/1.1\r\nHost: {addr}\r\nconnection: close\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut got = Vec::new();
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(10), s.read_to_end(&mut got)).await;
+        let text = String::from_utf8_lossy(&got);
+        let answers: Vec<&str> = text
+            .match_indices("HTTP/1.1 ")
+            .map(|(i, _)| &text[i..i + 12])
+            .collect();
+        assert_eq!(
+            answers,
+            ["HTTP/1.1 401", "HTTP/1.1 200"],
+            "{framing}: {text}"
+        );
+        assert_eq!(text.matches("\"claimed\"").count(), 1, "{framing}: {text}");
+    }
 }

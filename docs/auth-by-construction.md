@@ -65,9 +65,11 @@ Moving the 404 into the layer would mean the layer parses each route's path and 
 ## What an unauthenticated upload costs now
 
 Nothing of its body is read.
-The layer answers before the body extractor, the unread body is dropped, and hyper 1.12 then drains only what is already buffered and otherwise closes the read side (`hyper-1.12.0/src/proto/h1/conn.rs:876`, `poll_drain_or_close_read`), so the connection is closed after the 401 instead of reading the rest.
+The layer answers before the body extractor and the unread body is dropped.
+hyper 1.12 then drains what is already buffered (`hyper-1.12.0/src/proto/h1/conn.rs:876`, `poll_drain_or_close_read`): a body that arrived whole is consumed by its framing and the connection is kept for the next request; a body that has not arrived is not read, and the read side is closed, so the connection ends after the 401.
+The drained body is never read as a request: `a_refused_body_is_never_read_as_a_request` sends a refused POST whose body is itself a request, with `Content-Length` and with chunked framing, then a real pipelined request, and gets exactly two answers (the review's probe found the same for `Expect`, both framings at once and a GET with a body).
 `Expect: 100-continue` is answered with the 401 and no `100 Continue`, since hyper sends that only when the body is first polled (`conn.rs:412`).
-Test: `an_unauthenticated_upload_is_refused_unread` (a 1 GB `Content-Length`, with and without `Expect`): on the old code the server answered `100 Continue` and kept the connection open waiting for the body; now 401 and a close.
+Test: `an_unauthenticated_upload_is_refused_unread` (a 1 GB `Content-Length`, with and without `Expect`): on the old code the server answered `100 Continue` and kept the connection open waiting for the body; now 401 and a close, since the body had not arrived.
 Per-route body limits (`DefaultBodyLimit` layers) are unchanged: they only tell the body extractor its limit, so they now apply to identified callers only.
 
 ## Behaviour that changes, and what does not
@@ -100,21 +102,47 @@ Until a handler converts, it still calls `require` after the layer: two lookups 
 
 `member_walk_http.rs` reads the route table as the route walk does, resolves each registration to its handler function (through closures, `use` imports and helpers in the same file), and reads that function's checks: `require_admin` or `Admin` is admin-only, `require_agent_editor` needs an admin for `?scope=server`, `require_any` or `Caller` works during a pending password change, `require_bytes`, `ByteCaller` or `link_principal` take a link.
 A handler it cannot find, or one with no check at all, fails the test.
-The routes it reads as admin-only (43 today) must equal the written `ADMIN_ONLY` list, so a handler that loses its admin check when it converts fails until someone changes that list on purpose; nothing under `/api/admin/` may be open.
+The routes it reads as admin-only (43 today), as open to a login with a pending password change (`ANY_LOGIN`, 9) and as taking a link (`BYTE_ROUTES`, 10) must each equal a written list, so a handler that loses its admin check when it converts fails until someone changes that list on purpose; nothing under `/api/admin/` may be open.
 Then every route, every registered method, as:
 a member (empty, small JSON and 1 MB bodies: 403 or 404 on admin-only routes, never 401, never "admins only" elsewhere, never 500);
 a login whose password must change (403 "change your password first" except where `require_any` lets it in);
 a disabled account's still-stored login and an expired login (401);
 a member's cookie with a link on every write (401);
 and the API token, the machine owner's root key with admin rights and every session (`auth.rs`): never 401, never "admins only", never "change your password first".
+Each admin-only route also gets a body it parses (`VALID_BODIES`, from its body type's required fields), so a member's request reaches the handler's own admin check even while that check still comes after the body: all 43 answer a member 403 or 404, none is left unreached, and an admin route added without such a body fails.
+Only checks on a handler's straight-line path count: one inside `if`, `else`, a loop or a braced closure, or after a top-level `return`, does not (tested on written shapes); what a lexer cannot see, a branch dead by value or a `match` arm never taken, is left to the golden file and to the walk asking the server.
 Proven able to fail: an `Admin` extractor that let members through made it fail on `/api/admin/storage`.
 The "admin" in module docs was tried as a second source and dropped: 83 open routes match it, because the docs say "admins included" of rules that keep admins out of other people's things; the `ADMIN_ONLY` snapshot does that job.
 
-`the_layer_and_the_handlers_checks_agree` sends the same requests in the same order to a server with the layer and to one built without it (`router_before_identify`, test-only), as nobody, a wrong token, a made-up cookie, a foreign page, a member, an admin, a login that must change its password, the API token, and a cookie with a link (on a byte route, and carried to every other URL), with HEAD added on the byte routes: 1,989 request pairs.
-Every answer must be the same, except a caller who is nobody getting 401 where the old order answered the body first; a foreign page gets the guard's 403 on both.
-The handlers already converted cannot run without the layer, so their answers are pinned against what `require*` gave (the made-file download among them).
+**The golden file.** `tests/it/auth_golden.txt` (4,296 lines, 262 KB) holds what `require*` answered before the layer, one line per request: caller kind, method, path, body (none, empty, `{}`), status and error sentence.
+It was written by `write_the_auth_golden` (`HARNESS_WRITE_GOLDEN=1 cargo test -p harness-master --features testing --test it write_the_auth_golden`) against `router_before_identify`, with `storage.rs` and `made_files.rs` put back to their bodies before conversion (from `59c8b3c9`) for the run, so every line is an answer of `require*`; two runs gave the same file.
+Kinds: nobody, a wrong token, a made-up cookie, a member's cookie alone, a foreign page, a member, an admin, a login that must change its password, a disabled account's login, an expired login, the API token, and a cookie with a link (its own on a byte route, carried elsewhere), with HEAD on the byte routes.
+`the_layer_answers_as_require_did` sends the same requests to the router with the layer and allows only two differences, matched by rule: a caller who is nobody gets 401 where a body error came first (896 lines today), and decision 2, a member or a login that must change its password gets 403 "admins only" or "change your password first" where a body error came first (2 today, the converted `PUT /api/admin/storage`).
+Every other change fails it: widening `storage.rs`'s `mine` from `User` to `Caller` failed with `now must-change GET /api/me/storage none 200 / was ... 403 change your password first` (the review's mutation E, which the member walk alone missed).
+`router_before_identify` and the writer exist only with the crate's `testing` feature, which no shipped build turns on; once a handler converts it fails closed there (the extractors find no principal), so the file cannot be regenerated after conversion begins and is frozen.
+
 `the_origin_guard_answers_first` pins the guard's place: another site's write with no credentials is 403 "origin not allowed", a cookie write without `Origin` is 403 "origin required", the page's own GET and login pass through.
 `the_public_router_is_exactly_the_public_list` reads `http::public()`: moving `GET /api/me` there made it fail while the route walk stayed green (the handler still checks its caller), which is why it exists.
+
+## Review (2026-11-24, `r-auth-first`) and what was done
+
+The independent review found no way past the layer that the old code refused, link principals refused by `Caller`, `User` and `Admin`, and no request smuggling.
+Its findings, each closed in this pull request:
+- A route that gets wider access during conversion passed the member walk (mutation E): the golden file, and the `ANY_LOGIN` and `BYTE_ROUTES` lists beside `ADMIN_ONLY`, now catch it (both fail on mutation E).
+- The admin check of unconverted admin routes with a body was never asked over HTTP: `VALID_BODIES` reaches all 43.
+- A dead check counted as a check: only straight-line calls count now (above).
+- The layer read the store for every private GET with a cookie and no key (`cookie_user` ran before the link's MAC): `link_principal` now checks the link first, and `a_link_is_checked_before_the_store_is_read` counts the store reads (it failed with 4 reads before the change, 0 after).
+- "The connection is closed after the 401" was true only for a body not yet buffered: reworded above and in T2, with the no-desync test.
+- `router_before_identify` was `pub` in shipped builds: now behind the `testing` feature.
+- Mutations A (the layer takes a cookie alone as a link) and C (a link on every method) were each caught by one test: `the_layer_takes_a_link_only_to_read` (a unit test of the layer's own verdict, seen by a handler that does not check again) is the second catch for both, and the golden file's member-cookie-alone kind is a third for A.
+  No walk over the real routes can catch C, since every handler on a linkable URL that writes checks again; that is the defence in depth, and the unit test is the catch.
+
+## Rules for the conversion pull requests
+
+- Keep `the_layer_answers_as_require_did` green with only its two difference classes; never edit `auth_golden.txt` (the only allowed edit is deleting the lines of a route that is removed).
+- Edit `ADMIN_ONLY`, `ANY_LOGIN`, `BYTE_ROUTES` or `VALID_BODIES` only with a line of reason in the pull request.
+- The route walk, the member walk and the area's own suites stay green; the count of `require*` calls goes down.
+- A route added after the golden is listed by the golden test, not compared; it is covered by the route walk and the member walk, and should be written with the extractors from the start.
 
 ## Open questions
 

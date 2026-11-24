@@ -13,6 +13,10 @@ workspace = true
 # The document and PDF helpers answer a confinement probe when asked by
 # environment (tests/helper_confinement.rs); off in every shipped build.
 helper-probe = []
+# Test-only code paths (`router_before_identify`, which writes the auth
+# golden file): `cargo test -p harness-master --features testing`; off in
+# every shipped build.
+testing = []
 
 [dependencies]
 anyhow.workspace = true

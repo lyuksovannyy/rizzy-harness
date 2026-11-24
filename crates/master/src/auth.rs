@@ -94,6 +94,9 @@ pub struct Auth {
     lookups: Failures,
     /// Signs the links the browser fetches by itself; a new key per process.
     links: links::Signer,
+    /// Store reads made to check a link's login (tests: a link that does
+    /// not verify, or a request with none, never reaches the store).
+    link_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 type Failures = Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<i64>>>>;
@@ -489,7 +492,14 @@ impl Auth {
             hasher: Hasher::default(),
             lookups: Arc::default(),
             links: links::Signer::new(),
+            link_reads: Arc::default(),
         }
+    }
+
+    /// Tests: how many times a link's login was looked up in the store.
+    #[doc(hidden)]
+    pub fn link_store_reads(&self) -> usize {
+        self.link_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The signer of this process's download links.
@@ -888,15 +898,22 @@ pub async fn cookie_user(master: &Master, headers: &HeaderMap) -> Option<(UserRo
 /// The principal behind a request the browser made by itself: its cookie
 /// is a live login and `uri` carries a link minted for that login and
 /// exactly this URL ([`links`]). Read only, like the elements it serves.
+/// The link is checked first (a MAC over the cookie's hash, no store), so a
+/// request without a good one never reaches the store: the caller layer
+/// tries this on every private GET that comes without a key.
 pub async fn link_principal(master: &Master, headers: &HeaderMap, uri: &Uri) -> Option<Principal> {
-    let (user, hash) = cookie_user(master, headers).await?;
+    let hash = sha256_hex(&cookie_value(headers)?);
     let now = harness_core::now_ms();
+    if !master.inner.auth.links.verify(&hash, uri, now) {
+        return None;
+    }
     master
         .inner
         .auth
-        .links
-        .verify(&hash, uri, now)
-        .then(|| Principal::from_user(user))
+        .link_reads
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (user, live) = cookie_user(master, headers).await?;
+    (live == hash).then(|| Principal::from_user(user))
 }
 
 /// `target` with a link for the request's login, when it came with a
