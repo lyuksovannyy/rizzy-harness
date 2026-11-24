@@ -86,24 +86,36 @@ pub(crate) fn signal_group(pgid: i32, sig: Signal) {
 /// Decode as much valid UTF-8 as possible, keeping an incomplete trailing
 /// sequence for the next read.
 fn drain_utf8(buf: &mut Vec<u8>) -> String {
-    match std::str::from_utf8(buf) {
-        Ok(s) => {
-            let s = s.to_string();
-            buf.clear();
-            s
-        }
-        Err(e) if e.error_len().is_none() => {
-            let n = e.valid_up_to();
-            let s = String::from_utf8_lossy(&buf[..n]).into_owned();
-            buf.drain(..n);
-            s
-        }
-        Err(_) => {
-            let s = String::from_utf8_lossy(buf).into_owned();
-            buf.clear();
-            s
+    let mut out = String::new();
+    let mut at = 0;
+    loop {
+        match std::str::from_utf8(&buf[at..]) {
+            Ok(s) => {
+                out.push_str(s);
+                at = buf.len();
+                break;
+            }
+            Err(e) => {
+                let valid = at + e.valid_up_to();
+                out.push_str(&String::from_utf8_lossy(&buf[at..valid]));
+                match e.error_len() {
+                    // A character cut by the end of the read: the next read
+                    // finishes it.
+                    None => {
+                        at = valid;
+                        break;
+                    }
+                    // Invalid bytes: one replacement for them, and on.
+                    Some(n) => {
+                        out.push('\u{fffd}');
+                        at = valid + n;
+                    }
+                }
+            }
         }
     }
+    buf.drain(..at);
+    out
 }
 
 async fn pump<R: AsyncRead + Unpin>(
@@ -139,10 +151,11 @@ async fn pump<R: AsyncRead + Unpin>(
             }
         }
     }
-    if !pending.is_empty() {
-        let _ = tx
-            .send((stream, strip.push(&String::from_utf8_lossy(&pending))))
-            .await;
+    // The end: a character cut by it, and what an open string still holds.
+    let mut last = strip.push(&String::from_utf8_lossy(&pending));
+    last.push_str(&strip.finish());
+    if !last.is_empty() {
+        let _ = tx.send((stream, last)).await;
     }
 }
 
