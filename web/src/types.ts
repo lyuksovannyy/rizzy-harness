@@ -648,6 +648,8 @@ export interface AgentFeatures {
   board: boolean;
   /** `push`: one branch of a cloned project back to its forge repository, a card every time (PLAN.md T101); its own switch. */
   push?: boolean;
+  /** `pull_request`: open a pull request in a cloned project's source repository, a card every time (PLAN.md T102); its own switch. */
+  pull_requests?: boolean;
   web: boolean;
   read_files: boolean;
   edit_files: boolean;

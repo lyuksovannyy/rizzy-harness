@@ -177,8 +177,10 @@ describe("an agent's page", () => {
     expect(host.querySelector("pre.agent-prompt")!.textContent).toBe("You are careful.");
     // 22: "Push to the repository" (X.27 step 4) is its own switch, off
     // when the agent's features do not say it.
-    expect(switches().length).toBe(22);
+    // 23: and "Open pull requests" (PLAN.md T102).
+    expect(switches().length).toBe(23);
     expect(sw("Push to the repository").checked).toBe(false);
+    expect(sw("Open pull requests").checked).toBe(false);
     expect(switches().every((s) => s.disabled)).toBe(true);
     expect(sw("Change files").checked).toBe(true);
     expect(button("Duplicate")).toBeDefined();

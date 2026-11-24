@@ -68,7 +68,7 @@ export function ApprovalChoice({
   // A card whose approval id or call was announced twice (review N1).
   const reused = ap.invalid === true;
   // A push card's destination is the server's, never the node's text.
-  const push = !mismatch && !reused && item.tool === "push";
+  const push = !mismatch && !reused && (item.tool === "push" || item.tool === "pull_request");
   const [target, setTarget] = useState<{ host: string; full_name: string; login: string } | null | undefined>(
     undefined,
   );
@@ -223,7 +223,10 @@ export function ApprovalChoice({
         )}
         {push && target && (
           <div className="approval-push-target" role="note">
-            {t("approval.pushTo", { target: `${target.host}/${target.full_name}`, login: target.login })}
+            {t(item.tool === "pull_request" ? "approval.prIn" : "approval.pushTo", {
+              target: `${target.host}/${target.full_name}`,
+              login: target.login,
+            })}
           </div>
         )}
         {push && target === null && (
