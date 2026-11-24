@@ -4,11 +4,12 @@
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{ApiError, ApiResult, require_admin, runtime};
+use super::caller::Admin;
+use super::{ApiError, ApiResult, runtime};
 use crate::Master;
 
 #[derive(Deserialize)]
@@ -18,11 +19,10 @@ pub(super) struct PricingBody {
 }
 
 pub(super) async fn put_pricing(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<PricingBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     let currency = crate::pricing::clean_currency(&b.currency)
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
     let rt = runtime(&m)?;
