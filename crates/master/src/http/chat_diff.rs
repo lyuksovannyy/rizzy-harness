@@ -2,8 +2,8 @@
 //! `GET /api/sessions/{id}/diff`. Owner only, through the same check as
 //! opening the chat: anyone else, admins and workspace admins included, gets
 //! the 404 a chat that does not exist gets (T10). So does a chat without a
-//! folder (a plain chat) and a temporary one: they have no checkpoints, and
-//! the node is not asked. A read: no agentic grant is needed, as for a
+//! folder (a plain chat): it has no checkpoints, and the node is not asked. A
+//! temporary coding chat takes checkpoints and is served like any other. A read: no agentic grant is needed, as for a
 //! turn's diff.
 //!
 //! The same request to the owning node as a turn's diff (`crate::diff`,
@@ -32,7 +32,7 @@ async fn chat_diff(
 ) -> ApiResult<Json<TurnDiff>> {
     let who = require(&m, &headers).await?;
     let row = visible_session(&m, &who, &id).await?;
-    if row.profile.as_deref() == Some("chat") || row.incognito {
+    if row.profile.as_deref() == Some("chat") {
         return Err(ApiError(StatusCode::NOT_FOUND, "unknown session".into()));
     }
     let node = row.node_id.clone();

@@ -171,3 +171,40 @@ async fn the_range_keeps_the_turn_diffs_caps() {
         assert!(big.hunks.is_empty());
     }
 }
+
+/// A fork's log holds its parent's checkpoint events and its folder is the
+/// parent's: the range holds the inherited turn, the parent's later turn in
+/// the shared folder (documented: the range is the folder's), and its own.
+#[tokio::test]
+async fn a_forks_range_holds_the_inherited_turns_and_the_shared_folder() {
+    let mut rig = Rig::new().await;
+    let parent = rig.session_id();
+    let first = rig.turn("echo 1 > a.txt").await.id.unwrap();
+    let fork = rig.fork(parent, &first).await;
+    rig.turn("echo 2 > b.txt").await; // the parent goes on
+    rig.turn_in(fork, "echo 3 > c.txt").await;
+    let d = rig.diff_all_of(fork).await.unwrap();
+    assert_eq!(names(&d), ["a.txt", "b.txt", "c.txt"]);
+    assert!(!d.since_pruned);
+    // The parent's own range ends at its own last turn: no c.txt.
+    assert_eq!(names(&rig.diff_all().await.unwrap()), ["a.txt", "b.txt"]);
+}
+
+/// Checkpoints are pruned per folder, so a sibling chat's turns can push this
+/// chat's oldest out: the range starts at its oldest kept one and says so.
+#[tokio::test]
+async fn a_sibling_chats_turns_can_prune_the_start() {
+    let mut rig = Rig::with_keep(3).await;
+    let other = rig.new_chat().await;
+    rig.turn("echo 1 > a.txt").await;
+    rig.turn_in(other, "echo 2 > b.txt").await;
+    rig.turn("echo 3 > c.txt").await;
+    rig.turn_in(other, "echo 4 > d.txt").await;
+    let d = rig.diff_all().await.unwrap();
+    assert!(d.since_pruned, "the first turn's checkpoints are gone");
+    assert_eq!(
+        names(&d),
+        ["c.txt"],
+        "from its oldest kept start to its latest end"
+    );
+}

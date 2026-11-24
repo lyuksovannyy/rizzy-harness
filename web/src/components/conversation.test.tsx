@@ -767,6 +767,18 @@ describe("all of a chat's changes (X.61)", () => {
     expect(button()).toBeNull();
   });
 
+  test("the button has its words beside the icon, and a temporary coding chat has it too", async () => {
+    current = { ...view([{ type: "turn_end", turn_id: "t1", reason: "completed" }], "agentic"), checkpoints: changed };
+    current.meta = { ...current.meta, incognito: true } as SessionView["meta"];
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow({ incognito: true })} nodes={[]} agents={[]} models={[]} />));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    const open = button()!;
+    expect(open.textContent).toBe("All changes");
+    await act(async () => open.click());
+    await until(() => host.querySelector(".diff-panel"));
+    expect(api.chatDiff).toHaveBeenCalled();
+  });
+
   test("a turn's own changes and the whole chat's replace each other", async () => {
     await show([{ type: "turn_end", turn_id: "t1", reason: "completed" }], sessionRow(), "agentic", changed);
     await act(async () => button()!.click());

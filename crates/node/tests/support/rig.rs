@@ -90,11 +90,11 @@ impl harness_agent_native::provider::Provider for Recording {
     }
 }
 
-/// The environment a scripted agent's shell command puts in front of its
-/// own git calls (the agent's shell inherits the node's environment).
 /// A secret the rig's node holds: it must never come out in a diff.
 pub const RIG_SECRET: &str = "sk-rig-secret-0123456789abcdef";
 
+/// The environment a scripted agent's shell command puts in front of its
+/// own git calls (the agent's shell inherits the node's environment).
 pub const AGENT_GIT: &str = "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
      GIT_AUTHOR_NAME=agent GIT_AUTHOR_EMAIL=agent@example.com \
      GIT_COMMITTER_NAME=agent GIT_COMMITTER_EMAIL=agent@example.com";
@@ -398,6 +398,56 @@ impl Rig {
         lead
     }
 
+    /// One agent turn running `cmd` in the chat `sid` (another chat of the
+    /// rig); waits for that chat's turn to end.
+    pub async fn turn_in(&mut self, sid: SessionId, cmd: &str) {
+        self.n += 1;
+        self.send(MasterToNode::Prompt(PromptMsg {
+            req_id: format!("p{}", self.n),
+            ..PromptMsg::test(sid, format!("run: {cmd}"))
+        }));
+        loop {
+            match self.recv().await {
+                NodeToMaster::Event { event } => {
+                    let ended = event.session_id == sid
+                        && matches!(event.typed(), Ok(EventKind::TurnEnded(_)));
+                    self.seen.push(event);
+                    if ended {
+                        return;
+                    }
+                }
+                NodeToMaster::Ack { ok, error, .. } => assert!(ok, "nack: {error:?}"),
+                _ => {}
+            }
+        }
+    }
+
+    /// A fork of `parent` at the end of `turn`: the new chat.
+    pub async fn fork(&mut self, parent: SessionId, turn: &str) -> SessionId {
+        let child = SessionId::new();
+        self.n += 1;
+        let req = format!("f{}", self.n);
+        self.send(MasterToNode::Fork {
+            req_id: req.clone(),
+            session_id: child,
+            parent,
+            turn_id: turn.into(),
+            title: "t (fork)".into(),
+        });
+        loop {
+            match self.recv().await {
+                NodeToMaster::Event { event } => self.seen.push(event),
+                NodeToMaster::Ack {
+                    req_id, ok, error, ..
+                } if req_id == req => {
+                    assert!(ok, "fork refused: {error:?}");
+                    return child;
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Another agentic chat on the node, in the rig's folder, in Auto.
     pub async fn new_chat(&mut self) -> SessionId {
         let sid = SessionId::new();
@@ -554,11 +604,19 @@ impl Rig {
 
     /// Everything the chat changed (X.61): the node's whole-chat diff.
     pub async fn diff_all(&mut self) -> Result<harness_protocol::TurnDiff, String> {
+        self.diff_all_of(self.sid).await
+    }
+
+    /// [`Rig::diff_all`] of the chat `sid`.
+    pub async fn diff_all_of(
+        &mut self,
+        sid: SessionId,
+    ) -> Result<harness_protocol::TurnDiff, String> {
         self.n += 1;
         let req = format!("d{}", self.n);
         self.send(MasterToNode::Diff {
             req_id: req.clone(),
-            session_id: self.sid,
+            session_id: sid,
             turn_id: String::new(),
             rewind: false,
             all: true,

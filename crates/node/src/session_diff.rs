@@ -50,15 +50,25 @@ fn range_of(cps: impl Iterator<Item = Checkpoint>, turn_id: &str) -> Range {
 /// still kept to the second. An undo or a rewind is in the log as a restore
 /// whose `after` is the latest state, so undone work drops out by itself; a
 /// turn still running has a `before` and no `after` yet, so it is left out
-/// until it ends.
+/// until it ends. A start is only kept when it is before the end in log
+/// order, so the range is never inverted.
 fn whole_range(cps: impl Iterator<Item = Checkpoint>) -> (Vec<String>, Option<String>) {
     let (mut starts, mut latest) = (Vec::new(), None);
-    for c in cps {
+    let mut end_at = 0;
+    for (i, c) in cps.enumerate() {
         match c.phase {
-            CheckpointPhase::Before | CheckpointPhase::BeforeRestore => starts.push(c.git_ref),
-            _ => latest = Some(c.git_ref),
+            CheckpointPhase::Before | CheckpointPhase::BeforeRestore => starts.push((i, c.git_ref)),
+            _ => {
+                latest = Some(c.git_ref);
+                end_at = i;
+            }
         }
     }
+    let starts = starts
+        .into_iter()
+        .filter(|(i, _)| *i < end_at)
+        .map(|(_, r)| r)
+        .collect();
     (starts, latest)
 }
 
@@ -321,9 +331,15 @@ mod tests {
             ]
             .into_iter(),
         );
-        assert_eq!(starts, ["b1", "b2", "s", "b3"]);
-        // A running turn (t3) has no after: the latest finished state.
+        // A running turn (t3) has no after: the latest finished state, and
+        // its `before` is after the end, so not a start.
+        assert_eq!(starts, ["b1", "b2", "s"]);
         assert_eq!(latest.as_deref(), Some("ra"));
+        // Only a start after the end: no range, never an inverted one.
+        let (starts, latest) =
+            whole_range(vec![cp("t1", After, "a1"), cp("t2", Before, "b2")].into_iter());
+        assert!(starts.is_empty());
+        assert_eq!(latest.as_deref(), Some("a1"));
         assert_eq!(whole_range(std::iter::empty()), (vec![], None));
     }
 

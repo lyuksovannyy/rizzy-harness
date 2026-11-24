@@ -70,6 +70,7 @@ let PAGE = null;
 
     // The header's button, by keyboard.
     const btn = 'button[aria-label="All changes"]';
+    check((await p.textContent(btn)).trim() === 'All changes', 'the button has its words: ' + await p.textContent(btn));
     await p.focus(btn);
     await p.keyboard.press('Enter');
     await p.waitForSelector('.diff-panel .diff-file');
@@ -93,6 +94,20 @@ let PAGE = null;
     await p.keyboard.press('Escape');
     await p.waitForSelector('.diff-panel', { state: 'detached' });
     check(await p.evaluate(() => document.activeElement?.getAttribute('aria-label') === 'All changes'), 'focus is back on the button');
+    // At phone width the header holds: icon only, nothing overflows.
+    const phone = await p.evaluate((sel) => {
+      const b = document.querySelector(sel);
+      const r = b.getBoundingClientRect();
+      const label = b.querySelector('.all-changes-label');
+      return { w: r.width, right: r.right, labelShown: getComputedStyle(label).display !== 'none', overflow: document.documentElement.scrollWidth > window.innerWidth, name: b.getAttribute('aria-label') };
+    }, btn);
+    check(!phone.labelShown && phone.w <= 40 && phone.right <= 390 && !phone.overflow && phone.name === 'All changes', 'phone header: ' + JSON.stringify(phone));
+    await p.screenshot({ path: `${S}/chat-diff-3-phone-header.png` });
+    // Between the breakpoints (a tablet) the words show and fit.
+    await p.setViewportSize({ width: 700, height: 800 });
+    const mid = await p.evaluate((sel) => ({ right: document.querySelector(sel).getBoundingClientRect().right, overflow: document.documentElement.scrollWidth > window.innerWidth, label: getComputedStyle(document.querySelector(sel + ' .all-changes-label')).display !== 'none' }), btn);
+    check(mid.label && mid.right <= 700 && !mid.overflow, 'tablet header: ' + JSON.stringify(mid));
+    await p.screenshot({ path: `${S}/chat-diff-4-tablet-header.png` });
     await p.setViewportSize({ width: 1280, height: 900 });
 
     // Undo the second turn from its row: the range drops its file.

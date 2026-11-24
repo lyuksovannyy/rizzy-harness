@@ -1,6 +1,6 @@
 //! All of a chat's changes over HTTP (X.61, PLAN.md T53): owner only, every
 //! other account gets 404 (admins and workspace admins included, T10), and
-//! so does a chat without a folder or a temporary one, with the node never
+//! so does a chat without a folder, with the node never
 //! asked; the master asks the owning node once and passes its answer on; a
 //! node that is away, too old or has nothing to show is a sentence, never a
 //! 500. The node here is a fake; the real node's range rule is
@@ -393,7 +393,7 @@ async fn nobody_else_sees_it_not_even_an_admin() {
 }
 
 #[tokio::test]
-async fn a_plain_chat_and_a_temporary_chat_are_404_and_ask_nothing() {
+async fn a_plain_chat_is_404_and_asks_nothing_a_temporary_coding_chat_is_served() {
     let t = start().await;
     let (st, v) = req(
         &t,
@@ -405,13 +405,16 @@ async fn a_plain_chat_and_a_temporary_chat_are_404_and_ask_nothing() {
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let plain: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    let (st, v) = req(&t, Method::GET, &url(plain), None, &t.alex).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    assert_eq!(v["error"], "unknown session");
+    assert!(t.plain.diffs().is_empty());
+    // A temporary coding chat takes checkpoints like any other.
     let temp = chat(&t, &t.alex, "inc", None).await;
-    for (sid, name) in [(plain, "plain"), (temp, "temporary")] {
-        let (st, v) = req(&t, Method::GET, &url(sid), None, &t.alex).await;
-        assert_eq!(st, StatusCode::NOT_FOUND, "{name}: {v}");
-        assert_eq!(v["error"], "unknown session", "{name}");
-    }
-    assert!(t.plain.diffs().is_empty() && t.inc.diffs().is_empty());
+    let (st, v) = req(&t, Method::GET, &url(temp), None, &t.alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["more_files"], 4321);
+    assert_eq!(t.inc.diffs(), vec![(temp, String::new(), false, true)]);
 }
 
 #[tokio::test]

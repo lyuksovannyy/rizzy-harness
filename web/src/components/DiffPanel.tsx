@@ -258,6 +258,14 @@ export default function DiffPanel(props: {
     return () => ac.abort();
   }, [sessionId, turnId, rewind, all, tries]);
 
+  // The range holds no running turn: when it ends, read the range again, so
+  // "its changes show here once it ends" is true.
+  const wasRunning = useRef(props.running);
+  useEffect(() => {
+    if (all && wasRunning.current && !props.running) setTries((n) => n + 1);
+    wasRunning.current = props.running;
+  }, [all, props.running]);
+
   // Focus moves into the panel when it opens; Escape inside it closes it.
   useEffect(() => {
     head.current?.focus();
@@ -319,9 +327,10 @@ export default function DiffPanel(props: {
         {undo.err && <span className="error-text">{showHidden(undo.err)}</span>}
       </div>
       <div className="diff-body">
-        {all && diff?.since_pruned && (
+        {all && (
           <p className="muted small" role="note">
-            Older turns are no longer kept (the node keeps the latest checkpoints only), so this starts at the oldest that is.
+            Everything that changed in this chat's folder since {diff?.since_pruned ? "the oldest turn still kept" : "it started"}, including changes made by hand or by
+            other chats that share the folder.
           </p>
         )}
         {all && props.running && (

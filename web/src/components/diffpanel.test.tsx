@@ -254,11 +254,31 @@ test("the whole chat's changes: asked once for the chat, titled by range, no tur
   expect(host.querySelectorAll(".diff-file").length).toBeGreaterThan(0);
 });
 
-test("the whole chat's range says where it starts when older checkpoints were pruned", async () => {
-  chatDiff.mockImplementationOnce(() => Promise.resolve({ ...sample(), since_pruned: true }));
+test("the whole chat's range says what it holds, and where it starts when older checkpoints were pruned", async () => {
   await render({ all: true, turnId: "", canUndo: false });
+  expect(host.querySelector("[role=note]")!.textContent).toContain(
+    "Everything that changed in this chat's folder since it started, including changes made by hand or by other chats that share the folder.",
+  );
+  chatDiff.mockImplementationOnce(() => Promise.resolve({ ...sample(), since_pruned: true }));
+  await render({ all: true, turnId: "", canUndo: false, sessionId: "s2" });
   expect(host.querySelector(".diff-title")!.textContent).toContain("Changes since the oldest turn still kept");
-  expect(host.textContent).toContain("no longer kept");
+  expect(host.querySelector("[role=note]")!.textContent).toContain("since the oldest turn still kept, including changes made by hand");
+});
+
+test("the whole chat is read again when the running turn ends", async () => {
+  await render({ all: true, turnId: "", canUndo: false, running: true });
+  expect(chatDiff).toHaveBeenCalledTimes(1);
+  const props = { sessionId: "s1", turnId: "", all: true, rewind: false, laterChanges: false, canUndo: false, onRewind: vi.fn(), onClose: vi.fn() };
+  await act(async () => root.render(<DiffPanel {...props} running={true} />));
+  expect(chatDiff).toHaveBeenCalledTimes(1);
+  await act(async () => root.render(<DiffPanel {...props} running={false} />));
+  await act(async () => {});
+  expect(chatDiff).toHaveBeenCalledTimes(2);
+  // A turn's own panel is not read again by a run ending.
+  turnDiff.mockClear();
+  await act(async () => root.render(<DiffPanel {...props} all={false} turnId="t1" running={true} />));
+  await act(async () => root.render(<DiffPanel {...props} all={false} turnId="t1" running={false} />));
+  expect(turnDiff).toHaveBeenCalledTimes(1);
 });
 
 test("a whole chat with no file change says so; a running turn is named", async () => {
