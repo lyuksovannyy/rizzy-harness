@@ -3727,19 +3727,17 @@ impl Session {
             .as_ref()
             .map(|a| a.connector_tools.clone())
             .unwrap_or_default();
-        // Push (X.27 step 4): only with the master's target for this very
-        // turn and where this node and this session allow it; otherwise
-        // the tool is not offered at all.
+        // Push and pull requests (X.27): only with the master's target for
+        // this very turn and where this node and this session allow each
+        // tool; a tool not allowed is not offered at all.
         let mut agent = agent;
-        let target = self.push_for_turn(&turn_id, extra.push.take());
-        if target.is_none()
-            && let Some(a) = agent.as_mut()
-            && !a
-                .deny_tools
-                .iter()
-                .any(|t| t == harness_core::forge::PUSH_TOOL)
-        {
-            a.deny_tools.push(harness_core::forge::PUSH_TOOL.into());
+        let (target, refused) = self.forge_for_turn(&turn_id, extra.push.take());
+        if let Some(a) = agent.as_mut() {
+            for tool in refused {
+                if !a.deny_tools.iter().any(|t| t == tool) {
+                    a.deny_tools.push(tool.into());
+                }
+            }
         }
         *self.push_now.lock().unwrap_or_else(|p| p.into_inner()) =
             target.map(|t| (turn_id.clone(), t));

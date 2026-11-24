@@ -344,6 +344,11 @@ pub const CAP_FORGE_CLONE_PREFIX: &str = "forge-clone:";
 /// master names a push target in a turn only for a node with it.
 pub const CAP_FORGE_PUSH: &str = "forge-push";
 
+/// The node capability that announces the open-pull-request tool (PLAN.md
+/// T102): its node.toml does not deny `pull_request`. The master names a
+/// forge target for that tool only for a node with it.
+pub const CAP_FORGE_PR: &str = "forge-pr";
+
 /// The clone time limit a node announces in [`CAP_FORGE_CLONE_PREFIX`], if
 /// it announces one: `None` for a node that does not clone.
 /// A value over [`MAX_CLONE_TIMEOUT_S`] counts as that maximum, so a node
@@ -1270,6 +1275,18 @@ pub enum NodeToMaster {
         session_id: SessionId,
         approval_id: String,
     },
+    /// Open the pull request of one `pull_request` call of a session this
+    /// node runs (PLAN.md T102), after the person allowed it on its card:
+    /// the card's approval id and nothing else. The master creates it from
+    /// the input of the one `tool_call_started` that approval names in its
+    /// own mirror, never from anything this message carries, and answers
+    /// with one `forge.pull_request_result`.
+    #[serde(rename = "forge.pull_request")]
+    PullRequest {
+        req_id: String,
+        session_id: SessionId,
+        approval_id: String,
+    },
     /// The call `req_id` is no longer waited for (its turn stopped): the
     /// master drops it if it still runs. Nothing is answered.
     #[serde(rename = "connector.cancel")]
@@ -2086,6 +2103,22 @@ pub enum MasterToNode {
     /// token, or why not. The token is handed to one git process through a
     /// pipe and never written anywhere on the node. Only to nodes whose
     /// hello listed [`CAP_FORGE_PUSH`]; never acked.
+    /// The answer to a `forge.pull_request`: the pull request's number and
+    /// address on the forge, or why it was not made. Only to nodes whose
+    /// hello listed [`CAP_FORGE_PR`]; never acked.
+    #[serde(rename = "forge.pull_request_result")]
+    PullRequestResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        number: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        /// The forge already had one for these branches.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        existed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     #[serde(rename = "forge.push_credential_result")]
     PushCredentialResult {
         req_id: String,
@@ -2291,6 +2324,7 @@ impl MasterToNode {
             | MasterToNode::SkillResult { .. }
             | MasterToNode::ConnectorResult { .. }
             | MasterToNode::PushCredentialResult { .. }
+            | MasterToNode::PullRequestResult { .. }
             | MasterToNode::Diff { .. }
             | MasterToNode::BackgroundOutput { .. }
             | MasterToNode::Files { .. }

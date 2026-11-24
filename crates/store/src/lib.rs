@@ -146,6 +146,20 @@ pub enum HelloState {
     Foreign,
 }
 
+/// One approval and its one call, as the log holds them
+/// ([`Store::approval_call`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApprovalCall {
+    /// The tool `approval_requested` names.
+    pub tool: String,
+    /// The tool its call's `tool_call_started` names (what the page titles
+    /// the card by).
+    pub call_tool: String,
+    pub resolved: bool,
+    /// That call's input (what the page draws on the card).
+    pub input: serde_json::Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRow {
     pub session_id: SessionId,
@@ -2347,6 +2361,15 @@ impl Store {
         sid: SessionId,
         approval_id: &str,
     ) -> Result<Option<(String, Option<String>, bool)>> {
+        Ok(self
+            .approval_call(sid, approval_id)?
+            .map(|c| (c.tool, Some(c.call_tool), c.resolved)))
+    }
+
+    /// [`Self::approval_card`] with the call's own input, as the one
+    /// `tool_call_started` holds it: what the page draws on the card and
+    /// what a tool the master runs acts on (PLAN.md T102).
+    pub fn approval_call(&self, sid: SessionId, approval_id: &str) -> Result<Option<ApprovalCall>> {
         // Ids outside the harness's id rule never name a card (review N4).
         if !harness_core::valid_event_id(approval_id) {
             return Ok(None);
@@ -2375,20 +2398,27 @@ impl Store {
         if !harness_core::valid_event_id(call_id) {
             return Ok(None);
         }
-        let mut calls: Vec<String> = Vec::new();
+        let mut calls: Vec<(String, String)> = Vec::new();
         {
             let mut st = conn.prepare_cached(
-                "SELECT json_extract(payload, '$.tool') FROM events
+                "SELECT json_extract(payload, '$.tool'), json(json_extract(payload, '$.input'))
+                 FROM events
                  WHERE session_id = ?1 AND kind = 'tool_call_started'
                    AND json_extract(payload, '$.call_id') = ?2
                  LIMIT 2",
             )?;
-            let rows = st.query_map(params![s, call_id], |r| r.get::<_, String>(0))?;
+            let rows = st.query_map(params![s, call_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?
+                        .unwrap_or_else(|| "null".into()),
+                ))
+            })?;
             for r in rows {
                 calls.push(r?);
             }
         }
-        let [call_tool] = calls.as_slice() else {
+        let [(call_tool, input)] = calls.as_slice() else {
             return Ok(None);
         };
         let resolved: bool = conn
@@ -2398,7 +2428,12 @@ impl Store {
                    AND json_extract(payload, '$.approval_id') = ?2)",
             )?
             .query_row(params![s, approval_id], |r| r.get(0))?;
-        Ok(Some((tool.clone(), Some(call_tool.clone()), resolved)))
+        Ok(Some(ApprovalCall {
+            tool: tool.clone(),
+            call_tool: call_tool.clone(),
+            resolved,
+            input: serde_json::from_str(input)?,
+        }))
     }
 
     /// The seq up to which `user` has seen chat `sid` (0 when never).

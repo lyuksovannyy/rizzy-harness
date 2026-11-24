@@ -83,7 +83,14 @@ What this binding buys: a node, even one that runs the session, gets no token wi
 ## 6. The card
 
 `ToolRisk::External`: `ApprovalMode::needs_approval` is true in every mode but plan (which refuses the tool). The loop asks the host nothing for such a tool: the tool asks for its own card while it runs (`Session::ask_external`), once it can show what it will do. The card offers no "for this turn" or "for this chat" (`turn_allow` and `chat_allow` false), and any allow answer counts as this one call; node.toml's `denied_tools` refuses it.
-`reason`: "push branch `<branch>` to `<host>/<owner/name>` as `<login>`" (the node's text); the destination line on the page: "Pushes to `<host>/<owner/name>` as `<login>` (as the server knows it)", from the master; `preview` (plain text under "From the folder (the agent's repository)"): `branch:` and `commit: <12 hex> <subject>`. A card without a target from the master, or whose approval names another tool than its call, offers only Deny.
+Each part of the card and where it comes from:
+
+- **Destination line**, from the master: "Pushes to `<host>/<owner/name>` as `<login>` (as the server knows it)".
+- **"From the folder (the agent's repository)"**: the approval's `preview`, written by the node from the folder before the card: `branch:` and `commit: <12 hex> <subject>`, plain text. It is the only node-written part drawn, because only the node can read the folder; what it says is bound as below.
+- **Not drawn**: the approval's `reason` ("push branch `<branch>` to `<host>/<owner/name>` as `<login>`", the node's text; review R6 of the pull request tool): it stays in the event for the log, the page does not show it on a forge card.
+- **Collapsed text**: if the preview is long enough to be cut, Allow is replaced by "Show all to allow" until it was shown once, as on the pull request's card (`docs/forge-pr.md` §4).
+
+A card without a target from the master, or whose approval names another tool than its call, offers only Deny.
 Not shown: how many commits are ahead (the only local reference is agent-written), whether the branch is the default one (not recorded).
 **What on the card is bound to what:** the destination line (host, `owner/name`, login) is the master's, from the project's recorded source and the connection it named for the turn; the branch and the commit id are the folder's refs as the node read them before the card, read again after the Allow and pushed only if unchanged; the subject is shown only when the commit's bytes hash to that id (`git hash-object` over what `cat-file` returned; review F6), otherwise "(subject not shown: the commit could not be verified)"; what is pushed is the commit with that id, which the forge checks by hash.
 The result is the forge's porcelain line: `[new branch]`, `old..new`, `[up to date]` or the rejection, quoted line by line under `[harness]` lines.

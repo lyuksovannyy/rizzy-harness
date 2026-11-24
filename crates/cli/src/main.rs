@@ -923,6 +923,9 @@ fn agentic_tools(
     // (X.27 step 4, PLAN.md T101): offered only in a turn the master named
     // a target for, on a node whose node.toml pushes to that host.
     tools.push(Arc::new(harness_tools::Push));
+    // And opening a pull request there (PLAN.md T102): the master makes the
+    // call; the node shows the card.
+    tools.push(Arc::new(harness_tools::PullRequest));
     tools
 }
 

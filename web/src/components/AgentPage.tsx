@@ -122,6 +122,11 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
         label: "Push to the repository",
         hint: "In a chat of a project cloned from a forge: pushes one branch back to that repository with your connection, after you allow each push on its card (every time, in every approval mode, Auto included)",
       },
+      {
+        key: "pull_requests",
+        label: "Open pull requests",
+        hint: "In a chat of a project cloned from a forge: opens a pull request (GitLab: a merge request) in that repository with your connection, after you allow each one on its card showing its branches, title and description (every time, in every approval mode)",
+      },
       { key: "delegate", label: "Launch sub-agents", hint: "Hands sub-tasks to the agents available as sub-agents" },
       {
         key: "background_subagents",
@@ -144,6 +149,7 @@ export const NEW_FEATURES: AgentFeatures = {
   recall: false,
   board: false,
   push: false,
+  pull_requests: false,
   web: true,
   read_files: false,
   edit_files: false,

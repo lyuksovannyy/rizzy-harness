@@ -24,6 +24,7 @@ mod favicon;
 pub mod files;
 pub mod folder_preview;
 pub mod forge;
+pub mod forge_pr;
 pub mod forge_push;
 pub mod forge_repos;
 mod forks;
@@ -778,6 +779,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         // The credential for the node's own push, which the master checked
         // against the owner's Allow it relayed (`forge_push`).
         | MasterToNode::PushCredentialResult { .. }
+        // The answer to the node's own pull request: nothing is run there.
+        | MasterToNode::PullRequestResult { .. }
         // A read of two checkpoints: no event, no work.
         | MasterToNode::Diff { .. }
         // A read of a command's output for the strip: no event.
@@ -1773,6 +1776,11 @@ impl Master {
                 session_id,
                 approval_id,
             } => forge_push::handle(self, node_id, req_id, session_id, approval_id),
+            NodeToMaster::PullRequest {
+                req_id,
+                session_id,
+                approval_id,
+            } => forge_pr::handle(self, node_id, req_id, session_id, approval_id),
             NodeToMaster::ConnectorCancel { req_id } => {
                 connectors::call::cancel(self, node_id, &req_id)
             }

@@ -163,6 +163,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::SkillResult { .. }
         | MasterToNode::ConnectorResult { .. }
         | MasterToNode::PushCredentialResult { .. }
+        | MasterToNode::PullRequestResult { .. }
         | MasterToNode::Diff { .. }
         | MasterToNode::BackgroundOutput { .. }
         | MasterToNode::Files { .. }
@@ -274,6 +275,8 @@ pub(crate) struct Inner {
     pub(crate) boards: board::Pending,
     /// Pushes waiting for their credential (X.27 step 4, PLAN.md T101).
     pub(crate) pushes: session::push::Pending,
+    /// Pull requests waiting for the master's answer (PLAN.md T102).
+    pub(crate) prs: session::push::PrPending,
     /// Room for the push being run: one at a time on the node.
     pub(crate) push_slots: Arc<tokio::sync::Semaphore>,
     /// Pushes reading the folder for their card at once (two; they hold no
@@ -728,6 +731,7 @@ impl NodeRuntime {
             docs_pending: Default::default(),
             boards: Default::default(),
             pushes: Default::default(),
+            prs: Default::default(),
             push_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             push_previews: Arc::new(tokio::sync::Semaphore::new(2)),
             stored_skills: Default::default(),
@@ -1085,6 +1089,14 @@ impl NodeRuntime {
                 {
                     capabilities.push(harness_protocol::CAP_FORGE_PUSH.into());
                 }
+                // Pull requests the master opens (PLAN.md T102): only an
+                // agentic node whose node.toml does not deny the tool.
+                if self.inner.cfg.profile == harness_core::event::Profile::Agentic
+                    && self.inner.cfg.policy.forge.push
+                    && !self.inner.cfg.policy.denies(harness_core::forge::PR_TOOL)
+                {
+                    capabilities.push(harness_protocol::CAP_FORGE_PR.into());
+                }
                 // A repository's MCP servers (X.36, T82): only with node.toml
                 // `[mcp] project_servers = "ask"`.
                 if self.inner.project_mcp.is_some() {
@@ -1199,6 +1211,14 @@ impl NodeRuntime {
                         token,
                         error,
                     } => this.inner.pushes.answer(&req_id, username, token, error),
+                    // Likewise a pull request's answer (PLAN.md T102).
+                    MasterToNode::PullRequestResult {
+                        req_id,
+                        number,
+                        url,
+                        existed,
+                        error,
+                    } => this.inner.prs.answer(&req_id, number, url, existed, error),
                     // Likewise a stored skill's body (X.34 step B).
                     MasterToNode::SkillResult {
                         req_id,
@@ -2601,6 +2621,16 @@ impl NodeRuntime {
                 error,
             } => {
                 self.inner.pushes.answer(&req_id, username, token, error);
+                Ok(())
+            }
+            MasterToNode::PullRequestResult {
+                req_id,
+                number,
+                url,
+                existed,
+                error,
+            } => {
+                self.inner.prs.answer(&req_id, number, url, existed, error);
                 Ok(())
             }
             MasterToNode::SkillResult {

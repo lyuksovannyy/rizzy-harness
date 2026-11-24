@@ -112,6 +112,7 @@ struct Node {
 async fn node(r: &Rig, policy: NodePolicy) -> Node {
     let mut tools = harness_tools::builtin();
     tools.push(Arc::new(harness_tools::Push));
+    tools.push(Arc::new(harness_tools::PullRequest));
     let cfg = crate::NodeConfig {
         node_id: "n".into(),
         hostname: "test".into(),
@@ -151,7 +152,7 @@ async fn node(r: &Rig, policy: NodePolicy) -> Node {
 fn spec() -> harness_core::agent::AgentSpec {
     serde_json::from_value(serde_json::json!({
         "agent_id": "coder", "name": "Coder", "system_prompt": "", "prompt_hash": "h",
-        "tools": ["push", "read"]
+        "tools": ["push", "pull_request", "read"]
     }))
     .unwrap()
 }
@@ -162,6 +163,7 @@ fn target(host: &str) -> PushTarget {
         full_name: "o/r".into(),
         connection_id: "conn1".into(),
         login: USER.into(),
+        pull_requests: true,
     }
 }
 
@@ -499,7 +501,10 @@ async fn push_is_offered_only_with_a_target_in_a_chats_own_turn_on_a_pushing_nod
 }
 
 /// (g) One push at a time on a node: a second chat's push while the first
-/// waits on a stalled forge is refused at its Allow.
+/// waits on a stalled forge is refused at its Allow. The first push's limit
+/// is long and the test ends it by releasing the stalled forge after the
+/// second chat's assertions, so no time limit races the second turn (CI,
+/// PR 242: a 4 s limit ended the first push before the second Allow).
 #[tokio::test]
 async fn a_second_push_while_one_runs_is_refused() {
     let r = rig();
@@ -510,13 +515,14 @@ async fn a_second_push_while_one_runs_is_refused() {
             ..Default::default()
         },
     );
-    let mut n = node(&r, r.policy(&[stall.host()], true)).await;
+    let mut p = r.policy(&[stall.host()], true);
+    p.limits.clone_timeout_s = 120;
+    let mut n = node(&r, p).await;
     let a = n.create(&r.folder, false, false).await;
     let b = n.create(&r.folder, false, false).await;
     n.prompt(a, Some(target(&stall.host()))).await;
-    // Allow a's card and hand it its credential; it then waits on the forge.
-    let mut allowed = false;
-    while !allowed || stall.seen().is_empty() {
+    // Allow a's card and hand it its credential.
+    loop {
         match n.next().await {
             NodeToMaster::Event { event } if event.session_id == a => {
                 if let Ok(EventKind::ApprovalRequested(x)) = event.typed() {
@@ -533,7 +539,6 @@ async fn a_second_push_while_one_runs_is_refused() {
                 }
             }
             NodeToMaster::PushCredential { req_id, .. } => {
-                allowed = true;
                 n.link
                     .to_node
                     .try_send(MasterToNode::PushCredentialResult {
@@ -543,13 +548,19 @@ async fn a_second_push_while_one_runs_is_refused() {
                         error: None,
                     })
                     .unwrap();
+                break;
             }
             _ => {}
         }
-        if allowed && stall.seen().is_empty() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
     }
+    // a's push is at the forge, which does not answer until released.
+    for _ in 0..3000 {
+        if !stall.seen().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!stall.seen().is_empty(), "a's push never reached the forge");
     n.prompt(b, Some(target(&stall.host()))).await;
     // Its card shows (the slot is taken only after an Allow); the Allow
     // finds the slot taken, and nothing is asked of the master.
@@ -558,10 +569,36 @@ async fn a_second_push_while_one_runs_is_refused() {
     assert!(seen.asked_credential.is_empty(), "{seen:?}");
     let (_, ok, out) = &seen.results[0];
     assert!(!ok && out.contains("another push"), "{out}");
-    // a ends at its time limit.
+    // Now end a's push: the forge closes the connection unanswered.
+    stall.release();
     let seen = n.until_end(a, Answer::Allow, &r.folder).await;
     let (_, ok, out) = &seen.results[0];
-    assert!(!ok && out.contains("clone_timeout_s"), "{out}");
+    assert!(!ok && !out.contains("clone_timeout_s"), "{out}");
+    no_token_in(&seen);
+}
+
+/// A push to a forge that never answers ends at the node's time limit,
+/// with nothing else in the test racing it.
+#[tokio::test]
+async fn a_stalled_push_ends_at_its_time_limit() {
+    let r = rig();
+    let stall = server(
+        &r.root,
+        Mode {
+            stall: true,
+            ..Default::default()
+        },
+    );
+    let mut p = r.policy(&[stall.host()], true);
+    p.limits.clone_timeout_s = 2;
+    let mut n = node(&r, p).await;
+    let a = n.create(&r.folder, false, false).await;
+    n.prompt(a, Some(target(&stall.host()))).await;
+    let seen = n.until_end(a, Answer::Allow, &r.folder).await;
+    assert_eq!(seen.asked_credential.len(), 1, "{seen:?}");
+    let (_, ok, out) = &seen.results[0];
+    assert!(!ok && out.contains("clone_timeout_s = 2 s"), "{out}");
+    no_token_in(&seen);
 }
 
 /// The turn's target gone between the card and the Allow (the check after
@@ -680,4 +717,177 @@ fn spec_as(id: &str) -> harness_core::agent::AgentSpec {
         "tools": ["push", "read"]
     }))
     .unwrap()
+}
+
+// ------------------------------------------------ pull requests (T102)
+
+const PR_SCRIPT: &str = r#"script: [{"tool": "pull_request", "input": {"head": "feat", "title": "Add x", "body": "What changed", "draft": true}}]"#;
+
+/// The tool shows a card with the call's own input in Auto mode, offers no
+/// wider grant, and after the Allow asks the master with the card's
+/// approval id and nothing else; the master's answer is the result.
+/// Denied: nothing is asked.
+#[tokio::test]
+async fn a_pull_request_shows_its_card_and_asks_the_master_by_approval_only() {
+    let r = rig();
+    let mut n = node(&r, r.policy(&["github.com".to_string()], true)).await;
+    assert!(
+        n.caps.iter().any(|c| c == harness_protocol::CAP_FORGE_PR),
+        "{:?}",
+        n.caps
+    );
+    for allow in [true, false] {
+        let sid = n.create(&r.folder, false, false).await;
+        let mut m = PromptMsg::test(sid, PR_SCRIPT);
+        m.agent = Some(spec());
+        m.context = Some(Box::new(harness_core::backend::MasterContext {
+            push: Some(target("github.com")),
+            ..Default::default()
+        }));
+        n.link.to_node.try_send(MasterToNode::Prompt(m)).unwrap();
+        n.ack().await;
+        let (mut cards, mut asked, mut results) = (Vec::new(), Vec::new(), Vec::new());
+        loop {
+            match n.next().await {
+                NodeToMaster::PullRequest {
+                    req_id,
+                    session_id,
+                    approval_id,
+                } => {
+                    assert_eq!(session_id, sid);
+                    asked.push(approval_id);
+                    n.link
+                        .to_node
+                        .try_send(MasterToNode::PullRequestResult {
+                            req_id,
+                            number: Some(7),
+                            url: Some("https://github.com/o/r/pull/7".into()),
+                            existed: false,
+                            error: None,
+                        })
+                        .unwrap();
+                }
+                NodeToMaster::Event { event } if event.session_id == sid => match event.typed() {
+                    Ok(EventKind::ApprovalRequested(a)) => {
+                        assert_eq!(a.tool, "pull_request");
+                        assert!(!a.turn_allow && !a.chat_allow);
+                        assert_eq!(a.input["title"], "Add x");
+                        cards.push(a.approval_id.clone());
+                        n.link
+                            .to_node
+                            .try_send(MasterToNode::ApprovalRespond {
+                                req_id: "x".into(),
+                                session_id: sid,
+                                approval_id: a.approval_id.clone(),
+                                decision: if allow {
+                                    Decision::Allow
+                                } else {
+                                    Decision::Deny
+                                },
+                                note: None,
+                            })
+                            .unwrap();
+                    }
+                    Ok(EventKind::ToolCallFinished(f)) => results.push((f.ok, f.output)),
+                    Ok(EventKind::TurnEnded(_)) => break,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        assert_eq!(cards.len(), 1);
+        if allow {
+            assert_eq!(asked, cards, "the request names the card's approval");
+            let (ok, out) = &results[0];
+            assert!(
+                *ok && out.contains("#7") && out.contains("| https://github.com/o/r/pull/7"),
+                "{out}"
+            );
+        } else {
+            assert!(asked.is_empty());
+            assert!(!results[0].0);
+        }
+    }
+}
+
+/// A node whose node.toml denies the tool announces nothing for it and
+/// never offers it; a turn without a target never offers it either.
+#[tokio::test]
+async fn a_pull_request_is_not_offered_where_denied_or_without_a_target() {
+    let r = rig();
+    let mut p = r.policy(&["github.com".to_string()], true);
+    p.denied_tools = vec!["pull_request".into()];
+    let mut n = node(&r, p).await;
+    assert!(!n.caps.iter().any(|c| c == harness_protocol::CAP_FORGE_PR));
+    for target_given in [true, false] {
+        let sid = n.create(&r.folder, false, false).await;
+        let mut m = PromptMsg::test(sid, PR_SCRIPT);
+        m.agent = Some(spec());
+        m.context = Some(Box::new(harness_core::backend::MasterContext {
+            push: target_given.then(|| target("github.com")),
+            ..Default::default()
+        }));
+        n.link.to_node.try_send(MasterToNode::Prompt(m)).unwrap();
+        n.ack().await;
+        let seen = n.until_end(sid, Answer::Allow, &r.folder).await;
+        assert!(seen.cards.is_empty(), "{seen:?}");
+        let (_, ok, out) = &seen.results[0];
+        assert!(!ok && out.contains("unknown tool"), "{out}");
+    }
+}
+
+/// `[forge] push = false` withholds pull requests too (the node sends
+/// nothing to a forge on an agent's behalf): no capability, not offered.
+#[tokio::test]
+async fn forge_push_off_withholds_pull_requests_too() {
+    let r = rig();
+    let mut n = node(&r, r.policy(&["github.com".to_string()], false)).await;
+    assert!(
+        !n.caps.iter().any(|c| c == harness_protocol::CAP_FORGE_PR),
+        "{:?}",
+        n.caps
+    );
+    let sid = n.create(&r.folder, false, false).await;
+    let mut m = PromptMsg::test(sid, PR_SCRIPT);
+    m.agent = Some(spec());
+    m.context = Some(Box::new(harness_core::backend::MasterContext {
+        push: Some(target("github.com")),
+        ..Default::default()
+    }));
+    n.link.to_node.try_send(MasterToNode::Prompt(m)).unwrap();
+    n.ack().await;
+    let seen = n.until_end(sid, Answer::Allow, &r.folder).await;
+    assert!(seen.cards.is_empty(), "{seen:?}");
+    let (_, ok, out) = &seen.results[0];
+    assert!(!ok && out.contains("unknown tool"), "{out}");
+}
+
+/// (Review R9) A target that does not say the master opens pull requests
+/// (an older master's, which has no such service) offers no
+/// `pull_request`: the node never sends a request that master would not
+/// know. Push in that turn is unchanged.
+#[tokio::test]
+async fn a_target_without_pull_requests_offers_none() {
+    let r = rig();
+    let mut n = node(&r, r.policy(&["github.com".to_string()], true)).await;
+    let sid = n.create(&r.folder, false, false).await;
+    let mut m = PromptMsg::test(sid, PR_SCRIPT);
+    m.agent = Some(spec());
+    let old = PushTarget {
+        pull_requests: false,
+        ..target("github.com")
+    };
+    // As an older master writes it: no `pull_requests` key.
+    let wire = serde_json::to_value(&old).unwrap();
+    assert!(wire.get("pull_requests").is_none(), "{wire}");
+    m.context = Some(Box::new(harness_core::backend::MasterContext {
+        push: Some(serde_json::from_value(wire).unwrap()),
+        ..Default::default()
+    }));
+    n.link.to_node.try_send(MasterToNode::Prompt(m)).unwrap();
+    n.ack().await;
+    let seen = n.until_end(sid, Answer::Allow, &r.folder).await;
+    assert!(seen.cards.is_empty(), "{seen:?}");
+    let (_, ok, out) = &seen.results[0];
+    assert!(!ok && out.contains("unknown tool"), "{out}");
 }

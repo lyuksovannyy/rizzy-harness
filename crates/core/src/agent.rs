@@ -302,7 +302,8 @@ impl AgentSpec {
     pub fn allows_tool(&self, tool: &str) -> bool {
         // `push` acts as the person on their forge account (X.27 step 4):
         // only an agent that names it, never through `all`.
-        if tool == crate::forge::PUSH_TOOL && matches!(self.tools, ToolSelection::All(_)) {
+        if crate::forge::FORGE_TOOLS.contains(&tool) && matches!(self.tools, ToolSelection::All(_))
+        {
             return false;
         }
         let mcp = tool.starts_with(MCP_PREFIX);
@@ -505,6 +506,7 @@ mod tests {
             ..listed(&[], &[])
         };
         assert!(every.allows_tool("bash") && !every.allows_tool(crate::forge::PUSH_TOOL));
+        assert!(!every.allows_tool(crate::forge::PR_TOOL));
         assert!(listed(&["bash", "push"], &[]).allows_tool("push"));
         assert!(!listed(&["bash", "push"], &["push"]).allows_tool("push"));
         assert!(!listed(&["bash"], &[]).allows_tool("push"));

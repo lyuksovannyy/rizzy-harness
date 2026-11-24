@@ -66,8 +66,8 @@ pub struct State {
     used: Mutex<HashMap<(SessionId, String), Instant>>,
     /// Chats with a request being answered.
     busy: Mutex<HashSet<SessionId>>,
-    /// Credentials handed out per chat in the last hour.
-    hour: Mutex<HashMap<SessionId, VecDeque<Instant>>>,
+    /// Forge actions released per chat and tool in the last hour.
+    hour: Mutex<HashMap<(SessionId, String), VecDeque<Instant>>>,
 }
 
 /// Make room for one more entry in `m` (at most [`KEPT`]): the oldest goes
@@ -136,28 +136,29 @@ impl State {
     fn give_back(&self, sid: SessionId, approval_id: &str) {
         lock(&self.used).remove(&(sid, approval_id.to_string()));
         lock(&self.clicks).insert((sid, approval_id.to_string()), Instant::now());
-        if let Some(q) = lock(&self.hour).get_mut(&sid) {
+        if let Some(q) = lock(&self.hour).get_mut(&(sid, PUSH_TOOL.to_string())) {
             q.pop_back();
         }
     }
 
-    fn room_this_hour(&self, sid: SessionId) -> bool {
+    fn room_this_hour(&self, sid: SessionId, tool: &str, per_hour: usize) -> bool {
+        let key = (sid, tool.to_string());
         let mut h = lock(&self.hour);
-        if h.len() >= KEPT && !h.contains_key(&sid) {
+        if h.len() >= KEPT && !h.contains_key(&key) {
             h.retain(|_, q| {
                 q.back()
                     .is_some_and(|t| t.elapsed() < Duration::from_secs(3600))
             });
             evict_oldest(&mut h, |q| q.back().copied().unwrap_or_else(Instant::now));
         }
-        let q = h.entry(sid).or_default();
+        let q = h.entry(key).or_default();
         while q
             .front()
             .is_some_and(|t| t.elapsed() >= Duration::from_secs(3600))
         {
             q.pop_front();
         }
-        if q.len() >= PER_HOUR {
+        if q.len() >= per_hour {
             return false;
         }
         q.push_back(Instant::now());
@@ -212,9 +213,14 @@ async fn decide(
         || row.parent_id.is_some()
         || row.incognito
         || row.profile.as_deref() == Some("chat")
-        || !agent.allows_tool(PUSH_TOOL)
-        || !m.node_has(&row.node_id, harness_protocol::CAP_FORGE_PUSH)
     {
+        return None;
+    }
+    let push =
+        agent.allows_tool(PUSH_TOOL) && m.node_has(&row.node_id, harness_protocol::CAP_FORGE_PUSH);
+    let pull_requests = agent.allows_tool(harness_core::forge::PR_TOOL)
+        && m.node_has(&row.node_id, harness_protocol::CAP_FORGE_PR);
+    if !push && !pull_requests {
         return None;
     }
     let owner = row.owner_id.clone()?;
@@ -245,6 +251,7 @@ async fn decide(
             full_name,
             connection_id: found.connection_id,
             login: found.login,
+            pull_requests,
         },
         owner,
     ))
@@ -272,8 +279,8 @@ impl Master {
         // The card as the page draws it: its call a `push`, its approval a
         // `push`, and not answered yet (review F2, F3).
         if let Some((tool, call_tool, resolved)) = card
-            && tool == PUSH_TOOL
-            && call_tool.as_deref() == Some(PUSH_TOOL)
+            && harness_core::forge::FORGE_TOOLS.contains(&tool.as_str())
+            && call_tool.as_deref() == Some(tool.as_str())
             && !resolved
         {
             self.inner.pushes.click(sid, approval_id.to_string());
@@ -317,24 +324,52 @@ pub fn handle(m: &Master, node_id: &str, req_id: String, sid: SessionId, approva
 }
 
 /// Releases a chat's request slot however the answer ends.
-struct Busy<'a>(&'a State, SessionId);
+pub(crate) struct Busy(Master, SessionId);
 
-impl Drop for Busy<'_> {
+impl Drop for Busy {
     fn drop(&mut self) {
-        lock(&self.0.busy).remove(&self.1);
+        lock(&self.0.inner.pushes.busy).remove(&self.1);
     }
 }
 
-/// The login and token for one push, or why not.
-pub async fn answer(
+/// A forge action the master released for one Allow (push's credential, a
+/// pull request): who, where, the card's call input, and the chat's slot.
+pub(crate) struct Released {
+    pub owner: String,
+    pub target: PushTarget,
+    /// The input of the one `tool_call_started` the approval names, as the
+    /// master's own mirror holds it (what the page drew on the card).
+    pub input: serde_json::Value,
+    pub login: String,
+    pub _busy: Busy,
+}
+
+/// The checks every master-released forge action passes before anything
+/// is opened or sent, for an approval of `tool` (`push`, `pull_request`):
+/// the requesting node runs the session (with `cap`); a top-level,
+/// non-temporary chat; one request of the chat at a time; the approval and
+/// its one call both naming `tool`, each id unique in the log and within
+/// the id rule (before the click is taken: a request for another tool
+/// spends none); an Allow the master relayed from the chat's owner for
+/// that approval id, once; the chat's target and owner unchanged; the open
+/// turn not a callback, `tool` not withheld, the agent with the switch
+/// (`switch`); no one else acted in the chat; the owner's account, level
+/// and membership as they are now; the project's source, the host and the
+/// connection unchanged; then the hour's room for `tool` (`per_hour`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn release(
     m: &Master,
     node_id: &str,
     sid: SessionId,
     approval_id: &str,
-) -> Result<(String, harness_core::Secret<String>, serde_json::Value), String> {
+    tool: &str,
+    cap: &str,
+    switch: fn(&harness_agents::Features) -> bool,
+    per_hour: usize,
+) -> Result<Released, String> {
     let st = &m.inner.pushes;
-    if !m.node_has(node_id, harness_protocol::CAP_FORGE_PUSH) {
-        return Err("this node does not push".into());
+    if !m.node_has(node_id, cap) {
+        return Err(format!("this node does not offer `{tool}`"));
     }
     let refused = || "no such session on this node".to_string();
     let row = m
@@ -346,17 +381,31 @@ pub async fn answer(
         .flatten()
         .ok_or_else(refused)?;
     if row.node_id != node_id {
-        tracing::warn!(node = %node_id, session = %sid, "a node asked for a push credential of another node's session");
+        tracing::warn!(node = %node_id, session = %sid, tool, "a node asked for a forge action of another node's session");
         return Err(refused());
     }
     if row.parent_id.is_some() || row.incognito {
-        return Err("push is only for a project chat's own turn".into());
+        return Err(format!("`{tool}` is only for a project chat's own turn"));
     }
     // One at a time per chat.
     if !lock(&st.busy).insert(sid) {
-        return Err("another push of this chat is being answered".into());
+        return Err("another request of this chat is being answered".into());
     }
-    let _busy = Busy(st, sid);
+    let busy = Busy(m.clone(), sid);
+    // The card this tool's card as the page draws it (its call's tool),
+    // each id unique, and the call's input from this mirror: checked before
+    // the click is taken, so a request for another tool spends none
+    // (review R1).
+    let a = approval_id.to_string();
+    let call = m
+        .inner
+        .mirror
+        .call(move |s| s.approval_call(sid, &a))
+        .await
+        .ok()
+        .flatten()
+        .filter(|c| c.tool == tool && c.call_tool == tool)
+        .ok_or_else(|| format!("that card is not a `{tool}` card"))?;
     // The Allow the master relayed, once.
     if !st.take_click(sid, approval_id) {
         return Err(
@@ -368,19 +417,7 @@ pub async fn answer(
     let (target, owner) = lock(&st.offers)
         .get(&sid)
         .map(|(t, o, _)| (t.clone(), o.clone()))
-        .ok_or("this chat's turn has no push target")?;
-    // The card still a push card as the page draws it (its call's tool).
-    let a = approval_id.to_string();
-    let card = m
-        .inner
-        .mirror
-        .call(move |s| s.approval_card(sid, &a))
-        .await
-        .ok()
-        .flatten();
-    if !card.is_some_and(|(t, c, _)| t == PUSH_TOOL && c.as_deref() == Some(PUSH_TOOL)) {
-        return Err("that card is not a push card".into());
-    }
+        .ok_or("this chat's turn has no forge target")?;
     if row.owner_id.as_deref() != Some(owner.as_str()) {
         return Err("the chat's owner changed".into());
     }
@@ -391,18 +428,18 @@ pub async fn answer(
         .await
         .ok()
         .flatten()
-        .ok_or("push is not available outside a turn")?;
-    if open.callback || open.withheld.iter().any(|t| t == PUSH_TOOL) {
-        return Err("push is not available in this turn".into());
+        .ok_or_else(|| format!("`{tool}` is not available outside a turn"))?;
+    if open.callback || open.withheld.iter().any(|t| t == tool) {
+        return Err(format!("`{tool}` is not available in this turn"));
     }
     let r = m.resolver_for(row.workspace_id.as_deref()).await;
     if !open
         .agent_id
         .as_deref()
         .and_then(|id| r.agents().get(id))
-        .is_some_and(|a| a.features.push)
+        .is_some_and(|a| switch(&a.features))
     {
-        return Err("push is not available to this agent".into());
+        return Err(format!("`{tool}` is not available to this agent"));
     }
     if m.chat_foreign(sid).await {
         return Err("someone other than the chat's owner acted in it".into());
@@ -446,24 +483,51 @@ pub async fn answer(
     if conn.host != target.host {
         return Err("the connection is for another host".into());
     }
-    if !st.room_this_hour(sid) {
+    if !st.room_this_hour(sid, tool, per_hour) {
         return Err(format!(
-            "this chat had {PER_HOUR} push credentials in the last hour; try again later"
+            "this chat used `{tool}` {per_hour} times in the last hour; try again later"
         ));
     }
+    Ok(Released {
+        owner,
+        target,
+        input: call.input,
+        login: conn.login,
+        _busy: busy,
+    })
+}
+
+/// The login and token for one push, or why not.
+pub async fn answer(
+    m: &Master,
+    node_id: &str,
+    sid: SessionId,
+    approval_id: &str,
+) -> Result<(String, harness_core::Secret<String>, serde_json::Value), String> {
+    let r = release(
+        m,
+        node_id,
+        sid,
+        approval_id,
+        PUSH_TOOL,
+        harness_protocol::CAP_FORGE_PUSH,
+        |f| f.push,
+        PER_HOUR,
+    )
+    .await?;
     let token = m
-        .connection_token(&owner, &target.connection_id)
+        .connection_token(&r.owner, &r.target.connection_id)
         .await
         .map_err(|_| "the server's sealed storage could not open the token".to_string())?
         .ok_or("the connection was removed")?;
     let detail = serde_json::json!({
-        "user_id": owner,
+        "user_id": r.owner,
         "session_id": sid,
-        "connection_id": target.connection_id,
-        "host": target.host,
-        "full_name": target.full_name,
+        "connection_id": r.target.connection_id,
+        "host": r.target.host,
+        "full_name": r.target.full_name,
     });
-    Ok((conn.login, token, detail))
+    Ok((r.login, token, detail))
 }
 
 /// A chat's request place, held by a test (`Master::hold_push_request`).

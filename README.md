@@ -2043,8 +2043,8 @@ without a click. The picker in the composer shows it and offers four, each
 with one line saying what runs unasked:
 
 - **Auto** (the default for every new chat, sandbox and host alike, and for
-  routines that set none): nothing asks, except a push to a forge, which asks
-  in every mode (see "Pushing to the repository"). In a sandbox chat the sandbox is
+  routines that set none): nothing asks, except a push to a forge or opening
+  a pull request, which ask in every mode (see "Pushing to the repository"). In a sandbox chat the sandbox is
   the boundary (its own processes, its own file view). **In a host chat on
   Auto every command runs as the node's own user, with no sandbox and no
   question asked**: nothing stands between an agent that a web page or a
@@ -2277,7 +2277,7 @@ dir = "~/rizzy-projects"             # where "New project" makes folders (see "P
 
 [forge]
 clone = true                         # clone repositories into new project folders (see "Cloning a repository"); false: never
-push = true                          # let the push tool push a cloned project's branch back to its repository (see "Pushing to the repository"); false: never
+push = true                          # let the push tool push a cloned project's branch back to its repository, and the pull_request tool open pull requests there (see "Pushing to the repository", "Opening a pull request"); false: neither
 hosts = ["github.com", "gitlab.com"] # the only hosts this node clones from, exactly as written: a lower-case name or IPv4 address, ":<port>" only where you add one
 
 [web]                                # a REMOTE node's web tools for Agentic chats; off unless you say so. On the server's own node a table here only takes away (see "Web tools in Agentic chats")
@@ -4484,6 +4484,46 @@ another, or a push card the server knows no target for, offers only Deny.
 A node that is compromised and runs your chat can get the token for one push
 you allow: that token reaches whatever its scope on the forge reaches, so give
 the connection only the scope you need.
+
+**Opening a pull request.** An agent with the **Open pull requests** switch
+(on the agent's page; on for the built-in Software Developer and Senior
+Teamlead; a custom or file agent has it only when it names `pull_request`)
+can ask to open a pull request (GitLab: a merge request) in the repository
+the project was cloned from: from a branch already on the forge (push it
+first) into a base branch of the same repository (default: the repository's
+default branch), with a title, a description and whether it is a draft. No
+other repository and no fork. **Every one asks**, in every mode, Auto
+included: the card says "Opens a pull request in `<host>/<owner>/<name>` as
+`<login>`" (from the server), "Into the repository's default branch (asked
+from the forge after you allow)" when the agent named no base, and the
+branches, the whole title and the description exactly as the agent wrote
+them, as raw text. Nothing on it is the node's own text. A long description
+is collapsed in the middle; while it is, the card offers **Show all to
+allow** in Allow's place, and Allow appears only after every collapsed part
+was shown once (and waits a moment, so the same click doubled does not
+answer). The same holds for a push's card. **The description is Markdown
+that the forge renders** for everyone who opens the pull request: an
+`@name` notifies that person, `Closes #12` closes that issue when the pull
+request is merged, and an image in it is fetched by each viewer's browser
+from wherever it points (GitHub proxies images; GitLab, Gitea and Forgejo
+may not, so the image's server sees who looked). The card shows the raw
+text, not how the forge will draw it: read it as what will be posted. The server, not the node,
+opens it, with your connection: from exactly the request the card showed
+(it reads that request from its own copy of the chat), once per card, at
+most five per chat in an hour. The answer is the pull request's number and
+address (shown as plain text in the tool's result, never made a link; an
+address that is not https on the project's source host, on its default port
+or the port of the host entry's API there, with no user name, at most 300
+characters, is left out and only the number given), the forge's own words when it refuses (no commits between the
+branches, a missing scope), or that one is already open (with its number and
+address, from one lookup on GitHub and GitLab). A draft is GitHub's own
+flag, and on GitLab, Gitea and Forgejo a `Draft: ` or `WIP: ` title prefix
+(not added twice; a title that would then pass 255 characters is refused).
+The token never goes to the node for this. On a node, `[forge] push = false`
+turns it off together with pushing, and `denied_tools = ["pull_request"]`
+turns off only this tool; the node's `[forge] hosts` list does not limit
+pull requests (the server makes that call, to the project's source host).
+Details: `docs/forge-pr.md`.
 
 ## Custom connectors: a workspace's remote MCP servers
 

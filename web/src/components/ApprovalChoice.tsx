@@ -27,6 +27,11 @@ export const GUARD_MS = 700;
  * leaves its buttons to the composer's place. */
 export const Held = createContext<string | null>(null);
 
+/** The tools that act as the person on a forge (`ToolRisk::External`, PLAN.md
+ * T101, T102): their card draws nothing the node wrote (no reason line) and
+ * cannot be allowed while part of the request is collapsed. */
+const FORGE_TOOLS = new Set(["push", "pull_request"]);
+
 /** The longest note with a denial (`policy::MAX_DENY_NOTE`). */
 const MAX_DENY_NOTE = 2000;
 
@@ -68,7 +73,7 @@ export function ApprovalChoice({
   // A card whose approval id or call was announced twice (review N1).
   const reused = ap.invalid === true;
   // A push card's destination is the server's, never the node's text.
-  const push = !mismatch && !reused && item.tool === "push";
+  const push = !mismatch && !reused && (item.tool === "push" || item.tool === "pull_request");
   const [target, setTarget] = useState<{ host: string; full_name: string; login: string } | null | undefined>(
     undefined,
   );
@@ -93,6 +98,31 @@ export function ApprovalChoice({
   const [openFields, toggleField] = useOpenFields();
   const shown = useShown(item);
   const notExpanded = unseen(shown, openFields);
+  // A forge card is allowed only after every collapsed part was shown once
+  // (review R6): "Show all to allow" opens them, and the Allow that then
+  // appears waits GUARD_MS so the same click, doubled, cannot answer.
+  const forge = FORGE_TOOLS.has(item.tool) || FORGE_TOOLS.has(ap.tool ?? "");
+  const [everOpened, setEverOpened] = useState<ReadonlySet<string>>(() => new Set());
+  const onToggle = useCallback(
+    (k: string) => {
+      toggleField(k);
+      setEverOpened((s) => (s.has(k) ? s : new Set(s).add(k)));
+    },
+    [toggleField],
+  );
+  const collapsed = shown.filter((f) => f.kind === "text" && f.cut).map((f) => f.key);
+  const mustShow = forge ? collapsed.filter((k) => !everOpened.has(k)) : [];
+  const [settling, setSettling] = useState(false);
+  useEffect(() => {
+    if (!settling) return;
+    const id = setTimeout(() => setSettling(false), GUARD_MS);
+    return () => clearTimeout(id);
+  }, [settling]);
+  const showAll = () => {
+    for (const k of mustShow) if (!openFields.has(k)) toggleField(k);
+    setEverOpened((s) => new Set([...s, ...mustShow]));
+    setSettling(true);
+  };
   const [armed, setArmed] = useState(!place);
   useEffect(() => {
     if (!place) return;
@@ -158,6 +188,7 @@ export function ApprovalChoice({
 
   const decide = async (d: Decision) => {
     if (!armed) return;
+    if (d !== "deny" && (settling || mustShow.length > 0)) return;
     setBusy(true);
     setErr(null);
     try {
@@ -178,7 +209,9 @@ export function ApprovalChoice({
     }
   };
   const gate = armed ? undefined : true;
+  const allowGate = armed && !settling ? undefined : true;
   const seen = notExpanded > 0 ? `unseen-${ap.approval_id}` : undefined;
+  const noBase = item.tool === "pull_request" && push && (item.input as Record<string, unknown> | null)?.base == null;
   return (
     <div
       className={`approval${place ? " approval-choice" : ""}`}
@@ -223,7 +256,15 @@ export function ApprovalChoice({
         )}
         {push && target && (
           <div className="approval-push-target" role="note">
-            {t("approval.pushTo", { target: `${target.host}/${target.full_name}`, login: target.login })}
+            {t(item.tool === "pull_request" ? "approval.prIn" : "approval.pushTo", {
+              target: `${target.host}/${target.full_name}`,
+              login: target.login,
+            })}
+          </div>
+        )}
+        {noBase && (
+          <div className="approval-push-target" role="note">
+            {t("approval.prDefaultBase")}
           </div>
         )}
         {push && target === null && (
@@ -232,17 +273,24 @@ export function ApprovalChoice({
           </div>
         )}
         {lead}
-        <CallInput fields={shown} cwd={cwd} open={openFields} onToggle={toggleField} />
+        <CallInput fields={shown} cwd={cwd} open={openFields} onToggle={onToggle} />
       </div>
       {place && more && (
         <div className="approval-more small" aria-hidden="true">
           {t("approval.more")}
         </div>
       )}
-      <div className="approval-reason">{showHidden(ap.reason)}</div>
-      {/* Allow stays usable while part of the input is collapsed; this
-          line says how much of it the click approves unseen. */}
-      {notExpanded > 0 && (
+      {/* The reason is the node's text: a forge card says what it does from
+          the server's record and the call's own input instead (review R6). */}
+      {!forge && <div className="approval-reason">{showHidden(ap.reason)}</div>}
+      {/* Allow stays usable while part of the input is collapsed (not on a
+          forge card); this line says how much of it the click approves unseen. */}
+      {forge && mustShow.length > 0 && !noAllow && (
+        <div className="call-unseen" id={seen} role="note">
+          {t("approval.showToAllow", { n: fmt(notExpanded) })}
+        </div>
+      )}
+      {!forge && notExpanded > 0 && (
         <div className="call-unseen" id={seen} role="note">
           You are approving {fmt(notExpanded)} characters you have not expanded.
         </div>
@@ -255,9 +303,20 @@ export function ApprovalChoice({
         </div>
       )}
       <div className={`approval-actions row wrap${armed ? "" : " guarded"}`}>
-        {!noAllow && (
+        {!noAllow && mustShow.length > 0 && (
+          <button className="primary" disabled={busy} aria-disabled={gate} aria-describedby={seen} onClick={() => armed && showAll()}>
+            {t("approval.showAll")}
+          </button>
+        )}
+        {!noAllow && mustShow.length === 0 && (
           <>
-            <button className="primary" disabled={busy} aria-disabled={gate} aria-describedby={seen} onClick={() => decide("allow")}>
+            <button
+              className="primary"
+              disabled={busy}
+              aria-disabled={forge ? allowGate : gate}
+              aria-describedby={seen}
+              onClick={() => decide("allow")}
+            >
               Allow once
             </button>
             {ap.turn_allow && (

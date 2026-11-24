@@ -615,6 +615,64 @@ pub(crate) async fn get_url(
     Ok((headers, body))
 }
 
+/// POST `body` as JSON to `url` (built by the caller from `h`'s
+/// `api_base`) with the listing's client rules: the status and at most
+/// `max` bytes of the answer, success or not (a forge says why it refused
+/// a pull request in its error body; the caller bounds and cleans it).
+/// A 401 or 403 is [`CheckError::Refused`] with no body read.
+pub(crate) async fn post_json(
+    c: &reqwest::Client,
+    h: &ForgeHost,
+    url: reqwest::Url,
+    headers: HeaderMap,
+    body: &serde_json::Value,
+    max: usize,
+) -> Result<(u16, Vec<u8>), CheckError> {
+    let unreachable = |why| CheckError::Unreachable(h.host.clone(), why);
+    let r = c
+        .post(url)
+        .headers(headers)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| {
+            unreachable(if e.is_timeout() {
+                "it did not answer in time"
+            } else if e.is_redirect() {
+                "it redirected too often"
+            } else {
+                "the connection failed (or the address is not allowed)"
+            })
+        })?;
+    let status = r.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(CheckError::Refused(h.host.clone(), status.as_u16()));
+    }
+    if status.is_redirection() {
+        return Err(CheckError::Status(h.host.clone(), status.as_u16()));
+    }
+    let too_large = || CheckError::BadAnswer(h.host.clone(), "it is too large");
+    if r.content_length().is_some_and(|n| n > max as u64) {
+        return Err(too_large());
+    }
+    let mut out = Vec::new();
+    let mut s = r.bytes_stream();
+    while let Some(chunk) = s.next().await {
+        let chunk = chunk.map_err(|e| {
+            unreachable(if e.is_timeout() {
+                "it did not finish its answer in time"
+            } else {
+                "its answer broke off"
+            })
+        })?;
+        if out.len() + chunk.len() > max {
+            return Err(too_large());
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok((status.as_u16(), out))
+}
+
 /// Ask `h` whom `token` belongs to.
 pub async fn who_am_i(
     h: &ForgeHost,
