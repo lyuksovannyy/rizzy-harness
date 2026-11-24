@@ -12,7 +12,9 @@ use std::time::Duration;
 use harness_core::SessionId;
 use harness_core::forge::PushTarget;
 use harness_master::PromptOpts;
-use harness_protocol::{CAP_FORGE_PUSH, CAP_PROJECTS, MasterToNode, NodeToMaster, PromptMsg};
+use harness_protocol::{
+    CAP_FORGE_PR, CAP_FORGE_PUSH, CAP_PROJECTS, MasterToNode, NodeToMaster, PromptMsg,
+};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
@@ -20,7 +22,7 @@ use super::forge_clone_http::{
     T, TOKEN_A, assert_no_token_anywhere, clone_body, connect, fake, member, ready, req, start,
 };
 
-struct Chat {
+pub(crate) struct Chat {
     t: T,
     alice: String,
     alice_id: String,
@@ -31,9 +33,17 @@ struct Chat {
 
 /// Alice's connection, a project cloned with it on a node that pushes, and
 /// an agentic chat of hers in that project.
-async fn chat() -> Chat {
+pub(crate) async fn chat() -> Chat {
     let t = start().await;
-    let (l, node) = fake("pusher", &[CAP_PROJECTS, "forge-clone:600", CAP_FORGE_PUSH]);
+    let (l, node) = fake(
+        "pusher",
+        &[
+            CAP_PROJECTS,
+            "forge-clone:600",
+            CAP_FORGE_PUSH,
+            CAP_FORGE_PR,
+        ],
+    );
     t.master.add_link(l, false).await.unwrap();
     let (alice, alice_id) = member(&t, "alice").await;
     let conn = connect(&t, &alice, TOKEN_A).await;
@@ -739,4 +749,247 @@ async fn a_push_card_with_a_call_id_outside_the_rule_gets_nothing() {
     c.started("c#1", "push").await;
     c.requested("v1", "c#1", "push").await;
     assert!(!c.allowed_gets_token("v1").await);
+}
+
+// ------------------------------------------------ pull requests (T102)
+
+/// What the master answered a `forge.pull_request`.
+#[derive(Debug)]
+struct PrAnswer {
+    number: Option<u64>,
+    url: Option<String>,
+    existed: bool,
+    error: Option<String>,
+}
+
+impl Chat {
+    /// A `pull_request` card: the call with `input`, the approval naming it
+    /// (its own `input` field `shown`, which the page does not draw).
+    async fn pr_card(&self, approval: &str, call: &str, input: Value, shown: Value) {
+        if self.open_turn() != Some("t1".to_string()) {
+            self.card("t1", "push", "warm").await;
+        }
+        self.emit(
+            "tool_call_started",
+            json!({"turn_id": "t1", "call_id": call, "tool": "pull_request", "input": input}),
+        )
+        .await;
+        self.emit(
+            "approval_requested",
+            json!({"approval_id": approval, "call_id": call, "tool": "pull_request",
+                   "input": shown, "reason": "open a pull request"}),
+        )
+        .await;
+    }
+
+    async fn open_pr(&self, approval: &str) -> PrAnswer {
+        let req_id = harness_core::new_id();
+        self.node
+            .tx
+            .send(NodeToMaster::PullRequest {
+                req_id: req_id.clone(),
+                session_id: self.sid,
+                approval_id: approval.into(),
+            })
+            .await
+            .unwrap();
+        for _ in 0..1500 {
+            let found = self.node.seen.lock().unwrap().iter().find_map(|m| match m {
+                MasterToNode::PullRequestResult {
+                    req_id: r,
+                    number,
+                    url,
+                    existed,
+                    error,
+                } if *r == req_id => Some(PrAnswer {
+                    number: *number,
+                    url: url.clone(),
+                    existed: *existed,
+                    error: error.clone(),
+                }),
+                _ => None,
+            });
+            if let Some(f) = found {
+                return f;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no answer to the pull request");
+    }
+
+    /// Card, Allow by the owner, the node's request.
+    async fn pr(&self, approval: &str, input: Value) -> PrAnswer {
+        let call = format!("call{approval}");
+        self.pr_card(approval, &call, input.clone(), input).await;
+        assert_eq!(
+            self.click(&self.alice, approval, "allow").await,
+            StatusCode::OK
+        );
+        self.open_pr(approval).await
+    }
+}
+
+fn honest() -> Value {
+    json!({"head": "feat", "base": "main", "title": "Add x", "body": "What changed.\n\n- a", "draft": true})
+}
+
+/// The pull request is made from the input of the card's call as the
+/// master's mirror holds it, not from the approval's own `input` (which a
+/// lying node can set apart from what the page draws), with the owner's
+/// token, and answered with its number and address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pull_request_is_made_from_the_calls_input_in_the_mirror() {
+    let c = running().await;
+    let evil = json!({"head": "feat", "base": "main", "title": "EVIL", "body": "EVIL"});
+    c.pr_card("p1", "cp1", honest(), evil).await;
+    assert_eq!(c.click(&c.alice, "p1", "allow").await, StatusCode::OK);
+    let a = c.open_pr("p1").await;
+    assert_eq!(a.number, Some(7), "{a:?}");
+    assert!(a.url.unwrap().ends_with("/ada/secret/pull/7"));
+    let sent = c.t.forge.pulls.lock().unwrap().clone();
+    assert_eq!(
+        sent,
+        vec![json!({"title": "Add x", "head": "feat", "base": "main",
+                    "body": "What changed.\n\n- a", "draft": true})]
+    );
+    // Once: the same card again opens nothing more.
+    assert!(c.open_pr("p1").await.error.is_some());
+    assert_eq!(c.t.forge.pulls.lock().unwrap().len(), 1);
+    let audit =
+        c.t.master
+            .inner_mirror()
+            .audit_lines("forge.pull_request")
+            .unwrap();
+    assert_eq!(audit.len(), 1);
+    assert!(!audit[0].1.contains(TOKEN_A));
+    assert_no_token_anywhere(&c.t);
+}
+
+/// No base: the forge's default branch, asked after the Allow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_missing_base_is_the_forges_default_branch() {
+    let c = running().await;
+    let a = c.pr("p1", json!({"head": "feat", "title": "t"})).await;
+    assert_eq!(a.number, Some(7), "{a:?}");
+    assert_eq!(c.t.forge.pulls.lock().unwrap()[0]["base"], "main");
+}
+
+/// The click binding of push holds for pull requests: a reused id, a
+/// retitled call, an id outside the rule, a push card's click, no click.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pull_request_needs_its_own_unique_card_and_click() {
+    let c = running().await;
+    // Reused approval id: a bash card and a pull request card share it.
+    c.started("cb", "bash").await;
+    c.requested("r1", "cb", "bash").await;
+    c.pr_card("r1", "cp", honest(), honest()).await;
+    assert_eq!(c.click(&c.alice, "r1", "allow").await, StatusCode::OK);
+    assert!(c.open_pr("r1").await.error.is_some());
+    // A retitled call.
+    c.started("cr", "bash").await;
+    c.pr_card("r2", "cr", honest(), honest()).await;
+    assert_eq!(c.click(&c.alice, "r2", "allow").await, StatusCode::OK);
+    assert!(c.open_pr("r2").await.error.is_some());
+    // A push card's Allow is no pull request's.
+    c.started("cpu", "push").await;
+    c.requested("r3", "cpu", "push").await;
+    assert_eq!(c.click(&c.alice, "r3", "allow").await, StatusCode::OK);
+    assert!(c.open_pr("r3").await.error.is_some());
+    // No click at all.
+    c.pr_card("r4", "c4", honest(), honest()).await;
+    assert!(c.open_pr("r4").await.error.is_some());
+    // An id outside the rule.
+    c.pr_card("r#5", "c5", honest(), honest()).await;
+    assert_eq!(
+        c.click(&c.alice, "r%235", "allow").await,
+        StatusCode::NOT_FOUND
+    );
+    assert!(c.open_pr("r#5").await.error.is_some());
+    assert!(c.t.forge.pulls.lock().unwrap().is_empty());
+}
+
+/// Input the rule refuses never reaches the forge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bad_input_never_reaches_the_forge() {
+    let c = running().await;
+    let long_body = "b".repeat(100 * 1024);
+    let long_title = "t".repeat(300);
+    for (i, bad) in [
+        json!({"head": "main", "base": "main", "title": "t"}),
+        json!({"head": "a..b", "title": "t"}),
+        json!({"head": "a~1", "title": "t"}),
+        json!({"head": "a b", "title": "t"}),
+        json!({"head": "-a", "title": "t"}),
+        json!({"head": "a", "title": long_title}),
+        json!({"head": "a", "title": "two\nlines"}),
+        json!({"head": "a", "title": "t", "body": long_body}),
+        json!({"head": "a", "title": "t", "body": "bell\u{7}"}),
+        json!({"head": "a", "title": "t", "repo": "other/x"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let a = c.pr(&format!("b{i}"), bad).await;
+        assert!(a.error.is_some(), "{i}: {a:?}");
+    }
+    assert!(c.t.forge.pulls.lock().unwrap().is_empty());
+}
+
+/// The forge's refusals: already open (said so), a hostile error text
+/// (escapes, bidi, a token echo: cleaned and cut), a 5 MB answer, a slow
+/// answer and a redirect: errors, and nothing secret anywhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_forges_answers_are_bounded_and_clean() {
+    let c = running().await;
+    let mut input = honest();
+    input["title"] = json!("exists");
+    let a = c.pr("e1", input.clone()).await;
+    assert!(a.existed && a.error.is_none(), "{a:?}");
+    input["title"] = json!("hostile");
+    let a = c.pr("e2", input.clone()).await;
+    let e = a.error.unwrap();
+    assert!(
+        !e.contains(TOKEN_A) && !e.contains('\u{1b}') && !e.contains('\u{202e}'),
+        "{e}"
+    );
+    assert!(
+        e.contains("No commits between") && e.chars().count() <= 400,
+        "{e}"
+    );
+    for (t, want) in [
+        ("big", "too large"),
+        ("redirect", "HTTP 307"),
+        ("slow", "in time"),
+    ] {
+        input["title"] = json!(t);
+        let a = c.pr(&format!("e-{t}"), input.clone()).await;
+        let e = a.error.unwrap_or_default();
+        assert!(e.contains(want), "{t}: {e}");
+    }
+    assert_no_token_anywhere(&c.t);
+}
+
+/// Five per chat in any hour; the sixth is refused before the forge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_sixth_in_an_hour_is_refused() {
+    let c = running().await;
+    for i in 0..=harness_master::forge_pr::PER_HOUR {
+        let a = c.pr(&format!("h{i}"), honest()).await;
+        if i < harness_master::forge_pr::PER_HOUR {
+            assert!(a.error.is_none(), "{i}: {a:?}");
+        } else {
+            assert!(a.error.unwrap().contains("last hour"));
+        }
+    }
+    assert_eq!(
+        c.t.forge.pulls.lock().unwrap().len(),
+        harness_master::forge_pr::PER_HOUR
+    );
+}
+
+/// A turn the API token sent names no target, so nothing is offered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_api_token_turn_offers_no_pull_request() {
+    let c = chat().await;
+    assert!(c.turn(PromptOpts::default()).await.is_none());
 }
