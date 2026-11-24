@@ -4,12 +4,13 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use harness_store::{MemberRow, StoreError, WorkspaceRow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require, require_admin, runtime};
+use super::caller::{Admin, User};
+use super::{ApiError, ApiResult, runtime};
 use crate::auth::Principal;
 use crate::workspaces::{self, Access, Perm, Role, WorkspaceSettings, access};
 use crate::{Audience, Live, Master, levels};
@@ -210,8 +211,7 @@ pub(super) async fn active_summary(m: &Master, who: &Principal) -> ApiResult<Val
         .unwrap_or(Value::Null))
 }
 
-pub(super) async fn list(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
+pub(super) async fn list(User(who): User, State(m): State<Master>) -> ApiResult<Json<Value>> {
     let Some(uid) = who.user_id.clone() else {
         return Ok(Json(
             json!({ "workspaces": [], "active": null, "can_create": false }),
@@ -244,11 +244,10 @@ pub(super) struct NameBody {
 }
 
 pub(super) async fn create(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<NameBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let Some(uid) = who.user_id.clone() else {
         return Err(bad("the API token cannot own a workspace"));
     };
@@ -280,11 +279,10 @@ pub(super) struct ActiveBody {
 }
 
 pub(super) async fn set_active(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<ActiveBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let Some(uid) = who.user_id.clone() else {
         return Err(bad("the API token has no active workspace"));
     };
@@ -294,11 +292,10 @@ pub(super) async fn set_active(
 }
 
 pub(super) async fn get_one(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     detail(&m, &who, &access(&m, &who, &id).await?).await
 }
 
@@ -313,12 +310,11 @@ pub(super) struct PatchBody {
 }
 
 pub(super) async fn patch(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<PatchBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = access(&m, &who, &id).await?;
     if a.personal {
         return Err(bad(
@@ -360,12 +356,11 @@ pub(super) struct MemoryBody {
 /// The member's own switch, and their answer to the join question: use
 /// their own facts in this workspace's chats.
 pub(super) async fn set_memory(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<MemoryBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = access(&m, &who, &id).await?;
     let Some(uid) = who.user_id.clone() else {
         return Err(bad("the API token is no member and has no memory"));
@@ -385,11 +380,10 @@ pub(super) async fn set_memory(
 
 /// Owners only. Its chats return to their owners' Personal workspaces.
 pub(super) async fn delete(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = access(&m, &who, &id).await?;
     if a.personal {
         return Err(conflict("a Personal workspace cannot be deleted"));
@@ -480,11 +474,10 @@ async fn delete_workspace(m: &Master, ws: String) -> ApiResult<Option<Vec<String
 }
 
 pub(super) async fn members(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = access(&m, &who, &id).await?;
     // Every member's level to those who manage members here; to anyone
     // else, only their own (review L2-7).
@@ -513,12 +506,11 @@ pub(super) struct AddBody {
 /// Add an account by username. "No such user" tells whether a username
 /// exists, so failed adds are throttled per caller like logins (T12).
 pub(super) async fn add_member(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<AddBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = access(&m, &who, &id).await?;
     if a.personal {
         return Err(conflict(ONLY_YOU));
@@ -579,12 +571,11 @@ pub(super) struct RoleBody {
 }
 
 pub(super) async fn set_role(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, user_id)): Path<(String, String)>,
     Json(b): Json<RoleBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = access(&m, &who, &id).await?;
     if a.personal {
         return Err(conflict(ONLY_YOU));
@@ -622,11 +613,10 @@ pub(super) async fn set_role(
 /// return to their Personal workspace; a workspace whose last member left
 /// is deleted, since nobody could reach it again.
 pub(super) async fn remove_member(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, user_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = access(&m, &who, &id).await?;
     if a.personal {
         return Err(conflict(ONLY_YOU));
@@ -752,11 +742,7 @@ async fn admin_one(m: &Master, ws: &str) -> ApiResult<Option<Value>> {
 
 /// Every workspace with its owners and member count: team ones by name,
 /// then the Personal ones. No chats.
-pub(super) async fn admin_list(
-    State(m): State<Master>,
-    headers: HeaderMap,
-) -> ApiResult<Json<Value>> {
-    require_admin(&m, &headers).await?;
+pub(super) async fn admin_list(_: Admin, State(m): State<Master>) -> ApiResult<Json<Value>> {
     let rows = m
         .inner
         .mirror
@@ -776,11 +762,10 @@ pub(super) async fn admin_list(
 }
 
 pub(super) async fn admin_members(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(&m, &headers).await?;
     let (w, rows) = m
         .inner
         .mirror
@@ -807,11 +792,10 @@ pub(super) struct PolicyBody {
 /// Whether accounts other than server admins may create team workspaces
 /// (config.toml `[workspaces]`).
 pub(super) async fn admin_policy(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<PolicyBody>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     let _edits = rt.lock_edits().await;
     let mut cfg = rt.config();
@@ -833,12 +817,11 @@ pub(super) struct AdminPatchBody {
 /// Owner recovery: make an existing, enabled member an owner (team
 /// workspaces only; never the calling admin themselves).
 pub(super) async fn admin_patch(
+    Admin(who): Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<AdminPatchBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require_admin(&m, &headers).await?;
     let ws = id.clone();
     let w = m
         .inner
@@ -877,11 +860,10 @@ pub(super) async fn admin_patch(
 /// Delete a team workspace; its chats return to their owners' Personal
 /// workspaces.
 pub(super) async fn admin_delete(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(&m, &headers).await?;
     // A Personal workspace is refused by the store (409).
     let Some(members) = delete_workspace(&m, id).await? else {
         return Err(workspaces::WsError::NotFound.into());
