@@ -61,8 +61,12 @@ let opener: HTMLElement | null = null;
 const listeners = new Set<() => void>();
 const emit = () => listeners.forEach((l) => l());
 
+/** The open panel's question before it is replaced (lib/unsavedGuard.ts sets it while it has unsaved changes). */
+export const gate = { ask: (): boolean => true };
+
 /** Open the file in the side panel; the control that asked gets focus back on close. */
 export function openPreview(t: PreviewTarget, from?: HTMLElement | null) {
+  if (current && targetKey(t) !== targetKey(current) && !gate.ask()) return;
   opener = from ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
   current = t;
   emit();

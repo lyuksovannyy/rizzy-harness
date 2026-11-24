@@ -1677,9 +1677,12 @@ chat shows the file as a chip with its name and size.
   message is sent). Changes are per sheet: Save sends the sheet shown. A paragraph or cell that
   holds characters the preview cannot show (invisible, direction or
   private-use characters, line breaks in a cell) is not offered for change, so
-  they are never lost. Opening another chat or pressing Preview on another file
-  drops unsaved changes without asking (closing the panel or switching sheets
-  asks). If any
+  they are never lost. Closing the panel, switching sheets, pressing
+  Preview on another file, opening another chat or page (also with the
+  browser's back and forward) and closing or reloading the tab each ask once
+  before unsaved changes are thrown away; Save, or a click on the file
+  already open, asks nothing. Not covered: a crash, and a tab that is
+  discarded by the browser. If any
   change cannot be applied (the paragraph changed since the preview, a field, a
   link or tracked changes in the paragraph, a merged, hidden or array cell, a
   formula that is not allowed) nothing is saved and the panel says which place

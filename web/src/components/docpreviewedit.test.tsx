@@ -377,3 +377,97 @@ test("nothing from the file or the answer becomes HTML while editing", async () 
   expect(field("Paragraph 1")!.value).toBe("<img src=x onerror=alert(1)>");
   expect(host.querySelector("img")).toBeNull();
 });
+
+// The paths that used to drop the changes without a word (another file's
+// Preview, another chat or page, closing the tab) ask the same question.
+const other: PreviewTarget = { session: "s1", fileId: "f9", name: "other.docx" };
+async function withChange() {
+  store.openPreview(plainChat);
+  await show(doc, plainChat);
+  await change("Edit Paragraph 2", "Edited");
+}
+
+test("Preview on another file with changes asks; no keeps the panel's file, yes opens the other", async () => {
+  const sure = vi.fn(() => false);
+  window.confirm = sure;
+  await withChange();
+  act(() => store.openPreview(other));
+  expect(sure).toHaveBeenCalledTimes(1);
+  expect(sure).toHaveBeenCalledWith("Discard 1 change that has not been saved?");
+  expect(seen).toEqual(plainChat);
+  expect(host.textContent).toContain("1 change");
+  sure.mockImplementation(() => true);
+  act(() => store.openPreview(other));
+  expect(sure).toHaveBeenCalledTimes(2);
+  expect(seen).toEqual(other);
+});
+
+test("Preview on another file asks nothing without changes, after Save, or for the file already open", async () => {
+  const sure = vi.fn(() => false);
+  window.confirm = sure;
+  store.openPreview(plainChat);
+  await show(doc, plainChat);
+  act(() => store.openPreview(other));
+  expect(sure).not.toHaveBeenCalled();
+  expect(seen).toEqual(other);
+  // The same file, with changes: not a question.
+  store.openPreview(plainChat);
+  await withChange();
+  act(() => store.openPreview({ ...plainChat }));
+  expect(sure).not.toHaveBeenCalled();
+  // After a successful Save there is nothing to lose.
+  call.mockImplementation(() => Promise.resolve({ file: { attachment_id: "a1", name: "plan (edited).docx", mime: "x", kept: true }, results: [{ ok: true }] }));
+  await act(async () => button("Save a copy")!.click());
+  await flush();
+  act(() => store.openPreview(other));
+  expect(sure).not.toHaveBeenCalled();
+  expect(seen).toEqual(other);
+});
+
+test("moving to another chat or page asks; no stays and keeps the changes, yes goes on", async () => {
+  const sure = vi.fn(() => false);
+  window.confirm = sure;
+  const seenByApp = vi.fn();
+  window.addEventListener("hashchange", seenByApp);
+  await withChange();
+  const change1 = (to: string) => {
+    const old = location.href;
+    location.hash = to;
+    act(() => void window.dispatchEvent(new HashChangeEvent("hashchange", { oldURL: old, newURL: location.href })));
+  };
+  const start = location.hash;
+  change1("#/s/other");
+  expect(sure).toHaveBeenCalledTimes(1);
+  expect(seenByApp).not.toHaveBeenCalled();
+  expect(location.hash).toBe(start);
+  expect(host.textContent).toContain("1 change");
+  sure.mockImplementation(() => true);
+  change1("#/s/other");
+  expect(sure).toHaveBeenCalledTimes(2);
+  expect(seenByApp).toHaveBeenCalledTimes(1);
+  expect(location.hash).toBe("#/s/other");
+  // The changes are gone with the answer: the same question is not asked twice.
+  expect(host.textContent).not.toContain("1 change");
+  change1("#/s/third");
+  expect(sure).toHaveBeenCalledTimes(2);
+  window.removeEventListener("hashchange", seenByApp);
+});
+
+test("closing the tab is stopped by the browser only while there are changes", async () => {
+  const fire = () => {
+    const e = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+  store.openPreview(plainChat);
+  await show(doc, plainChat);
+  expect(fire()).toBe(false);
+  await change("Edit Paragraph 2", "Edited");
+  expect(fire()).toBe(true);
+  await act(async () => button("Discard")!.click());
+  expect(fire()).toBe(false);
+  await change("Edit Paragraph 2", "Edited again");
+  expect(fire()).toBe(true);
+  act(() => root.render(<></>));
+  expect(fire()).toBe(false);
+});
