@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -20,7 +20,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require};
+use super::caller::User;
+use super::{ApiError, ApiResult};
 use crate::Master;
 use crate::auth::{self, Principal};
 use crate::routines::events::{self, Event, EventSource};
@@ -528,11 +529,10 @@ fn limits(cfg: &RoutinesConfig) -> Value {
 }
 
 async fn list(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
     let ws_id = scope.as_ref().map(|a| a.id().to_string());
     // Each user lists their own; the API token every owner's.
@@ -583,11 +583,10 @@ async fn list(
 }
 
 async fn create(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(raw): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>)> {
-    let who = require(&m, &headers).await?;
     let b: CreateBody = body(raw)?;
     let Some(uid) = who.user_id.clone() else {
         return Err(forbidden(r::TOKEN_CANNOT_OWN).into());
@@ -648,22 +647,20 @@ async fn create(
 }
 
 async fn detail(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = visible(&m, &who, &id).await?;
     Ok(Json(one_json(&m, &who, &row).await?))
 }
 
 async fn update(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(raw): Json<Value>,
 ) -> Result<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let b: PatchBody = body(raw)?;
     let (row, a) = owned(&m, &who, &id).await?;
     let cfg = r::config(&m);
@@ -731,11 +728,10 @@ async fn update(
 }
 
 async fn remove(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = visible(&m, &who, &id).await?;
     if who.user_id.is_none() {
         return Err(forbidden(r::TOKEN_CANNOT_OWN));
@@ -760,12 +756,11 @@ struct RunBody {
 }
 
 async fn run_now(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     raw: Option<Json<Value>>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    let who = require(&m, &headers).await?;
     let b: RunBody = match raw {
         Some(Json(v)) if !v.is_null() => body(v)?,
         _ => RunBody::default(),
@@ -822,12 +817,11 @@ struct RunsQuery {
 }
 
 async fn runs(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<RunsQuery>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = visible(&m, &who, &id).await?;
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let rid = row.routine_id.clone();
@@ -861,11 +855,10 @@ async fn run_of(
 }
 
 async fn run_detail(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, run_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (_, run) = run_of(&m, &who, &id, &run_id).await?;
     let p = previews(&m, std::slice::from_ref(&run)).await?;
     let mut v = run_json(&run, run.session_id.as_ref().and_then(|s| p.get(s)));
@@ -879,11 +872,10 @@ async fn run_detail(
 }
 
 async fn seen(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, run_id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (row, run) = run_of(&m, &who, &id, &run_id).await?;
     if who.user_id.is_none() {
         return Err(forbidden(r::TOKEN_CANNOT_OWN));
@@ -950,11 +942,10 @@ async fn sample_event(m: &Master, row: &RoutineRow, sample: Value) -> ApiResult<
 /// A new secret for webhook trigger `tid`, shown once; the old one stops
 /// working at once.
 async fn rotate_secret(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, tid)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (row, a) = owned(&m, &who, &id).await?;
     agentic_allowed(
         &m,
@@ -1076,11 +1067,10 @@ async fn previewed_triggers(
 /// sample event's, for a webhook routine). Problems come back in `errors`,
 /// not as a failure, so the editor can show them as the user types.
 async fn preview(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(raw): Json<Value>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let b: PreviewBody = body(raw)?;
     let routine = match &b.routine_id {
         Some(id) => Some(visible(&m, &who, id).await?),
