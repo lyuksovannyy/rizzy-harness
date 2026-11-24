@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use harness_attached::{self as peek, EntryKind};
@@ -137,6 +137,8 @@ pub struct Grants {
     window: Mutex<Recent<VecDeque<Instant>>>,
     busy: Mutex<HashSet<SessionId>>,
     nodes: Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>,
+    /// Tests only: unset in production, where `held` is one atomic load.
+    gate: OnceLock<tokio::sync::watch::Sender<bool>>,
 }
 
 impl Default for Grants {
@@ -174,6 +176,28 @@ impl Grants {
             window: Mutex::default(),
             busy: Mutex::default(),
             nodes: Mutex::default(),
+            gate: OnceLock::new(),
+        }
+    }
+
+    /// Tests: from now on every call waits, once it holds its chat's place,
+    /// until [`Grants::release`], so a call is provably in flight.
+    pub(crate) fn hold(&self) {
+        self.gate
+            .get_or_init(|| tokio::sync::watch::channel(false).0);
+    }
+
+    /// Tests: let every waiting call, and every later one, go on.
+    pub(crate) fn release(&self) {
+        if let Some(g) = self.gate.get() {
+            g.send_replace(true);
+        }
+    }
+
+    /// Waits while the gate is armed and shut; returns at once otherwise.
+    async fn held(&self) {
+        if let Some(g) = self.gate.get() {
+            let _ = g.subscribe().wait_for(|open| *open).await;
         }
     }
 
@@ -425,6 +449,7 @@ pub async fn answer(
     // One call in flight per chat, refused at once: the master-wide queue is
     // every user's, and one chat must not fill it.
     let _one = m.inner.attached.chat(sid)?;
+    m.inner.attached.held().await;
     let (row, _top) = crate::recall::sessions(m, node_id, sid).await?;
     if row.parent_id.is_some() {
         return Err("a sub-agent's chat has no attached files".into());
