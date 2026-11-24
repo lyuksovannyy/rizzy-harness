@@ -1,4 +1,4 @@
-# W.6 **sec** (built, PR open)
+# W.6 **sec** (built)
 
 ## Covers
 

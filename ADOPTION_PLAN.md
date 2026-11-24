@@ -7,6 +7,11 @@ workspaces, see C.12). **Progress, 2026-11-11:** Phase A tasks A.1 to A.14 are w
 run. Phases C, T, N, X and W have not started. **2026-11-12: fix plan Gate 3 is passed (the
 owner); the feature freeze is over.** Phases A and R are merged, with experiments B.1, B.2, B.3
 and B.5 and notes C.12, C.13 and C.14. What comes first is under "After Gate 3" in §4.
+**2026-11-24:** the sentence above that phases C, T, N, X and W have not started is of
+2026-11-11 and no longer holds: most T, X and W rows are built and merged (each row's file under
+`docs/plan/` says what is done and what is left). Not built: X.4 hooks, X.6 per-command rules,
+T.4, T.5, T.6, the N phase apart from the parts named in its rows, step 2 of X.37, the push tool
+of X.27 step 4, OAuth for connectors (X.35), spending limits (X.18, X.39).
 
 Brings what the two-round harness study found into our own code. Inputs, by authority:
 `research/round2/final-review-ours.md` (what is true about our code; it wins every
@@ -298,7 +303,7 @@ Each row's full text is in `docs/plan/`.
 | [X.4 **sec**](docs/plan/X.4.md) | Hooks |
 | [X.5](docs/plan/X.5.md) | Input during a turn |
 | [X.6 **sec**](docs/plan/X.6.md) | Per-command rules |
-| [X.7 **sec**](docs/plan/X.7.md) | Enforced plan mode |
+| [X.7 **sec**](docs/plan/X.7.md) | Enforced plan mode (built; left: executing a plan in a fresh chat) |
 | [X.8](docs/plan/X.8.md) | Loop staying power (the owner, 2026-11-14: "all useful things other harnesses ship") |
 | [X.9 **sec** (done, T50)](docs/plan/X.9.md) | Per-chat approval modes the person changes (the owner, 2026-11-14: "not that usable"): Ask, Accept edits, Auto, as Claude Desktop names them… |
 | [X.10](docs/plan/X.10.md) | Tool-call checks (the owner, 2026-11-14) |
@@ -378,7 +383,7 @@ Each row's full text is in `docs/plan/`.
 | [W.5 (done)](docs/plan/W.5.md) | PR 7 follow-up (O2 is yes) |
 | [W.5b (done)](docs/plan/W.5b.md) | A person cannot see when a turn ended elsewhere, how full the context is, or what a sub-agent does (2026-11-14) |
 | [W.5c (done)](docs/plan/W.5c.md) | Rename and export a chat (2026-11-14) |
-| [W.6 **sec** (built, PR open)](docs/plan/W.6.md) | The approval takes the composer's place (the owner, 2026-11-12) |
+| [W.6 **sec** (built)](docs/plan/W.6.md) | The approval takes the composer's place (the owner, 2026-11-12) |
 | [W.7](docs/plan/W.7.md) | The browser scripts pass again |
 | [W.7 (done)](docs/plan/W.7-2.md) | Result, 2026-11-12 (`fix/W.7-browser-scripts`) |
 | [W.8](docs/plan/W.8.md) | What the browser run turned up |
