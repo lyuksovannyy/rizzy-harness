@@ -1,0 +1,37 @@
+# Opening a pull request in a project's forge repository (X.27)
+
+Status: built (branch `feat/pr-create`, 2026-11-24).
+Row: [`plan/X.27.md`](plan/X.27.md). Threat row: [T102](threats/T102.md). It builds on the push tool ([`forge-push.md`](forge-push.md), T101) and the repository listing (T83).
+
+## 1. Tool or button
+
+The owner approved "the push and open-PR tool". Before building, the question the brief asked: is a button the person presses after a push the better product?
+
+What the others do (research `round1/claude-code.md`): Claude Code's terminal agent opens pull requests itself with `gh pr create` or `glab mr create`, under its permission rules (auto mode allows pull requests on the working repository); its web client has "Create PR" and "Create draft PR" buttons on the session's changes card; its Slack app ends with a "Create PR" button that opens the forge's compare page. Codex's desktop diff pane commits, pushes and opens pull requests by the person's hand (`round1/codex.md`).
+
+A button would be simpler and safer: the person's own request would carry the title and description they see and edit, so there is no agent-written request to bind to a card and no click-binding class to get right (four findings on push's card came from that class). Its cost: the person writes or edits the description, or the agent's draft has to reach the form some other way (a message they copy, or a draft-only tool, which is a tool again).
+
+The tool is still worth it here, because what it adds is the point: the agent writes the description from the work it just did and opens the pull request in the same flow as its push, and the person approves one card that shows exactly what will be sent. The binding it needs is small on top of push's: the master creates the pull request from the input of the one `tool_call_started` the approval names in its own mirror, and the page draws that same event. So the tool is built; a button ("Open pull request" in the side panel after a push, with an editable form) is a possible addition, not a replacement.
+
+## 2. Decisions (the session lead's of 2026-11-24; each may be overruled by the owner)
+
+1. It runs on the master as a built-in service: the node shows the card and files `forge.pull_request` with the approval id only; the master takes the scope from the session (the owner, the project's `source`, the target it named for the turn: the owner's newest connection for that host), makes the forge calls with the sealed token through the listing's client, and answers. The token never goes to the node for this tool.
+2. The click approves the content: the master acts only against an Allow it relayed itself from the signed-in owner, for an approval id that is unique in the chat's log, within the id rule, whose one call is a `pull_request` call, once; and it creates the pull request from that call's input as its own mirror holds it, not from the approval event's own `input` field (which a node can set apart from what the page draws) and not from anything the node sends after the click (the request carries nothing else).
+3. Only the project's recorded source repository: head and base are branches of it (no forks, no other repository). Branch names by `valid_branch` (push's rule). A missing base is the forge's default branch, asked with one GET after the Allow; no network call before it.
+4. Bounds: title 1 to 256 characters, one line; body up to 20,000 characters; no control characters but newline and tab in the body; hidden and bidirectional characters are shown on the card (the page's `showHidden`) and sent as they are; 5 per chat per hour; one request at a time per chat (shared with push).
+5. Who: as push. Only the chat's own agent in a turn its signed-in owner started; never a sub-agent, a routine, a callback turn, a forked, temporary or foreign-marked chat, or an API-token or webhook turn; refused in plan mode and by node.toml's `denied_tools = ["pull_request"]` (the node's say: it then does not announce `forge-pr`, and the tool is not offered).
+6. Forges: GitHub `POST /repos/{owner}/{repo}/pulls`, GitLab `POST /projects/{id}/merge_requests`, Gitea and Forgejo `POST /repos/{owner}/{repo}/pulls`, at the host entry's `api_base`. A draft is GitHub's `draft`; GitLab's `Draft: ` and Gitea's and Forgejo's `WIP: ` title prefix. The forge's refusal (`message`, `errors[].message`) is returned cleaned, without the token, cut to 300 characters; an "already exists" answer says so (with the number when the text names one).
+7. Its own per-agent switch, "Open pull requests", on for Software Developer and Senior Teamlead, by explicit name for others, never through `tools: all`.
+8. No schema change, no new dependency, no `unsafe`, no event kind change.
+
+## 3. What was generalised from push
+
+`crate::forge_push::release` (master) is now the one set of checks for both master-released forge actions: the node runs the session and announced the tool's capability; a top-level, non-temporary chat; one request of the chat at a time; the relayed Allow once; the approval and its one call both naming the tool, each id unique and within the rule; the chat's target and owner unchanged; the open turn not a callback, the tool not withheld, the agent's switch on; no one else acted in the chat; the owner's account, level and membership now; the project's source, the host and the connection unchanged; the hourly room per tool. Push then opens the token; the pull request reads the call's input. The click record (`note_push_click`) takes either tool's card; the per-turn target (`MasterContext::push`) is named when the agent may use either tool on a node that offers it. On the node, the target is kept when either tool is allowed and each tool not allowed is withheld (`forge_for_turn`).
+
+## 4. The card
+
+Destination line from the master (`GET /api/sessions/{id}/push-target`): "Opens a pull request in `host/owner/name` as `login` (as the server knows it)"; without it only Deny. The content is the call's own input, drawn by the page's generic call fields (head, base, title, body, draft; long text cut with "you are approving N characters you have not expanded"); the node adds no preview of its own. Invalid cards (mismatched tools, reused or out-of-rule ids) offer only Deny, as for push.
+
+## 5. What remains
+
+A compromised node that runs the chat can still make the agent's request say what it likes; the person sees exactly that on the card, and the master sends exactly that. The forge's default branch and the existence of the head branch are the forge's word. The pull request's address is shown as text. No fork pull requests, no reviewers or labels, no update of an open pull request.

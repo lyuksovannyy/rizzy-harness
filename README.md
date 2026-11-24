@@ -2043,8 +2043,8 @@ without a click. The picker in the composer shows it and offers four, each
 with one line saying what runs unasked:
 
 - **Auto** (the default for every new chat, sandbox and host alike, and for
-  routines that set none): nothing asks, except a push to a forge, which asks
-  in every mode (see "Pushing to the repository"). In a sandbox chat the sandbox is
+  routines that set none): nothing asks, except a push to a forge or opening
+  a pull request, which ask in every mode (see "Pushing to the repository"). In a sandbox chat the sandbox is
   the boundary (its own processes, its own file view). **In a host chat on
   Auto every command runs as the node's own user, with no sandbox and no
   question asked**: nothing stands between an agent that a web page or a
@@ -4484,6 +4484,26 @@ another, or a push card the server knows no target for, offers only Deny.
 A node that is compromised and runs your chat can get the token for one push
 you allow: that token reaches whatever its scope on the forge reaches, so give
 the connection only the scope you need.
+
+**Opening a pull request.** An agent with the **Open pull requests** switch
+(on the agent's page; on for the built-in Software Developer and Senior
+Teamlead; a custom or file agent has it only when it names `pull_request`)
+can ask to open a pull request (GitLab: a merge request) in the repository
+the project was cloned from: from a branch already on the forge (push it
+first) into a base branch of the same repository (default: the repository's
+default branch), with a title, a description and whether it is a draft. No
+other repository and no fork. **Every one asks**, in every mode, Auto
+included: the card says "Opens a pull request in `<host>/<owner>/<name>` as
+`<login>`" (from the server) and shows the branches, the whole title and the
+description exactly as the agent wrote them (long text is cut on the card
+with how many characters you have not expanded). The server, not the node,
+opens it, with your connection: from exactly the request the card showed
+(it reads that request from its own copy of the chat), once per card, at
+most five per chat in an hour. The answer is the pull request's number and
+address (shown as text), the forge's own words when it refuses (no commits
+between the branches, a missing scope), or that one is already open. The
+token never goes to the node for this. `denied_tools = ["pull_request"]` in
+node.toml turns it off on a node. Details: `docs/forge-pr.md`.
 
 ## Custom connectors: a workspace's remote MCP servers
 
