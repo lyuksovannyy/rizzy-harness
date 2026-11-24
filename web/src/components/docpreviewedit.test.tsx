@@ -279,29 +279,40 @@ test("another failure is one sentence; the changes stay and Save can be tried ag
   expect(button("Save a copy")!.disabled).toBe(false);
 });
 
-test("leaving with changes asks once; without changes it does not", async () => {
+const dlg = () => document.querySelector<HTMLDialogElement>("dialog.host-warning");
+const dlgButton = (label: string) => [...(dlg()?.querySelectorAll("button") ?? [])].find((b) => b.textContent === label)!;
+const answer = (label: string) => act(async () => dlgButton(label).click());
+
+test("leaving with changes asks once, in the app's dialog; without changes it does not", async () => {
   const onClose = vi.fn();
-  const sure = vi.fn(() => false);
-  window.confirm = sure;
+  const confirm = vi.fn();
+  window.confirm = confirm;
   await show(book, { session: "s1", fileId: "f2", name: "book.xlsx" }, composer(), onClose);
   // No changes: close and sheet tabs go straight.
   await act(async () => q<HTMLButtonElement>(".pv-tabs button:nth-child(2)").click());
-  expect(sure).not.toHaveBeenCalled();
+  expect(dlg()).toBeNull();
   call.mockImplementation(() => Promise.resolve(book));
   await act(async () => q<HTMLButtonElement>(".pv-tabs button:nth-child(1)").click());
   await flush();
   await change("Edit Cell B2", "9");
   const calls = call.mock.calls.length;
   await act(async () => q<HTMLButtonElement>(".pv-tabs button:nth-child(2)").click());
-  expect(sure).toHaveBeenCalledTimes(1);
+  expect(dlg()!.textContent).toContain("Discard 1 change that has not been saved?");
+  expect(document.activeElement).toBe(dlgButton("Keep editing"));
+  await answer("Keep editing");
+  expect(dlg()).toBeNull();
   expect(call.mock.calls.length).toBe(calls);
   expect(host.textContent).toContain("1 change");
   await act(async () => button("Close the preview")!.click());
-  expect(sure).toHaveBeenCalledTimes(2);
+  expect(dlg()).not.toBeNull();
+  // Escape is Keep editing.
+  await act(async () => void dlg()!.dispatchEvent(new Event("cancel", { cancelable: true })));
+  expect(dlg()).toBeNull();
   expect(onClose).not.toHaveBeenCalled();
-  sure.mockImplementation(() => true);
   await act(async () => button("Close the preview")!.click());
+  await answer("Discard changes");
   expect(onClose).toHaveBeenCalledTimes(1);
+  expect(confirm).not.toHaveBeenCalled();
 });
 
 test("a cell is a field with its text or formula; an empty cell of the grid can be filled; a cut cell cannot", async () => {
@@ -376,4 +387,116 @@ test("nothing from the file or the answer becomes HTML while editing", async () 
   await act(async () => button("Edit Paragraph 1")!.click());
   expect(field("Paragraph 1")!.value).toBe("<img src=x onerror=alert(1)>");
   expect(host.querySelector("img")).toBeNull();
+});
+
+// The paths that used to drop the changes without a word (another file's
+// Preview, another chat or page, closing the tab) ask the same question.
+const other: PreviewTarget = { session: "s1", fileId: "f9", name: "other.docx" };
+async function withChange() {
+  store.openPreview(plainChat);
+  await show(doc, plainChat);
+  await change("Edit Paragraph 2", "Edited");
+}
+
+test("Preview on another file with changes asks; Keep editing and Escape keep the panel's file, Discard opens the other", async () => {
+  await withChange();
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  opener.focus();
+  act(() => store.openPreview(other));
+  expect(dlg()!.textContent).toContain("Discard 1 change that has not been saved?");
+  expect(seen).toEqual(plainChat);
+  await answer("Keep editing");
+  expect(seen).toEqual(plainChat);
+  expect(host.textContent).toContain("1 change");
+  expect(document.activeElement).toBe(opener);
+  act(() => store.openPreview(other));
+  await act(async () => void dlg()!.dispatchEvent(new Event("cancel", { cancelable: true })));
+  expect(seen).toEqual(plainChat);
+  act(() => store.openPreview(other));
+  await answer("Discard changes");
+  expect(seen).toEqual(other);
+  opener.remove();
+});
+
+test("Preview on another file asks nothing without changes, after Save, or for the file already open", async () => {
+  store.openPreview(plainChat);
+  await show(doc, plainChat);
+  act(() => store.openPreview(other));
+  expect(dlg()).toBeNull();
+  expect(seen).toEqual(other);
+  // The same file, with changes: not a question.
+  store.openPreview(plainChat);
+  await withChange();
+  act(() => store.openPreview({ ...plainChat }));
+  expect(dlg()).toBeNull();
+  // After a successful Save there is nothing to lose.
+  call.mockImplementation(() => Promise.resolve({ file: { attachment_id: "a1", name: "plan (edited).docx", mime: "x", kept: true }, results: [{ ok: true }] }));
+  await act(async () => button("Save a copy")!.click());
+  await flush();
+  act(() => store.openPreview(other));
+  expect(dlg()).toBeNull();
+  expect(seen).toEqual(other);
+});
+
+test("moving to another chat or page holds the move until answered; Keep editing restores the address, Discard puts it back", async () => {
+  // The router reads the address when `hashchange` comes, after `popstate`.
+  const routerSaw: string[] = [];
+  const router = () => routerSaw.push(location.hash);
+  window.addEventListener("hashchange", router);
+  await withChange();
+  const move = async (to: string) => {
+    location.hash = to;
+    await act(async () => void window.dispatchEvent(new PopStateEvent("popstate")));
+    await act(async () => {});
+    router();
+  };
+  const start = location.hash;
+  await move("#/s/other");
+  expect(dlg()).not.toBeNull();
+  expect(location.hash).toBe(start);
+  await answer("Keep editing");
+  expect(location.hash).toBe(start);
+  expect(routerSaw.every((h) => h === start)).toBe(true);
+  expect(host.textContent).toContain("1 change");
+  await move("#/s/other");
+  routerSaw.length = 0;
+  await answer("Discard changes");
+  expect(location.hash).toBe("#/s/other");
+  expect(routerSaw).toContain("#/s/other");
+  expect(host.textContent).not.toContain("1 change");
+  // The changes are gone with the answer: the same question is not asked twice.
+  await move("#/s/third");
+  expect(dlg()).toBeNull();
+  window.removeEventListener("hashchange", router);
+});
+
+test("closing the tab is stopped by the browser only while there are changes", async () => {
+  const fire = () => {
+    const e = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+  store.openPreview(plainChat);
+  await show(doc, plainChat);
+  expect(fire()).toBe(false);
+  await change("Edit Paragraph 2", "Edited");
+  expect(fire()).toBe(true);
+  await act(async () => button("Discard")!.click());
+  expect(fire()).toBe(false);
+  await change("Edit Paragraph 2", "Edited again");
+  expect(fire()).toBe(true);
+  act(() => root.render(<></>));
+  expect(fire()).toBe(false);
+});
+
+test("a copy saved in a chat with a folder opens in the panel without a question or a loop", async () => {
+  store.openPreview(codingChat);
+  await show(doc, codingChat);
+  await change("Edit Paragraph 2", "Edited");
+  call.mockImplementation((method: unknown) => (method === "POST" ? Promise.resolve({ saved: "docs/plan (edited).docx", name: "plan (edited).docx" }) : Promise.resolve(doc)));
+  await act(async () => button("Save a copy")!.click());
+  await flush();
+  expect(dlg()).toBeNull();
+  expect(seen).toMatchObject({ session: "s2", path: "docs/plan (edited).docx" });
 });

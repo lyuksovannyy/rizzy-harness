@@ -13,6 +13,7 @@ import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "rea
 import { call } from "../api";
 import { type PBlock, type PCell, type PreviewAnswer, type PreviewTarget, type PRow, type PRun, openPreview, previewUrl, targetKey } from "../lib/docPreview";
 import { applyChanges, type Change, editRequest, losesFormatting, mentionOf, paragraphNumber, refusals, textOf, withMention } from "../lib/docPreviewEdit";
+import { askDiscard, watch } from "../lib/unsavedGuard";
 import { showHidden } from "../md/hidden";
 import type { UploadedAttachment } from "../types";
 import { LinkedA } from "./Linked";
@@ -305,12 +306,28 @@ export default function DocPreview(props: { target: PreviewTarget; onClose: () =
   /** Asked once before the changes are thrown away (close, another sheet). */
   const leave = (go: () => void) => {
     const n = Object.keys(mine.current).length;
-    if (n === 0 || window.confirm(`Discard ${plural(n)} that ${n === 1 ? "has" : "have"} not been saved?`)) {
+    const proceed = () => {
       setAll({});
       setOpen(null);
       go();
-    }
+    };
+    if (n === 0) proceed();
+    else void askDiscard(n).then((ok) => ok && proceed());
   };
+
+  // Changes waiting: another file, another chat and a closed tab ask first.
+  const dirty = count > 0;
+  useEffect(() => {
+    if (!dirty) return;
+    return watch(
+      () => Object.keys(mine.current).length,
+      () => {
+        setAll({});
+        setOpen(null);
+      },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty]);
 
   useEffect(() => {
     const ac = new AbortController();
