@@ -21,7 +21,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use harness_core::Secret;
@@ -29,7 +29,9 @@ use harness_store::connections::{ConnectionPut, ConnectionRow, NewConnection};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require};
+use super::caller::User;
+use super::{ApiError, ApiResult};
+use crate::auth::Principal;
 use crate::forge::{self, ForgeHost};
 use crate::sealed::Binding;
 use crate::{Audience, Master};
@@ -58,8 +60,7 @@ pub(super) fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
 }
 
 /// The caller's account id: connections belong to a person.
-pub(super) async fn person(m: &Master, headers: &HeaderMap) -> ApiResult<String> {
-    let who = require(m, headers).await?;
+pub(super) fn person(who: Principal) -> ApiResult<String> {
     who.user_id.ok_or_else(|| {
         err(
             StatusCode::FORBIDDEN,
@@ -106,8 +107,8 @@ fn row_json(r: &ConnectionRow, hosts: &[ForgeHost]) -> Value {
     })
 }
 
-async fn list(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let me = person(&m, &headers).await?;
+async fn list(User(who): User, State(m): State<Master>) -> ApiResult<Json<Value>> {
+    let me = person(who)?;
     let hosts = m.forge_hosts();
     let rows = m.inner.mirror.call(move |s| s.connections_of(&me)).await?;
     // Whether a token pasted now could be stored: the key is there (or can
@@ -242,12 +243,8 @@ struct CreateBody {
     token: String,
 }
 
-async fn create(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> ApiResult<Json<Value>> {
-    let me = person(&m, &headers).await?;
+async fn create(User(who): User, State(m): State<Master>, body: Bytes) -> ApiResult<Json<Value>> {
+    let me = person(who)?;
     let b: CreateBody = parse(&body)?;
     // The exact listed name: no URL, port, case or dot is folded into one.
     let h = m
@@ -290,12 +287,12 @@ struct TokenBody {
 }
 
 async fn replace(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let me = person(&m, &headers).await?;
+    let me = person(who)?;
     let b: TokenBody = parse(&body)?;
     let token = forge::clean_token(&b.token).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     drop(b);
@@ -339,11 +336,11 @@ async fn replace(
 }
 
 async fn remove(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let me = person(&m, &headers).await?;
+    let me = person(who)?;
     let (u, i) = (me.clone(), id.clone());
     let row = m.inner.mirror.call(move |s| s.connection(&u, &i)).await?;
     let (u, i) = (me.clone(), id.clone());
