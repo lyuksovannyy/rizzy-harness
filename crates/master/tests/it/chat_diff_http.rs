@@ -163,15 +163,15 @@ fn fake(id: &str, caps: &[&str], profile: Profile, incognito: bool) -> (NodeLink
                         // The chat whose title the test named "hold" is never
                         // answered; every other is, with the big diff, except
                         // the turn route's request (not under test here).
-                        MasterToNode::Diff { req_id, all: true, session_id, .. } => {
-                            if !HELD.lock().unwrap().contains(session_id) {
-                                let refuse = REFUSED.lock().unwrap().contains(session_id);
-                                let _ = tx.try_send(NodeToMaster::DiffResult {
-                                    req_id: req_id.clone(),
-                                    diff: (!refuse).then(|| Box::new(big())),
-                                    error: refuse.then(|| PRUNED.into()),
-                                });
-                            }
+                        MasterToNode::Diff { req_id, all: true, session_id, .. }
+                            if !HELD.lock().unwrap().contains(session_id) =>
+                        {
+                            let refuse = REFUSED.lock().unwrap().contains(session_id);
+                            let _ = tx.try_send(NodeToMaster::DiffResult {
+                                req_id: req_id.clone(),
+                                diff: (!refuse).then(|| Box::new(big())),
+                                error: refuse.then(|| PRUNED.into()),
+                            });
                         }
                         _ => {}
                     }
