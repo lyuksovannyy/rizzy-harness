@@ -21,11 +21,12 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require};
+use super::caller::User;
+use super::{ApiError, ApiResult};
 use crate::Master;
 use crate::plugins::{self, MAX_AGENTS, MAX_ASSIGNED};
 use crate::workspaces::{self as ws, Perm, access};
@@ -35,11 +36,10 @@ fn bad(msg: impl Into<String>) -> ApiError {
 }
 
 pub(super) async fn list(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = access(&m, &who, &id).await?;
     let agents = m.agents_in(Some(a.id())).await;
     let chosen = m.assignments(a.id()).await;
@@ -222,12 +222,11 @@ pub(super) struct PutBody {
 }
 
 pub(super) async fn put(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, kind, name)): Path<(String, String, String)>,
     Json(b): Json<PutBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = access(&m, &who, &id).await?;
     a.require(Perm::Settings)?;
     if kind != plugins::SKILL && kind != plugins::MCP {
