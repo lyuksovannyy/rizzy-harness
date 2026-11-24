@@ -58,6 +58,7 @@ import { Markdown } from "./Markdown";
 import { folderWords } from "../lib/subFolder";
 import { Mentioned } from "./Mentioned";
 import { peersLeft } from "../lib/peers";
+import { AllChangesButton } from "./AllChangesButton";
 import { ChatHeader } from "./ChatHeader";
 import { compactTokens } from "./ContextMeter";
 import { SessionFigures } from "./SessionFigures";
@@ -696,7 +697,7 @@ export default function Conversation(props: {
   useEffect(() => setAgentPick(null), [rowAgent, sessionId]);
   useEffect(() => setPickErr(null), [sessionId]);
   useEffect(() => setCarryErr(null), [sessionId]);
-  const [diffOf, setDiffOf] = useState<{ session: string; turn: string; rewind: boolean } | null>(null);
+  const [diffOf, setDiffOf] = useState<{ session: string; turn: string; rewind: boolean; all?: boolean } | null>(null);
   const diffOpener = useRef<HTMLElement | null>(null);
   const closeDiff = () => {
     setDiffOf(null);
@@ -748,7 +749,21 @@ export default function Conversation(props: {
         exportDisabled={!view || view.items.length === 0}
         onExport={() => setExporting(true)}
         onDelete={remove}
-        extra={view?.pins && <PinnedList sessionId={sessionId} pins={view.pins} canUnpin={!!props.row && !blocked} />}
+        extra={
+          <>
+            {view?.pins && <PinnedList sessionId={sessionId} pins={view.pins} canUnpin={!!props.row && !blocked} />}
+            {agentic && (
+              <AllChangesButton
+                checkpoints={view?.checkpoints}
+                onOpen={(from) => {
+                  diffOpener.current = from;
+                  closePreview();
+                  setDiffOf({ session: sessionId, turn: "", rewind: false, all: true });
+                }}
+              />
+            )}
+          </>
+        }
       />
       {deleting && <DeleteChat sessionId={sessionId} workspaceId={workspaceId} incognito={incognito} onClose={() => setDeleting(false)} />}
       {exporting && view && (
@@ -1451,7 +1466,24 @@ export default function Conversation(props: {
         </div>
       </div>
         </div>
+        {diffOf?.session === sessionId && diffOf.all && (
+          <Suspense fallback={null}>
+            <DiffPanel
+              key={`${sessionId}:all`}
+              sessionId={sessionId}
+              turnId=""
+              all
+              rewind={false}
+              laterChanges={false}
+              canUndo={false}
+              running={running}
+              onRewind={() => {}}
+              onClose={closeDiff}
+            />
+          </Suspense>
+        )}
         {diffOf?.session === sessionId &&
+          !diffOf.all &&
           (() => {
             const cp = own(view?.checkpoints, diffOf.turn);
             const at = items.findIndex((x) => x.type === "turn_end" && x.turn_id === diffOf.turn);

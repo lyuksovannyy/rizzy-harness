@@ -511,6 +511,9 @@ export interface TurnDiff {
   /** Files another chat may have changed during the turn (its commands, a
    * background command, a chat deleted since), not in `others_wrote`. */
   others_may?: string[];
+  /** The whole-chat diff only (X.61): the chat's first checkpoint is no
+   * longer kept, so the range starts at the oldest one that is. */
+  since_pruned?: boolean;
 }
 
 export type DiffStatus = "added" | "deleted" | "modified" | "renamed" | "type_changed";

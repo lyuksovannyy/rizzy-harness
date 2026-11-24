@@ -1765,6 +1765,16 @@ the turn changed beside the chat: each file with its added and removed lines
 (three lines of context, line numbers, `+` and `−`), renames as renames,
 binary files and files over 512 KiB named with their sizes, hidden characters
 shown as `<U+…>` codes. "Include later turns" shows what "Rewind" would undo.
+**All changes** in a coding chat's header shows everything the chat changed in
+its folder in one view, in the same panel: from the oldest checkpoint the node
+still keeps (the start of the chat unless the oldest turns were pruned, and then
+the panel says "Changes since the oldest turn still kept") to the latest
+finished turn, with no undo or rewind (those stay on each turn). A file several
+turns touched shows its net change; a turn you undid or rewound is not in it;
+a turn still running is left out until it ends. A file you changed by hand
+between turns is inside the range and shows as a change. In a forked chat the
+range holds the turns copied from the original too. A chat without a folder and
+a temporary chat have no such button; an older node is told to update.
 A turn that changed more than 100 files adds a note at its end ("This turn changed
 143 files, more than the recommended 100. Undoing it will put back 143 files."), and
 its undo adds one too, drawn as a quiet note, not a red error; nothing is blocked (nested repositories and ignored files are not

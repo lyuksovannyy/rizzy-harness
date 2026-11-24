@@ -586,7 +586,7 @@ Master → node
 * `approval.respond {req_id, session_id, approval_id, decision}`
 * `resume {session_id, last_seq}`
 * `session.retry {req_id, session_id, turn_id, agent?, savings?, context?}` — a person's Retry of the chat's failed last turn (X.21, T69); only to nodes announcing `retry`, only from `POST /api/sessions/{id}/turns/{turn}/retry`; no text, files or images (the node's log has the message); refused unless `harness_core::retry::check` passes against the node's log, and while a turn or `/compact` runs
-* `session.diff {req_id, session_id, turn_id, rewind?}` — a turn's changes from its checkpoints (X.12, T53); only to nodes announcing `diff`; never acked, nothing logged
+* `session.diff {req_id, session_id, turn_id, rewind?, all?}` — a turn's changes from its checkpoints (X.12, T53); with `all` (turn_id empty) the whole chat's changes, from its oldest kept checkpoint to the latest finished state (X.61), only to nodes announcing `diff-all`; only to nodes announcing `diff`; never acked, nothing logged
 * `session.files {req_id, session_id, query}` — the composer's `@` completion (T63); only to nodes announcing `files`; never acked, nothing logged
 * `project.create {req_id, name}` — a new project's folder (X.26, T77): a display name only, no place; only to nodes announcing `projects`; never acked, answered by one `project.created`; nothing logged on the master
 * `project.mcp {req_id, user_id, folder, request: {op: list} | {op: approve, name, digest} | {op: remove, name}}` — a person's request about a project folder's `.mcp.json` (X.36, T82); only to nodes announcing `project-mcp`, only from a person's HTTP call; names no program; never acked, answered by one `project.mcp_result`
