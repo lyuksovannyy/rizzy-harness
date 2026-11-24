@@ -31,13 +31,24 @@ use harness_store::Store;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
+/// How long the cut request waits before the route timeout cuts it. It is
+/// the only thing on a clock; long enough that the request reaches the held
+/// write first on any machine.
+const CUT_AFTER: Duration = Duration::from_secs(4);
+
 const K1: &str = "sk-made-up-first-key-0001";
 const K2: &str = "sk-made-up-second-key-0002";
 const U1: &str = "https://first.example.com/v1";
 const U2: &str = "https://second.example.com/v1";
 
 struct T {
+    /// The router with the normal timeouts: every request that is expected
+    /// to succeed goes here, so nothing but the cut request is on a clock.
     base: String,
+    /// The router with the short timeout, over the same `Master`: only the
+    /// request that is meant to be cut goes here. It blocks on the named
+    /// pipe, so its 504 is certain whatever the machine's speed.
+    cut: String,
     dir: tempfile::TempDir,
     admin: String,
     rt: Arc<ProviderRuntime>,
@@ -50,16 +61,25 @@ async fn start(short: Duration) -> T {
     let rt = Arc::new(rt);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
+    let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = l2.local_addr().unwrap();
     let master = Master::new(
         Store::open_in_memory().unwrap(),
-        Auth::new(Secret::new("tok".into()), vec![addr.to_string()], false).with_claim(Claim {
+        Auth::new(
+            Secret::new("tok".into()),
+            vec![addr.to_string(), addr2.to_string()],
+            false,
+        )
+        .with_claim(Claim {
             code: Secret::new("CLAIM".into()),
             path: dir.path().join("claim-code"),
         }),
     );
     master.set_provider_runtime(rt.clone());
-    let app = router_with(master, Timeouts { short, long: short });
+    let app = router_with(master.clone(), Timeouts::default());
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    let app = router_with(master, Timeouts { short, long: short });
+    tokio::spawn(async move { axum::serve(l2, app).await.unwrap() });
     let base = format!("http://{addr}");
     let r = reqwest::Client::new()
         .post(format!("{base}/api/setup"))
@@ -71,6 +91,7 @@ async fn start(short: Duration) -> T {
     let admin = common::signed_in(r).await;
     T {
         base,
+        cut: format!("http://{addr2}"),
         dir,
         admin,
         rt,
@@ -78,10 +99,19 @@ async fn start(short: Duration) -> T {
 }
 
 async fn put(t: &T, path: &str, body: Value) -> StatusCode {
+    send(t, &t.base, path, body).await
+}
+
+/// The one request that is meant to be cut.
+async fn put_cut(t: &T, path: &str, body: Value) -> StatusCode {
+    send(t, &t.cut, path, body).await
+}
+
+async fn send(t: &T, base: &str, path: &str, body: Value) -> StatusCode {
     reqwest::Client::new()
-        .request(Method::PUT, format!("{}{path}", t.base))
+        .request(Method::PUT, format!("{base}{path}"))
         .login(&t.admin)
-        .header("origin", &t.base)
+        .header("origin", base)
         .json(&body)
         .send()
         .await
@@ -119,8 +149,11 @@ async fn settle(t: &T, wrote: std::thread::JoinHandle<String>) {
     let text = tokio::task::spawn_blocking(move || wrote.join().unwrap())
         .await
         .unwrap();
-    drop(t.rt.lock_edits().await);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The section drops the lock when it ends, after the rename: taking the
+    // lock is the signal. The bound is only there so a hang fails the test.
+    let ended = tokio::time::timeout(Duration::from_secs(30), t.rt.lock_edits()).await;
+    assert!(ended.is_ok(), "the save section did not end");
+    drop(ended);
     let file = t.dir.path().join("config.toml");
     if std::fs::symlink_metadata(&file)
         .unwrap()
@@ -136,13 +169,13 @@ async fn settle(t: &T, wrote: std::thread::JoinHandle<String>) {
 /// configuration follows the file.
 #[tokio::test]
 async fn a_cut_save_finishes_and_the_running_config_follows_the_file() {
-    let t = start(Duration::from_millis(1500)).await;
+    let t = start(CUT_AFTER).await;
     assert_eq!(
         put(&t, "/api/admin/storage", storage(3)).await,
         StatusCode::OK
     );
     mkfifo(&t.dir.path().join("config.toml.tmp"));
-    let st = put(&t, "/api/admin/storage", storage(7)).await;
+    let st = put_cut(&t, "/api/admin/storage", storage(7)).await;
     assert_eq!(st, StatusCode::GATEWAY_TIMEOUT);
     let wrote = release(&t.dir.path().join("config.toml.tmp"));
     settle(&t, wrote).await;
@@ -160,7 +193,7 @@ async fn a_cut_save_finishes_and_the_running_config_follows_the_file() {
 /// lock is still held (two writers would share the fixed temp file).
 #[tokio::test]
 async fn the_edit_lock_is_held_until_a_cut_save_ends() {
-    let t = start(Duration::from_millis(1500)).await;
+    let t = start(CUT_AFTER).await;
     assert_eq!(
         put(&t, "/api/admin/storage", storage(3)).await,
         StatusCode::OK
@@ -168,7 +201,7 @@ async fn the_edit_lock_is_held_until_a_cut_save_ends() {
     let tmp = t.dir.path().join("config.toml.tmp");
     mkfifo(&tmp);
     assert_eq!(
-        put(&t, "/api/admin/storage", storage(7)).await,
+        put_cut(&t, "/api/admin/storage", storage(7)).await,
         StatusCode::GATEWAY_TIMEOUT
     );
     let free = tokio::time::timeout(Duration::from_millis(150), t.rt.lock_edits())
@@ -186,7 +219,7 @@ async fn the_edit_lock_is_held_until_a_cut_save_ends() {
 /// URL: the key, the file and the running configuration agree afterwards.
 #[tokio::test]
 async fn a_cut_provider_save_never_pairs_the_new_key_with_the_old_url() {
-    let t = start(Duration::from_millis(1500)).await;
+    let t = start(CUT_AFTER).await;
     assert_eq!(
         put(&t, "/api/admin/providers/fake", provider(U1, K1)).await,
         StatusCode::OK
@@ -194,7 +227,7 @@ async fn a_cut_provider_save_never_pairs_the_new_key_with_the_old_url() {
     let tmp = t.dir.path().join("config.toml.tmp");
     mkfifo(&tmp);
     assert_eq!(
-        put(&t, "/api/admin/providers/fake", provider(U2, K2)).await,
+        put_cut(&t, "/api/admin/providers/fake", provider(U2, K2)).await,
         StatusCode::GATEWAY_TIMEOUT
     );
     let wrote = release(&tmp);
