@@ -20,13 +20,14 @@
 //! automatic.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, acting_session, agentic_gate, require, visible_session};
+use super::caller::User;
+use super::{ApiError, ApiResult, acting_session, agentic_gate, visible_session};
 use crate::{CommandError, Master};
 
 pub(super) fn routes() -> Router<Master> {
@@ -82,12 +83,11 @@ fn needs_update() -> ApiError {
 }
 
 async fn rewind(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<Body>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = owned(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     if row.parent_id.is_some() {
@@ -132,11 +132,10 @@ async fn rewind(
 }
 
 async fn undo(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, rewind_seq)): Path<(String, u64)>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = owned(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     if !m.node_has(&row.node_id, harness_protocol::CAP_REWIND) {
