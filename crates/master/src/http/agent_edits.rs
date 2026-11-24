@@ -15,7 +15,6 @@ use harness_agents::edits::{Custom, Overlay};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::agent_edits;
 use super::caller::User;
 use super::{ApiError, ApiResult, runtime};
 use crate::Master;
@@ -576,10 +575,10 @@ async fn agents(
             "agentic": r.default_for(harness_core::event::Profile::Agentic).ok(),
         },
         // Whether the caller may make and change agents in this scope.
-        "may_edit": agent_edits::may_edit(&who, scope.as_ref()),
+        "may_edit": may_edit(&who, scope.as_ref()),
         // For the workspace's editors: its own agents a server agent with
         // the same id hides (PLAN.md T79), to delete or remake.
-        "hidden": agent_edits::hidden(&m, &who, scope.as_ref()).await,
+        "hidden": hidden(&m, &who, scope.as_ref()).await,
     })))
 }
 
