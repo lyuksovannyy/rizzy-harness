@@ -33,6 +33,7 @@ mod folder_file;
 mod folder_page_edit;
 mod folder_preview;
 mod fork;
+mod git_state;
 mod hooks;
 mod levels;
 mod links;
@@ -257,6 +258,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(folder_page_edit::routes())
         .merge(folder_preview::routes())
         .merge(folder_file::routes())
+        .merge(git_state::routes())
         .merge(approval_mode::routes())
         .merge(exec_mode::routes())
         .merge(chat_allows::routes())

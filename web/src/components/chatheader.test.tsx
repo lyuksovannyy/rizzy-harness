@@ -17,6 +17,8 @@ vi.mock("../lib/projects", async (original) => {
   return { ...m, projectsApi: { ...m.projectsApi, setChatProject: (s: string, p: string | null) => setChatProject(s, p) } };
 });
 vi.mock("../apiPages", () => ({ pageApi: { renameSession: (_i: string, title: string) => Promise.resolve({ ok: true, title }) } }));
+// The git chip reads the server on its own (gitchip.test.tsx); not here.
+vi.mock("./GitChip", () => ({ GitChip: () => null }));
 const { ChatHeader } = await import("./ChatHeader");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

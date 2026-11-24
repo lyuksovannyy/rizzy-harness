@@ -14,6 +14,7 @@ import { shownName } from "../md/hidden";
 import type { ExecMode, NodeInfo, SessionRow } from "../types";
 import { ChatTitle } from "./ChatTitle";
 import { ExecBadge } from "./ExecBadge";
+import { GitChip } from "./GitChip";
 import { NodeBadge, nodeLabel } from "./NodeBadge";
 import { ProjectChip, showsProjectChip } from "./ProjectChip";
 
@@ -31,6 +32,8 @@ export interface ChatHeaderProps {
   /** The log names a mode this page does not read: the chat runs nothing. */
   execUnknown?: boolean;
   cwd?: string;
+  /** A turn is running: the git chip is read again when it ends. */
+  running?: boolean;
   exportDisabled: boolean;
   onExport: () => void;
   onDelete: () => void;
@@ -82,6 +85,7 @@ export function ChatHeader(p: ChatHeaderProps) {
                 </span>
               </Fragment>
             ))}
+            {p.agentic && <GitChip key={p.sessionId} sessionId={p.sessionId} running={!!p.running} />}
             <span className="sr-only">{sentence}</span>
           </span>
         )}

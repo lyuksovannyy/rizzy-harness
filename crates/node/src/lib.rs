@@ -160,6 +160,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Files { .. }
         | MasterToNode::DocPreview { .. }
         | MasterToNode::FolderFile { .. }
+        | MasterToNode::GitState { .. }
         | MasterToNode::DocPageEdit { .. }
         | MasterToNode::ProjectCreate { .. }
         | MasterToNode::ProjectClone { .. }
@@ -279,6 +280,9 @@ pub(crate) struct Inner {
     previews: Arc<tokio::sync::Semaphore>,
     /// The one place a person's text-file views take (X.63).
     file_views: Arc<tokio::sync::Semaphore>,
+    /// The places a person's git-state requests (the header's branch chip)
+    /// take (X.64): two, so a slow repository does not queue behind itself.
+    git_states: Arc<tokio::sync::Semaphore>,
     /// New project folders made in the last hour (T77), and room for the
     /// ones being made (one at a time).
     projects_made: projects::Made,
@@ -712,6 +716,7 @@ impl NodeRuntime {
             bg_outputs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             previews: Arc::new(tokio::sync::Semaphore::new(1)),
             file_views: Arc::new(tokio::sync::Semaphore::new(1)),
+            git_states: Arc::new(tokio::sync::Semaphore::new(2)),
             projects_made: Default::default(),
             project_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             clone_slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1007,6 +1012,9 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_FILES.into());
                 // A text file of a folder for the page's panel (X.63).
                 capabilities.push(harness_protocol::CAP_FOLDER_FILE.into());
+                // The branch and the changed-file count of a folder for
+                // the chat's header (X.64).
+                capabilities.push(harness_protocol::CAP_GIT_STATE.into());
                 // A Word or Excel file of a folder for the page's panel
                 // (X.59): only where the helper can be started.
                 if docs::shared_helper().is_some() {
@@ -1199,6 +1207,10 @@ impl NodeRuntime {
                         session_id,
                         path,
                     } => this.folder_file(req_id, session_id, path),
+                    // The folder's git branch for the header (X.64).
+                    MasterToNode::GitState { req_id, session_id } => {
+                        this.git_state(req_id, session_id)
+                    }
                     // A person's text changes to such a file (X.60): the same
                     // kind of task, answered by one
                     // `session.doc_page_edit_result`; no event.
@@ -1670,6 +1682,37 @@ impl NodeRuntime {
                 },
             };
             inner.publish_wait(msg).await;
+        });
+    }
+
+    /// Answer `session.git_state` (X.64, T19) from a task of its own; never
+    /// acked, nothing logged but the node's audit line (the session id only),
+    /// no event. Two at a time: past that the answer is `busy` and the page
+    /// keeps what it shows.
+    fn git_state(&self, req_id: String, sid: SessionId) {
+        self.audit_inline("session.git_state", sid);
+        let Ok(permit) = self.inner.git_states.clone().try_acquire_owned() else {
+            self.inner.publish(NodeToMaster::GitStateResult {
+                req_id,
+                state: None,
+                busy: true,
+            });
+            return;
+        };
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let state = match inner.session(sid) {
+                Some(s) => s.git_state().await,
+                None => None,
+            };
+            inner
+                .publish_wait(NodeToMaster::GitStateResult {
+                    req_id,
+                    state,
+                    busy: false,
+                })
+                .await;
         });
     }
 
@@ -2537,6 +2580,10 @@ impl NodeRuntime {
                 path,
             } => {
                 self.folder_file(req_id, session_id, path);
+                Ok(())
+            }
+            MasterToNode::GitState { req_id, session_id } => {
+                self.git_state(req_id, session_id);
                 Ok(())
             }
             MasterToNode::DocPageEdit {

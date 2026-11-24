@@ -404,7 +404,23 @@ sandbox`; hover it for the chat's folder). The project there is the picker that
 moves the chat into another project or out ("No project", in muted words,
 when it has none); a plain chat with no folder shows only what applies. On a
 narrow screen the header is two lines: the title and the buttons, then the
-suffix, whole. The download
+suffix, whole. In a coding chat whose folder is in a git repository the suffix
+ends with **the branch** (`feature/x`, or `detached at abc1234`) and, when files
+differ from the last commit, how many (`3 changed`: changed tracked files plus
+new files that no ignore rule hides, a folder of new files counting once; the
+whole repository, also when the chat's folder is a subfolder of it). It is read
+when you open the chat, again when a turn ends, and when you click it; it is
+never polled, so a commit you make outside the chat shows after a click. The
+count is left out, not shown as 0, when it cannot be told (a repository with no
+commit yet, checkpoints turned off on the node, a huge tree that takes too
+long). Nothing is shown for a folder that is no repository, for a linked
+worktree or a submodule (`.git` is a file), or on a node that does not allow the
+`read` tool. The branch name is the repository's own text, so it is cut at 80
+characters and shown as text, its hidden characters as codes; the hover text
+has it whole. The node reads the branch from the repository's files and counts
+from its own checkpoint copy, so no program the repository names runs; it is
+not `git status` (your global ignore file is not followed, and a file a filter
+would change counts by its bytes). The download
 button at the right saves the chat as a Markdown file: your messages, the
 answers, and each tool call as one line (tick **Include tool outputs** for
 their full output). The file is made in your browser from what the chat

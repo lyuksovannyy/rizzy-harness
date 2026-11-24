@@ -25,6 +25,8 @@ vi.mock("../api", () => ({
   call: (...a: unknown[]) => call(...a),
   HttpError: Error,
 }));
+// The header's git chip reads the server on its own (gitchip.test.tsx); here `call` counts what the panel asks.
+vi.mock("./GitChip", () => ({ GitChip: () => null }));
 vi.mock("../apiPages", () => ({
   pageApi: {
     deleteSession: vi.fn(() => Promise.resolve({ ok: true })),

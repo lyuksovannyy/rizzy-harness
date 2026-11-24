@@ -6984,6 +6984,11 @@ fn applied_count(a: &crate::git::Applied) -> String {
 #[path = "session_diff.rs"]
 mod diff;
 
+/// The folder's git branch and changed-file count for the header (X.64); its
+/// own file.
+#[path = "session_git.rs"]
+mod git_chip;
+
 /// A person's Retry of the failed last turn (X.21); its own file.
 #[path = "session_peers.rs"]
 mod peers;

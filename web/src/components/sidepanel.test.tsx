@@ -24,6 +24,8 @@ const cancel = vi.fn(() => Promise.resolve({ ok: true }));
 vi.mock("../apiPages", () => ({
   pageApi: { cancel: () => cancel(), approve: vi.fn(), turnDiff: () => Promise.resolve({ files: [] }), restoreTurn: vi.fn() },
 }));
+// The header's git chip reads the server on its own (gitchip.test.tsx); here `call` counts what the panel asks.
+vi.mock("./GitChip", () => ({ GitChip: () => null }));
 const { default: Conversation } = await import("./Conversation");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

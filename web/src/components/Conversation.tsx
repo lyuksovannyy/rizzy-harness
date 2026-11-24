@@ -747,6 +747,7 @@ export default function Conversation(props: {
         execMode={meta?.exec_mode}
         execUnknown={!!view?.exec_mode_unknown}
         cwd={meta?.cwd}
+        running={running}
         exportDisabled={!view || view.items.length === 0}
         onExport={() => setExporting(true)}
         onDelete={remove}

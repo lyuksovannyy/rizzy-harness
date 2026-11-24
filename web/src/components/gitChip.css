@@ -1,0 +1,35 @@
+/* The header's git chip (X.64): plain words like the rest of the suffix. */
+.git-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.git-chip:hover {
+  color: var(--fg);
+}
+.git-chip[aria-busy="true"] {
+  opacity: 0.7;
+}
+.git-chip svg {
+  flex: none;
+}
+.git-name {
+  min-width: 0;
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.git-count {
+  flex: none;
+  color: var(--warn);
+}
