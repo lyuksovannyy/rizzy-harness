@@ -98,7 +98,7 @@ impl Master {
         let (k, v) = (key(id), serde_json::to_string(&l)?);
         self.inner.mirror.call(move |s| s.kv_set(&k, &v)).await?;
         if mark(p, &l.models, l.fetched_ms) {
-            rt.save(cfg)?;
+            rt.save(cfg).await?;
             self.set_models(rt.models());
         }
         Ok(l)

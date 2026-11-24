@@ -255,6 +255,7 @@ async fn put_memory_cfg(
         .validate()
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
     rt.save(latest.clone())
+        .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let Some(bm) = m.builtin_memory() {
         bm.set_embedder(emb);

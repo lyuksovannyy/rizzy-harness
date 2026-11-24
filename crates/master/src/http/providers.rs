@@ -18,7 +18,7 @@ use crate::Master;
 use crate::avatars::AgentAvatar;
 use crate::config::{AgentChain, Config, ModelConfig, ProviderConfig, ProviderKind, check_chain};
 use crate::presets::{self, Preset};
-use crate::providers::{ProviderRuntime, secret_name};
+use crate::providers::{ProviderRuntime, SaveError, secret_name};
 
 const MAX_NAME: usize = 64;
 const MAX_TOKENS: u64 = 100_000_000;
@@ -282,32 +282,51 @@ fn secrets_path(rt: &ProviderRuntime) -> std::path::PathBuf {
 /// Store `key` under `name` for `f` (which builds and persists the config
 /// that uses it), and put the previous value back when `f` fails, so a
 /// failed save never pairs the new key with the old URL.
-pub(super) fn with_secret<T>(
+pub(super) async fn with_secret<T, Fut: std::future::Future<Output = ApiResult<T>>>(
     path: &std::path::Path,
     name: &str,
     key: Option<&Secret<String>>,
-    f: impl FnOnce() -> ApiResult<T>,
+    f: impl FnOnce() -> Fut,
 ) -> ApiResult<T> {
-    let Some(k) = key else { return f() };
+    let Some(k) = key else { return f().await };
     let internal = |e: crate::secrets::SecretsError| {
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     };
     let prev = crate::secrets::get(path, name).map_err(internal)?;
-    crate::secrets::set(path, name, Some(k)).map_err(internal)?;
-    let r = f();
+    crate::secrets::set_off_thread(path, name, Some(k))
+        .await
+        .map_err(internal)?;
+    let r = f().await;
     if r.is_err()
-        && let Err(e) = crate::secrets::set(path, name, prev.as_ref())
+        && let Err(e) = crate::secrets::set_off_thread(path, name, prev.as_ref()).await
     {
         tracing::error!("restoring secret {name:?} after a failed save: {e}");
     }
     r
 }
 
+/// A refused change is a 400 with its sentence; a config file that could
+/// not be written is a 500 (its text names the server's path, so it is for
+/// the log: `response::finish` keeps it from the client).
+impl From<SaveError> for ApiError {
+    fn from(e: SaveError) -> Self {
+        let code = match &e {
+            SaveError::Invalid(_) => StatusCode::BAD_REQUEST,
+            SaveError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError(code, e.to_string())
+    }
+}
+
 /// Validate, persist, switch, and refresh the model list and the memory
 /// embedder.
-pub(super) fn apply(m: &Master, rt: &ProviderRuntime, mut cfg: Config) -> ApiResult<()> {
+pub(super) async fn apply(m: &Master, rt: &ProviderRuntime, mut cfg: Config) -> ApiResult<()> {
     cfg.normalize();
-    rt.apply(cfg).map_err(|e| bad(format!("{e:#}")))?;
+    // A refusal keeps its whole chain here (it always did on these routes).
+    rt.apply(cfg).await.map_err(|e| match e {
+        SaveError::Invalid(e) => bad(format!("{e:#}")),
+        io => io.into(),
+    })?;
     m.set_models(rt.models());
     super::memory_settings::refresh_embedder(m, rt);
     Ok(())
@@ -315,7 +334,7 @@ pub(super) fn apply(m: &Master, rt: &ProviderRuntime, mut cfg: Config) -> ApiRes
 
 /// Drop a stored key nothing uses any more (only our own `provider-<id>`
 /// names; a key referenced by hand under another name is left alone).
-fn forget_key(rt: &ProviderRuntime, old: Option<&ProviderConfig>) {
+async fn forget_key(rt: &ProviderRuntime, old: Option<&ProviderConfig>) {
     let Some(old) = old else { return };
     let name = secret_name(&old.id);
     let in_use = rt
@@ -324,7 +343,7 @@ fn forget_key(rt: &ProviderRuntime, old: Option<&ProviderConfig>) {
         .iter()
         .any(|p| p.api_key_secret.as_deref() == Some(name.as_str()));
     if old.api_key_secret.as_deref() == Some(name.as_str()) && !in_use {
-        let _ = crate::secrets::set(&secrets_path(rt), &name, None);
+        let _ = crate::secrets::set_off_thread(&secrets_path(rt), &name, None).await;
     }
 }
 
@@ -421,8 +440,9 @@ pub(super) async fn put_provider(
     cfg.validate().map_err(|e| bad(format!("{e:#}")))?;
     with_secret(&secrets_path(&rt), &secret_name(&id), key.as_ref(), || {
         apply(&m, &rt, cfg)
-    })?;
-    forget_key(&rt, old.as_ref());
+    })
+    .await?;
+    forget_key(&rt, old.as_ref()).await;
     if moved {
         m.forget_listing(&id).await;
     }
@@ -443,8 +463,8 @@ pub(super) async fn delete_provider(
         return Err(ApiError(StatusCode::NOT_FOUND, "unknown provider".into()));
     }
     cfg.providers.retain(|p| p.id != id);
-    apply(&m, &rt, cfg)?;
-    forget_key(&rt, old.as_ref());
+    apply(&m, &rt, cfg).await?;
+    forget_key(&rt, old.as_ref()).await;
     m.forget_listing(&id).await;
     tracing::info!(provider = %id, "provider deleted");
     Ok(Json(state_json(&rt.config(), rt.data_dir())))
@@ -489,7 +509,7 @@ pub(super) async fn use_demo(
         cfg.providers.push(ProviderConfig::demo(40));
     }
     cfg.default_model = Some(format!("{}::mock", presets::DEMO));
-    apply(&m, &rt, cfg)?;
+    apply(&m, &rt, cfg).await?;
     Ok(Json(state_json(&rt.config(), rt.data_dir())))
 }
 
@@ -546,7 +566,7 @@ pub(super) async fn put_agent_models(
         Some(None) => cfg.default_model = None,
         None => {}
     }
-    apply(&m, &rt, cfg)?;
+    apply(&m, &rt, cfg).await?;
     Ok(Json(state_json(&rt.config(), rt.data_dir())))
 }
 
@@ -568,7 +588,7 @@ pub(super) async fn put_agent_avatar(
     let _edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     cfg.agent_avatars.insert(id, avatar);
-    apply(&m, &rt, cfg)?;
+    apply(&m, &rt, cfg).await?;
     // Server settings show the server's own chains.
     Ok(Json(super::agent_edits::agent_json(
         &m,
@@ -658,7 +678,7 @@ pub(super) async fn delete_model(
     }
     // Agents and defaults that named it are repaired by `apply`: a fallback
     // takes the place of a main model, a default falls back.
-    apply(&m, &rt, cfg)?;
+    apply(&m, &rt, cfg).await?;
     tracing::info!(provider = %id, model = %raw, "model removed");
     Ok(Json(state_json(&rt.config(), rt.data_dir())))
 }

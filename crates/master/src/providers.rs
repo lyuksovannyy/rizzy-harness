@@ -175,6 +175,23 @@ pub fn model_list(cfg: &Config) -> Vec<ModelInfo> {
         .collect()
 }
 
+/// Why [`ProviderRuntime::save`] or [`ProviderRuntime::apply`] failed.
+/// Callers answer the two differently: a refused change is the admin's to
+/// fix (a 400 with the sentence), a file that could not be written is the
+/// server's trouble (a 500, whose text holds a server path and goes to the
+/// log, never to the client).
+#[derive(Debug, thiserror::Error)]
+pub enum SaveError {
+    /// The change is refused: the environment, `validate` or building the
+    /// providers said why.
+    #[error("{0}")]
+    Invalid(anyhow::Error),
+    /// `config.toml` could not be written (or read back for the settings
+    /// the environment fixes).
+    #[error("{0:#}")]
+    Io(anyhow::Error),
+}
+
 /// Owns the live provider, its config file and the shared secret set.
 pub struct ProviderRuntime {
     pub provider: Arc<SwappableProvider>,
@@ -224,10 +241,15 @@ impl ProviderRuntime {
     }
 
     /// Write `cfg` to `config.toml`, keeping the file's own values for the
-    /// settings the environment fixes.
-    fn persist(&self, cfg: &Config) -> anyhow::Result<()> {
+    /// settings the environment fixes. The one place the running server
+    /// writes the file: on the blocking pool, so a slow disk stalls a
+    /// thread meant for it and not the async workers (FIX_PLAN 4.2).
+    async fn persist(&self, cfg: &Config) -> anyhow::Result<()> {
         let path = self.data_dir.join(harness_core::CONFIG_FILE);
-        self.env.for_file(cfg, &path)?.save(&path)
+        let (env, cfg) = (self.env.clone(), cfg.clone());
+        tokio::task::spawn_blocking(move || env.for_file(&cfg, &path)?.save(&path))
+            .await
+            .context("the config write did not finish")?
     }
 
     pub fn config(&self) -> Config {
@@ -253,21 +275,21 @@ impl ProviderRuntime {
     }
 
     /// Validate and persist a config change that does not touch the provider.
-    pub fn save(&self, mut cfg: Config) -> anyhow::Result<()> {
-        self.env.apply(&mut cfg)?;
-        cfg.validate()?;
-        self.persist(&cfg)?;
+    pub async fn save(&self, mut cfg: Config) -> Result<(), SaveError> {
+        self.env.apply(&mut cfg).map_err(SaveError::Invalid)?;
+        cfg.validate().map_err(SaveError::Invalid)?;
+        self.persist(&cfg).await.map_err(SaveError::Io)?;
         *self.config.lock().unwrap_or_else(|p| p.into_inner()) = cfg;
         Ok(())
     }
 
     /// Validate, build, persist to `config.toml`, then switch. Running turns
     /// finish on the old provider; the next turn uses the new one.
-    pub fn apply(&self, mut cfg: Config) -> anyhow::Result<()> {
-        self.env.apply(&mut cfg)?;
-        cfg.validate()?;
-        let built = build(&cfg, &self.data_dir)?;
-        self.persist(&cfg)?;
+    pub async fn apply(&self, mut cfg: Config) -> Result<(), SaveError> {
+        self.env.apply(&mut cfg).map_err(SaveError::Invalid)?;
+        cfg.validate().map_err(SaveError::Invalid)?;
+        let built = build(&cfg, &self.data_dir).map_err(SaveError::Invalid)?;
+        self.persist(&cfg).await.map_err(SaveError::Io)?;
         for k in built.keys {
             self.secrets.add(k);
         }

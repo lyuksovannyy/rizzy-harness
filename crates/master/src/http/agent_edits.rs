@@ -361,7 +361,7 @@ pub(super) async fn delete_agent(
         let looks = cfg.agent_avatars.remove(&id).is_some();
         let chain = cfg.agent_models.remove(&id).is_some();
         if looks || chain {
-            super::providers::apply(&m, &rt, cfg)?;
+            super::providers::apply(&m, &rt, cfg).await?;
         }
     }
     Ok(Json(json!({ "ok": true })))

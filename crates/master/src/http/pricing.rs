@@ -29,7 +29,7 @@ pub(super) async fn put_pricing(
     let _edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     cfg.pricing.currency = currency;
-    super::providers::apply(&m, &rt, cfg)?;
+    super::providers::apply(&m, &rt, cfg).await?;
     tracing::info!(currency = %rt.config().pricing.currency, "model price currency set");
     Ok(Json(json!({ "currency": rt.config().pricing.currency })))
 }

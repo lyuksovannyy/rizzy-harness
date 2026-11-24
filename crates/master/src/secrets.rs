@@ -170,6 +170,21 @@ pub fn set(path: &Path, name: &str, value: Option<&Secret<String>>) -> Result<()
     std::fs::rename(&tmp, path).map_err(|e| SecretsError::Io(path.into(), e))
 }
 
+/// [`set`] on the blocking pool, for the async handlers: the file is read,
+/// written and renamed (and synced) there, never on an async worker. The
+/// write itself is `set`'s, unchanged: a fresh 0600 temp file, synced, then
+/// renamed.
+pub async fn set_off_thread(
+    path: &Path,
+    name: &str,
+    value: Option<&Secret<String>>,
+) -> Result<(), SecretsError> {
+    let (p, n, v) = (path.to_path_buf(), name.to_string(), value.cloned());
+    tokio::task::spawn_blocking(move || set(&p, &n, v.as_ref()))
+        .await
+        .unwrap_or_else(|e| Err(SecretsError::Io(path.into(), std::io::Error::other(e))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +224,32 @@ mod tests {
         }
         assert!(matches!(
             set(&p, "Bad Name", None),
+            Err(SecretsError::BadName)
+        ));
+    }
+
+    /// The async wrapper is `set` on the blocking pool and nothing else: the
+    /// same 0600 file, no temp file left, the same refusals.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn set_off_thread_is_set() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("secrets.toml");
+        set_off_thread(&p, "provider-a", Some(&Secret::new("sk-made-up-1".into())))
+            .await
+            .unwrap();
+        assert_eq!(
+            get(&p, "provider-a").unwrap().unwrap().expose(),
+            "sk-made-up-1"
+        );
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert!(!dir.path().join("secrets.toml.tmp").exists());
+        set_off_thread(&p, "provider-a", None).await.unwrap();
+        assert!(get(&p, "provider-a").unwrap().is_none());
+        assert!(matches!(
+            set_off_thread(&p, "Bad Name", None).await,
             Err(SecretsError::BadName)
         ));
     }

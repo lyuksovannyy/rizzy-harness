@@ -81,7 +81,6 @@ async fn put_settings(
     let _edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     cfg.storage = b;
-    rt.save(cfg.clone())
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    rt.save(cfg.clone()).await?;
     Ok(Json(settings_json(&cfg.storage)))
 }

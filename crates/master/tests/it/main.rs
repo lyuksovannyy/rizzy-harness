@@ -31,6 +31,7 @@ mod attached_http;
 mod attention_http;
 mod background_stop_http;
 mod bg_output_http;
+mod blocking_io_http;
 mod board_http;
 mod callbacks_http;
 mod chat_diff_http;

@@ -1,6 +1,6 @@
 # FIX_PLAN 4.2: inventory and plan (stage 0)
 
-Status: plan only, 2026-11-24, read at `cc411909` (origin/main). No code was changed for this document.
+Status: plan, 2026-11-24, read at `cc411909` (origin/main). Done since: the split (two pull requests) and pull request 3, "Errors" (branch `fix/save-errors`: scrubbed 500 log, `SaveError`, config and secrets writes on the blocking pool, `tokio::fs` unlinks, the `std::fs` source check). Left: pull request 4, the keyed limiter.
 
 Row 4.2: "Split `http.rs` by area into `http/*`; one `ApiError` enum that logs server errors and maps them; one keyed rate-limit module (`governor`) replacing the five throttles; file IO in handlers moved to `spawn_blocking`. Done when: `http.rs` holds the router and shared types only. M"
 
