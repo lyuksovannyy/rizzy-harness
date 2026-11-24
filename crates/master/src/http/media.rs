@@ -4,7 +4,7 @@
 
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -13,8 +13,8 @@ use harness_store::media::{MediaInsert, MediaQuery, MediaRow, NewItem};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::links::require_bytes;
-use super::{ApiError, ApiResult, query_flag, require};
+use super::caller::{ByteCaller, User};
+use super::{ApiError, ApiResult, query_flag};
 use crate::auth::Principal;
 use crate::media::{self, item_json};
 use crate::workspaces as ws;
@@ -58,8 +58,7 @@ fn refused((code, msg): storage::Refusal) -> ApiError {
 }
 
 /// The caller, while Media is on (404 otherwise, like a missing route).
-async fn caller(m: &Master, headers: &HeaderMap) -> ApiResult<Principal> {
-    let who = require(m, headers).await?;
+fn caller(m: &Master, who: Principal) -> ApiResult<Principal> {
     if !media::enabled(m) {
         return Err(unknown());
     }
@@ -67,20 +66,14 @@ async fn caller(m: &Master, headers: &HeaderMap) -> ApiResult<Principal> {
 }
 
 /// Item `id`, if the caller may see it: its owner, or the API token.
-async fn visible(m: &Master, headers: &HeaderMap, id: &str) -> ApiResult<(Principal, MediaRow)> {
-    let who = caller(m, headers).await?;
+async fn visible(m: &Master, who: Principal, id: &str) -> ApiResult<(Principal, MediaRow)> {
+    let who = caller(m, who)?;
     visible_to(m, who, id).await
 }
 
 /// [`visible`] for an element or a download, which may come with a link
 /// instead of the login key (P-1, `http::links`).
-async fn visible_bytes(
-    m: &Master,
-    headers: &HeaderMap,
-    uri: &Uri,
-    id: &str,
-) -> ApiResult<(Principal, MediaRow)> {
-    let who = require_bytes(m, headers, uri).await?;
+async fn visible_bytes(m: &Master, who: Principal, id: &str) -> ApiResult<(Principal, MediaRow)> {
     if !media::enabled(m) {
         return Err(unknown());
     }
@@ -152,11 +145,11 @@ async fn usage(m: &Master, who: &Principal) -> ApiResult<Value> {
 }
 
 async fn list(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
-    let who = caller(&m, &headers).await?;
+    let who = caller(&m, who)?;
     let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
     if let Some(k) = &q.kind
         && !matches!(k.as_str(), "image" | "video" | "audio" | "other")
@@ -279,12 +272,13 @@ fn file_name(headers: &HeaderMap) -> ApiResult<String> {
 /// one and `duplicate: true` when the same bytes are already in Media in
 /// this workspace.
 async fn upload(
+    User(who): User,
     State(m): State<Master>,
     headers: HeaderMap,
     Query(q): Query<UploadQuery>,
     body: Body,
 ) -> ApiResult<Response> {
-    let who = caller(&m, &headers).await?;
+    let who = caller(&m, who)?;
     let (from_chat, session) = upload_origin(&m, &who, &q).await?;
     let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
     let name = file_name(&headers)?;
@@ -377,11 +371,11 @@ async fn upload(
 }
 
 async fn detail(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let (_, row) = visible(&m, &headers, &id).await?;
+    let (_, row) = visible(&m, who, &id).await?;
     Ok(Json(item_json(&row)))
 }
 
@@ -404,12 +398,12 @@ struct Patch {
 /// (clamped; an image's size comes from its header and is never
 /// overwritten) and `no_thumb` when it could not make a thumbnail.
 async fn update(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<Patch>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row) = visible(&m, &headers, &id).await?;
+    let (who, row) = visible(&m, who, &id).await?;
     if let Some(name) = &b.name {
         if harness_core::text::clean_line(name, 1).is_empty() {
             return Err(ApiError(
@@ -459,11 +453,11 @@ async fn update(
 }
 
 async fn delete_one(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row) = visible(&m, &headers, &id).await?;
+    let (who, row) = visible(&m, who, &id).await?;
     media::delete(&m, &who, vec![row.media_id]).await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -475,11 +469,11 @@ struct DeleteMany {
 }
 
 async fn delete_many(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<DeleteMany>,
 ) -> ApiResult<Json<Value>> {
-    let who = caller(&m, &headers).await?;
+    let who = caller(&m, who)?;
     if b.ids.len() > MAX_BULK {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -499,13 +493,13 @@ struct ContentQuery {
 }
 
 async fn content(
+    ByteCaller(who): ByteCaller,
     State(m): State<Master>,
     headers: HeaderMap,
-    uri: Uri,
     Path(id): Path<String>,
     Query(q): Query<ContentQuery>,
 ) -> ApiResult<Response> {
-    let (_, row) = visible_bytes(&m, &headers, &uri, &id).await?;
+    let (_, row) = visible_bytes(&m, who, &id).await?;
     let st = storage::get(&m).ok_or_else(unknown)?;
     let path = st.path(&row.blob.blob_id).ok_or_else(unknown)?;
     let blob = row.blob.blob_id.clone();
@@ -529,12 +523,12 @@ async fn content(
 }
 
 async fn thumb(
+    ByteCaller(who): ByteCaller,
     State(m): State<Master>,
     headers: HeaderMap,
-    uri: Uri,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
-    let (_, row) = visible_bytes(&m, &headers, &uri, &id).await?;
+    let (_, row) = visible_bytes(&m, who, &id).await?;
     let blob = row.blob.blob_id.clone();
     let (mime, bytes) = m
         .inner
@@ -548,12 +542,12 @@ async fn thumb(
 /// The owner's browser-made thumbnail: WebP, JPEG or PNG by its magic
 /// bytes, at most 64 KiB.
 async fn put_thumb(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let (who, row) = visible(&m, &headers, &id).await?;
+    let (who, row) = visible(&m, who, &id).await?;
     blob_owner(&who, &row)?;
     if body.len() > MAX_THUMB {
         return Err(ApiError(
