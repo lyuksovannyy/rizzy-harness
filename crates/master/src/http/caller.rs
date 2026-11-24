@@ -72,7 +72,9 @@ fn found(parts: &Parts) -> Result<&Identified, ApiError> {
         .ok_or_else(not_logged_in)
 }
 
-fn settled(who: &Principal) -> Result<(), ApiError> {
+/// The rule of a [`User`]: no pending password change. A handler whose
+/// need depends on its body (a chat approval) applies it by hand.
+pub(super) fn settled(who: &Principal) -> Result<(), ApiError> {
     if who.must_change_password {
         return Err(ApiError(
             StatusCode::FORBIDDEN,

@@ -1605,18 +1605,17 @@ struct ApprovalBody {
 }
 
 async fn approval(
+    Caller(who): Caller,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, approval_id)): Path<(String, String)>,
     Json(b): Json<ApprovalBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     // Allowing makes the chat do work; denying stops it, like cancel, so a
     // user who lost access, or must change their password first, can
     // still refuse (Gate 3 review P-7).
-    let who = match b.decision.allows() {
-        true => require(&m, &headers).await?,
-        false => require_any(&m, &headers).await?,
-    };
+    if b.decision.allows() {
+        caller::settled(&who)?;
+    }
     // An id outside the harness's id rule names no card (review N4): the
     // same answer as an unknown session, before anything is relayed.
     if !harness_core::valid_event_id(&approval_id) {
