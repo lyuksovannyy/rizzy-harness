@@ -17,9 +17,8 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use super::caller::User;
-use super::{
-    ApiError, ApiResult, CreateBody, acting_session, memory_err, memory_store, visible_session,
-};
+use super::sessions::CreateBody;
+use super::{ApiError, ApiResult, acting_session, memory_err, memory_store, visible_session};
 use crate::auth::Principal;
 use crate::memory::{audience_of, memory_changed};
 use crate::projects::{self as p, ProjectSettings};
