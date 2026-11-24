@@ -31,6 +31,7 @@ struct T {
     base: String,
     dir: tempfile::TempDir,
     admin: String,
+    master: Master,
 }
 
 /// A server whose data directory is named after `prefix` and whose runtime
@@ -50,7 +51,7 @@ async fn start(prefix: &str, cfg: Config) -> T {
         }),
     );
     master.set_provider_runtime(Arc::new(rt));
-    let app = router(master);
+    let app = router(master.clone());
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
     let base = format!("http://{addr}");
     let r = reqwest::Client::new()
@@ -61,7 +62,12 @@ async fn start(prefix: &str, cfg: Config) -> T {
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let admin = common::signed_in(r).await;
-    T { base, dir, admin }
+    T {
+        base,
+        dir,
+        admin,
+        master,
+    }
 }
 
 fn browser(t: &T, method: Method, path: &str) -> reqwest::RequestBuilder {
@@ -251,4 +257,216 @@ async fn a_failed_write_leaves_the_old_file_and_a_good_one_no_temp() {
     let (st, _, v) = send(&t, Method::PUT, "/api/admin/storage", Some(&body(4))).await;
     assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), first);
+}
+
+/// An OpenAI-compatible fake that lists one model the saved provider does
+/// not have, so that refreshing marks the saved one and saves the config.
+async fn fake_lister() -> String {
+    let app = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(|| async { axum::Json(json!({"data": [{"id": "zzz"}]})) }),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    base
+}
+
+/// Review round: the model-listing routes sent a failed write of
+/// `config.toml` as a 502 with the server's path (the response layer
+/// replaces only 500s). It is a 500 now; a provider that does not answer
+/// keeps its sentence.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_listing_that_cannot_be_recorded_is_a_500_without_the_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = start("save-errors-listing-", Config::default()).await;
+    t.master
+        .set_outbound(harness_master::outbound::Outbound::new([
+            "127.0.0.1".to_string()
+        ]));
+    let fake = fake_lister().await;
+    let (st, _, v) = send(
+        &t,
+        Method::PUT,
+        "/api/admin/providers/fake",
+        Some(&provider_at(&fake)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let dir = t.dir.path().to_path_buf();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let (st, id, v) = send(
+        &t,
+        Method::POST,
+        "/api/admin/providers/fake/models/refresh",
+        None,
+    )
+    .await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+    assert_eq!(v, json!({"error": "internal error", "request_id": id}));
+    let lines = lines_of(&id);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("config.toml"), "{}", lines[0]);
+    // A provider that does not answer is still the admin's news.
+    let (st, _, v) = send(
+        &t,
+        Method::PUT,
+        "/api/admin/providers/dead",
+        Some(&provider_at("http://127.0.0.1:1/v1")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, _, v) = send(
+        &t,
+        Method::POST,
+        "/api/admin/providers/dead/models/refresh",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{v}");
+    assert!(v["error"].as_str().is_some_and(|e| !e.is_empty()), "{v}");
+}
+
+fn provider_at(url: &str) -> Value {
+    json!({
+        "name": "Fake", "preset": "custom_openai", "base_url": url, "api_key": KEY,
+        "models": [{"id": "m1"}]
+    })
+}
+
+/// Review round: `toml` quotes the line it cannot read, and in
+/// `secrets.toml` that line holds a key. A broken `secrets.toml` reaches
+/// neither a response nor a log line with its content; the position is
+/// given in the log.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_broken_secrets_file_shows_no_key_and_no_line() {
+    const LEAK: &str = "sk-leak-probe-0003";
+    let t = start("save-errors-broken-", Config::default()).await;
+    let (st, _, v) = send(
+        &t,
+        Method::PUT,
+        "/api/admin/providers/fake",
+        Some(&provider(KEY)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let secrets = t.dir.path().join("secrets.toml");
+    std::fs::write(
+        &secrets,
+        format!("[keys]\n\"provider-fake\" = \"{LEAK} oops\n"),
+    )
+    .unwrap();
+    let (st, id, v) = send(
+        &t,
+        Method::PUT,
+        "/api/admin/pricing",
+        Some(&json!({"currency": "EUR"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+    assert_eq!(v, json!({"error": "internal error", "request_id": id}));
+    let lines = lines_of(&id);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        !lines[0].contains(LEAK) && !lines[0].contains("oops"),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("is not valid TOML at line 2, column"),
+        "{}",
+        lines[0]
+    );
+}
+
+/// The same for `config.toml` (an inline key, a URL with credentials, a
+/// value of the wrong type is quoted by serde too).
+#[test]
+fn a_broken_config_file_shows_its_position_and_nothing_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    for (name, text) in [
+        (
+            "syntax",
+            "[[providers]]\nid = \"x\"\nbase_url = \"https://user:pass-leak-0004@example.com/v1\" oops\n",
+        ),
+        (
+            "type",
+            "[[providers]]\nid = \"x\"\nbase_url = 5\n[chat]\nmodel_first_byte_timeout_s = \"pass-leak-0004\"\n",
+        ),
+        ("unknown", "pass-leak-0004 = 1\n"),
+    ] {
+        std::fs::write(&file, text).unwrap();
+        let e = format!("{:#}", Config::load(&file).unwrap_err());
+        assert!(
+            !e.contains("pass-leak") && !e.contains("oops"),
+            "{name}: {e}"
+        );
+        assert!(e.contains("is not valid TOML at line"), "{name}: {e}");
+    }
+}
+
+/// A `secrets.toml` open to others, found while building the providers, is
+/// the server's trouble (500, the path only in the log), not a 400 with the
+/// path.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_secrets_file_open_to_others_found_in_apply_is_a_500() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = start("save-errors-mode-", Config::default()).await;
+    let (st, _, v) = send(
+        &t,
+        Method::PUT,
+        "/api/admin/providers/fake",
+        Some(&provider(KEY)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    std::fs::set_permissions(
+        t.dir.path().join("secrets.toml"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let (st, id, v) = send(
+        &t,
+        Method::PUT,
+        "/api/admin/pricing",
+        Some(&json!({"currency": "EUR"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+    assert_eq!(v, json!({"error": "internal error", "request_id": id}));
+    assert_eq!(lines_of(&id).len(), 1);
+}
+
+/// The one refusal that still reaches the admin names the secret but not
+/// the server's path.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_missing_named_secret_is_named_without_the_path() {
+    let t = start("save-errors-missing-", Config::default()).await;
+    let (st, _, v) = send(
+        &t,
+        Method::PUT,
+        "/api/admin/providers/fake",
+        Some(&provider(KEY)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    std::fs::write(t.dir.path().join("secrets.toml"), "[keys]\n").unwrap();
+    let (st, _, v) = send(
+        &t,
+        Method::PUT,
+        "/api/admin/pricing",
+        Some(&json!({"currency": "EUR"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(
+        v,
+        json!({"error": "provider \"fake\": secret \"provider-fake\" not found in secrets.toml"})
+    );
 }

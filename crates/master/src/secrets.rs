@@ -16,8 +16,10 @@ use harness_core::Secret;
 pub enum SecretsError {
     #[error("{0}: {1}")]
     Io(PathBuf, std::io::Error),
-    #[error("{0} is not valid TOML: {1}")]
-    Parse(PathBuf, toml::de::Error),
+    /// The path and where; never what the file says (a key sits on that
+    /// line): see [`crate::config::toml_position`].
+    #[error("{0} is not valid TOML {1}")]
+    Parse(PathBuf, String),
     #[error("{0} holds secrets and is open to group or others (mode {1:03o}); run: chmod 600 {0}")]
     Permissions(PathBuf, u32),
     #[error(
@@ -124,7 +126,8 @@ fn read(path: &Path) -> Result<File, SecretsError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(File::default()),
         Err(e) => return Err(SecretsError::Io(path.into(), e)),
     };
-    toml::from_str(&text).map_err(|e| SecretsError::Parse(path.into(), e))
+    toml::from_str(&text)
+        .map_err(|e| SecretsError::Parse(path.into(), crate::config::toml_position(&text, &e)))
 }
 
 /// Look up one secret by name.
@@ -142,6 +145,12 @@ pub fn set(path: &Path, name: &str, value: Option<&Secret<String>>) -> Result<()
     if !valid_name(name) {
         return Err(SecretsError::BadName);
     }
+    // Read, change, write and rename as one step, one writer at a time in
+    // this process: the temp file has a fixed name, and two writers would
+    // tear it or lose each other's change. (The edit lock keeps the
+    // server's writers apart too; this keeps the function safe on its own.)
+    static ONE_WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE_WRITER.lock().unwrap_or_else(|p| p.into_inner());
     let mut f = read(path)?;
     match value {
         Some(v) => {
@@ -168,6 +177,17 @@ pub fn set(path: &Path, name: &str, value: Option<&Secret<String>>) -> Result<()
     file.write_all(text.as_bytes()).map_err(io)?;
     file.sync_all().map_err(io)?;
     std::fs::rename(&tmp, path).map_err(|e| SecretsError::Io(path.into(), e))
+}
+
+/// [`get`] on the blocking pool, for the async handlers.
+pub async fn get_off_thread(
+    path: &Path,
+    name: &str,
+) -> Result<Option<Secret<String>>, SecretsError> {
+    let (p, n) = (path.to_path_buf(), name.to_string());
+    tokio::task::spawn_blocking(move || get(&p, &n))
+        .await
+        .unwrap_or_else(|e| Err(SecretsError::Io(path.into(), std::io::Error::other(e))))
 }
 
 /// [`set`] on the blocking pool, for the async handlers: the file is read,
@@ -226,6 +246,33 @@ mod tests {
             set(&p, "Bad Name", None),
             Err(SecretsError::BadName)
         ));
+    }
+
+    /// Two writers at once (a request cut by its timeout used to leave one
+    /// running beside the next) neither corrupt the file nor lose an update.
+    #[test]
+    fn concurrent_sets_neither_corrupt_nor_lose() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("secrets.toml");
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let threads: Vec<_> = (0..16)
+            .map(|i| {
+                let (p, gate) = (p.clone(), gate.clone());
+                std::thread::spawn(move || {
+                    gate.wait();
+                    set(
+                        &p,
+                        &format!("k{i}"),
+                        Some(&Secret::new(format!("sk-made-up-{i}"))),
+                    )
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap().unwrap();
+        }
+        assert_eq!(names(&p).unwrap().len(), 16);
+        assert!(!dir.path().join("secrets.toml.tmp").exists());
     }
 
     /// The async wrapper is `set` on the blocking pool and nothing else: the

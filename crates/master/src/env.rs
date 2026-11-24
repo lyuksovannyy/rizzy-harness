@@ -336,9 +336,9 @@ fn read_file(path: &Path) -> anyhow::Result<(toml::Table, Config)> {
     match std::fs::read_to_string(path) {
         Ok(s) => {
             let table: toml::Table =
-                toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
+                toml::from_str(&s).map_err(|e| crate::config::bad_toml(path, &s, &e))?;
             let cfg: Config =
-                toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
+                toml::from_str(&s).map_err(|e| crate::config::bad_toml(path, &s, &e))?;
             Ok((table, cfg))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

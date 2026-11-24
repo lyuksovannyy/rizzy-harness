@@ -356,12 +356,12 @@ pub(super) async fn delete_agent(
     if place == Place::Server
         && let Some(rt) = m.provider_runtime()
     {
-        let _edits = rt.lock_edits().await;
+        let edits = rt.lock_edits().await;
         let mut cfg = rt.config();
         let looks = cfg.agent_avatars.remove(&id).is_some();
         let chain = cfg.agent_models.remove(&id).is_some();
         if looks || chain {
-            super::providers::apply(&m, &rt, cfg).await?;
+            super::providers::apply(&m, &rt, cfg, edits).await?;
         }
     }
     Ok(Json(json!({ "ok": true })))

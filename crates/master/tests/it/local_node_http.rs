@@ -323,7 +323,8 @@ async fn existing_local_chats_follow_the_setting() {
 
     let mut cfg = s.rt.config();
     cfg.nodes.local_node_users = LocalNodeUsers::Admins;
-    s.rt.save(cfg).await.unwrap();
+    let edits = s.rt.lock_edits().await;
+    s.rt.save(cfg, edits).await.unwrap();
 
     let (st, v) = prompt(&s, &bob, &sid, "again").await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{v}");

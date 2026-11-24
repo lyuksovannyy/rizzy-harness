@@ -797,10 +797,10 @@ pub(super) async fn admin_policy(
     Json(b): Json<PolicyBody>,
 ) -> ApiResult<Json<Value>> {
     let rt = runtime(&m)?;
-    let _edits = rt.lock_edits().await;
+    let edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     cfg.workspaces.members_can_create = b.members_can_create;
-    rt.save(cfg).await?;
+    rt.save(cfg, edits).await?;
     // A server-wide setting (who may create workspaces).
     changed(&m, &[Audience::Everyone], false);
     Ok(Json(json!({ "members_can_create": b.members_can_create })))

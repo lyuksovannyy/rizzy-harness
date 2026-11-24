@@ -73,10 +73,10 @@ async fn put_savings(
     Json(b): Json<harness_core::savings::TokenSavings>,
 ) -> ApiResult<Json<harness_core::savings::TokenSavings>> {
     let rt = runtime(&m)?;
-    let _edits = rt.lock_edits().await;
+    let edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     cfg.savings = b;
-    rt.save(cfg.clone()).await?;
+    rt.save(cfg.clone(), edits).await?;
     Ok(Json(cfg.savings))
 }
 

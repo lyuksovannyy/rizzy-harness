@@ -89,6 +89,7 @@ mod retry_http;
 mod rewind_http;
 mod route_walk_http;
 mod routines_http;
+mod save_cancel_http;
 mod seams_http;
 mod search_http;
 mod server_limits;

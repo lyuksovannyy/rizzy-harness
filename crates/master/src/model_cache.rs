@@ -18,6 +18,20 @@ const PREFIX: &str = "model-listing:";
 /// How old a listing may get before the background task fetches it again.
 pub const REFRESH_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Why a listing could not be fetched or recorded.
+#[derive(Debug, thiserror::Error)]
+pub enum ListingError {
+    /// The provider did not answer, or the provider or its key is not as
+    /// the admin set it up: the sentence is for the admin.
+    #[error("{0}")]
+    Failed(String),
+    /// The server could not write or read its own files: the text names a
+    /// server path, so it is for the log (`response::finish` keeps a 500's
+    /// text from the client).
+    #[error("{0}")]
+    Server(String),
+}
+
 /// One provider's listing as it was fetched.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Listing {
@@ -86,7 +100,7 @@ impl Master {
         let Some(rt) = self.provider_runtime() else {
             return Ok(l);
         };
-        let _edits = rt.lock_edits().await;
+        let edits = rt.lock_edits().await;
         let mut cfg = rt.config();
         let Some(p) = cfg
             .providers
@@ -98,24 +112,45 @@ impl Master {
         let (k, v) = (key(id), serde_json::to_string(&l)?);
         self.inner.mirror.call(move |s| s.kv_set(&k, &v)).await?;
         if mark(p, &l.models, l.fetched_ms) {
-            rt.save(cfg).await?;
-            self.set_models(rt.models());
+            // The write and the new model list go together even if the
+            // request that asked for the refresh is cut.
+            let m = self.clone();
+            rt.section(edits, move |rt, held| async move {
+                rt.save_in(cfg, &held).await?;
+                m.set_models(rt.models());
+                Ok::<(), crate::providers::SaveError>(())
+            })
+            .await??;
         }
         Ok(l)
     }
 
     /// Fetch provider `id`'s listing now with its saved key, and record it.
-    pub async fn refresh_listing(&self, id: &str) -> Result<Listing, String> {
+    pub async fn refresh_listing(&self, id: &str) -> Result<Listing, ListingError> {
         let rt = self
             .provider_runtime()
-            .ok_or("provider is not managed by this server")?;
+            .ok_or_else(|| ListingError::Failed("provider is not managed by this server".into()))?;
         let p = rt
             .config()
             .provider(id)
             .cloned()
-            .ok_or("unknown provider")?;
+            .ok_or_else(|| ListingError::Failed("unknown provider".into()))?;
+        let data_dir = rt.data_dir().to_path_buf();
+        let pc = p.clone();
         let (key, _) =
-            crate::providers::resolve_key(&p, rt.data_dir()).map_err(|e| format!("{e:#}"))?;
+            tokio::task::spawn_blocking(move || crate::providers::resolve_key(&pc, &data_dir))
+                .await
+                .map_err(|e| ListingError::Server(e.to_string()))?
+                .map_err(|e| {
+                    // A secrets file that cannot be read has the server's path in
+                    // its message; a key that is not set is the admin's news.
+                    let text = format!("{e:#}");
+                    if e.chain().any(|c| c.is::<crate::secrets::SecretsError>()) {
+                        ListingError::Server(text)
+                    } else {
+                        ListingError::Failed(text)
+                    }
+                })?;
         let ollama = p.preset == "ollama";
         let models = crate::providers::list_models(
             p.kind,
@@ -124,10 +159,11 @@ impl Master {
             ollama,
             &self.outbound(),
         )
-        .await?;
+        .await
+        .map_err(ListingError::Failed)?;
         self.record_listing(id, p.kind, &p.base_url, models)
             .await
-            .map_err(|e| format!("{e:#}"))
+            .map_err(|e| ListingError::Server(format!("{e:#}")))
     }
 
     /// Fetch every real provider's listing when the cached one is older

@@ -225,7 +225,7 @@ async fn put_memory_cfg(
     }
     // The test took a while: save onto the config as it is now, and only
     // if what the test relied on is unchanged.
-    let _edits = rt.lock_edits().await;
+    let edits = rt.lock_edits().await;
     let mut latest = rt.config();
     let provider_of = |c: &crate::config::Config| {
         c.memory
@@ -254,11 +254,18 @@ async fn put_memory_cfg(
     latest
         .validate()
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
-    rt.save(latest.clone())
-        .await
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    if let Some(bm) = m.builtin_memory() {
-        bm.set_embedder(emb);
-    }
+    // The write, the switch and the new embedder go together even if this
+    // request is cut.
+    let (saved, bm) = (latest.clone(), m.builtin_memory());
+    rt.section(edits, move |rt, held| async move {
+        rt.save_in(saved, &held)
+            .await
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Some(bm) = bm {
+            bm.set_embedder(emb);
+        }
+        Ok::<(), ApiError>(())
+    })
+    .await??;
     Ok(Json(memory_cfg_json(&m, &latest)))
 }

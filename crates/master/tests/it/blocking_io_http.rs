@@ -9,11 +9,17 @@
 //!
 //! The test reads the source the way the route walk does (the lexer of
 //! `route_walk_http`: comments dropped, strings kept apart, `#[cfg(test)]`
-//! modules removed) and fails on `std::fs` and on `std::io::Write` in
-//! `http.rs` and every file under `http/`. Its honest limit: it sees a
-//! handler doing file IO itself, not a helper the handler calls (a sync
-//! `secrets::get`, `providers::build`, the sealed-key read: see FIX_PLAN
-//! 4.2); `tokio::fs` is not flagged, it is the fix.
+//! modules removed) and fails on `std::fs`, the `std::io` read and write
+//! traits, `std::process`, `tempfile`, and the `Path` methods that ask the
+//! disk (`exists`, `metadata`, `read_dir`, `canonicalize`, `is_file`,
+//! `is_dir`, ...) in `http.rs` and every file under `http/`. Nothing is
+//! flagged today. What it still cannot see: an alias (`use std as s;`), a
+//! helper the handler calls (`secrets::get`, `providers::resolve_key`, the
+//! sealed-key read, `Prefs`; FIX_PLAN 4.2 lists the ones that remain), a
+//! method named like a disk one on another type (a hit there goes in the
+//! allow-list with its reason), and any blocking that is not file or
+//! process work (a `std::thread::sleep`, a CPU loop). `tokio::fs` is not
+//! flagged: it is the fix.
 
 use std::path::{Path, PathBuf};
 
@@ -23,6 +29,25 @@ use crate::route_walk_http::{Tok, Toks, lex, rs_files, src_dir, without_test_mod
 /// reason. Empty today: every file operation a handler file had was moved.
 /// An entry needs a reason a reviewer can check.
 const ALLOWED: &[(&str, &str)] = &[];
+
+/// `Path` / `PathBuf` methods that hit the disk. `Metadata::is_file` and
+/// `is_dir` do not, and share their names: a hit there is looked at by
+/// hand (the allow-list).
+const DISK_METHODS: &[&str] = &[
+    "exists",
+    "try_exists",
+    "metadata",
+    "symlink_metadata",
+    "read_dir",
+    "canonicalize",
+    "read_link",
+    "is_file",
+    "is_dir",
+    "is_symlink",
+];
+
+/// The `std::io` traits that read or write a file or a pipe.
+const IO_TRAITS: &[&str] = &["Write", "Read", "BufRead", "Seek"];
 
 /// `(line, what)` for every direct use in these tokens.
 fn uses(t: &Toks) -> Vec<(usize, String)> {
@@ -37,8 +62,27 @@ fn uses(t: &Toks) -> Vec<(usize, String)> {
         if id(i, "std") && colons(i + 1) && id(i + 3, "fs") {
             out.push((line, "std::fs".to_string()));
         }
-        if id(i, "std") && colons(i + 1) && id(i + 3, "io") && colons(i + 4) && id(i + 6, "Write") {
-            out.push((line, "std::io::Write".to_string()));
+        if id(i, "std")
+            && colons(i + 1)
+            && id(i + 3, "io")
+            && colons(i + 4)
+            && IO_TRAITS.iter().any(|x| id(i + 6, x))
+        {
+            out.push((line, "std::io::Read/Write".to_string()));
+        }
+        // A `Path` method that asks the disk.
+        if matches!(t.get(i), Some((Tok::P('.'), _)))
+            && DISK_METHODS.iter().any(|m| id(i + 1, m))
+            && matches!(t.get(i + 2), Some((Tok::P('('), _)))
+        {
+            out.push((line, "a Path method that reads the disk".to_string()));
+        }
+        // A process: `std::process::Command` blocks in `output()`/`status()`.
+        if id(i, "std") && colons(i + 1) && id(i + 3, "process") {
+            out.push((line, "std::process".to_string()));
+        }
+        if id(i, "tempfile") && colons(i + 1) {
+            out.push((line, "tempfile".to_string()));
         }
         // An import: `use std::fs;`, `use std::{fs, ..}`, `use std::io::{self, Write}`.
         if id(i, "use") && id(i + 1, "std") {
@@ -49,7 +93,7 @@ fn uses(t: &Toks) -> Vec<(usize, String)> {
                 if id(k, "fs") {
                     out.push((line, "use std::..fs".to_string()));
                 }
-                if id(k, "Write") {
+                if IO_TRAITS.iter().any(|x| id(k, x)) || id(k, "process") {
                     out.push((line, "use std::..Write".to_string()));
                 }
             }
@@ -85,6 +129,23 @@ fn the_scan_sees_what_it_must_and_nothing_else() {
     assert!(n("fn f() { tokio::fs::remove_file(p).await; }").is_empty());
     assert!(n("use tokio::fs;").is_empty());
     assert!(n("fn f(e: std::io::Error) -> std::io::Result<()> { Ok(()) }").is_empty());
+    // Paths that ask the disk, processes, temp files, the read traits.
+    for src in [
+        "fn f(p: &Path) -> bool { p.exists() }",
+        "fn f(p: PathBuf) { let _ = p.metadata(); }",
+        "fn f(p: &Path) { for _ in p.read_dir().unwrap() {} }",
+        "fn f(p: &Path) { let _ = p.canonicalize(); }",
+        "fn f(p: &Path) -> bool { p.is_file() || p.is_dir() }",
+        "fn f() { std::process::Command::new(\"x\"); }",
+        "use std::process::Command;",
+        "fn f() { let d = tempfile::tempdir(); }",
+        "use std::io::Read;",
+        "use std::io::{BufRead, Seek};",
+        "fn f(r: &mut dyn std::io::Read) {}",
+    ] {
+        assert_eq!(n(src).len(), 1, "{src}");
+    }
+    assert!(n("fn f(p: &Path) { let x = p.join(\"a\").display(); }").is_empty());
     // Permission work is file work too.
     assert_eq!(n("use std::os::unix::fs::PermissionsExt;").len(), 1);
     assert!(n("// std::fs::read\nfn f() { let s = \"std::fs::read\"; }").is_empty());
