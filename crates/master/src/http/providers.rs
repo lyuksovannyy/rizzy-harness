@@ -309,7 +309,7 @@ pub(super) fn apply(m: &Master, rt: &ProviderRuntime, mut cfg: Config) -> ApiRes
     cfg.normalize();
     rt.apply(cfg).map_err(|e| bad(format!("{e:#}")))?;
     m.set_models(rt.models());
-    super::refresh_embedder(m, rt);
+    super::memory_settings::refresh_embedder(m, rt);
     Ok(())
 }
 
