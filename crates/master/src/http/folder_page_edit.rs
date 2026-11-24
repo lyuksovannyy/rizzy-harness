@@ -15,7 +15,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -23,10 +23,11 @@ use harness_protocol::{MAX_PREVIEW_PATH_BYTES, MAX_SAVED_PATH_BYTES, PageChange}
 use serde::Deserialize;
 use serde_json::json;
 
+use super::caller::User;
 use super::doc_page_edit::{MAX_BODY_BYTES, check_changes, parse, refused_changes, results_json};
 use super::doc_preview::refusal;
 use super::files::away;
-use super::{ApiError, ApiResult, acting_session, agentic_gate, require};
+use super::{ApiError, ApiResult, acting_session, agentic_gate};
 use crate::Master;
 use crate::folder_preview::PreviewError;
 
@@ -78,12 +79,11 @@ fn plain_path(p: &str) -> bool {
 }
 
 async fn edit(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     body: Bytes,
 ) -> ApiResult<Response> {
-    let who = require(&m, &headers).await?;
     let row = acting_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     // Only a coding chat with a folder: a chat without one has the other
