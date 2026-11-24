@@ -20,12 +20,13 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use harness_store::stored_skills::SkillScope;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require};
+use super::caller::User;
+use super::{ApiError, ApiResult};
 use crate::Master;
 use crate::auth::Principal;
 use crate::stored_skills;
@@ -222,12 +223,11 @@ async fn checked(f: impl FnOnce() -> ApiResult<Checked> + Send + 'static) -> Api
 }
 
 pub(super) async fn create(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<NewSkill>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = ws::access(&m, &who, &id).await?;
     let scope = scope_of(&b.scope)?;
     require_write(&who, &a, scope)?;
@@ -260,11 +260,10 @@ pub(super) async fn create(
 }
 
 pub(super) async fn get_one(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, scope, name)): Path<(String, String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = ws::access(&m, &who, &id).await?;
     let scope = scope_of(&scope)?;
     let w = a.id().to_string();
@@ -297,12 +296,11 @@ pub(super) struct EditSkill {
 }
 
 pub(super) async fn put(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, scope, name)): Path<(String, String, String)>,
     Json(b): Json<EditSkill>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = ws::access(&m, &who, &id).await?;
     let scope = scope_of(&scope)?;
     require_write(&who, &a, scope)?;
@@ -335,11 +333,10 @@ pub(super) async fn put(
 }
 
 pub(super) async fn delete(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, scope, name)): Path<(String, String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = ws::access(&m, &who, &id).await?;
     let scope = scope_of(&scope)?;
     require_write(&who, &a, scope)?;
