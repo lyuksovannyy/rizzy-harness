@@ -13,15 +13,16 @@
 //! it, as a host create is; a granted switch to `sandbox` too.
 
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
+
 use axum::routing::post;
 use axum::{Json, Router};
 use harness_core::policy::ExecMode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::ApiResult;
+use super::caller::User;
 use super::rewind::owned;
-use super::{ApiResult, require};
 use crate::Master;
 
 pub(super) fn routes() -> Router<Master> {
@@ -35,12 +36,11 @@ struct ModeBody {
 }
 
 async fn set_mode(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<ModeBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = owned(&m, &who, &id).await?;
     tracing::info!(session = %row.session_id, mode = b.mode.id(), "the owner switches a chat's commands");
     let out = m.set_exec_mode(&row, b.mode).await;
