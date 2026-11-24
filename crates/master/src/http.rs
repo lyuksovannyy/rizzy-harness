@@ -10,6 +10,7 @@ use serde_json::json;
 
 use crate::workspaces::{self as ws, WsError};
 use crate::{CommandError, Master, auth, forge_repos};
+pub(crate) use caller::ByteCaller;
 use caller::{Admin, Caller, User};
 use memory::{memory_err, memory_store};
 
@@ -340,7 +341,7 @@ fn private_routes() -> Router<Master> {
         .merge(sessions::routes())
 }
 
-struct ApiError(StatusCode, String);
+pub(crate) struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {

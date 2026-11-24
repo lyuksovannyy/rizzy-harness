@@ -97,7 +97,7 @@ pub(super) struct Admin(pub Principal);
 
 /// A [`User`], or a login vouched for by a link: what serves bytes to an
 /// element or a download.
-pub(super) struct ByteCaller(pub Principal);
+pub(crate) struct ByteCaller(pub Principal);
 
 impl<S: Send + Sync> FromRequestParts<S> for Caller {
     type Rejection = ApiError;
