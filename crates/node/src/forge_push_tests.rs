@@ -524,11 +524,83 @@ async fn too_many_object_files_are_refused_plainly() {
     assert!(r.staging_empty());
 }
 
-/// A stalled forge: the push ends at its time limit with its process
-/// group, and while it waits no process has the token in its command line
-/// or environment (it is only in the pipe).
+/// While a push waits on a stalled forge, no process has the token in its
+/// command line or environment (it is only in the pipe). The limit is long
+/// and the test releases the forge once it has looked, so no time limit
+/// races the look; then git's whole group is gone.
 #[tokio::test]
-async fn a_stalled_push_ends_at_its_limit_with_no_token_in_proc() {
+async fn a_stalled_push_has_no_token_in_proc() {
+    let r = rig();
+    let forge = server(
+        &r.root,
+        Mode {
+            stall: true,
+            ..Default::default()
+        },
+    );
+    let pin = pin(&r.open(), None).unwrap();
+    let st = r.stage().unwrap();
+    let long = Bounds {
+        timeout: Duration::from_secs(120),
+        ..bounds()
+    };
+    let look = async {
+        let mut seen = Vec::new();
+        // Until the forge has the request and git is seen, then a few
+        // more looks, then the forge lets go.
+        let mut after = 0;
+        for _ in 0..3000 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let pids = pids_with(&forge.host());
+            for pid in &pids {
+                for f in ["cmdline", "environ"] {
+                    if let Ok(b) = std::fs::read(format!("/proc/{pid}/{f}")) {
+                        seen.push(String::from_utf8_lossy(&b).to_string());
+                    }
+                }
+            }
+            if !forge.seen().is_empty() && !pids.is_empty() {
+                after += 1;
+                if after >= 10 {
+                    break;
+                }
+            }
+        }
+        forge.release();
+        seen
+    };
+    let (host, tok) = (forge.host(), token());
+    let run = push(
+        &st,
+        None,
+        &host,
+        "o/r",
+        "stall",
+        &pin.commit,
+        USER,
+        &tok,
+        &long,
+    );
+    let (res, seen) = tokio::join!(run, look);
+    let e = res.unwrap_err();
+    assert!(!e.contains(CANARY) && !e.contains("clone_timeout_s"), "{e}");
+    assert!(!seen.is_empty(), "no git process was seen");
+    for s in seen {
+        assert!(!s.contains(CANARY), "{s}");
+    }
+    for _ in 0..250 {
+        if pids_with(&forge.host()).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(pids_with(&forge.host()), Vec::<i32>::new());
+}
+
+/// A stalled forge: the push ends at its time limit with its process
+/// group, nothing else in the test racing the limit.
+#[tokio::test]
+async fn a_stalled_push_ends_at_its_limit() {
     let r = rig();
     let forge = server(
         &r.root,
@@ -540,24 +612,9 @@ async fn a_stalled_push_ends_at_its_limit_with_no_token_in_proc() {
     let pin = pin(&r.open(), None).unwrap();
     let st = r.stage().unwrap();
     let short = Bounds {
-        timeout: Duration::from_secs(3),
+        timeout: Duration::from_secs(2),
         ..bounds()
     };
-    let host = forge.host();
-    let looked = tokio::spawn(async move {
-        let mut seen = Vec::new();
-        for _ in 0..40 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            for pid in pids_with(&host) {
-                for f in ["cmdline", "environ"] {
-                    if let Ok(b) = std::fs::read(format!("/proc/{pid}/{f}")) {
-                        seen.push(String::from_utf8_lossy(&b).to_string());
-                    }
-                }
-            }
-        }
-        seen
-    });
     let e = push(
         &st,
         None,
@@ -572,11 +629,7 @@ async fn a_stalled_push_ends_at_its_limit_with_no_token_in_proc() {
     .await
     .unwrap_err();
     assert!(e.contains("clone_timeout_s"), "{e}");
-    let seen = looked.await.unwrap();
-    assert!(!seen.is_empty(), "no git process was seen");
-    for s in seen {
-        assert!(!s.contains(CANARY), "{s}");
-    }
+    assert!(!e.contains(CANARY), "{e}");
     assert_eq!(pids_with(&forge.host()), Vec::<i32>::new());
 }
 
@@ -1070,38 +1123,43 @@ async fn the_pushs_git_dumps_no_core() {
     );
     let pin = pin(&r.open(), None).unwrap();
     let st = r.stage().unwrap();
-    let short = Bounds {
-        timeout: Duration::from_secs(3),
+    // A long limit; the forge is released once git was looked at, so no
+    // time limit races the look.
+    let long = Bounds {
+        timeout: Duration::from_secs(120),
         ..bounds()
     };
-    let host = forge.host();
-    let looked = tokio::spawn(async move {
+    let look = async {
         let mut limits = Vec::new();
-        for _ in 0..40 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            for pid in pids_with(&host) {
+        for _ in 0..3000 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            for pid in pids_with(&forge.host()) {
                 if let Ok(t) = std::fs::read_to_string(format!("/proc/{pid}/limits"))
                     && let Some(l) = t.lines().find(|l| l.starts_with("Max core file size"))
                 {
                     limits.push(l.split_whitespace().nth(4).unwrap_or("?").to_string());
                 }
             }
+            if !forge.seen().is_empty() && limits.len() >= 2 {
+                break;
+            }
         }
+        forge.release();
         limits
-    });
-    let _ = push(
+    };
+    let (host, tok) = (forge.host(), token());
+    let run = push(
         &st,
         None,
-        &forge.host(),
+        &host,
         "o/r",
         "core",
         &pin.commit,
         USER,
-        &token(),
-        &short,
-    )
-    .await;
-    let limits = looked.await.unwrap();
+        &tok,
+        &long,
+    );
+    let (_, limits) = tokio::join!(run, look);
     assert!(!limits.is_empty(), "no git process was seen");
     assert!(limits.iter().all(|l| l == "0"), "{limits:?}");
 }

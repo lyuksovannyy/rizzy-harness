@@ -68,7 +68,7 @@ async fn chat_on(forge: &[&str]) -> Chat {
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let sid: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
-    for _ in 0..200 {
+    for _ in 0..3000 {
         if t.master.inner_mirror().session(sid).unwrap().is_some() {
             break;
         }
@@ -104,7 +104,7 @@ impl Chat {
             })
             .await
             .unwrap();
-        for _ in 0..200 {
+        for _ in 0..3000 {
             if self.t.master.inner_mirror().head_seq(self.sid).unwrap_or(0) >= seq {
                 return;
             }
@@ -217,7 +217,7 @@ impl Chat {
             })
             .await
             .unwrap();
-        for _ in 0..500 {
+        for _ in 0..3000 {
             let found = node.seen.lock().unwrap().iter().find_map(|m| match m {
                 MasterToNode::PushCredentialResult {
                     req_id: r,
@@ -496,7 +496,7 @@ async fn a_sub_agents_session_is_refused_by_its_own_rule() {
         })
         .await
         .unwrap();
-    for _ in 0..200 {
+    for _ in 0..3000 {
         if c.t.master.inner_mirror().session(kid).unwrap().is_some() {
             break;
         }
@@ -1058,7 +1058,7 @@ async fn bobs_chat() -> Chat {
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let sid: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
-    for _ in 0..200 {
+    for _ in 0..3000 {
         if t.master.inner_mirror().session(sid).unwrap().is_some() {
             break;
         }
@@ -1155,7 +1155,7 @@ async fn sub_agents_routines_forks_and_old_nodes_get_no_pull_request() {
         })
         .await
         .unwrap();
-    for _ in 0..200 {
+    for _ in 0..3000 {
         if c.t.master.inner_mirror().session(kid).unwrap().is_some() {
             break;
         }
@@ -1201,7 +1201,7 @@ async fn sub_agents_routines_forks_and_old_nodes_get_no_pull_request() {
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let sid: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
-    for _ in 0..200 {
+    for _ in 0..3000 {
         if t.master.inner_mirror().session(sid).unwrap().is_some() {
             break;
         }

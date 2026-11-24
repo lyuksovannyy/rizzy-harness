@@ -41,7 +41,8 @@ pub(crate) struct Mode {
     /// Answer with this status and `Location: <to><path>`, on the first
     /// GET (`on_post` false) or on the POST.
     pub(crate) redirect: Option<(u16, String, bool)>,
-    /// Read the request, then never answer.
+    /// Read the request, then never answer: until [`Server::release`] (the
+    /// connection is then closed with no answer) or 120 s.
     pub(crate) stall: bool,
     /// Send answers slowly: 64 KiB every 50 ms.
     pub(crate) slow: bool,
@@ -52,6 +53,8 @@ pub(crate) struct Server {
     seen: Arc<Mutex<Vec<Seen>>>,
     /// Answers written to the end.
     finished: Arc<Mutex<usize>>,
+    /// Stalled requests end now (`Mode::stall`).
+    released: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Server {
@@ -63,6 +66,13 @@ impl Server {
     }
     pub(crate) fn seen(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
+    }
+    /// End every stalled request, now and later: each connection is closed
+    /// without an answer, so a test decides when a stall ends instead of a
+    /// time limit racing the rest of the test.
+    pub(crate) fn release(&self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     /// No request to this server carried the token in any form.
     pub(crate) fn never_saw_the_token(&self) {
@@ -84,12 +94,24 @@ pub(crate) fn server(root: &Path, mode: Mode) -> Server {
     let port = l.local_addr().unwrap().port();
     let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
     let finished: Arc<Mutex<usize>> = Arc::default();
-    let (root, keep, done) = (root.to_path_buf(), seen.clone(), finished.clone());
+    let released: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+    let (root, keep, done, free) = (
+        root.to_path_buf(),
+        seen.clone(),
+        finished.clone(),
+        released.clone(),
+    );
     std::thread::spawn(move || {
         for s in l.incoming().flatten() {
-            let (root, keep, mode, done) = (root.clone(), keep.clone(), mode.clone(), done.clone());
+            let (root, keep, mode, done, free) = (
+                root.clone(),
+                keep.clone(),
+                mode.clone(),
+                done.clone(),
+                free.clone(),
+            );
             std::thread::spawn(move || {
-                if answer(s, &root, &keep, &mode).is_ok() {
+                if answer(s, &root, &keep, &mode, &free).is_ok() {
                     *done.lock().unwrap() += 1;
                 }
             });
@@ -99,10 +121,17 @@ pub(crate) fn server(root: &Path, mode: Mode) -> Server {
         port,
         seen,
         finished,
+        released,
     }
 }
 
-fn answer(s: TcpStream, root: &Path, seen: &Mutex<Vec<Seen>>, mode: &Mode) -> std::io::Result<()> {
+fn answer(
+    s: TcpStream,
+    root: &Path,
+    seen: &Mutex<Vec<Seen>>,
+    mode: &Mode,
+    released: &std::sync::atomic::AtomicBool,
+) -> std::io::Result<()> {
     let mut r = BufReader::new(s.try_clone()?);
     let mut line = String::new();
     r.read_line(&mut line)?;
@@ -150,7 +179,13 @@ fn answer(s: TcpStream, root: &Path, seen: &Mutex<Vec<Seen>>, mode: &Mode) -> st
     });
     let mut w = s;
     if mode.stall {
-        std::thread::sleep(Duration::from_secs(120));
+        for _ in 0..6000 {
+            if released.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = w.shutdown(std::net::Shutdown::Both);
         return Ok(());
     }
     if let Some((code, to, on_post)) = &mode.redirect
@@ -551,10 +586,11 @@ async fn a_redirect_to_another_host_never_carries_the_token() {
 /// The processes of a clone that stalls: neither git nor any process of
 /// its group has the token in its arguments or environment (the helper has
 /// run: the server got the first request, with the credential where git
-/// sends it first); at the time limit git's whole group is ended, nothing
-/// is kept and the error names the bound.
+/// sends it first). The limit is long and the test releases the forge once
+/// it has looked, so no time limit races the look; then the group is gone
+/// and nothing is kept. The limit itself: the next test.
 #[tokio::test]
-async fn a_stalled_clone_has_no_token_in_proc_and_ends_at_the_time_limit() {
+async fn a_stalled_clone_has_no_token_in_proc() {
     let tmp = tempfile::tempdir().unwrap();
     bare(tmp.path(), "o/secret", |_| {});
     let a = server(
@@ -567,7 +603,7 @@ async fn a_stalled_clone_has_no_token_in_proc_and_ends_at_the_time_limit() {
     let r = rig(&[a.host()]);
     let needle = a.host();
     let mut b = bounds();
-    b.timeout = Duration::from_secs(4);
+    b.timeout = Duration::from_secs(120);
     let clone = clone(
         &r.policy,
         &r.made,
@@ -579,8 +615,8 @@ async fn a_stalled_clone_has_no_token_in_proc_and_ends_at_the_time_limit() {
         // The server saw the request (the helper ran before it, where git
         // asks first), and git and its remote helper are alive.
         let mut pids = Vec::new();
-        for _ in 0..100 {
-            tokio::time::sleep(Duration::from_millis(30)).await;
+        for _ in 0..3000 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
             pids = pids_with(&needle);
             if !a.seen().is_empty() && pids.len() >= 2 {
                 break;
@@ -603,11 +639,12 @@ async fn a_stalled_clone_has_no_token_in_proc_and_ends_at_the_time_limit() {
                 );
             }
         }
+        a.release();
         members
     };
     let (res, members) = tokio::join!(clone, watch);
     let e = res.unwrap_err();
-    assert!(e.contains("clone_timeout_s"), "{e}");
+    assert!(!e.contains("clone_timeout_s"), "the limit ended it: {e}");
     assert!(!e.contains(CANARY));
     for _ in 0..50 {
         if pids_with(&needle).is_empty() {
@@ -625,6 +662,49 @@ async fn a_stalled_clone_has_no_token_in_proc_and_ends_at_the_time_limit() {
             .is_ok_and(|s| !s.split(") ").nth(1).unwrap_or("").starts_with('Z'));
         assert!(!alive, "{p} of the clone's group is still running");
     }
+    r.nothing_kept();
+    assert_eq!(r.made_count(), 0, "a failed clone does not count");
+}
+
+/// A clone whose forge never answers ends at the time limit: git's whole
+/// group is ended, nothing is kept and the error names the bound. Nothing
+/// else in the test races the limit.
+#[tokio::test]
+async fn a_stalled_clone_ends_at_the_time_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    bare(tmp.path(), "o/secret", |_| {});
+    let a = server(
+        tmp.path(),
+        Mode {
+            stall: true,
+            ..Default::default()
+        },
+    );
+    let r = rig(&[a.host()]);
+    let mut b = bounds();
+    b.timeout = Duration::from_secs(2);
+    let e = clone(
+        &r.policy,
+        &r.made,
+        req(&a.host(), "o/secret", true),
+        b,
+        &projects::suffix,
+    )
+    .await
+    .unwrap_err();
+    assert!(e.contains("clone_timeout_s"), "{e}");
+    assert!(!e.contains(CANARY));
+    for _ in 0..50 {
+        if pids_with(&a.host()).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        pids_with(&a.host()),
+        Vec::<i32>::new(),
+        "git is still running"
+    );
     r.nothing_kept();
     assert_eq!(r.made_count(), 0, "a failed clone does not count");
 }
@@ -1274,7 +1354,9 @@ async fn through_the_runtime_the_token_is_nowhere_but_the_server() {
         },
     );
     let mut r = rig(&[a.host(), stall.host(), gone.host()]);
-    r.policy.limits.clone_timeout_s = 3;
+    // A long limit: the stalled forges are released by the test, so no
+    // time limit races the requests that must meet a running clone.
+    r.policy.limits.clone_timeout_s = 120;
     let cfg = crate::NodeConfig {
         node_id: "n".into(),
         hostname: "test".into(),
@@ -1303,7 +1385,7 @@ async fn through_the_runtime_the_token_is_nowhere_but_the_server() {
         NodeToMaster::Hello { capabilities, .. } => capabilities,
         other => panic!("{other:?}"),
     };
-    assert!(caps.contains(&"forge-clone:3".to_string()), "{caps:?}");
+    assert!(caps.contains(&"forge-clone:120".to_string()), "{caps:?}");
     assert!(!caps.iter().any(|c| c.contains("127.0.0.1")), "{caps:?}");
     let ask = |id: &str, host: &str, full: &str| MasterToNode::ProjectClone {
         req_id: id.into(),
@@ -1342,38 +1424,46 @@ async fn through_the_runtime_the_token_is_nowhere_but_the_server() {
     link.to_node
         .try_send(ask("slow", &stall.host(), "o/secret"))
         .unwrap();
-    for _ in 0..200 {
+    for _ in 0..3000 {
         if !stall.seen().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    assert!(
+        !stall.seen().is_empty(),
+        "the stalled clone never reached its forge"
+    );
     link.to_node
         .try_send(ask("busy", &a.host(), "o/secret"))
         .unwrap();
     let (path, error) = wait_for(&mut link, "busy").await;
     assert!(path.is_none() && error.unwrap().contains("cloning another"));
-    let (_, error) = wait_for(&mut link, "slow").await;
-    assert!(error.unwrap().contains("clone_timeout_s"));
+    // Then the stalled forge lets go: that clone fails.
+    stall.release();
+    let (path, error) = wait_for(&mut link, "slow").await;
+    assert!(path.is_none() && error.is_some(), "{error:?}");
     // A refusal: a host the node does not list.
     link.to_node
         .try_send(ask("no", "evil.example", "o/secret"))
         .unwrap();
     let (_, error) = wait_for(&mut link, "no").await;
     assert!(error.unwrap().contains("[forge] hosts"));
-    // The master goes away mid-clone: the clone ends at its limit all the
-    // same, and leaves no half folder (staging empty, only the first
+    // The master goes away mid-clone: the clone ends all the same (its
+    // forge released here; the time limit has its own test), and leaves no
+    // half folder (staging empty, only the first
     // clone's folder in the projects folder) and no git process.
     link.to_node
         .try_send(ask("gone", &gone.host(), "o/secret"))
         .unwrap();
-    for _ in 0..200 {
+    for _ in 0..3000 {
         if !gone.seen().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     drop(link);
+    gone.release();
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if pids_with(&gone.host()).is_empty()

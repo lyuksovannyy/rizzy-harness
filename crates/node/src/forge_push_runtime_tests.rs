@@ -501,7 +501,10 @@ async fn push_is_offered_only_with_a_target_in_a_chats_own_turn_on_a_pushing_nod
 }
 
 /// (g) One push at a time on a node: a second chat's push while the first
-/// waits on a stalled forge is refused at its Allow.
+/// waits on a stalled forge is refused at its Allow. The first push's limit
+/// is long and the test ends it by releasing the stalled forge after the
+/// second chat's assertions, so no time limit races the second turn (CI,
+/// PR 242: a 4 s limit ended the first push before the second Allow).
 #[tokio::test]
 async fn a_second_push_while_one_runs_is_refused() {
     let r = rig();
@@ -512,13 +515,14 @@ async fn a_second_push_while_one_runs_is_refused() {
             ..Default::default()
         },
     );
-    let mut n = node(&r, r.policy(&[stall.host()], true)).await;
+    let mut p = r.policy(&[stall.host()], true);
+    p.limits.clone_timeout_s = 120;
+    let mut n = node(&r, p).await;
     let a = n.create(&r.folder, false, false).await;
     let b = n.create(&r.folder, false, false).await;
     n.prompt(a, Some(target(&stall.host()))).await;
-    // Allow a's card and hand it its credential; it then waits on the forge.
-    let mut allowed = false;
-    while !allowed || stall.seen().is_empty() {
+    // Allow a's card and hand it its credential.
+    loop {
         match n.next().await {
             NodeToMaster::Event { event } if event.session_id == a => {
                 if let Ok(EventKind::ApprovalRequested(x)) = event.typed() {
@@ -535,7 +539,6 @@ async fn a_second_push_while_one_runs_is_refused() {
                 }
             }
             NodeToMaster::PushCredential { req_id, .. } => {
-                allowed = true;
                 n.link
                     .to_node
                     .try_send(MasterToNode::PushCredentialResult {
@@ -545,13 +548,19 @@ async fn a_second_push_while_one_runs_is_refused() {
                         error: None,
                     })
                     .unwrap();
+                break;
             }
             _ => {}
         }
-        if allowed && stall.seen().is_empty() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
     }
+    // a's push is at the forge, which does not answer until released.
+    for _ in 0..3000 {
+        if !stall.seen().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!stall.seen().is_empty(), "a's push never reached the forge");
     n.prompt(b, Some(target(&stall.host()))).await;
     // Its card shows (the slot is taken only after an Allow); the Allow
     // finds the slot taken, and nothing is asked of the master.
@@ -560,10 +569,36 @@ async fn a_second_push_while_one_runs_is_refused() {
     assert!(seen.asked_credential.is_empty(), "{seen:?}");
     let (_, ok, out) = &seen.results[0];
     assert!(!ok && out.contains("another push"), "{out}");
-    // a ends at its time limit.
+    // Now end a's push: the forge closes the connection unanswered.
+    stall.release();
     let seen = n.until_end(a, Answer::Allow, &r.folder).await;
     let (_, ok, out) = &seen.results[0];
-    assert!(!ok && out.contains("clone_timeout_s"), "{out}");
+    assert!(!ok && !out.contains("clone_timeout_s"), "{out}");
+    no_token_in(&seen);
+}
+
+/// A push to a forge that never answers ends at the node's time limit,
+/// with nothing else in the test racing it.
+#[tokio::test]
+async fn a_stalled_push_ends_at_its_time_limit() {
+    let r = rig();
+    let stall = server(
+        &r.root,
+        Mode {
+            stall: true,
+            ..Default::default()
+        },
+    );
+    let mut p = r.policy(&[stall.host()], true);
+    p.limits.clone_timeout_s = 2;
+    let mut n = node(&r, p).await;
+    let a = n.create(&r.folder, false, false).await;
+    n.prompt(a, Some(target(&stall.host()))).await;
+    let seen = n.until_end(a, Answer::Allow, &r.folder).await;
+    assert_eq!(seen.asked_credential.len(), 1, "{seen:?}");
+    let (_, ok, out) = &seen.results[0];
+    assert!(!ok && out.contains("clone_timeout_s = 2 s"), "{out}");
+    no_token_in(&seen);
 }
 
 /// The turn's target gone between the card and the Allow (the check after
