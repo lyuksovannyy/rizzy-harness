@@ -7,12 +7,13 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use harness_core::Secret;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{ApiError, ApiResult, require_admin, runtime};
+use super::caller::Admin;
+use super::{ApiError, ApiResult, runtime};
 use crate::Master;
 use crate::avatars::AgentAvatar;
 use crate::config::{AgentChain, Config, ModelConfig, ProviderConfig, ProviderKind, check_chain};
@@ -72,10 +73,9 @@ fn state_json(cfg: &Config, data_dir: &std::path::Path) -> serde_json::Value {
 }
 
 pub(super) async fn get_providers(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     Ok(Json(state_json(&rt.config(), rt.data_dir())))
 }
@@ -135,11 +135,10 @@ pub(super) struct TestBody {
 }
 
 pub(super) async fn test_provider(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<TestBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     // Always 200: a bad preset or URL is a failed test like any other.
     let checked = preset(&b.preset).and_then(|p| Ok((p, base_url(p, b.base_url.as_deref())?)));
@@ -330,12 +329,11 @@ fn forget_key(rt: &ProviderRuntime, old: Option<&ProviderConfig>) {
 }
 
 pub(super) async fn put_provider(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<ProviderBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     if !crate::config::valid_provider_id(&id) {
         return Err(bad(
@@ -433,11 +431,10 @@ pub(super) async fn put_provider(
 }
 
 pub(super) async fn delete_provider(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     let _edits = rt.lock_edits().await;
     let mut cfg = rt.config();
@@ -457,41 +454,34 @@ pub(super) async fn delete_provider(
 /// routes away from `{id}`: saving under them is refused with a reason, and
 /// a provider named so by hand can still be removed.
 pub(super) async fn put_test(
+    a: Admin,
     s: State<Master>,
-    h: HeaderMap,
     b: Json<ProviderBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    put_provider(s, h, Path("test".into()), b).await
+    put_provider(a, s, Path("test".into()), b).await
 }
 
 pub(super) async fn put_demo(
+    a: Admin,
     s: State<Master>,
-    h: HeaderMap,
     b: Json<ProviderBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    put_provider(s, h, Path(presets::DEMO.into()), b).await
+    put_provider(a, s, Path(presets::DEMO.into()), b).await
 }
 
-pub(super) async fn delete_test(
-    s: State<Master>,
-    h: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    delete_provider(s, h, Path("test".into())).await
+pub(super) async fn delete_test(a: Admin, s: State<Master>) -> ApiResult<Json<serde_json::Value>> {
+    delete_provider(a, s, Path("test".into())).await
 }
 
-pub(super) async fn delete_demo(
-    s: State<Master>,
-    h: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    delete_provider(s, h, Path(presets::DEMO.into())).await
+pub(super) async fn delete_demo(a: Admin, s: State<Master>) -> ApiResult<Json<serde_json::Value>> {
+    delete_provider(a, s, Path(presets::DEMO.into())).await
 }
 
 /// Switch to the built-in demo provider (onboarding's "Skip").
 pub(super) async fn use_demo(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     let _edits = rt.lock_edits().await;
     let mut cfg = rt.config();
@@ -524,11 +514,10 @@ pub(super) struct AgentModelsBody {
 }
 
 pub(super) async fn put_agent_models(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<AgentModelsBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     let _edits = rt.lock_edits().await;
     let mut cfg = rt.config();
@@ -564,12 +553,11 @@ pub(super) async fn put_agent_models(
 /// Set how an agent looks. The body must name a shape, eyes and an accent
 /// from the fixed sets.
 pub(super) async fn put_agent_avatar(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     body: String,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     let set = m.agents();
     let agent = set
         .get(&id)
@@ -607,11 +595,10 @@ fn unknown_provider() -> ApiError {
 
 /// The cached listing; fetched once when there is none yet.
 pub(super) async fn get_models(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     let base = rt
         .config()
@@ -630,11 +617,10 @@ pub(super) async fn get_models(
 
 /// Fetch the listing now and re-mark the saved models.
 pub(super) async fn refresh_models(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     if rt.config().provider(&id).is_none() {
         return Err(unknown_provider());
@@ -649,11 +635,10 @@ pub(super) async fn refresh_models(
 /// The admin's override for a model: remove it (and its mark) from the
 /// provider and from every agent that uses it.
 pub(super) async fn delete_model(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, raw)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     let _edits = rt.lock_edits().await;
     let mut cfg = rt.config();
@@ -677,11 +662,11 @@ pub(super) async fn delete_model(
 /// `DELETE …/models/refresh`, which axum routes to the refresh action: the
 /// model whose raw id is `refresh`.
 pub(super) async fn delete_refresh(
+    a: Admin,
     s: State<Master>,
-    h: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    delete_model(s, h, Path((id, "refresh".into()))).await
+    delete_model(a, s, Path((id, "refresh".into()))).await
 }
 
 #[derive(Deserialize)]
@@ -732,11 +717,10 @@ fn test_target(rt: &ProviderRuntime, b: &ModelTestBody) -> ApiResult<(ProviderKi
 /// One short request to a model: a chat that should answer "OK", or for
 /// an embeddings model one embedding. Always 200, like `/providers/test`.
 pub(super) async fn test_model(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<ModelTestBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     let fail = |e: String| Ok(Json(json!({ "ok": false, "error": e })));
     let (kind, base) = match test_target(&rt, &b) {
