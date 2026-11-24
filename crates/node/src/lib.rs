@@ -156,6 +156,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::SkillResult { .. }
         | MasterToNode::ConnectorResult { .. }
         | MasterToNode::Diff { .. }
+        | MasterToNode::BackgroundOutput { .. }
         | MasterToNode::Files { .. }
         | MasterToNode::DocPreview { .. }
         | MasterToNode::DocPageEdit { .. }
@@ -268,6 +269,9 @@ pub(crate) struct Inner {
     diffs: Arc<tokio::sync::Semaphore>,
     /// Room for `@` completions being walked (T63), as many as diffs.
     file_lists: Arc<tokio::sync::Semaphore>,
+    /// Room for background-output answers (X.62), apart from `@`
+    /// completion's: an open row cannot refuse a file list, nor the reverse.
+    bg_outputs: Arc<tokio::sync::Semaphore>,
     /// Room for one page preview at a time (X.59, T99): the helper has two
     /// places, and a person's previews take at most one, so they cannot
     /// starve the agent's own `doc_view`.
@@ -702,6 +706,7 @@ impl NodeRuntime {
             connectors: Default::default(),
             diffs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             file_lists: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
+            bg_outputs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             previews: Arc::new(tokio::sync::Semaphore::new(1)),
             projects_made: Default::default(),
             project_slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -991,6 +996,9 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_DIFF.into());
                 // ...and the whole chat's changes in one diff (X.61).
                 capabilities.push(harness_protocol::CAP_DIFF_ALL.into());
+                // The tail of a background command's output for the
+                // chat's strip (X.62).
+                capabilities.push(harness_protocol::CAP_BG_OUTPUT.into());
                 // `@` file mentions and their completion (T63).
                 capabilities.push(harness_protocol::CAP_FILES.into());
                 // A Word or Excel file of a folder for the page's panel
@@ -1155,6 +1163,14 @@ impl NodeRuntime {
                         rewind,
                         all,
                     } => this.diff(req_id, session_id, turn_id, rewind, all),
+                    // A background command's output for the strip (X.62): a
+                    // bounded read of the ring, never behind a command of
+                    // the session.
+                    MasterToNode::BackgroundOutput {
+                        req_id,
+                        session_id,
+                        bg_id,
+                    } => this.background_output(req_id, session_id, bg_id),
                     // The composer's completion (T63): a bounded walk of
                     // names, in a task of its own, nothing logged.
                     MasterToNode::Files {
@@ -1476,6 +1492,57 @@ impl NodeRuntime {
             // full queue (the master's request would only time out).
             inner.publish_wait(msg).await;
         });
+    }
+
+    /// Answer `session.background_output` (X.62): one bounded read of the
+    /// ring `bash_output` reads, from a task of its own; never acked, no
+    /// event, nothing stored, and no audit line: it is the owner reading
+    /// their own chat's output, as reading its events is not audited either
+    /// (a row polls every 3 s: an audit row each would be 29,000 a day).
+    /// At most [`DIFF_AT_ONCE`] are answered at once, in places of its own
+    /// (not `@` completion's); past them the answer is `busy`, which is
+    /// not final.
+    fn background_output(&self, req_id: String, sid: SessionId, bg_id: String) {
+        let reply = |output, error| NodeToMaster::BackgroundOutputResult {
+            req_id: req_id.clone(),
+            output,
+            error,
+            busy: false,
+        };
+        let Ok(permit) = self.inner.bg_outputs.clone().try_acquire_owned() else {
+            return self.inner.publish(NodeToMaster::BackgroundOutputResult {
+                req_id,
+                output: None,
+                error: None,
+                busy: true,
+            });
+        };
+        let res = match self.inner.session(sid) {
+            Some(s) => s.background_output(&bg_id),
+            // Not loaded: the node restarted since, and a command ends with
+            // its node.
+            None => Err(
+                "this chat is not running on the node now (it restarted): its \
+                         background commands ended with it"
+                    .to_string(),
+            ),
+        };
+        let msg = match res {
+            Ok(o) => reply(Some(o), None),
+            Err(e) => reply(None, Some(e)),
+        };
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            inner.publish_wait(msg).await;
+        });
+    }
+
+    /// The two request places `@` completion and a background output read
+    /// each have (for the test that they are not the same).
+    #[doc(hidden)]
+    pub fn request_places(&self) -> (Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>) {
+        (self.inner.bg_outputs.clone(), self.inner.file_lists.clone())
     }
 
     /// Answer `session.files` (T63) from a task of its own; never acked:
@@ -2384,6 +2451,14 @@ impl NodeRuntime {
                 all,
             } => {
                 self.diff(req_id, session_id, turn_id, rewind, all);
+                Ok(())
+            }
+            MasterToNode::BackgroundOutput {
+                req_id,
+                session_id,
+                bg_id,
+            } => {
+                self.background_output(req_id, session_id, bg_id);
                 Ok(())
             }
             MasterToNode::Files {

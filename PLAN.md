@@ -572,6 +572,7 @@ Node → master
 * `session.snapshot {session_id, head_seq, events: [RawEvent]}` — a replay batch answering `resume`
 * `ack {req_id, ok, error?}`
 * `session.diff_result {req_id, diff?, error?}` — answers one `session.diff` (X.12), never sent unasked, at most `MAX_DIFF_JSON` (2 MiB)
+* `session.background_output_result {req_id, output?, error?}` — answers one `session.background_output` (X.62, T36), never sent unasked, the last at most 28,000 bytes of one background command's output as plain text with its state; the master cuts anything over `MAX_BG_OUTPUT_BYTES` from the front
 * `session.files_result {req_id, paths?, error?}` — answers one `session.files` (T63), never sent unasked, at most 50 paths relative to the chat's folder
 * `project.created {req_id, path?, error?}` — answers one `project.create` (X.26, T77), never sent unasked: the absolute path of the folder the node made, or why it made none
 * `project.mcp_result {req_id, list?, error?}` — answers one `project.mcp` (X.36, T82), never sent unasked: the folder's `.mcp.json` for the asking person (each entry's command, arguments, `env` names and values whole, its state, a digest to approve with), or why not
@@ -587,6 +588,7 @@ Master → node
 * `resume {session_id, last_seq}`
 * `session.retry {req_id, session_id, turn_id, agent?, savings?, context?}` — a person's Retry of the chat's failed last turn (X.21, T69); only to nodes announcing `retry`, only from `POST /api/sessions/{id}/turns/{turn}/retry`; no text, files or images (the node's log has the message); refused unless `harness_core::retry::check` passes against the node's log, and while a turn or `/compact` runs
 * `session.diff {req_id, session_id, turn_id, rewind?, all?}` — a turn's changes from its checkpoints (X.12, T53); with `all` (turn_id empty) the whole chat's changes, from its oldest kept checkpoint to the latest finished state (X.61), only to nodes announcing `diff-all`; only to nodes announcing `diff`; never acked, nothing logged
+* `session.background_output {req_id, session_id, bg_id}` — the tail of one background command's output for the chat's strip (X.62, T36); only to nodes announcing `bg-output`; never acked, nothing logged or stored; the node reads the ring `bash_output` reads
 * `session.files {req_id, session_id, query}` — the composer's `@` completion (T63); only to nodes announcing `files`; never acked, nothing logged
 * `project.create {req_id, name}` — a new project's folder (X.26, T77): a display name only, no place; only to nodes announcing `projects`; never acked, answered by one `project.created`; nothing logged on the master
 * `project.mcp {req_id, user_id, folder, request: {op: list} | {op: approve, name, digest} | {op: remove, name}}` — a person's request about a project folder's `.mcp.json` (X.36, T82); only to nodes announcing `project-mcp`, only from a person's HTTP call; names no program; never acked, answered by one `project.mcp_result`

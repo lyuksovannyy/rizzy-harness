@@ -163,6 +163,115 @@ pub struct Started {
     pub ends_by_ms: i64,
 }
 
+/// The most of a command's output the strip shows (X.62): under the agent
+/// tool's own cap ([`crate::MAX_OUTPUT_CHARS`]) and the protocol's.
+pub const VIEW_BYTES: usize = 28_000;
+
+/// A command's output as the chat's strip asks for it ([`SessionBg::view`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputView {
+    pub running: bool,
+    /// How long it ran (so far, or in all).
+    pub ran_ms: u64,
+    /// Bytes it printed in all.
+    pub printed: u64,
+    /// The last of what the node holds, as plain text.
+    pub text: String,
+    /// `text` is not all it printed.
+    pub cut: bool,
+    /// The node still holds its output (it gives it up past its bounds).
+    pub kept: bool,
+}
+
+/// The most a terminal string (OSC, DCS, APC, PM, SOS) or an open CSI hides:
+/// one that is never closed ends at a newline or after this many
+/// characters, so a command cannot blank what it prints after it.
+const STRING_SKIP_MAX: usize = 4096;
+
+/// Skip a terminal string: to BEL (`bel_ends`: OSC), to ST (`ESC \`, or
+/// any ESC), to a newline (left in place) or [`STRING_SKIP_MAX`].
+fn skip_string(it: &mut std::iter::Peekable<std::str::Chars<'_>>, bel_ends: bool) {
+    let mut n = 0;
+    while let Some(&c) = it.peek() {
+        if c == '\n' || n >= STRING_SKIP_MAX {
+            return;
+        }
+        it.next();
+        n += 1;
+        if bel_ends && c == '\u{7}' {
+            return;
+        }
+        if c == '\u{1b}' {
+            it.next_if_eq(&'\\');
+            return;
+        }
+    }
+}
+
+/// `s` as plain text: CSI, OSC, DCS, APC, PM and SOS sequences and other
+/// escapes removed, `\r\n` and a bare `\r` a line break (a progress bar's
+/// redraws become lines). Removing an escape can join the two halves of a
+/// secret it split: scrub the result again ([`SessionBg::view`] does).
+pub fn plain_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '\u{1b}' => match it.next() {
+                // CSI: parameters, then one final byte 0x40..=0x7E.
+                Some('[') => {
+                    let mut n = 0;
+                    while let Some(&p) = it.peek() {
+                        if p == '\n' || n >= STRING_SKIP_MAX {
+                            break;
+                        }
+                        it.next();
+                        n += 1;
+                        if ('\u{40}'..='\u{7e}').contains(&p) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => skip_string(&mut it, true),
+                Some('P' | '_' | '^' | 'X') => skip_string(&mut it, false),
+                // Any other escape: the one character after it.
+                _ => {}
+            },
+            '\r' => {
+                it.next_if_eq(&'\n');
+                out.push('\n');
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The window of a ring that does not start at the start of its output
+/// begins at an arbitrary byte, maybe inside a secret whose first half
+/// cannot be matched: its first, partial, line goes (with no newline in it,
+/// its first 4 KiB, the most a secret may be, `MAX_HOLD_BACK`).
+fn drop_partial_front(s: &str) -> &str {
+    let mut at = s.find('\n').map_or(4096.min(s.len()), |i| i + 1);
+    while !s.is_char_boundary(at) {
+        at += 1;
+    }
+    &s[at..]
+}
+
+/// The last at most `n` bytes of `s`, from a character boundary, and
+/// whether anything was left out.
+fn last_bytes(s: &str, n: usize) -> (&str, bool) {
+    if s.len() <= n {
+        return (s, false);
+    }
+    let mut from = s.len() - n;
+    while !s.is_char_boundary(from) {
+        from += 1;
+    }
+    (&s[from..], true)
+}
+
 /// A command's output: the first [`HEAD_MAX`] bytes (or a quarter of the
 /// budget, if smaller), then the last bytes up to the rest of the budget.
 /// Everything between is counted and dropped. Scrubbed where it enters
@@ -340,6 +449,20 @@ impl Ring {
         }
         let from = boundary_after(&all, all.len() - n);
         (String::from_utf8_lossy(&all[from..]).into_owned(), true)
+    }
+
+    /// The last at most `n` bytes held, copying only those (a read of a
+    /// running command's end does not copy a ring of megabytes), from a
+    /// character boundary, and whether that is not all it printed.
+    pub fn last_window(&self, n: usize) -> (String, bool) {
+        let from_tail = self.tail.len().min(n);
+        let mut v: Vec<u8> = Vec::with_capacity(n.min(self.held()));
+        let from_head = (n - from_tail).min(self.head.len());
+        v.extend_from_slice(&self.head[self.head.len() - from_head..]);
+        v.extend(self.tail.iter().skip(self.tail.len() - from_tail));
+        let at = boundary_after(&v, 0);
+        let cut = self.seen > (v.len() - at) as u64;
+        (String::from_utf8_lossy(&v[at..]).into_owned(), cut)
     }
 
     /// Head and tail joined, with no marker (`last` cuts from it).
@@ -1239,6 +1362,70 @@ impl SessionBg {
             ring.text_within(crate::MAX_OUTPUT_CHARS - 2000)
         ))
     }
+
+    /// What the chat's strip shows of one command (X.62): the last
+    /// [`VIEW_BYTES`] of what the ring holds, read from the very ring
+    /// `bash_output` reads (scrubbed where it entered, no second buffer),
+    /// as plain text: terminal escape sequences are removed and a bare
+    /// carriage return is a line break. Read-only; it ends nothing and
+    /// stops no timer. `Err` is a sentence for the person.
+    pub fn view(&self, id: &str) -> Result<OutputView, String> {
+        let mut t = self.lock();
+        Self::prune(&mut t, self.reg.now());
+        let Some(c) = t.cmds.values().find(|c| c.id == id) else {
+            return Err(format!(
+                "no background command {id} in this chat: the node forgets one {} minutes after \
+                 it ended, or when it restarts",
+                KEPT_AFTER_END.as_secs() / 60
+            ));
+        };
+        if c.agent.is_some() {
+            return Err(format!(
+                "{id} is a background sub-agent: its work is in its own chat"
+            ));
+        }
+        let (running, ran_ms) = match &c.state {
+            State::Running { .. } => (true, c.started.elapsed().as_millis() as u64),
+            State::Ended { at, .. } => (
+                false,
+                at.saturating_duration_since(c.started).as_millis() as u64,
+            ),
+        };
+        let ring = c.ring.lock().unwrap_or_else(|p| p.into_inner());
+        if ring.is_dropped() {
+            return Ok(OutputView {
+                running,
+                ran_ms,
+                printed: ring.total(),
+                text: String::new(),
+                cut: true,
+                kept: false,
+            });
+        }
+        // Twice the size before the escapes go, so one cut in the middle of a
+        // sequence cannot leave a fragment of it in what is shown.
+        let (raw, cut) = ring.last_window(VIEW_BYTES * 2);
+        let raw = if cut {
+            drop_partial_front(&raw)
+        } else {
+            &raw[..]
+        };
+        // Removing an escape can join the halves of a secret the ring's
+        // scrubber never saw whole (a colour code in its middle): scrub
+        // again, before the cut to the size shown, so no cut leaves half of
+        // one. A second pass is safe: the marker is never itself a secret
+        // (`is_marker_part`).
+        let text = self.reg.secrets.scrub(&plain_text(raw));
+        let (text, trimmed) = last_bytes(&text, VIEW_BYTES);
+        Ok(OutputView {
+            running,
+            ran_ms,
+            printed: ring.total(),
+            text: text.to_string(),
+            cut: cut || trimmed,
+            kept: true,
+        })
+    }
 }
 
 /// The text of a stop whose guard reported `alive`. Without a namespace
@@ -2025,6 +2212,184 @@ mod tests {
         let slot = r.node.take();
         release_slot(slot, BackgroundConfirmed::Ended, std::future::pending());
         assert_eq!(reg.running(), 0);
+    }
+
+    /// X.62: what the strip shows is the ring's last bytes as plain text:
+    /// escapes gone, a redraw a line, never past `VIEW_BYTES`, never a
+    /// broken character, and the cut said.
+    #[test]
+    fn the_view_is_plain_bounded_text() {
+        let (bg, _rx) = table(Limits::default());
+        let num = ended(&bg, 0);
+        let id = format!("bg-{num}");
+        {
+            let t = bg.lock();
+            let mut r = t.cmds[&num].ring.lock().unwrap();
+            r.push("\u{1b}[31mred\u{1b}[0m \u{1b}]0;title\u{7}ok\r10%\r20%\r\nlast\n");
+        }
+        let v = bg.view(&id).unwrap();
+        assert_eq!(v.text, "red ok\n10%\n20%\nlast\n");
+        assert!(!v.running && v.kept && !v.cut);
+        // A flood: bounded, on a boundary, and said to be cut.
+        {
+            let t = bg.lock();
+            let mut r = t.cmds[&num].ring.lock().unwrap();
+            for _ in 0..40_000 {
+                r.push("é€😀\u{1b}[1m");
+            }
+        }
+        let v = bg.view(&id).unwrap();
+        assert!(v.text.len() <= VIEW_BYTES && v.cut && !v.text.contains('\u{1b}'));
+        assert!(!v.text.contains('\u{FFFD}'));
+        // No newline at all, and invalid-looking bytes are the ring's own
+        // lossy text: still bounded.
+        let one = bg.view(&id).unwrap();
+        assert!(one.text.len() <= VIEW_BYTES);
+    }
+
+    /// X.62: the strip's text is the ring's own, scrubbed where it entered;
+    /// a secret printed in two pieces is in neither answer.
+    #[test]
+    fn the_view_never_holds_a_secret() {
+        const S: &str = "sk-test-0123456789abcdef";
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let bg = Registry::new(Limits::default(), secrets(&[S])).session(1, tx);
+        let num = ended(&bg, 0);
+        {
+            let t = bg.lock();
+            let mut r = t.cmds[&num].ring.lock().unwrap();
+            r.push("key: sk-test-0123");
+            r.push("456789abcdef\n");
+            r.finish();
+        }
+        let v = bg.view(&format!("bg-{num}")).unwrap();
+        assert!(v.text.contains("[REDACTED]"), "{}", v.text);
+        assert!(
+            !v.text.contains("sk-test") && !v.text.contains("456789abcdef"),
+            "{}",
+            v.text
+        );
+    }
+
+    /// X.62: an id the chat does not have (another chat's, one forgotten, a
+    /// sub-agent's) is a sentence; nothing of any other table is read.
+    #[test]
+    fn the_view_refuses_what_this_chat_does_not_hold() {
+        let (a, _ra) = table(Limits::default());
+        let (b, _rb) = table(Limits::default());
+        let n = ended(&b, 10);
+        // Same number, another chat's table: a's own table has no such id.
+        let e = a.view(&format!("bg-{n}")).unwrap_err();
+        assert!(e.contains("no background command"), "{e}");
+        assert!(
+            a.view("bg-9")
+                .unwrap_err()
+                .contains("forgets one 30 minutes")
+        );
+        // A background sub-agent has no output to show.
+        let r = a.reserve_agent().unwrap();
+        let (_n, s, _stop) = a.adopt_agent(r, "look", "task", Duration::from_secs(60));
+        assert!(a.view(&s.bg_id).unwrap_err().contains("own chat"));
+    }
+
+    /// What the strip shows of `pushed` (one ring, one long-lived secret set).
+    fn shown(secret: &str, pushed: &[&str]) -> OutputView {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let bg = Registry::new(Limits::default(), secrets(&[secret])).session(1, tx);
+        let num = ended(&bg, 0);
+        {
+            let t = bg.lock();
+            let mut r = t.cmds[&num].ring.lock().unwrap();
+            for p in pushed {
+                r.push(p);
+            }
+            r.finish();
+        }
+        bg.view(&format!("bg-{num}")).unwrap()
+    }
+
+    const KEY: &str = "sk-test-0123456789abcdef";
+
+    /// X.62 review: a key the scrubber never saw whole (a colour code, an
+    /// escape or a title in its middle, as `grep --color=always` leaves)
+    /// is joined by removing the escape; the view scrubs again after it.
+    /// What the ring (and `bash_output`) hold of it is not this change's.
+    #[test]
+    fn a_key_split_by_an_escape_is_scrubbed_after_the_escape_goes() {
+        for split in [
+            "\u{1b}[0m",
+            "\u{1b}X",
+            "\u{1b}]0;t\u{7}",
+            "\u{1b}Pq\u{1b}\\",
+            "\u{1b}Z",
+        ] {
+            let v = shown(
+                KEY,
+                &[&format!("key sk-test-0123{split}456789abcdef\nnext\n")],
+            );
+            assert!(
+                !v.text.contains("456789abcdef") && !v.text.contains(KEY),
+                "{split:?}: {:?}",
+                v.text
+            );
+            assert!(v.text.contains("next"), "{split:?}: {:?}", v.text);
+        }
+        let v = shown(KEY, &["key sk-test-0123\u{1b}[0m456789abcdef\n"]);
+        assert!(v.text.contains("[REDACTED]"), "{:?}", v.text);
+    }
+
+    /// A key that begins before the front of the window the view reads is
+    /// not shown by its end: the window's first, partial, line is dropped.
+    #[test]
+    fn a_key_straddling_the_front_of_the_window_leaves_no_tail() {
+        // The window is the last 2 x VIEW_BYTES; it begins 10 bytes into KEY.
+        let post = "z".repeat(VIEW_BYTES * 2 - (KEY.len() - 10) - 1);
+        let v = shown(KEY, &[&"x".repeat(1000), KEY, "\n", &post]);
+        assert!(
+            !v.text.contains("23456789abcdef") && !v.text.contains("456789abcdef"),
+            "{:?}",
+            &v.text[..40.min(v.text.len())]
+        );
+        assert!(v.text.ends_with('z') && v.cut);
+        // A window with no newline at all loses its first 4 KiB instead.
+        let v = shown(
+            KEY,
+            &[&"x".repeat(1000), KEY, &"z".repeat(VIEW_BYTES * 2 - 14)],
+        );
+        assert!(!v.text.contains("456789abcdef"));
+        assert!(v.text.ends_with('z'));
+    }
+
+    /// X.62 review: an unterminated string does not blank what follows it:
+    /// it ends at a newline or after 4 KiB; DCS, APC, PM and SOS strings are
+    /// skipped to their ST in the same bounded way.
+    #[test]
+    fn unterminated_and_other_strings_are_skipped_in_a_bounded_way() {
+        assert_eq!(plain_text("a\u{1b}]0;title\nvisible\n"), "a\nvisible\n");
+        let long = format!("\u{1b}]{}TAIL", "q".repeat(5000));
+        let t = plain_text(&long);
+        assert!(t.ends_with("TAIL") && t.len() < 1000, "{}", t.len());
+        for open in ["P", "_", "^", "X", "]"] {
+            let t = plain_text(&format!("a\u{1b}{open}payload\u{1b}\\after"));
+            assert_eq!(t, "aafter", "{open}");
+            let t = plain_text(&format!("a\u{1b}{open}payload\nafter"));
+            assert_eq!(t, "a\nafter", "{open}");
+        }
+        // An unterminated CSI stops at the newline too.
+        assert_eq!(plain_text("a\u{1b}[1;2;3\nb"), "a\nb");
+    }
+
+    /// The cost of a read: only the end of the ring is copied.
+    #[test]
+    fn the_ring_window_copies_only_the_end() {
+        let mut r = Ring::new(4 * 1024 * 1024, none());
+        r.push(&"h".repeat(HEAD_MAX));
+        r.push(&"t".repeat(1_000_000));
+        let (w, cut) = r.last_window(1000);
+        assert!(cut && w.len() == 1000 && w.bytes().all(|b| b == b't'));
+        let mut small = Ring::new(4096, none());
+        small.push("abc");
+        assert_eq!(small.last_window(1000), ("abc".to_string(), false));
     }
 
     fn table(limits: Limits) -> (Arc<SessionBg>, mpsc::UnboundedReceiver<Ended>) {

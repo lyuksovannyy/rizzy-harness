@@ -105,6 +105,16 @@ pub const CAP_DIFF: &str = "diff";
 /// nodes whose hello listed it; an older one is told to update.
 pub const CAP_DIFF_ALL: &str = "diff-all";
 
+/// The node capability that announces `session.background_output` (X.62,
+/// PLAN.md T53): the tail of one background command's output, for the chat's
+/// strip. The master asks only nodes whose hello listed it.
+pub const CAP_BG_OUTPUT: &str = "bg-output";
+
+/// The most text of a background command's output one answer carries, in
+/// bytes (the node sends at most 28,000; the master cuts anything longer
+/// from the front).
+pub const MAX_BG_OUTPUT_BYTES: usize = 32 * 1024;
+
 /// The node capability that announces `@` file mentions (PLAN.md T63):
 /// `session.prompt.files` and `session.files`. The master sends neither to
 /// a node whose hello did not list it.
@@ -527,6 +537,25 @@ pub const MAX_PROMPT_FILE_BYTES: usize = 1024;
 
 /// The most paths one `session.files_result` carries.
 pub const MAX_FILES_RESULT: usize = 50;
+
+/// What a background command printed, as the chat's strip shows it (X.62):
+/// the last bytes the node holds, as plain text (at most
+/// [`MAX_BG_OUTPUT_BYTES`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BackgroundOutput {
+    pub running: bool,
+    /// How long it ran (so far, or in all), in milliseconds.
+    pub ran_ms: u64,
+    /// Bytes it printed in all.
+    pub printed: u64,
+    pub text: String,
+    /// `text` is not all it printed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cut: bool,
+    /// The node no longer keeps its output (`text` is empty).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dropped: bool,
+}
 
 /// The largest serialized `session.diff_result` a node sends: a quarter of
 /// the link's frame, so one answer holds the node's ordered output back by
@@ -1138,6 +1167,20 @@ pub enum NodeToMaster {
         diff: Option<Box<TurnDiff>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+    },
+    /// The answer to `session.background_output` (pull only): the command's
+    /// tail, or why there is none, in words for the person.
+    #[serde(rename = "session.background_output_result")]
+    BackgroundOutputResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<BackgroundOutput>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// The node had no place for it just now: try again (a transient
+        /// answer, unlike an `error`, which is final).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        busy: bool,
     },
     /// The answer to `session.files` (pull only): at most
     /// [`MAX_FILES_RESULT`] paths relative to the chat's folder (a folder
@@ -1892,6 +1935,17 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         all: bool,
     },
+    /// The tail of one background command's output (X.62), read from the
+    /// ring `bash_output` reads: answered by one
+    /// `session.background_output_result`, never by an ack, handled outside
+    /// the node's command loop, nothing logged or stored. Only to nodes with
+    /// [`CAP_BG_OUTPUT`].
+    #[serde(rename = "session.background_output")]
+    BackgroundOutput {
+        req_id: String,
+        session_id: SessionId,
+        bg_id: String,
+    },
     /// Paths of the chat's folder for the composer's `@` completion
     /// (PLAN.md T63): answered by one `session.files_result`, never by an
     /// ack, handled outside the node's command loop, nothing logged. Only
@@ -2022,6 +2076,7 @@ impl MasterToNode {
             | MasterToNode::SkillResult { .. }
             | MasterToNode::ConnectorResult { .. }
             | MasterToNode::Diff { .. }
+            | MasterToNode::BackgroundOutput { .. }
             | MasterToNode::Files { .. }
             | MasterToNode::DocPreview { .. }
             | MasterToNode::DocPageEdit { .. }
@@ -2783,6 +2838,59 @@ mod tests {
                 .get("since_pruned")
                 .is_none()
         );
+    }
+
+    /// X.62: the strip's output request is answered by its result, never
+    /// acked; the result carries the tail or the node's words.
+    #[test]
+    fn background_output_wire_shapes() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let ask = MasterToNode::BackgroundOutput {
+            req_id: "r".into(),
+            session_id: sid,
+            bg_id: "bg-2".into(),
+        };
+        assert_eq!(ask.req_id(), None);
+        let v = serde_json::to_value(&ask).unwrap();
+        assert_eq!(
+            v,
+            json!({"type": "session.background_output", "req_id": "r",
+                   "session_id": "0193f2a0-0000-7000-8000-000000000001", "bg_id": "bg-2"})
+        );
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), ask);
+        let ans = NodeToMaster::BackgroundOutputResult {
+            req_id: "r".into(),
+            output: Some(BackgroundOutput {
+                running: true,
+                ran_ms: 5,
+                printed: 3,
+                text: "hi\n".into(),
+                ..Default::default()
+            }),
+            error: None,
+            busy: false,
+        };
+        let v = serde_json::to_value(&ans).unwrap();
+        assert_eq!(v["type"], "session.background_output_result");
+        assert_eq!(v["output"]["text"], "hi\n");
+        assert!(
+            v["output"].get("cut").is_none() && v.get("error").is_none(),
+            "{v}"
+        );
+        assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), ans);
+        // Busy is its own flag, absent when false, never an error text.
+        let busy = NodeToMaster::BackgroundOutputResult {
+            req_id: "r".into(),
+            output: None,
+            error: None,
+            busy: true,
+        };
+        let v = serde_json::to_value(&busy).unwrap();
+        assert_eq!(
+            v,
+            json!({"type": "session.background_output_result", "req_id": "r", "busy": true})
+        );
+        assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), busy);
     }
 
     /// X.59: the wire shape of the folder preview pair.

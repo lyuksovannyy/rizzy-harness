@@ -3891,3 +3891,220 @@ async fn the_persons_stop_over_http_ends_them_with_stopped_by_user() {
     none_left(&two, "Stop all").await;
     none_left(&three, "Stop all").await;
 }
+
+// ---- what the chat's strip shows of a command (X.62, PLAN.md T8D) ----
+
+/// What the node answers to `session.background_output` for `sid`'s `bg`.
+async fn read_out(
+    n: &mut Node,
+    sid: SessionId,
+    bg: &str,
+) -> Result<harness_protocol::BackgroundOutput, String> {
+    use harness_protocol::{MasterToNode, NodeToMaster};
+    n.n += 1;
+    let req = format!("o{}", n.n);
+    n.send(MasterToNode::BackgroundOutput {
+        req_id: req.clone(),
+        session_id: sid,
+        bg_id: bg.into(),
+    });
+    loop {
+        let m = tokio::time::timeout(Duration::from_secs(60), n.link.from_node.recv())
+            .await
+            .expect("no answer")
+            .expect("link closed");
+        match m {
+            NodeToMaster::Event { event } => n.seen.push(event),
+            NodeToMaster::BackgroundOutputResult {
+                req_id,
+                output,
+                error,
+                ..
+            } if req_id == req => {
+                return match (output, error) {
+                    (Some(o), None) => Ok(o),
+                    (_, e) => Err(e.unwrap_or_default()),
+                };
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Ask until `ok` holds (the command prints in its own time).
+async fn out_until(
+    n: &mut Node,
+    sid: SessionId,
+    bg: &str,
+    ok: impl Fn(&harness_protocol::BackgroundOutput) -> bool,
+) -> harness_protocol::BackgroundOutput {
+    let by = Instant::now() + Duration::from_secs(60);
+    loop {
+        let o = read_out(n, sid, bg).await.expect("an answer");
+        if ok(&o) {
+            return o;
+        }
+        assert!(
+            Instant::now() < by,
+            "never showed what was waited for: {o:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The strip's read of a running command: its tail has grown since the last
+/// look, a secret of the node's is scrubbed exactly as in the events (abuse
+/// case 3), and the output is still there, as ended, after the person's Stop.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_strip_reads_the_tail_of_a_running_command_scrubbed_and_after_its_end() {
+    use harness_protocol::{MasterToNode, StopBackgroundBy};
+    // A long key (32 bytes or more): the scrubber holds text back only where it
+    // could begin one; a short key holds back its last bytes while the
+    // command runs, for the model as for the strip.
+    const SECRET: &str = "sk-test-0123456789abcdef0123456789abcdef";
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let mut n = node_with(f, sb, vec![SECRET.into()]).await;
+    let sid = n.sid;
+    let cmd = format!("echo first; echo key={SECRET}; sleep 1; echo second; sleep 30");
+    n.turn(json!([bg(&cmd, 60)])).await;
+    let o = out_until(&mut n, sid, "bg-1", |o| o.text.contains("[REDACTED]")).await;
+    assert!(o.running && !o.dropped, "{o:?}");
+    assert!(
+        !o.text.contains(SECRET) && !o.text.contains("0123456789abcdef0123"),
+        "a secret reached the strip: {o:?}"
+    );
+    let o = out_until(&mut n, sid, "bg-1", |o| o.text.contains("second")).await;
+    assert!(
+        o.text.starts_with("first\n") && o.ran_ms > 0 && o.printed > 0,
+        "{o:?}"
+    );
+    n.send(MasterToNode::StopBackground {
+        req_id: "stop".into(),
+        session_id: sid,
+        bg_id: Some("bg-1".into()),
+        by: StopBackgroundBy::User,
+    });
+    n.until(|k| matches!(k, EventKind::BackgroundEnded(_)))
+        .await;
+    let o = read_out(&mut n, sid, "bg-1").await.unwrap();
+    assert!(
+        !o.running && o.text.contains("second") && !o.text.contains(SECRET),
+        "{o:?}"
+    );
+    // The same text is what the log holds of the end: not less scrubbed.
+    assert!(!n.ends()[0].tail.contains("0123456789abcdef0123"));
+    n.rt.delete(n.sid).await.unwrap();
+}
+
+/// Abuse case 2: a command id of another chat of the same node is not found
+/// in this chat and none of the other chat's output comes back.
+#[tokio::test(flavor = "multi_thread")]
+async fn another_chats_command_is_not_found_by_the_strip() {
+    use harness_protocol::MasterToNode;
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let mut n = node_with(f, sb, vec![]).await;
+    let a = n.sid;
+    n.turn(json!([bg("echo only-in-chat-a; sleep 30", 60)]))
+        .await;
+    out_until(&mut n, a, "bg-1", |o| o.text.contains("only-in-chat-a")).await;
+    // Chat B on the same node has no command; the same number is not A's.
+    let b = SessionId::new();
+    n.send(MasterToNode::Create {
+        exec_mode: None,
+        no_callbacks: false,
+        profile: None,
+        incognito: false,
+        agent: None,
+        req_id: "cb".into(),
+        session_id: b,
+        title: "b".into(),
+        cwd: n.ws.display().to_string(),
+        model: None,
+        approval_mode: None,
+    });
+    n.until(|k| matches!(k, EventKind::SessionCreated(_))).await;
+    let e = read_out(&mut n, b, "bg-1").await.unwrap_err();
+    assert!(
+        !e.contains("only-in-chat-a") && e.contains("no background"),
+        "{e}"
+    );
+    let e = read_out(&mut n, a, "bg-99").await.unwrap_err();
+    assert!(e.contains("no background command bg-99"), "{e}");
+    let e = read_out(&mut n, SessionId::new(), "bg-1")
+        .await
+        .unwrap_err();
+    assert!(!e.contains("only-in-chat-a"), "{e}");
+    n.rt.delete(a).await.unwrap();
+    n.rt.delete(b).await.unwrap();
+}
+
+/// Abuse case 4: escape sequences, markup, bidi, a control character,
+/// invalid UTF-8 and a flood of 50 MB with no newline are one bounded answer
+/// of plain valid text (rendered as text: `web/src/components/bgOutput.test.tsx`).
+#[tokio::test(flavor = "multi_thread")]
+async fn hostile_output_is_one_bounded_plain_answer_for_the_strip() {
+    use harness_protocol::{MasterToNode, StopBackgroundBy};
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let mut n = node_with(f, sb, vec![]).await;
+    let sid = n.sid;
+    let cmd = "printf '\\033[31mred\\033[0m <script>alert(1)</script> \\342\\200\\256rtl \\377\\376 \\a\\033]0;t\\a done\\n'; \
+               head -c 50000000 /dev/zero | tr '\\0' 'a'; sleep 30";
+    n.turn(json!([bg(cmd, 60)])).await;
+    let o = out_until(&mut n, sid, "bg-1", |o| o.printed >= 50_000_000).await;
+    assert!(
+        o.text.len() <= harness_protocol::MAX_BG_OUTPUT_BYTES && o.cut,
+        "{} bytes",
+        o.text.len()
+    );
+    assert!(
+        !o.text.contains('\u{1b}') && !o.text.contains('\u{7}'),
+        "an escape survived"
+    );
+    assert!(o.text.ends_with('a'), "the tail is the end of the flood");
+    n.send(MasterToNode::StopBackground {
+        req_id: "stop".into(),
+        session_id: sid,
+        bg_id: None,
+        by: StopBackgroundBy::User,
+    });
+    n.until(|k| matches!(k, EventKind::BackgroundEnded(_)))
+        .await;
+    // The first line, read while it was still in the ring's head, was plain
+    // too: the head is not cut by the flood and the markup is only text.
+    n.rt.delete(n.sid).await.unwrap();
+}
+
+/// X.62 review: a key with a colour code in its middle (what `grep
+/// --color=always` leaves) is not whole in the ring, so the ring's scrubber
+/// cannot match it; the strip removes the escape and so would show it whole
+/// unless it scrubs again. It does. (The ring itself, `bash_output` and the
+/// end's tail still hold such a key: not this change's.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_split_by_a_colour_code_is_not_shown_by_the_strip() {
+    use harness_protocol::{MasterToNode, StopBackgroundBy};
+    const SECRET: &str = "sk-test-0123456789abcdef0123456789abcdef";
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let mut n = node_with(f, sb, vec![SECRET.into()]).await;
+    let sid = n.sid;
+    let cmd = "printf 'key sk-test-0123456789\\033[1;31mabcdef0123456789abcdef\\033[0m\\nafter\\n'; sleep 30";
+    n.turn(json!([bg(cmd, 60)])).await;
+    let o = out_until(&mut n, sid, "bg-1", |o| o.text.contains("after")).await;
+    assert!(
+        !o.text.contains("abcdef0123456789abcdef") && !o.text.contains(SECRET),
+        "the key is shown whole: {o:?}"
+    );
+    assert!(o.text.contains("[REDACTED]"), "{o:?}");
+    n.send(MasterToNode::StopBackground {
+        req_id: "stop".into(),
+        session_id: sid,
+        bg_id: None,
+        by: StopBackgroundBy::User,
+    });
+    n.until(|k| matches!(k, EventKind::BackgroundEnded(_)))
+        .await;
+    n.rt.delete(n.sid).await.unwrap();
+}

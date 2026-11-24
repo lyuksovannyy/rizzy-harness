@@ -260,6 +260,14 @@ impl Rig {
         self._node = Some(node);
     }
 
+    /// The node's request places: background output reads, `@` completion.
+    pub fn places(&self) -> (Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>) {
+        self._node
+            .as_ref()
+            .expect("a running node")
+            .request_places()
+    }
+
     /// The rig's one session.
     pub fn session_id(&self) -> SessionId {
         self.sid

@@ -106,3 +106,31 @@
     box-shadow: var(--shadow-1);
   }
 }
+
+/* A background command's output (CommandOutput.tsx): under its row's foot. */
+.side-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+}
+.side-output {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.side-output-text {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-1, var(--bg-2));
+  color: var(--fg-1, inherit);
+  font-size: var(--text-xs, 12px);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
