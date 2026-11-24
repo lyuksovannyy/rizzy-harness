@@ -343,6 +343,30 @@ async fn existing(
     })
 }
 
+/// The forge's words for a refusal: `message` (a string, or GitLab's list)
+/// and the messages of `errors`, joined, at most a few kilobytes.
+fn message_of(v: &serde_json::Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match v.get("message") {
+        Some(serde_json::Value::String(s)) => parts.push(s.clone()),
+        Some(serde_json::Value::Array(a)) => {
+            parts.extend(a.iter().filter_map(|x| x.as_str()).map(str::to_string))
+        }
+        _ => {}
+    }
+    if let Some(serde_json::Value::Array(errs)) = v.get("errors") {
+        for e in errs.iter().take(5) {
+            if let Some(s) = e.get("message").and_then(|m| m.as_str()) {
+                parts.push(s.to_string());
+            } else if let Some(s) = e.as_str() {
+                parts.push(s.to_string());
+            }
+        }
+    }
+    let joined = parts.join("; ");
+    joined.chars().take(4096).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,28 +394,4 @@ mod tests {
         assert!(draft_title(ForgeKind::Github, &"t".repeat(256), true).is_ok());
         assert!(draft_title(ForgeKind::Gitlab, &"t".repeat(256), false).is_err());
     }
-}
-
-/// The forge's words for a refusal: `message` (a string, or GitLab's list)
-/// and the messages of `errors`, joined, at most a few kilobytes.
-fn message_of(v: &serde_json::Value) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    match v.get("message") {
-        Some(serde_json::Value::String(s)) => parts.push(s.clone()),
-        Some(serde_json::Value::Array(a)) => {
-            parts.extend(a.iter().filter_map(|x| x.as_str()).map(str::to_string))
-        }
-        _ => {}
-    }
-    if let Some(serde_json::Value::Array(errs)) = v.get("errors") {
-        for e in errs.iter().take(5) {
-            if let Some(s) = e.get("message").and_then(|m| m.as_str()) {
-                parts.push(s.to_string());
-            } else if let Some(s) = e.as_str() {
-                parts.push(s.to_string());
-            }
-        }
-    }
-    let joined = parts.join("; ");
-    joined.chars().take(4096).collect()
 }
