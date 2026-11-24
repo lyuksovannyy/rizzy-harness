@@ -435,6 +435,8 @@ async fn require(master: &Master, headers: &HeaderMap) -> ApiResult<auth::Princi
     Ok(who)
 }
 
+// Unused once every admin route takes `Admin`; deleted with `require*`.
+#[allow(dead_code)]
 async fn require_admin(master: &Master, headers: &HeaderMap) -> ApiResult<auth::Principal> {
     let who = require(master, headers).await?;
     if !who.is_admin() {
