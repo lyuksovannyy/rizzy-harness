@@ -7,14 +7,15 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use harness_agent_native::{ChatMsg, ChatRequest, Provider};
 use harness_agents::Features;
 use harness_agents::edits::{Custom, Overlay};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{ApiError, ApiResult, ScopeQuery, agent_json, require, runtime, settings_scope};
+use super::caller::User;
+use super::{ApiError, ApiResult, ScopeQuery, agent_json, runtime, settings_scope};
 use crate::Master;
 use crate::agent_edits::{AgentEditError, Place};
 use crate::auth::Principal;
@@ -30,10 +31,9 @@ use crate::workspaces::{self as ws, Perm};
 /// `may_edit` on the listing.
 async fn require_agent_editor(
     m: &Master,
-    headers: &HeaderMap,
+    who: Principal,
     q: &ScopeQuery,
 ) -> ApiResult<(Principal, Place)> {
-    let who = require(m, headers).await?;
     let place = match (q.scope.as_deref(), q.workspace.as_deref()) {
         (Some("server"), None) => {
             if !who.is_admin() {
@@ -181,12 +181,11 @@ async fn written(m: &Master, place: &Place) -> crate::Resolver {
 
 /// Anyone who can use an agent may read what it is told.
 pub(super) async fn get_agent(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<ScopeQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let scope = settings_scope(&m, &who, &q).await?;
     let (place, r) = match &scope {
         Some(a) => (Place::Workspace(a.id().to_string()), a.resolver(&m).await),
@@ -217,12 +216,12 @@ pub(super) struct NewAgent {
 }
 
 pub(super) async fn create_agent(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<ScopeQuery>,
     Json(b): Json<NewAgent>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let (_, place) = require_agent_editor(&m, &headers, &q).await?;
+    let (_, place) = require_agent_editor(&m, who, &q).await?;
     let id = b.id.trim().to_string();
     let c = Custom {
         name: b.name,
@@ -266,13 +265,13 @@ fn present<'de, D: serde::Deserializer<'de>>(
 }
 
 pub(super) async fn update_agent(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<ScopeQuery>,
     Json(b): Json<AgentChange>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let (_, place) = require_agent_editor(&m, &headers, &q).await?;
+    let (_, place) = require_agent_editor(&m, who, &q).await?;
     let (own, seen) = m.place_edits(&place).await;
     match own.custom.get(&id).cloned() {
         Some(old) => {
@@ -335,12 +334,12 @@ pub(super) async fn update_agent(
 /// new agent with the same handle starts fresh. Chats that used it refuse
 /// their next prompt until another agent is chosen (`AgentGone`).
 pub(super) async fn delete_agent(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<ScopeQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let (_, place) = require_agent_editor(&m, &headers, &q).await?;
+    let (_, place) = require_agent_editor(&m, who, &q).await?;
     m.delete_custom_agent(&place, &id).await?;
     if place == Place::Server
         && let Some(rt) = m.provider_runtime()
@@ -375,12 +374,12 @@ pub(super) struct SummaryBody {
 /// A summary written by the default model from the instructions in the
 /// editor (saved or not); nothing is stored. One short request.
 pub(super) async fn generate_summary(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<ScopeQuery>,
     Json(b): Json<SummaryBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_agent_editor(&m, &headers, &q).await?;
+    require_agent_editor(&m, who, &q).await?;
     let prompt = b.prompt.trim();
     if prompt.is_empty() {
         return Err(ApiError(

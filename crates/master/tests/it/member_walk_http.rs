@@ -446,6 +446,10 @@ fn handlers_are_read_from_the_code() {
     assert!(at("GET", "/api/users/{id}/avatar").bytes);
     assert!(at("GET", "/api/favicon").bytes);
     assert!(at("PATCH", "/api/agents/{id}").editor);
+    // An editor route takes `User`, but its admin check is the helper's:
+    // read as converted, not as admin-first.
+    let e = at("PATCH", "/api/agents/{id}");
+    assert!(e.converted && e.user && e.editor && !e.admin);
 }
 
 // ---------------------------------------------------------------- rigs
@@ -920,7 +924,10 @@ async fn each_kind_of_caller_gets_what_the_code_allows() {
                     reached = true;
                     continue;
                 }
-                if c.input && !c.converted && BODY_CODES.contains(&code) {
+                // An agent editor's admin check is the helper's, made after
+                // the body is read, so the `User` extractor does not move it.
+                let admin_first = c.converted && !(c.editor && !c.admin);
+                if c.input && !admin_first && BODY_CODES.contains(&code) {
                     pending.insert(format!("{m} {p}"));
                 } else {
                     note("member-on-admin", m, p, format!("{code} {err}"));
