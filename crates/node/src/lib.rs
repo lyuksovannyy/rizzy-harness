@@ -276,6 +276,9 @@ pub(crate) struct Inner {
     pub(crate) pushes: session::push::Pending,
     /// Room for the push being run: one at a time on the node.
     pub(crate) push_slots: Arc<tokio::sync::Semaphore>,
+    /// Pushes reading the folder for their card at once (two; they hold no
+    /// push slot, so a card nobody answers blocks no other push).
+    pub(crate) push_previews: Arc<tokio::sync::Semaphore>,
     /// Loads of a stored skill waiting for their `skill.result`.
     pub(crate) stored_skills: stored_skills::Pending,
     /// Connector calls waiting for the master's answer (X.35 step 2).
@@ -726,6 +729,7 @@ impl NodeRuntime {
             boards: Default::default(),
             pushes: Default::default(),
             push_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            push_previews: Arc::new(tokio::sync::Semaphore::new(2)),
             stored_skills: Default::default(),
             connectors: Default::default(),
             diffs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),

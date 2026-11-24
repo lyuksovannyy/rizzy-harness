@@ -107,8 +107,12 @@ impl Rig {
             .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
+    fn open(&self) -> Folder {
+        Folder::open(&self.folder, None).unwrap()
+    }
+
     fn stage(&self) -> Result<Staged, String> {
-        stage(&self.staging, &self.folder, "sha1", &bounds())
+        stage(&self.staging, &self.open(), "sha1", &bounds())
     }
 
     async fn push(&self, host: &str, branch: &str, commit: &str) -> Result<Pushed, String> {
@@ -165,7 +169,7 @@ fn ask() -> Mode {
 async fn the_pinned_commit_reaches_the_branch() {
     let r = rig();
     let forge = server(&r.root, ask());
-    let pin = pin(&r.folder, None).unwrap();
+    let pin = pin(&r.open(), None).unwrap();
     assert_eq!(pin.branch, "main");
     let p = r.push(&forge.host(), "feature", &pin.commit).await.unwrap();
     assert_eq!(p.flag, '*', "{p:?}");
@@ -248,7 +252,7 @@ async fn nothing_of_the_folders_config_or_hooks_is_read_or_run() {
         &format!("160000,{other},s"),
     ]);
     r.git(&["commit", "-q", "-m", "gitlink"]);
-    let pin = pin(&r.folder, None).unwrap();
+    let pin = pin(&r.open(), None).unwrap();
     let p = r.push(&forge.host(), "main", &pin.commit).await.unwrap();
     assert_eq!(p.flag, ' ', "{p:?}");
     assert_eq!(r.remote_ref("main").as_deref(), Some(pin.commit.as_str()));
@@ -281,7 +285,7 @@ async fn an_alternates_chain_never_reaches_another_repository() {
     .unwrap();
     // Also as the branch's own ref: what an agent would write.
     std::fs::write(r.folder.join(".git/refs/heads/leak"), format!("{theirs}\n")).unwrap();
-    let pin = pin(&r.folder, Some("leak")).unwrap();
+    let pin = pin(&r.open(), Some("leak")).unwrap();
     assert_eq!(pin.commit, theirs);
     let st = r.stage().unwrap();
     assert!(subject(&st, &theirs, None).await.is_err());
@@ -348,7 +352,7 @@ async fn only_loose_objects_and_packs_are_taken() {
         "{names:?}"
     );
     assert!(names.iter().any(|n| n.ends_with(".pack")), "{names:?}");
-    let pin = pin(&r.folder, None).unwrap();
+    let pin = pin(&r.open(), None).unwrap();
     drop(st);
     let p = r.push(&forge.host(), "packed", &pin.commit).await.unwrap();
     assert_eq!(p.flag, '*');
@@ -368,7 +372,7 @@ async fn a_redirect_is_not_followed() {
                 ..Default::default()
             },
         );
-        let pin = pin(&r.folder, None).unwrap();
+        let pin = pin(&r.open(), None).unwrap();
         let res = r.push(&forge.host(), "redir", &pin.commit).await;
         assert!(res.is_err(), "{res:?}");
         assert!(!res.unwrap_err().contains(CANARY));
@@ -383,7 +387,7 @@ async fn a_redirect_is_not_followed() {
 async fn a_rejected_push_is_the_forges_answer_without_hints() {
     let r = rig();
     let forge = server(&r.root, ask());
-    let first = pin(&r.folder, None).unwrap();
+    let first = pin(&r.open(), None).unwrap();
     r.push(&forge.host(), "main", &first.commit).await.unwrap();
     r.git(&["reset", "-q", "--hard", "HEAD~1"]);
     let diverged = r.commit("diverged", "other work\n");
@@ -402,7 +406,7 @@ async fn a_rejected_push_is_the_forges_answer_without_hints() {
 async fn a_rewritten_object_only_fails_the_push() {
     let r = rig();
     let forge = server(&r.root, ask());
-    let pin = pin(&r.folder, None).unwrap();
+    let pin = pin(&r.open(), None).unwrap();
     let st = r.stage().unwrap();
     // The commit's tree's blob `work.txt`, rewritten in place (same inode)
     // as a valid loose object of other content.
@@ -472,7 +476,7 @@ async fn a_rewritten_object_only_fails_the_push() {
 async fn refused_links_fall_back_to_a_bounded_copy() {
     let r = rig();
     let forge = server(&r.root, ask());
-    let pin = pin(&r.folder, None).unwrap();
+    let pin = pin(&r.open(), None).unwrap();
     refuse_links(true);
     let st = r.stage().unwrap();
     assert!(
@@ -500,7 +504,7 @@ async fn refused_links_fall_back_to_a_bounded_copy() {
         max_copy: 100,
         ..bounds()
     };
-    let e = stage(&r.staging, &r.folder, "sha1", &small).err().unwrap();
+    let e = stage(&r.staging, &r.open(), "sha1", &small).err().unwrap();
     assert!(e.contains("clone_max_mb"), "{e}");
     refuse_links(false);
     assert!(r.staging_empty());
@@ -515,7 +519,7 @@ async fn too_many_object_files_are_refused_plainly() {
         max_files: 2,
         ..bounds()
     };
-    let e = stage(&r.staging, &r.folder, "sha1", &few).err().unwrap();
+    let e = stage(&r.staging, &r.open(), "sha1", &few).err().unwrap();
     assert!(e.contains("git gc"), "{e}");
     assert!(r.staging_empty());
 }
@@ -533,7 +537,7 @@ async fn a_stalled_push_ends_at_its_limit_with_no_token_in_proc() {
             ..Default::default()
         },
     );
-    let pin = pin(&r.folder, None).unwrap();
+    let pin = pin(&r.open(), None).unwrap();
     let st = r.stage().unwrap();
     let short = Bounds {
         timeout: Duration::from_secs(3),
@@ -584,7 +588,7 @@ fn pins() {
     let r = rig();
     let head = r.git(&["rev-parse", "HEAD"]);
     assert_eq!(
-        pin(&r.folder, None).unwrap(),
+        pin(&r.open(), None).unwrap(),
         Pin {
             branch: "main".into(),
             commit: head.clone()
@@ -592,16 +596,16 @@ fn pins() {
     );
     r.git(&["branch", "feature/x"]);
     r.git(&["pack-refs", "--all"]);
-    assert_eq!(pin(&r.folder, Some("feature/x")).unwrap().commit, head);
+    assert_eq!(pin(&r.open(), Some("feature/x")).unwrap().commit, head);
     assert!(
-        pin(&r.folder, Some("nope"))
+        pin(&r.open(), Some("nope"))
             .unwrap_err()
             .contains("no commit")
     );
     r.git(&["checkout", "-q", "--detach"]);
-    assert!(pin(&r.folder, None).unwrap_err().contains("detached"));
+    assert!(pin(&r.open(), None).unwrap_err().contains("detached"));
     r.git(&["checkout", "-q", "--orphan", "empty"]);
-    assert!(pin(&r.folder, None).unwrap_err().contains("no commit"));
+    assert!(pin(&r.open(), None).unwrap_err().contains("no commit"));
     // A `.git` that is a file (a linked worktree) is not read.
     let wt = r.root.join("wt");
     std::fs::create_dir_all(&wt).unwrap();
@@ -610,7 +614,7 @@ fn pins() {
         format!("gitdir: {}\n", r.folder.join(".git").display()),
     )
     .unwrap();
-    assert!(pin(&wt, None).is_err());
+    assert!(Folder::open(&wt, None).and_then(|f| pin(&f, None)).is_err());
 }
 
 /// git's text loses terminal escapes, the token in every form and hints.
@@ -636,7 +640,7 @@ fn gits_text_is_cleaned() {
 async fn no_file_holds_the_token() {
     let r = rig();
     let forge = server(&r.root, ask());
-    let pin = pin(&r.folder, None).unwrap();
+    let pin = pin(&r.open(), None).unwrap();
     r.push(&forge.host(), "t", &pin.commit).await.unwrap();
     assert_eq!(files_with_token(&r.root), Vec::<PathBuf>::new());
 }
@@ -662,7 +666,7 @@ fn measure_the_link_step() {
     for links in [true, false] {
         refuse_links(!links);
         let t = std::time::Instant::now();
-        let r = stage(&staging, &top, "sha1", &b);
+        let r = stage(&staging, &Folder::open(&top, None).unwrap(), "sha1", &b);
         let took = t.elapsed();
         match &r {
             Ok(s) => eprintln!(
@@ -677,4 +681,427 @@ fn measure_the_link_step() {
     }
     refuse_links(false);
     let _ = std::fs::remove_dir_all(&staging);
+}
+
+// ------------------------------------------- F1: directories swapped mid-walk
+
+/// Another repository on the node (the one the agent wants leaked), with
+/// its commit id; `packed`: in one pack, else loose.
+fn other_repo(r: &Rig, packed: bool) -> (PathBuf, String) {
+    let other = r.root.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    git_in(&other, &["init", "-q", "-b", "main"]);
+    std::fs::write(other.join("secret"), "OTHER-REPO-SECRET-CANARY\n").unwrap();
+    git_in(&other, &["add", "-A"]);
+    git_in(&other, &["commit", "-q", "-m", "other"]);
+    if packed {
+        git_in(&other, &["gc", "-q"]);
+    }
+    let id = git_in(&other, &["rev-parse", "HEAD"]);
+    (other, id)
+}
+
+/// At race point `at` (once), `dir` is swapped for a symbolic link to
+/// `to`, as a racing agent would.
+fn swap_at(at: &str, dir: PathBuf, to: PathBuf) {
+    let at = at.to_string();
+    let mut done = false;
+    set_race(Some(Box::new(move |p: &str| {
+        if done || p != at {
+            return;
+        }
+        done = true;
+        let mut real = dir.clone().into_os_string();
+        real.push(".real");
+        std::fs::rename(&dir, &real).unwrap();
+        std::os::unix::fs::symlink(&to, &dir).unwrap();
+    })));
+}
+
+/// The forge has neither the other repository's commit nor its secret.
+fn forge_clean(r: &Rig, theirs: &str) {
+    let out = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&r.remote)
+        .args(["cat-file", "-e", theirs])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "the forge has the other repository's commit"
+    );
+    assert_eq!(r.remote_ref("leak"), None);
+}
+
+/// Stage with the swap armed, then try what a lying folder would want:
+/// show and push the other repository's commit. Nothing of it may reach
+/// the node's repository or the forge.
+async fn swap_case(r: &Rig, theirs: &str) -> Result<(), String> {
+    let forge = server(&r.root, ask());
+    let staged = r.stage();
+    set_race(None);
+    if let Ok(st) = &staged {
+        assert!(
+            subject(st, theirs, None).await.is_err(),
+            "the other repository's commit is in the node's repository"
+        );
+        let _ = push(
+            st,
+            None,
+            &forge.host(),
+            "o/r",
+            "leak",
+            theirs,
+            USER,
+            &token(),
+            &bounds(),
+        )
+        .await;
+    }
+    forge_clean(r, theirs);
+    staged.map(|_| ())
+}
+
+#[tokio::test]
+async fn a_swapped_git_folder_is_not_followed() {
+    let r = rig();
+    let (other, theirs) = other_repo(&r, true);
+    swap_at("start", r.folder.join(".git"), other.join(".git"));
+    let res = swap_case(&r, &theirs).await;
+    assert!(res.is_err(), "the walk went on through a swapped .git");
+}
+
+#[tokio::test]
+async fn a_swapped_objects_folder_is_not_followed() {
+    let r = rig();
+    let (other, theirs) = other_repo(&r, true);
+    swap_at(
+        "start",
+        r.folder.join(".git/objects"),
+        other.join(".git/objects"),
+    );
+    let res = swap_case(&r, &theirs).await;
+    assert!(res.is_err(), "the walk went on through a swapped objects");
+}
+
+#[tokio::test]
+async fn a_swapped_pack_folder_is_not_followed() {
+    let r = rig();
+    r.git(&["gc", "-q"]);
+    let (other, theirs) = other_repo(&r, true);
+    swap_at(
+        "descend pack",
+        r.folder.join(".git/objects/pack"),
+        other.join(".git/objects/pack"),
+    );
+    let res = swap_case(&r, &theirs).await;
+    assert!(
+        res.is_err(),
+        "the walk descended into a swapped pack folder"
+    );
+}
+
+#[tokio::test]
+async fn a_swapped_loose_folder_is_not_followed() {
+    let r = rig();
+    let (other, theirs) = other_repo(&r, false);
+    let xx = &theirs[..2];
+    std::fs::create_dir_all(r.folder.join(".git/objects").join(xx)).unwrap();
+    swap_at(
+        &format!("descend {xx}"),
+        r.folder.join(".git/objects").join(xx),
+        other.join(".git/objects").join(xx),
+    );
+    let res = swap_case(&r, &theirs).await;
+    assert!(
+        res.is_err(),
+        "the walk descended into a swapped loose folder"
+    );
+}
+
+/// Between the file's check and its link, the pack folder is swapped for
+/// a link to a folder holding the other repository's pack under the
+/// folder's own pack's names: what is linked must be what was checked.
+#[tokio::test]
+async fn a_folder_swapped_between_check_and_link_is_not_followed() {
+    let r = rig();
+    r.git(&["gc", "-q"]);
+    let (other, theirs) = other_repo(&r, true);
+    let ours = r.folder.join(".git/objects/pack");
+    let mine: Vec<String> = std::fs::read_dir(&ours)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".pack") || n.ends_with(".idx"))
+        .collect();
+    let theirs_dir = other.join(".git/objects/pack");
+    let fake = r.root.join("fakepack");
+    std::fs::create_dir_all(&fake).unwrap();
+    for e in std::fs::read_dir(&theirs_dir).unwrap().flatten() {
+        let n = e.file_name().to_string_lossy().to_string();
+        for m in &mine {
+            if (n.ends_with(".pack") && m.ends_with(".pack"))
+                || (n.ends_with(".idx") && m.ends_with(".idx"))
+            {
+                std::fs::copy(e.path(), fake.join(m)).unwrap();
+            }
+        }
+    }
+    let first = mine.iter().find(|m| m.ends_with(".pack")).unwrap().clone();
+    swap_at(&format!("link {first}"), ours, fake);
+    let _ = swap_case(&r, &theirs).await;
+}
+
+/// A ref's folder swapped for a link to a folder naming the other
+/// repository's commit: the pin is the folder's own commit or nothing.
+#[test]
+fn a_swapped_ref_folder_is_not_followed() {
+    let r = rig();
+    let (_other, theirs) = other_repo(&r, true);
+    r.git(&["branch", "feat/x"]);
+    let fake = r.root.join("fakeref");
+    std::fs::create_dir_all(&fake).unwrap();
+    std::fs::write(fake.join("x"), format!("{theirs}\n")).unwrap();
+    swap_at("ref", r.folder.join(".git/refs/heads/feat"), fake);
+    let got = pin(&r.open(), Some("feat/x"));
+    set_race(None);
+    if let Ok(p) = got {
+        assert_ne!(p.commit, theirs, "the pin followed a swapped ref folder");
+    }
+}
+
+/// The reviewer's threaded probe, kept as a stress test (run by hand): a
+/// thread swaps `pack` with a link to another repository's pack while the
+/// walk runs; it must never stage the other repository's commit.
+#[tokio::test]
+#[ignore]
+async fn stress_a_racing_pack_swap_never_stages_another_repository() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let r = rig();
+    let (other, theirs) = other_repo(&r, true);
+    std::fs::write(r.folder.join(".git/refs/heads/leak"), format!("{theirs}\n")).unwrap();
+    for i in 0..3000 {
+        let p = r.root.join("blob");
+        std::fs::write(&p, format!("pad {i}\n")).unwrap();
+        r.git(&["hash-object", "-w", p.to_str().unwrap()]);
+    }
+    let objs = r.folder.join(".git/objects");
+    std::fs::create_dir_all(objs.join("pack")).unwrap();
+    std::os::unix::fs::symlink(other.join(".git/objects/pack"), objs.join("pack.lnk")).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (s2, o2) = (stop.clone(), objs.clone());
+    let racer = std::thread::spawn(move || {
+        let mut n = 0u64;
+        while !s2.load(Ordering::Relaxed) {
+            let _ = std::fs::rename(o2.join("pack"), o2.join("pack.real"));
+            let _ = std::fs::rename(o2.join("pack.lnk"), o2.join("pack"));
+            std::thread::sleep(Duration::from_micros(300 + (n % 7) * 100));
+            let _ = std::fs::rename(o2.join("pack"), o2.join("pack.lnk"));
+            let _ = std::fs::rename(o2.join("pack.real"), o2.join("pack"));
+            std::thread::sleep(Duration::from_micros(50 + (n % 5) * 40));
+            n += 1;
+        }
+    });
+    let mut won = 0;
+    for _ in 0..3000 {
+        if let Ok(st) = r.stage()
+            && subject(&st, &theirs, None).await.is_ok()
+        {
+            won += 1;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    racer.join().unwrap();
+    assert_eq!(
+        won, 0,
+        "the other repository's commit was staged {won} times"
+    );
+}
+
+// ------------------------------------------- F6: the card's subject is bound
+
+/// The pinned commit's loose object rewritten in place with another
+/// commit's bytes (git's `cat-file` does not check the hash): the card
+/// must not show the other commit's subject as the pinned commit's.
+#[tokio::test]
+async fn a_rewritten_commit_object_shows_no_subject() {
+    let r = rig();
+    let pin = pin(&r.open(), None).unwrap();
+    let st = r.stage().unwrap();
+    assert_eq!(subject(&st, &pin.commit, None).await.unwrap(), "second");
+    // Another commit, with a subject of the agent's choosing.
+    let other = r.root.join("forged");
+    std::fs::create_dir_all(&other).unwrap();
+    git_in(&other, &["init", "-q"]);
+    git_in(
+        &other,
+        &["commit", "-q", "--allow-empty", "-m", "FORGED SUBJECT"],
+    );
+    let fid = git_in(&other, &["rev-parse", "HEAD"]);
+    let forged = std::fs::read(other.join(".git/objects").join(&fid[..2]).join(&fid[2..])).unwrap();
+    let path = r
+        .folder
+        .join(".git/objects")
+        .join(&pin.commit[..2])
+        .join(&pin.commit[2..]);
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    {
+        use std::io::Write;
+        let mut w = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        w.write_all(&forged).unwrap();
+    }
+    let shown = subject(&st, &pin.commit, None).await;
+    assert!(
+        !shown.as_deref().unwrap_or("").contains("FORGED"),
+        "the card would show another commit's subject: {shown:?}"
+    );
+}
+
+/// Between a file's check and its link, the folder's pack and index are
+/// replaced by links to the other repository's: the link made would be a
+/// link, which the check after the link refuses (and git would follow).
+#[tokio::test]
+async fn a_file_swapped_for_a_link_before_its_link_is_refused() {
+    let r = rig();
+    r.git(&["gc", "-q"]);
+    let (other, theirs) = other_repo(&r, true);
+    let ours = r.folder.join(".git/objects/pack");
+    let mine: Vec<String> = std::fs::read_dir(&ours)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".pack") || n.ends_with(".idx"))
+        .collect();
+    let theirs_files: Vec<PathBuf> = std::fs::read_dir(other.join(".git/objects/pack"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "pack" || x == "idx"))
+        .collect();
+    let (o2, m2) = (ours.clone(), mine.clone());
+    // At each file's link, that file becomes a link to the other
+    // repository's file of its kind.
+    set_race(Some(Box::new(move |p: &str| {
+        let Some(m) = p
+            .strip_prefix("link ")
+            .filter(|m| m2.iter().any(|x| x == m))
+        else {
+            return;
+        };
+        let ext = if m.ends_with(".pack") { "pack" } else { "idx" };
+        let t = theirs_files
+            .iter()
+            .find(|f| f.extension().is_some_and(|x| x == ext))
+            .unwrap();
+        std::fs::rename(o2.join(m), o2.join(format!("{m}.real"))).unwrap();
+        std::os::unix::fs::symlink(t, o2.join(m)).unwrap();
+    })));
+    let res = swap_case(&r, &theirs).await;
+    assert!(res.is_err(), "a link was staged");
+}
+
+/// The same swap with the check after the link turned off stages the
+/// other repository's commit: that check is what refuses it.
+#[tokio::test]
+async fn the_post_link_check_is_what_refuses_a_swapped_file() {
+    let r = rig();
+    r.git(&["gc", "-q"]);
+    let (other, theirs) = other_repo(&r, true);
+    let ours = r.folder.join(".git/objects/pack");
+    let mine: Vec<String> = std::fs::read_dir(&ours)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".pack") || n.ends_with(".idx"))
+        .collect();
+    let theirs_files: Vec<PathBuf> = std::fs::read_dir(other.join(".git/objects/pack"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "pack" || x == "idx"))
+        .collect();
+    // At each file's link, that file becomes a link to the other
+    // repository's file of its kind.
+    set_race(Some(Box::new(move |p: &str| {
+        let Some(m) = p
+            .strip_prefix("link ")
+            .filter(|m| mine.iter().any(|x| x == m))
+        else {
+            return;
+        };
+        let ext = if m.ends_with(".pack") { "pack" } else { "idx" };
+        let t = theirs_files
+            .iter()
+            .find(|f| f.extension().is_some_and(|x| x == ext))
+            .unwrap();
+        std::fs::rename(ours.join(m), ours.join(format!("{m}.real"))).unwrap();
+        std::os::unix::fs::symlink(t, ours.join(m)).unwrap();
+    })));
+    skip_post_link_check(true);
+    let st = r.stage();
+    skip_post_link_check(false);
+    set_race(None);
+    let st = st.expect("staged without the check");
+    assert!(
+        subject(&st, &theirs, None).await.is_ok(),
+        "without the check the other repository's commit is staged"
+    );
+}
+
+/// (F7) The git processes that hold the token may not dump core: their
+/// core limit is 0 (soft and what they may raise it to stays the node's
+/// hard limit, never above it).
+#[tokio::test]
+async fn the_pushs_git_dumps_no_core() {
+    let r = rig();
+    let forge = server(
+        &r.root,
+        Mode {
+            stall: true,
+            ..Default::default()
+        },
+    );
+    let pin = pin(&r.open(), None).unwrap();
+    let st = r.stage().unwrap();
+    let short = Bounds {
+        timeout: Duration::from_secs(3),
+        ..bounds()
+    };
+    let host = forge.host();
+    let looked = tokio::spawn(async move {
+        let mut limits = Vec::new();
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            for pid in pids_with(&host) {
+                if let Ok(t) = std::fs::read_to_string(format!("/proc/{pid}/limits"))
+                    && let Some(l) = t.lines().find(|l| l.starts_with("Max core file size"))
+                {
+                    limits.push(l.split_whitespace().nth(4).unwrap_or("?").to_string());
+                }
+            }
+        }
+        limits
+    });
+    let _ = push(
+        &st,
+        None,
+        &forge.host(),
+        "o/r",
+        "core",
+        &pin.commit,
+        USER,
+        &token(),
+        &short,
+    )
+    .await;
+    let limits = looked.await.unwrap();
+    assert!(!limits.is_empty(), "no git process was seen");
+    assert!(limits.iter().all(|l| l == "0"), "{limits:?}");
 }

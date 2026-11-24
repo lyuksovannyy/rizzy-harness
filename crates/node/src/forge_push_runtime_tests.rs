@@ -172,6 +172,13 @@ enum Answer {
     Deny,
     /// A commit in the folder between the card and the Allow.
     MoveThenAllow,
+    /// The session's target taken away (as when another turn started)
+    /// between the card and the Allow.
+    LoseTargetThenAllow,
+    /// The turn stopped while the card is up.
+    Cancel,
+    /// Leave the card unanswered: return once it is up.
+    Hold,
 }
 
 #[derive(Default, Debug)]
@@ -180,6 +187,8 @@ struct Seen {
     asked_credential: Vec<String>,
     results: Vec<(String, bool, String)>,
     events: Vec<String>,
+    /// Sessions whose `session_created` names this one as parent.
+    children: Vec<SessionId>,
 }
 
 impl Node {
@@ -255,6 +264,12 @@ impl Node {
                         })
                         .unwrap();
                 }
+                NodeToMaster::Event { event }
+                    if event.kind == "session_created"
+                        && event.payload["parent_session"] == serde_json::json!(sid) =>
+                {
+                    seen.children.push(event.session_id);
+                }
                 NodeToMaster::Event { event } if event.session_id == sid => {
                     seen.events.push(event.payload.to_string());
                     match event.typed() {
@@ -268,6 +283,23 @@ impl Node {
                             if answer == Answer::MoveThenAllow {
                                 std::fs::write(folder.join("work.txt"), "moved\n").unwrap();
                                 git_in(folder, &["commit", "-q", "-am", "moved"]);
+                            }
+                            if answer == Answer::Hold {
+                                return seen;
+                            }
+                            if answer == Answer::LoseTargetThenAllow {
+                                let s = self.rt.inner.session(sid).unwrap();
+                                *s.push_now.lock().unwrap() = None;
+                            }
+                            if answer == Answer::Cancel {
+                                self.link
+                                    .to_node
+                                    .try_send(MasterToNode::Cancel {
+                                        req_id: "stop".into(),
+                                        session_id: sid,
+                                    })
+                                    .unwrap();
+                                continue;
                             }
                             let decision = if answer == Answer::Deny {
                                 Decision::Deny
@@ -345,14 +377,11 @@ async fn auto_mode_shows_the_card_and_allow_pushes_the_pinned_commit() {
         reason.contains(&forge.host()) && reason.contains("o/r"),
         "{reason}"
     );
-    for want in [
-        format!("repository: {}/o/r", forge.host()),
-        "branch: main".to_string(),
-        format!("as: {USER}"),
-        format!("commit: {} the agent's commit", &head[..12]),
-    ] {
-        assert!(preview.contains(&want), "{want} not in {preview}");
-    }
+    // The folder's part only: the destination is the master's to show.
+    assert_eq!(
+        preview,
+        &format!("branch: main\ncommit: {} the agent's commit", &head[..12])
+    );
     assert_eq!(seen.asked_credential.len(), 1);
     let (_, ok, out) = &seen.results[0];
     assert!(ok, "{out}");
@@ -470,7 +499,7 @@ async fn push_is_offered_only_with_a_target_in_a_chats_own_turn_on_a_pushing_nod
 }
 
 /// (g) One push at a time on a node: a second chat's push while the first
-/// waits on a stalled forge is refused before any card.
+/// waits on a stalled forge is refused at its Allow.
 #[tokio::test]
 async fn a_second_push_while_one_runs_is_refused() {
     let r = rig();
@@ -522,12 +551,133 @@ async fn a_second_push_while_one_runs_is_refused() {
         }
     }
     n.prompt(b, Some(target(&stall.host()))).await;
+    // Its card shows (the slot is taken only after an Allow); the Allow
+    // finds the slot taken, and nothing is asked of the master.
     let seen = n.until_end(b, Answer::Allow, &r.folder).await;
-    assert!(seen.cards.is_empty(), "{seen:?}");
+    assert_eq!(seen.cards.len(), 1, "{seen:?}");
+    assert!(seen.asked_credential.is_empty(), "{seen:?}");
     let (_, ok, out) = &seen.results[0];
     assert!(!ok && out.contains("another push"), "{out}");
     // a ends at its time limit.
     let seen = n.until_end(a, Answer::Allow, &r.folder).await;
     let (_, ok, out) = &seen.results[0];
     assert!(!ok && out.contains("clone_timeout_s"), "{out}");
+}
+
+/// The turn's target gone between the card and the Allow (the check after
+/// the Allow): nothing pushed, no credential asked for.
+#[tokio::test]
+async fn a_target_gone_after_the_card_asks_for_nothing() {
+    let r = rig();
+    let forge = server(
+        &r.root,
+        Mode {
+            ask: true,
+            ..Default::default()
+        },
+    );
+    let mut n = node(&r, r.policy(&[forge.host()], true)).await;
+    let sid = n.create(&r.folder, false, false).await;
+    n.prompt(sid, Some(target(&forge.host()))).await;
+    let seen = n
+        .until_end(sid, Answer::LoseTargetThenAllow, &r.folder)
+        .await;
+    assert!(seen.asked_credential.is_empty(), "{seen:?}");
+    let (_, ok, out) = &seen.results[0];
+    assert!(!ok && out.contains("turn that asked has ended"), "{out}");
+    assert!(forge.seen().is_empty());
+}
+
+/// The turn stopped while the card is up: the card is denied, nothing is
+/// sent and no credential asked for.
+#[tokio::test]
+async fn a_turn_stopped_while_the_card_is_up_sends_nothing() {
+    let r = rig();
+    let forge = server(
+        &r.root,
+        Mode {
+            ask: true,
+            ..Default::default()
+        },
+    );
+    let mut n = node(&r, r.policy(&[forge.host()], true)).await;
+    let sid = n.create(&r.folder, false, false).await;
+    n.prompt(sid, Some(target(&forge.host()))).await;
+    let seen = n.until_end(sid, Answer::Cancel, &r.folder).await;
+    assert!(seen.asked_credential.is_empty(), "{seen:?}");
+    assert!(seen.results.iter().all(|(_, ok, _)| !ok), "{seen:?}");
+    assert!(forge.seen().is_empty());
+}
+
+/// (F5) A card nobody answers holds no push slot: another chat's push on
+/// the same node goes through meanwhile.
+#[tokio::test]
+async fn an_unanswered_card_blocks_no_other_push() {
+    let r = rig();
+    let forge = server(
+        &r.root,
+        Mode {
+            ask: true,
+            ..Default::default()
+        },
+    );
+    let mut n = node(&r, r.policy(&[forge.host()], true)).await;
+    let a = n.create(&r.folder, false, false).await;
+    let b = n.create(&r.folder, false, false).await;
+    n.prompt(a, Some(target(&forge.host()))).await;
+    let held = n.until_end(a, Answer::Hold, &r.folder).await;
+    assert_eq!(held.cards.len(), 1);
+    n.prompt(b, Some(target(&forge.host()))).await;
+    let seen = n.until_end(b, Answer::Allow, &r.folder).await;
+    let (_, ok, out) = &seen.results[0];
+    assert!(ok, "{out}");
+    assert_eq!(r.remote_ref("main").as_deref(), Some(r.head().as_str()));
+}
+
+/// A sub-agent's session never keeps a target, even one the master (or a
+/// node bug) sends it in a message of its own.
+#[tokio::test]
+async fn a_sub_agents_session_is_never_offered_push() {
+    let r = rig();
+    let forge = server(
+        &r.root,
+        Mode {
+            ask: true,
+            ..Default::default()
+        },
+    );
+    let mut n = node(&r, r.policy(&[forge.host()], true)).await;
+    let sid = n.create(&r.folder, false, false).await;
+    let mut lead = spec();
+    lead.delegates = vec![spec_as("scout")];
+    let mut m = PromptMsg::test(sid, "delegate: scout=hello");
+    m.agent = Some(lead);
+    n.link.to_node.try_send(MasterToNode::Prompt(m)).unwrap();
+    n.ack().await;
+    let seen = n.until_end(sid, Answer::Allow, &r.folder).await;
+    let child = *seen.children.first().expect("a sub-agent's session");
+    let mut m = PromptMsg::test(child, SCRIPT);
+    m.agent = Some(spec_as("scout"));
+    m.context = Some(Box::new(harness_core::backend::MasterContext {
+        push: Some(target(&forge.host())),
+        ..Default::default()
+    }));
+    n.link.to_node.try_send(MasterToNode::Prompt(m)).unwrap();
+    n.ack().await;
+    let seen = n.until_end(child, Answer::Allow, &r.folder).await;
+    assert!(
+        seen.cards.is_empty() && seen.asked_credential.is_empty(),
+        "{seen:?}"
+    );
+    let (_, ok, out) = &seen.results[0];
+    assert!(!ok && out.contains("unknown tool"), "{out}");
+    assert!(forge.seen().is_empty());
+}
+
+fn spec_as(id: &str) -> harness_core::agent::AgentSpec {
+    serde_json::from_value(serde_json::json!({
+        "agent_id": id, "name": id, "system_prompt": "", "prompt_hash": "h",
+        "tools": ["push", "read"]
+    }))
+    .unwrap()
 }

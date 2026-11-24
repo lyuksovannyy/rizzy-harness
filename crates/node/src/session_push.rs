@@ -321,21 +321,15 @@ pub(crate) async fn run(
         .clone()
         .ok_or("this node has no staging folder ([projects] dir)")?;
     let branch = harness_tools::push::branch_arg(input)?;
-    let folder = s.checked_folder()?;
-    let top = match crate::git::user_repo::find(&folder, Some(&folder)) {
-        crate::git::user_repo::Found::Repo(r) if r.top == folder => r.top,
-        _ => {
-            return Err(
-                "this chat's folder is not a plain git repository at its top \
-                 (a .git directory); nothing was pushed"
-                    .into(),
-            );
-        }
-    };
-    // One at a time on this node.
-    let Ok(_slot) = s.node.push_slots.clone().try_acquire_owned() else {
-        return Err("another push is running on this node; try again when it has finished".into());
-    };
+    // The chat's folder, opened once and checked to be the session's pinned
+    // directory; every read of the repository for this push goes through
+    // this one descriptor (no path is resolved again).
+    let path = s.checked_folder()?;
+    let pinned = s.pin().map(|p| p.identity());
+    if pinned.is_none() {
+        return Err("this chat's folder is not pinned; nothing was pushed".into());
+    }
+    let folder = Arc::new(forge_push::Folder::open(&path, pinned)?);
     let bounds = forge_push::Bounds::of(&policy);
     let jail = s.node.cfg.git_sandbox.clone();
     let blocking = |f: Box<dyn FnOnce() -> Result<forge_push::Staged, String> + Send>| async move {
@@ -344,8 +338,8 @@ pub(crate) async fn run(
             .map_err(|e| format!("reading the folder: {e}"))?
     };
     let pin1 = {
-        let (t, b) = (top.clone(), branch.clone());
-        tokio::task::spawn_blocking(move || forge_push::pin(&t, b.as_deref()))
+        let (f, b) = (folder.clone(), branch.clone());
+        tokio::task::spawn_blocking(move || forge_push::pin(&f, b.as_deref()))
             .await
             .map_err(|e| format!("reading the folder: {e}"))??
     };
@@ -354,10 +348,17 @@ pub(crate) async fn run(
     } else {
         "sha1"
     };
-    // Before the card: the subject, from a first repository of links.
+    // Before the card: the subject, from a first repository of links. A
+    // few of these at a time on the node (they need no push slot, so an
+    // unanswered card holds nothing of anyone else's).
     let subject = {
-        let (st, t, b) = (staging.clone(), top.clone(), bounds.clone());
-        let staged = blocking(Box::new(move || forge_push::stage(&st, &t, format, &b))).await?;
+        let Ok(_reading) = s.node.push_previews.clone().try_acquire_owned() else {
+            return Err(
+                "too many pushes are being prepared on this node; try again in a moment".into(),
+            );
+        };
+        let (st, f, b) = (staging.clone(), folder.clone(), bounds.clone());
+        let staged = blocking(Box::new(move || forge_push::stage(&st, &f, format, &b))).await?;
         forge_push::subject(&staged, &pin1.commit, jail.as_deref()).await?
     };
     let short = &pin1.commit[..12];
@@ -365,10 +366,9 @@ pub(crate) async fn run(
         "push branch `{}` to {}/{} as {}",
         pin1.branch, target.host, target.full_name, target.login
     );
-    let preview = format!(
-        "repository: {}/{}\nbranch: {}\nas: {}\ncommit: {} {}",
-        target.host, target.full_name, pin1.branch, target.login, short, subject
-    );
+    // The destination is the master's (it shows its own on the page); the
+    // folder supplies the branch, the commit and its subject.
+    let preview = format!("branch: {}\ncommit: {} {}", pin1.branch, short, subject);
     let approval_id = s
         .ask_external(call_id, PUSH_TOOL, input, reason, preview)
         .await?;
@@ -379,9 +379,13 @@ pub(crate) async fn run(
     if s.push_target_now().as_ref() != Some(&target) {
         return Err("the turn that asked has ended; nothing was pushed".into());
     }
+    // One push at a time on this node, from the Allow on.
+    let Ok(_slot) = s.node.push_slots.clone().try_acquire_owned() else {
+        return Err("another push is running on this node; try again when it has finished".into());
+    };
     let pin2 = {
-        let (t, b) = (top.clone(), pin1.branch.clone());
-        tokio::task::spawn_blocking(move || forge_push::pin(&t, Some(&b)))
+        let (f, b) = (folder.clone(), pin1.branch.clone());
+        tokio::task::spawn_blocking(move || forge_push::pin(&f, Some(&b)))
             .await
             .map_err(|e| format!("reading the folder: {e}"))??
     };
@@ -395,8 +399,8 @@ pub(crate) async fn run(
         ));
     }
     let staged = {
-        let (st, t, b) = (staging.clone(), top.clone(), bounds.clone());
-        blocking(Box::new(move || forge_push::stage(&st, &t, format, &b))).await?
+        let (st, f, b) = (staging.clone(), folder.clone(), bounds.clone());
+        blocking(Box::new(move || forge_push::stage(&st, &f, format, &b))).await?
     };
     forge_push::subject(&staged, &pin1.commit, jail.as_deref()).await?;
     let (login, token) = credential(s, approval_id).await?;
