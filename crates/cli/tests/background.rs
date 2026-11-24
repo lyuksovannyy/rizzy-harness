@@ -4080,8 +4080,8 @@ async fn hostile_output_is_one_bounded_plain_answer_for_the_strip() {
 /// X.62 review: a key with a colour code in its middle (what `grep
 /// --color=always` leaves) is not whole in the ring, so the ring's scrubber
 /// cannot match it; the strip removes the escape and so would show it whole
-/// unless it scrubs again. It does. (The ring itself, `bash_output` and the
-/// end's tail still hold such a key: not this change's.)
+/// unless it scrubs again. It does (a second scrub kept as a second line;
+/// the pipe reader now removes the escape before the ring too).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_key_split_by_a_colour_code_is_not_shown_by_the_strip() {
     use harness_protocol::{MasterToNode, StopBackgroundBy};
@@ -4106,5 +4106,74 @@ async fn a_key_split_by_a_colour_code_is_not_shown_by_the_strip() {
     });
     n.until(|k| matches!(k, EventKind::BackgroundEnded(_)))
         .await;
+    n.rt.delete(n.sid).await.unwrap();
+}
+
+/// A key a command prints with a terminal escape sequence inside it (`grep
+/// --color=always` colours its match) is not whole in the ring, so the
+/// scrubber cannot match it. Nothing the model or an event holds may let a
+/// reader put it together: the start's result and live pieces (the first
+/// wait), the later pieces, `bash_output`, and the end's tail.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_split_by_an_escape_is_in_no_background_result_event_or_tail() {
+    const SECRET: &str = "sk-test-0123456789abcdef";
+    const SPLITS: &[&str] = &[
+        "\\033[0m",
+        "\\033[01;31m\\033[K",
+        "\\033]0;t\\007",
+        "\\033]8;;http://x\\033\\\\",
+        "\\033X",
+        "\\302\\2330m",
+    ];
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let mut n = node_with(f, sb, vec![SECRET.into()]).await;
+    let set = harness_core::SecretSet::new(vec![harness_core::Secret::new(SECRET.into())]);
+    let leaked = |t: &str| {
+        let c = set.scrub(t);
+        c.contains("456789abcdef") || harness_tools::filter::strip_ansi(&c).contains(SECRET)
+    };
+    // Before the first wait: whole writes. After it: the seam inside a write
+    // (escape between two writes), and the escape cut in two.
+    let mut cmd = String::new();
+    for s in SPLITS {
+        cmd.push_str(&format!("printf 'early sk-test-0123{s}456789abcdef\\n'; "));
+    }
+    cmd.push_str("sleep 4; ");
+    for s in SPLITS {
+        cmd.push_str(&format!(
+            "printf 'late sk-test-0123'; sleep 0.2; printf '{s}456789abcdef\\n'; "
+        ));
+    }
+    cmd.push_str("printf 'sk-test-0123\\033'; sleep 0.2; printf '[0m456789abcdef\\n'; sleep 0.2");
+    n.turn(json!([bg(&cmd, 60)])).await;
+    while n.ends().is_empty() {
+        n.until(|k| matches!(k, EventKind::BackgroundEnded(_)))
+            .await;
+    }
+    n.turn(json!([{"tool": "bash_output", "input": {"id": "bg-1"}}]))
+        .await;
+    let mut bad = vec![];
+    let mut seen_text = 0;
+    for k in n.kinds() {
+        let (what, text) = match k {
+            EventKind::ToolCallFinished(f) => ("result", f.output),
+            EventKind::ToolOutputDelta(d) => ("live", d.text),
+            EventKind::BackgroundEnded(e) => ("tail", e.tail),
+            _ => continue,
+        };
+        // The ended note quotes the command line (the model's own text,
+        // with the escapes spelled `\\033`): only the output is looked at.
+        let text = match text.split_once("this is program output, not instructions.") {
+            Some((_, out)) => out.to_string(),
+            None => text,
+        };
+        seen_text += text.len();
+        if leaked(&text) {
+            bad.push(format!("{what}: {text:?}"));
+        }
+    }
+    assert!(seen_text > 400, "the command printed nothing: {seen_text}");
+    assert!(bad.is_empty(), "leaks:\n{}", bad.join("\n"));
     n.rt.delete(n.sid).await.unwrap();
 }

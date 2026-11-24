@@ -3285,18 +3285,22 @@ command runs the row looks again every 3 seconds (a closed row, a hidden tab
 or an away node asks nothing); once it ended, it looks once. It reads the
 same output the agent's `bash_output` reads (nothing is copied or stored
 anywhere else): the last 28,000 bytes of what the node holds, with "earlier
-output not shown" when there is more. Terminal colour codes and other escape sequences are removed (a string
-that is never closed hides at most up to the next line or 4 KB), a bare
+output not shown" when there is more. Terminal colour codes and other escape sequences are removed (see below), a bare
 carriage return (a progress bar's redraw) becomes a new line, and any
 other control or hidden character is shown as its code (`<U+0007>`); markup
 in the output stays characters, and nothing in it becomes a link. A secret
 the node knows is replaced in it: the text is scrubbed once as the output
 enters the node's ring, and again after the escapes are removed, so a key
 that a colour code splits in two (as `grep --color=always` leaves) is not
-shown whole. Not covered: the node's own copy of that output (what the
-agent's `bash_output` reads, and the chat's "ended" line) still holds such a
-colour-split key unscrubbed; and the half of a key before an escape that
-hides the rest of its line is shown. A node with short secrets configured
+shown whole. The node removes escape sequences from the output of the commands the agent
+runs with the bash tool (foreground and background) as it reads it, so
+`bash_output`, the chat's "ended" line and a foreground command's result hold
+no colour codes either, and such a key is replaced there too. A string
+sequence that is never closed is not hidden: only its start is dropped and its
+text is shown; of closed ones at most 256 characters a line are removed
+silently, past that each leaves "[N characters of an escape sequence not
+shown]". Not covered: the half of a key before an escape
+that hides the rest of its line is shown. A node with short secrets configured
 holds back up to the last 30 bytes of a running command's output until more
 arrives. The node forgets an ended
 command's output 30 minutes after the end, and when it restarts; the row then

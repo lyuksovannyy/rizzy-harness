@@ -126,6 +126,15 @@ const KEEP_ENV: &[&str] = &["PATH", "HOME", "LANG", "TMPDIR"];
 /// Command-line config for every call. Command-line config beats every
 /// config file, so these win over the repository's `.git/config`.
 const OVERRIDES: &[&str] = &[
+    // No colour codes in what git prints: output is read by the model and a
+    // person, and an escape inside a secret would hide it from the scrubber.
+    // `color.ui=always` in a repository's config would otherwise colour it.
+    "color.ui=never",
+    "color.diff=never",
+    "color.status=never",
+    "color.branch=never",
+    "color.grep=never",
+    "color.interactive=never",
     // Commands git would run on its own while reading the index or writing it.
     "core.fsmonitor=false",
     "core.hooksPath=/dev/null",
@@ -3130,6 +3139,35 @@ mod tests {
             );
             assert!(!self.repo.join("new.txt").exists());
             repo
+        }
+    }
+
+    /// A repository's own `color.ui = always` (or `color.diff`) must not put
+    /// escape sequences into what the node's git prints: a colour code inside
+    /// a secret hides it from the scrubber.
+    #[tokio::test]
+    async fn a_repository_that_asks_for_colour_gets_none() {
+        let h = Hostile::new();
+        let repo = repo_for(&h.repo, Some(&h.base)).await.unwrap();
+        // The repository git reads here is the node's shadow of the folder.
+        let git_dir = repo.shadow.clone().expect("a shadow repository");
+        for k in ["color.ui", "color.diff", "color.status"] {
+            sh(&git_dir, &["config", "--local", k, "always"]);
+        }
+        let before = snapshot(&repo, "refs/harness/s/t/before", "before")
+            .await
+            .unwrap();
+        std::fs::write(h.repo.join("a.txt"), "two\n").unwrap();
+        let after = snapshot(&repo, "refs/harness/s/t/after", "after")
+            .await
+            .unwrap();
+        for args in [
+            vec!["diff", &before, &after],
+            vec!["diff", "--stat", &before, &after],
+        ] {
+            let out = run(&repo, &args, None).await.unwrap();
+            assert!(!out.is_empty(), "{args:?}");
+            assert!(!out.contains('\u{1b}'), "{args:?}: {out:?}");
         }
     }
 

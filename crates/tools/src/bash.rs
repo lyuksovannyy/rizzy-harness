@@ -86,24 +86,36 @@ pub(crate) fn signal_group(pgid: i32, sig: Signal) {
 /// Decode as much valid UTF-8 as possible, keeping an incomplete trailing
 /// sequence for the next read.
 fn drain_utf8(buf: &mut Vec<u8>) -> String {
-    match std::str::from_utf8(buf) {
-        Ok(s) => {
-            let s = s.to_string();
-            buf.clear();
-            s
-        }
-        Err(e) if e.error_len().is_none() => {
-            let n = e.valid_up_to();
-            let s = String::from_utf8_lossy(&buf[..n]).into_owned();
-            buf.drain(..n);
-            s
-        }
-        Err(_) => {
-            let s = String::from_utf8_lossy(buf).into_owned();
-            buf.clear();
-            s
+    let mut out = String::new();
+    let mut at = 0;
+    loop {
+        match std::str::from_utf8(&buf[at..]) {
+            Ok(s) => {
+                out.push_str(s);
+                at = buf.len();
+                break;
+            }
+            Err(e) => {
+                let valid = at + e.valid_up_to();
+                out.push_str(&String::from_utf8_lossy(&buf[at..valid]));
+                match e.error_len() {
+                    // A character cut by the end of the read: the next read
+                    // finishes it.
+                    None => {
+                        at = valid;
+                        break;
+                    }
+                    // Invalid bytes: one replacement for them, and on.
+                    Some(n) => {
+                        out.push('\u{fffd}');
+                        at = valid + n;
+                    }
+                }
+            }
         }
     }
+    buf.drain(..at);
+    out
 }
 
 async fn pump<R: AsyncRead + Unpin>(
@@ -114,6 +126,15 @@ async fn pump<R: AsyncRead + Unpin>(
 ) {
     let mut chunk = [0u8; 8192];
     let mut pending = Vec::new();
+    // Where the command's output enters: terminal escape sequences come out
+    // here, before anything keeps, scrubs or shows it. A command that
+    // colours its match (`grep --color=always`) puts one inside a secret,
+    // which the scrubber, matching exact bytes, would not find; stripped
+    // here, nothing downstream (the result, the kept full output, the live
+    // pieces, a background ring, an end's tail) holds one. One stripper per
+    // stream: an escape split across two reads is removed whole, and the
+    // other stream's text is never inside it.
+    let mut strip = crate::filter::AnsiStripper::new();
     loop {
         match r.read(&mut chunk).await {
             Ok(0) | Err(_) => break,
@@ -123,17 +144,18 @@ async fn pump<R: AsyncRead + Unpin>(
                     p.fetch_add(n as u64, std::sync::atomic::Ordering::SeqCst);
                 }
                 pending.extend_from_slice(&chunk[..n]);
-                let s = drain_utf8(&mut pending);
+                let s = strip.push(&drain_utf8(&mut pending));
                 if !s.is_empty() && tx.send((stream, s)).await.is_err() {
                     break;
                 }
             }
         }
     }
-    if !pending.is_empty() {
-        let _ = tx
-            .send((stream, String::from_utf8_lossy(&pending).into_owned()))
-            .await;
+    // The end: a character cut by it, and what an open string still holds.
+    let mut last = strip.push(&String::from_utf8_lossy(&pending));
+    last.push_str(&strip.finish());
+    if !last.is_empty() {
+        let _ = tx.send((stream, last)).await;
     }
 }
 
