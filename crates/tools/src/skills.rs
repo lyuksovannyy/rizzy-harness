@@ -205,7 +205,7 @@ pub fn discover(roots: &[Root], protected: &[PathBuf]) -> Found {
                     }
                     found.catalogue.refused.push(shown);
                 }
-                Ok(Some((name, description, manual, dir))) => {
+                Ok(Some((name, description, manual, invocable, dir))) => {
                     if !seen.insert(name.clone()) {
                         let first = from
                             .iter()
@@ -223,6 +223,9 @@ pub fn discover(roots: &[Root], protected: &[PathBuf]) -> Found {
                         && !found.catalogue.read.contains(&dir)
                     {
                         found.catalogue.read.push(dir.clone());
+                    }
+                    if !invocable {
+                        found.catalogue.not_invocable.push(name.clone());
                     }
                     from.push((name.clone(), dir.clone()));
                     found.catalogue.skills.push(Skill {
@@ -248,7 +251,7 @@ fn one(
     folder: &str,
     bound: &Path,
     protected: &[PathBuf],
-) -> Result<Option<(String, String, bool, PathBuf)>, String> {
+) -> Result<Option<(String, String, bool, bool, PathBuf)>, String> {
     let md = std::fs::metadata(entry).map_err(|e| format!("it could not be read: {e}"))?;
     if !md.is_dir() {
         return Ok(None);
@@ -294,7 +297,13 @@ fn one(
     if description.is_empty() {
         return Err("SKILL.md: it has no description".into());
     }
-    Ok(Some((name, description, fm.manual.unwrap_or(false), dir)))
+    Ok(Some((
+        name,
+        description,
+        fm.manual.unwrap_or(false),
+        fm.invocable.unwrap_or(true),
+        dir,
+    )))
 }
 
 /// The front matter keys read; every other key (`allowed-tools`, `hooks`,
@@ -306,6 +315,9 @@ struct Front {
     description: Option<String>,
     #[serde(rename = "disable-model-invocation")]
     manual: Option<bool>,
+    /// `user-invocable: false` hides the skill from the composer's menu.
+    #[serde(rename = "user-invocable")]
+    invocable: Option<bool>,
 }
 
 /// The keys of front matter that is not valid YAML, read line by line: a
@@ -324,6 +336,7 @@ fn front_by_lines(y: &str) -> Front {
             "name" => f.name = Some(v),
             "description" => f.description = Some(v),
             "disable-model-invocation" => f.manual = Some(v == "true"),
+            "user-invocable" => f.invocable = Some(v != "false"),
             _ => {}
         }
     }
@@ -585,6 +598,38 @@ pub fn asked_line(n: &str) -> String {
         "[The person's message starts with /{n}: they ask for the skill `{n}`. Load it with the \
          `skill` tool first.]"
     )
+}
+
+/// The most characters of a description the `/` menu carries.
+pub const MENU_DESCRIPTION_MAX: usize = 200;
+
+/// What the composer's `/` menu lists (X.65): the skills this turn's
+/// catalogue lets a person ask for with `/name`, as (name, description),
+/// in name order, at most [`MAX_LISTED`]. Left out: a skill with
+/// `user-invocable: false`, a name that is not a [`valid_name`] and a
+/// [`RESERVED`] one (the built-in command wins; `/name` never invokes the
+/// skill). A `disable-model-invocation` skill is listed: the person may ask
+/// for it. A description is cut at [`MENU_DESCRIPTION_MAX`] characters with
+/// an ellipsis. The catalogue is the turn's own (`withhold` and
+/// `merge_stored` applied), so a denied skill is not here either.
+pub fn menu(c: &Catalogue) -> Vec<(String, String)> {
+    c.skills
+        .iter()
+        .filter(|s| {
+            valid_name(&s.name)
+                && !RESERVED.contains(&s.name.as_str())
+                && !c.not_invocable.contains(&s.name)
+        })
+        .take(MAX_LISTED)
+        .map(|s| {
+            let mut d: String = s.description.chars().take(MENU_DESCRIPTION_MAX).collect();
+            if s.description.chars().count() > MENU_DESCRIPTION_MAX {
+                d.pop();
+                d.push('…');
+            }
+            (s.name.clone(), d)
+        })
+        .collect()
 }
 
 /// Names whose `/name` is a built-in command of the chat's composer, not a
@@ -886,6 +931,9 @@ pub fn merge_stored(
         if description.is_empty() {
             continue;
         }
+        // A stored skill is always invocable, whatever flag a skill it
+        // replaced carried.
+        c.not_invocable.retain(|n| *n != e.name);
         c.skills.push(Skill {
             name: e.name.clone(),
             description,

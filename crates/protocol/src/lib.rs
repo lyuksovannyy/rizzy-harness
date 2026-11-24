@@ -179,6 +179,28 @@ pub struct GitState {
     pub changed: Option<u32>,
 }
 
+/// The node capability that announces `session.skills_menu` (ADOPTION_PLAN
+/// X.65, PLAN.md T46): the skills a chat can ask for with `/name`, for the
+/// composer's `/` menu. The master sends it only to nodes whose hello
+/// listed it; for an older one the menu lists the built-in commands alone.
+pub const CAP_SKILLS_MENU: &str = "skills-menu";
+
+/// The most skills one `session.skills_menu_result` lists (the model's own
+/// list holds as many).
+pub const MAX_MENU_SKILLS: usize = 150;
+/// The longest description a menu entry carries, in characters.
+pub const MAX_MENU_DESCRIPTION_CHARS: usize = 200;
+
+/// One skill of the `/` menu (X.65): its name, which is a valid skill name,
+/// and a one-line description. Both are text from a repository someone else
+/// controls: the node bounds them, the master bounds them again, the page
+/// shows them as text only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MenuSkill {
+    pub name: String,
+    pub description: String,
+}
+
 /// The node capability that announces `session.doc_page_edit` (ADOPTION_PLAN
 /// X.60, PLAN.md T100): a person's text changes to a Word or Excel file of
 /// the chat's folder, made into a new file beside it by the node. Announced
@@ -1317,6 +1339,17 @@ pub enum NodeToMaster {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         busy: bool,
     },
+    /// The answer to `session.skills_menu` (pull only): the skills the chat
+    /// can ask for with `/name`, or `busy` (X.65).
+    #[serde(rename = "session.skills_menu_result")]
+    SkillsMenuResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skills: Vec<MenuSkill>,
+        /// The node is answering another such request; ask again later.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        busy: bool,
+    },
     /// The answer to `session.doc_page_edit` (pull only): the path of the new
     /// file relative to the chat's folder and one result per change, or why
     /// nothing was made.
@@ -2107,6 +2140,19 @@ pub enum MasterToNode {
         req_id: String,
         session_id: SessionId,
     },
+    /// The skills the chat's agent can ask for with `/name` (X.65): the node
+    /// finds them as it does at the start of a turn, for `agent` (the chat's
+    /// own, resolved by the master as for a prompt: its deny lists and the
+    /// stored skills it may load), answered by one
+    /// `session.skills_menu_result`, never by an ack, handled outside the
+    /// node's command loop, appends no event and reads no skill's text but
+    /// its front matter. Only to nodes with [`CAP_SKILLS_MENU`].
+    #[serde(rename = "session.skills_menu")]
+    SkillsMenu {
+        req_id: String,
+        session_id: SessionId,
+        agent: AgentSpec,
+    },
     /// A person's text changes to a Word or Excel file of the chat's folder
     /// (X.60, T100): the node reads the file as `session.doc_preview` does,
     /// runs the changes through its confined helper and writes the result as
@@ -2217,6 +2263,7 @@ impl MasterToNode {
             | MasterToNode::DocPreview { .. }
             | MasterToNode::FolderFile { .. }
             | MasterToNode::GitState { .. }
+            | MasterToNode::SkillsMenu { .. }
             | MasterToNode::DocPageEdit { .. }
             | MasterToNode::ProjectCreate { .. }
             | MasterToNode::ProjectClone { .. }
@@ -3164,6 +3211,45 @@ mod tests {
                 refusal: Some(FileRefusal::Unknown),
                 ..
             }
+        ));
+    }
+
+    /// X.65: the wire shape of the skills menu pair.
+    #[test]
+    fn skills_menu_wire_shape() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let ask = MasterToNode::SkillsMenu {
+            req_id: "r".into(),
+            session_id: sid,
+            agent: serde_json::from_value(json!({
+                "agent_id": "a", "name": "A", "system_prompt": "", "tools": "all", "prompt_hash": "h"
+            }))
+            .unwrap(),
+        };
+        let v = serde_json::to_value(&ask).unwrap();
+        assert_eq!(v["type"], "session.skills_menu");
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), ask);
+        assert_eq!(ask.req_id(), None, "never acked");
+        let ans = NodeToMaster::SkillsMenuResult {
+            req_id: "r".into(),
+            skills: vec![MenuSkill {
+                name: "deploy".into(),
+                description: "Ship it".into(),
+            }],
+            busy: false,
+        };
+        let v = serde_json::to_value(&ans).unwrap();
+        assert_eq!(v["type"], "session.skills_menu_result");
+        assert_eq!(v["skills"][0]["name"], "deploy");
+        assert!(v.get("busy").is_none(), "{v}");
+        assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), ans);
+        let busy: NodeToMaster = serde_json::from_value(
+            json!({"type": "session.skills_menu_result", "req_id": "r", "busy": true}),
+        )
+        .unwrap();
+        assert!(matches!(
+            busy,
+            NodeToMaster::SkillsMenuResult { busy: true, .. }
         ));
     }
 

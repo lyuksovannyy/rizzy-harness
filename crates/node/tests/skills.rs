@@ -872,3 +872,302 @@ async fn an_agent_without_file_access_gets_stored_skills_only() {
         .await;
     assert_eq!(asked, [(sid, "notes".to_string())]);
 }
+
+// ---- the composer's `/` menu (X.65, PLAN.md T46) ---------------------------
+
+impl Node {
+    /// Ask `session.skills_menu` for `agent` and wait for its one answer;
+    /// `None` when `busy`. The requests the model got stay as they were:
+    /// the menu starts no turn, and appends no event.
+    async fn menu(
+        &mut self,
+        sid: SessionId,
+        agent: harness_core::agent::AgentSpec,
+    ) -> Option<Vec<(String, String)>> {
+        let events = self
+            .node
+            .store()
+            .events_after(sid, 0, 10_000)
+            .unwrap()
+            .len();
+        let asked = self.requests().len();
+        self.link
+            .to_node
+            .try_send(MasterToNode::SkillsMenu {
+                req_id: "m".into(),
+                session_id: sid,
+                agent,
+            })
+            .unwrap();
+        let answer = loop {
+            let msg = tokio::time::timeout(Duration::from_secs(10), self.link.from_node.recv())
+                .await
+                .expect("no answer")
+                .expect("link closed");
+            match msg {
+                NodeToMaster::SkillsMenuResult {
+                    req_id,
+                    skills,
+                    busy,
+                } => {
+                    assert_eq!(req_id, "m");
+                    break (!busy).then(|| {
+                        skills
+                            .into_iter()
+                            .map(|s| (s.name, s.description))
+                            .collect::<Vec<_>>()
+                    });
+                }
+                NodeToMaster::Ack { .. } => panic!("the menu is never acked"),
+                _ => {}
+            }
+        };
+        assert_eq!(self.requests().len(), asked, "no model request");
+        assert_eq!(
+            self.node
+                .store()
+                .events_after(sid, 0, 10_000)
+                .unwrap()
+                .len(),
+            events,
+            "no event"
+        );
+        answer
+    }
+}
+
+fn menu_names(m: &[(String, String)]) -> Vec<&str> {
+    m.iter().map(|(n, _)| n.as_str()).collect()
+}
+
+/// The menu is the turn's catalogue as a person may ask for it: the owner's
+/// `deploy` (not the repository's), the repository's `release`, and the
+/// manual skill, which the model is not told of but a person may ask for;
+/// the node announces the capability.
+#[tokio::test]
+async fn the_menu_lists_the_turns_skills_and_the_manual_one() {
+    let mut n = start(both).await;
+    assert!(
+        n.capabilities
+            .contains(&harness_protocol::CAP_SKILLS_MENU.to_string()),
+        "{:?}",
+        n.capabilities
+    );
+    let sub = n.repo.join("sub");
+    let sid = n.create(&sub).await;
+    let m = n
+        .menu(sid, spec("a", &["read", "skill"], vec![]))
+        .await
+        .unwrap();
+    assert_eq!(menu_names(&m), ["deploy", "manual", "release"], "{m:?}");
+    assert_eq!(m[0].1, "The owner's deploy");
+    assert_eq!(m[1].1, "Only by hand");
+    // The list the model gets is the same minus the manual one.
+    n.turn(sid, "hello", None).await;
+    let first = n.requests()[0].clone();
+    assert!(first.contains("| - release: Cut a release"), "{first}");
+    assert!(!first.contains("manual"), "{first}");
+}
+
+/// node.toml decides and the agent's own switch holds: `repository = false`
+/// lists the owner's roots only; `denied_tools` naming `skill`, an agent
+/// without the tool, and a skill the agent may not use list nothing of it.
+#[tokio::test]
+async fn the_menu_follows_node_toml_and_the_agents_switches() {
+    let mut n = start(|home| NodePolicy {
+        skills: SkillsPolicy {
+            repository: false,
+            roots: vec![home.to_path_buf()],
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+    let repo = n.repo.clone();
+    let sid = n.create(&repo).await;
+    let m = n
+        .menu(sid, spec("a", &["read", "skill"], vec![]))
+        .await
+        .unwrap();
+    assert_eq!(menu_names(&m), ["deploy", "manual"], "{m:?}");
+
+    let mut n = start(|home| NodePolicy {
+        denied_tools: vec!["skill".into()],
+        ..both(home)
+    })
+    .await;
+    assert!(
+        !n.capabilities
+            .contains(&harness_protocol::CAP_SKILLS_MENU.to_string()),
+        "{:?}",
+        n.capabilities
+    );
+    let repo = n.repo.clone();
+    let sid = n.create(&repo).await;
+    let m = n
+        .menu(sid, spec("a", &["read", "skill"], vec![]))
+        .await
+        .unwrap();
+    assert!(m.is_empty(), "{m:?}");
+
+    let mut n = start(both).await;
+    let repo = n.repo.clone();
+    let sid = n.create(&repo).await;
+    let m = n.menu(sid, spec("a", &["read"], vec![])).await.unwrap();
+    assert!(m.is_empty(), "no skill tool: {m:?}");
+    let mut denying = spec("a", &["read", "skill"], vec![]);
+    denying.deny_skills = vec!["deploy".into(), "manual".into()];
+    let m = n.menu(sid, denying).await.unwrap();
+    assert_eq!(menu_names(&m), ["release"], "{m:?}");
+}
+
+/// A hostile repository: hundreds of skills, a megabyte description, names
+/// with spaces, slashes, control and bidirectional characters and markup, a
+/// folder named like a built-in, a `SKILL.md` that is a link out of its
+/// folder, a skills folder that is a link out, a hidden-from-the-menu one:
+/// the menu holds at most 150 entries of bounded, valid, inert text.
+#[tokio::test]
+async fn a_hostile_repository_gets_a_bounded_inert_menu() {
+    let mut n = start(|_| NodePolicy {
+        skills: SkillsPolicy {
+            repository: true,
+            roots: vec![],
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+    let repo = n.repo.clone();
+    let skills = repo.join(".agents/skills");
+    for i in 0..900 {
+        put(
+            &skills.join(format!("bulk{i:05}/SKILL.md")),
+            &skill_md(&format!("bulk{i:05}"), "d", "b"),
+        );
+    }
+    put(
+        &skills.join("big/SKILL.md"),
+        &skill_md("big", &"x".repeat(1_000_000), "b"),
+    );
+    put(
+        &skills.join("bigish/SKILL.md"),
+        &skill_md("bigish", &"x".repeat(5_000), "b"),
+    );
+    put(
+        &skills.join("Bad Name/SKILL.md"),
+        &skill_md("my skill", "spaces", "b"),
+    );
+    put(
+        &skills.join("sl/SKILL.md"),
+        "---\nname: a/b\ndescription: slash\n---\nb\n",
+    );
+    put(
+        &skills.join("ctl/SKILL.md"),
+        "---\nname: \"x\\u202ey\"\ndescription: \"bidi\\u202e and \\u0007 bell <script>alert(1)</script>\"\n---\nb\n",
+    );
+    put(
+        &skills.join("compact/SKILL.md"),
+        &skill_md("compact", "shadow", "b"),
+    );
+    put(
+        &skills.join("quiet/SKILL.md"),
+        "---\nname: quiet\ndescription: Not for people\nuser-invocable: false\n---\nb\n",
+    );
+    // A SKILL.md that links out of its folder, and a skills folder that does.
+    let outside = repo.parent().unwrap().join("outside");
+    put(
+        &outside.join("secret.md"),
+        &skill_md("leak", "outside", "b"),
+    );
+    std::fs::create_dir_all(skills.join("linked")).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.md"), skills.join("linked/SKILL.md")).unwrap();
+    put(
+        &outside.join("farskill/SKILL.md"),
+        &skill_md("far", "outside", "b"),
+    );
+    std::os::unix::fs::symlink(outside.join("farskill"), skills.join("far")).unwrap();
+    let sid = n.create(&repo).await;
+    let m = n
+        .menu(sid, spec("a", &["skill", "read"], vec![]))
+        .await
+        .unwrap();
+    assert!(m.len() <= harness_protocol::MAX_MENU_SKILLS, "{}", m.len());
+    for (name, d) in &m {
+        assert!(
+            harness_tools::skills::menu(&harness_core::skills::Catalogue {
+                skills: vec![harness_core::skills::Skill {
+                    name: name.clone(),
+                    description: d.clone(),
+                    dir: Default::default(),
+                    origin: harness_core::skills::SkillOrigin::Repository,
+                    manual: false,
+                }],
+                ..Default::default()
+            })
+            .len()
+                == 1,
+            "{name}"
+        );
+        assert!(d.chars().count() <= harness_protocol::MAX_MENU_DESCRIPTION_CHARS);
+        assert!(
+            !d.chars().any(|c| c.is_control() || c == '\u{202e}'),
+            "{d:?}"
+        );
+    }
+    let names = menu_names(&m);
+    for gone in [
+        "compact", "quiet", "my skill", "a/b", "leak", "far", "linked",
+    ] {
+        assert!(!names.contains(&gone), "{gone} listed: {names:?}");
+    }
+    // A front matter past the reader's 16 KB is refused, as for a turn.
+    assert!(!names.contains(&"big"), "{names:?}");
+    assert!(names.contains(&"bigish"), "{names:?}");
+    let big = m.iter().find(|(n, _)| n == "bigish").unwrap();
+    assert_eq!(
+        big.1.chars().count(),
+        harness_protocol::MAX_MENU_DESCRIPTION_CHARS
+    );
+}
+
+/// A chat the node does not know gets an empty menu, not an error; a plain
+/// chat (no folder) lists only what the master stored for its agent.
+#[tokio::test]
+async fn an_unknown_chat_has_an_empty_menu_and_a_stored_skill_is_listed() {
+    let mut n = start(|home| NodePolicy {
+        skills: SkillsPolicy {
+            from_master: true,
+            ..both(home).skills
+        },
+        ..Default::default()
+    })
+    .await;
+    let m = n
+        .menu(SessionId::new(), spec("a", &["read", "skill"], vec![]))
+        .await
+        .unwrap();
+    assert!(m.is_empty());
+    let repo = n.repo.clone();
+    let sid = n.create(&repo).await;
+    let mut a = spec("a", &["read", "skill"], vec![]);
+    a.stored_skills = vec![
+        harness_core::skills::StoredSkillEntry {
+            name: "from-server".into(),
+            description: "Kept on the server".into(),
+            scope: harness_core::skills::StoredScope::Server,
+        },
+        // The node's own folder wins a name.
+        harness_core::skills::StoredSkillEntry {
+            name: "deploy".into(),
+            description: "stored deploy".into(),
+            scope: harness_core::skills::StoredScope::Server,
+        },
+    ];
+    let m = n.menu(sid, a).await.unwrap();
+    assert_eq!(
+        menu_names(&m),
+        ["deploy", "from-server", "manual", "release"],
+        "{m:?}"
+    );
+    assert_eq!(m[0].1, "The owner's deploy");
+}

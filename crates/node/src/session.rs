@@ -3541,9 +3541,7 @@ impl Session {
         let policy = &self.node.cfg.policy;
         // The `skill` tool here, and the master's stored skills for it
         // (X.34 step B, PLAN.md T81) where node.toml takes them.
-        let skill_on = agent.is_none_or(|a| a.allows_tool(skills::NAME))
-            && !policy.denies(skills::NAME)
-            && self.node.cfg.backend.has_tool(skills::NAME);
+        let skill_on = self.skill_on(agent);
         let stored: &[harness_core::skills::StoredSkillEntry] =
             match agent.filter(|_| skill_on && policy.skills.from_master) {
                 Some(a) => &a.stored_skills,
@@ -3586,29 +3584,11 @@ impl Session {
             .unwrap_or_else(|| self.model.clone());
         let window = agent.and_then(|a| a.context_windows.get(&model).copied());
         let cap = ins::cap_for(window);
-        let mut roots = Vec::new();
-        // The skill folders only for an agent that works on files or runs
-        // commands: a skill folder is files (X.34 step B). One without has
-        // the stored skills, which are text.
-        if skill_on && agent.is_none_or(|a| a.works_on_files()) {
-            // Checked when node.toml was loaded; a policy built in code
-            // with a bad entry reads none of them.
-            roots.extend(
-                policy
-                    .skills
-                    .roots()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|path| skills::Root {
-                        path,
-                        origin: harness_core::skills::SkillOrigin::Node,
-                        bound: None,
-                    }),
-            );
-            if policy.skills.repository {
-                roots.extend(skills::repo_roots(&dir, &granted));
-            }
-        }
+        let roots = if skill_on {
+            self.skill_roots(agent, &dir, &granted)
+        } else {
+            Vec::new()
+        };
         let protected = policy.protected_dirs.clone();
         // The instruction files first, in a bound of their own: a slow
         // skill folder must not cost the turn its AGENTS.md (review S3).
@@ -6988,6 +6968,12 @@ mod diff;
 /// own file.
 #[path = "session_git.rs"]
 mod git_chip;
+
+/// The skills a chat can ask for with `/name`, for the composer's menu
+/// (X.65), and the skill roots a turn's discovery shares with it; its own
+/// file.
+#[path = "session_skills.rs"]
+mod skills_menu;
 
 /// A person's Retry of the failed last turn (X.21); its own file.
 #[path = "session_peers.rs"]

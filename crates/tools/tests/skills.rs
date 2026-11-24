@@ -1168,3 +1168,85 @@ fn the_check_refuses_every_line_break_but_a_plain_one() {
     }
     assert!(check("a", "d", "one\n\ttwo\r\nthree").is_ok());
 }
+
+/// X.65: the `/` menu lists what `/name` can ask for: a skill with
+/// `user-invocable: false` is left out (the model still sees it), a
+/// `disable-model-invocation` one is in, a skill named like a built-in
+/// command is not (the built-in wins), a description is cut at 200
+/// characters, and at most 150 are listed.
+#[test]
+fn the_menu_lists_what_a_person_can_ask_for() {
+    let t = tree();
+    put(
+        &t.home.join("deploy/SKILL.md"),
+        "---\nname: deploy\ndescription: Ship it.\nuser-invocable: false\n---\nb",
+    );
+    put(
+        &t.home.join("manual/SKILL.md"),
+        "---\ndescription: Only by hand\ndisable-model-invocation: true\n---\nb",
+    );
+    put(
+        &t.home.join("compact/SKILL.md"),
+        skill_md("compact", "Shadows a built-in.", "b"),
+    );
+    put(
+        &t.home.join("notes/SKILL.md"),
+        skill_md("notes", &"é".repeat(900), "b"),
+    );
+    put(
+        &t.home.join("plain/SKILL.md"),
+        "---\ndescription: Visible\nuser-invocable: true\n---\nb",
+    );
+    let c = skills::discover(&roots(&t, &t.repo), &[]).catalogue;
+    // The model's view does not change: the hidden one is still listed to it.
+    assert_eq!(names(&c), ["compact", "deploy", "manual", "notes", "plain"]);
+    let listed = skills::render(&c, skills::CAP).unwrap();
+    assert!(listed.contains("deploy"), "{listed}");
+    let menu = skills::menu(&c);
+    let got: Vec<&str> = menu.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(got, ["manual", "notes", "plain"]);
+    let notes = &menu[1].1;
+    assert_eq!(
+        notes.chars().count(),
+        skills::MENU_DESCRIPTION_MAX,
+        "{notes}"
+    );
+    assert!(notes.ends_with('…'), "{notes}");
+    assert_eq!(menu[0].1, "Only by hand");
+}
+
+/// X.65: a catalogue of thousands lists 150, in name order; a stored skill
+/// is listed like any other; a `user-invocable: false` value read by lines
+/// (front matter that is not YAML) hides too.
+#[test]
+fn the_menu_is_bounded_and_reads_the_flag_line_by_line() {
+    let t = tree();
+    for i in 0..400 {
+        put(
+            &t.home.join(format!("s{i:03}/SKILL.md")),
+            skill_md(&format!("s{i:03}"), "d", "b"),
+        );
+    }
+    put(
+        &t.home.join("odd/SKILL.md"),
+        "---\ndescription: Use when: odd\nuser-invocable: false\n---\nb",
+    );
+    let mut c = skills::discover(&roots(&t, &t.repo), &[]).catalogue;
+    assert_eq!(c.skills.len(), 401);
+    let menu = skills::menu(&c);
+    assert_eq!(menu.len(), skills::MAX_LISTED);
+    assert!(menu.iter().all(|(n, _)| n != "odd"));
+    assert_eq!(menu[0].0, "s000");
+    // A stored skill is invocable.
+    c.skills.retain(|s| s.name == "odd");
+    c.skills.push(harness_core::skills::Skill {
+        name: "stored".into(),
+        description: "From the server".into(),
+        dir: PathBuf::new(),
+        origin: SkillOrigin::Stored(harness_core::skills::StoredScope::Server),
+        manual: false,
+    });
+    let menu = skills::menu(&c);
+    assert_eq!(menu.len(), 1);
+    assert_eq!(menu[0].0, "stored");
+}

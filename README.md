@@ -3979,7 +3979,7 @@ unquoted `description: Use when: ...`, is read line by line, as other harnesses
 accept it; the rest of the file
 is what it reads when it loads the skill. `disable-model-invocation: true`
 keeps a skill out of the agent's list: it is loaded only when you ask for it
-(below). Other keys (`allowed-tools`, `hooks`, `model`, `context`, ...) are
+(below). `user-invocable: false` keeps it out of the `/` menu (below) and nothing else. Other keys (`allowed-tools`, `hooks`, `model`, `context`, ...) are
 ignored: a skill never widens what the agent may do. Files beside `SKILL.md`
 (scripts, references, templates) are read when the skill says so.
 
@@ -4030,9 +4030,33 @@ other agents is not in its list, the tool refuses it with the reason, and
 **Asking for one.** A message of yours that starts with `/name` (a skill's
 name, then your text; `/name:` works too) asks the agent to load that skill
 first, a manual one included. A task one agent hands another never does.
-There is no menu for it yet. `/compact` is taken by the built-in command
-(see "Summarise now"): a skill named `compact` is still offered to the
-agent, but cannot be asked for this way (a manual one not at all).
+`/compact` is taken by the built-in command (see "Summarise now"): a skill
+named `compact` is still offered to the agent, but cannot be asked for this
+way (a manual one not at all), and the menu below does not list it.
+
+**The `/` menu.** Type `/` as the first character of a message in a chat and
+a menu opens above the box: the built-in commands (today `/compact`, with its
+`[focus]` hint) and the skills this chat can ask for, each with its
+description (at most 200 characters; text only, never a link or markup).
+Typing narrows it, names that start with what you typed first. Up and Down
+move, Enter or Tab complete the word to `/name ` and leave the caret after
+it, Escape closes the menu and keeps your text, and a click on an entry
+completes it too. Choosing only edits the text: nothing is sent, run or read
+until you send the message. A name typed in full (`/compact`) and Enter is
+sent as before, and Shift+Enter, a path such as `/usr/bin`, a `/` later in the
+text and an input-method composition do not open or use it. The skills are
+the ones the agent would be offered at the start of its next message: the
+same folders, the same limits (150), the agent's own Skills switch, the
+workspace's Plugins rule, `repository = false` and `denied_tools` in
+`node.toml`; a chat whose agent has no Skills switch, or a node that is away
+or older than the server, lists the built-in commands alone. A skill with
+`user-invocable: false` in its front matter is left out of the menu (the
+agent still sees it); a `disable-model-invocation` skill is listed, since
+you may ask for it. The menu reads the list from the chat's node once when
+it first opens and keeps it for 30 seconds (never polled), and only in a
+chat: the new-chat box has no menu, because there is nothing there yet to
+ask or to summarise. Command files of other harnesses (`.claude/commands`,
+`.codex/prompts`, ...) are not read.
 
 **What a skill can do: nothing by itself.** Nothing in a skill runs when it is
 found or loaded (no `` !`command` `` expansion); a script it names runs only
