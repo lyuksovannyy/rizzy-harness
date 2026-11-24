@@ -100,6 +100,11 @@ pub const CAP_FORK: &str = "fork";
 /// The master asks for a turn's changes only on nodes whose hello listed it.
 pub const CAP_DIFF: &str = "diff";
 
+/// The node capability that announces `session.diff` with `all` (ADOPTION_PLAN
+/// X.61): the whole chat's changes in one diff. The master sends `all` only to
+/// nodes whose hello listed it; an older one is told to update.
+pub const CAP_DIFF_ALL: &str = "diff-all";
+
 /// The node capability that announces `@` file mentions (PLAN.md T63):
 /// `session.prompt.files` and `session.files`. The master sends neither to
 /// a node whose hello did not list it.
@@ -558,6 +563,10 @@ pub struct TurnDiff {
     /// `others_wrote`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub others_may: Vec<String>,
+    /// The whole-chat diff only (X.61): the chat's first checkpoint is no
+    /// longer kept, so the range starts at the oldest one that is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub since_pruned: bool,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -1870,6 +1879,9 @@ pub enum MasterToNode {
     /// outside the node's command loop, and nothing is logged. `rewind`:
     /// this turn and every later one (before this turn against the latest
     /// state, what a rewind would undo). Only to nodes with `CAP_DIFF`.
+    /// `all` (X.61): the whole chat's changes, from the oldest checkpoint the
+    /// node still keeps to the latest finished state; `turn_id` is then empty
+    /// and `rewind` is not used. Only to nodes with `CAP_DIFF_ALL`.
     #[serde(rename = "session.diff")]
     Diff {
         req_id: String,
@@ -1877,6 +1889,8 @@ pub enum MasterToNode {
         turn_id: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         rewind: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
     },
     /// Paths of the chat's folder for the composer's `@` completion
     /// (PLAN.md T63): answered by one `session.files_result`, never by an
@@ -2695,6 +2709,7 @@ mod tests {
             session_id: sid,
             turn_id: "t1".into(),
             rewind: false,
+            all: false,
         };
         assert_eq!(ask.req_id(), None);
         let v = serde_json::to_value(&ask).unwrap();
@@ -2739,6 +2754,35 @@ mod tests {
         assert_eq!(v["diff"]["files"][0]["hunks"][0]["lines"][1], "+two");
         assert!(v["diff"].get("cut").is_none(), "{v}");
         assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), ans);
+    }
+
+    /// X.61: the whole-chat request is the same message with `all`; an
+    /// absent `all` is false, so a turn's request keeps its shape.
+    #[test]
+    fn whole_chat_diff_wire_shape() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let ask = MasterToNode::Diff {
+            req_id: "r".into(),
+            session_id: sid,
+            turn_id: String::new(),
+            rewind: false,
+            all: true,
+        };
+        let v = serde_json::to_value(&ask).unwrap();
+        assert_eq!(v["all"], true);
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), ask);
+        let pruned = TurnDiff {
+            since_pruned: true,
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&pruned).unwrap();
+        assert_eq!(v["since_pruned"], true);
+        assert!(
+            serde_json::to_value(TurnDiff::default())
+                .unwrap()
+                .get("since_pruned")
+                .is_none()
+        );
     }
 
     /// X.59: the wire shape of the folder preview pair.

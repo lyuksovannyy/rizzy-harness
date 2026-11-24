@@ -92,6 +92,9 @@ impl harness_agent_native::provider::Provider for Recording {
 
 /// The environment a scripted agent's shell command puts in front of its
 /// own git calls (the agent's shell inherits the node's environment).
+/// A secret the rig's node holds: it must never come out in a diff.
+pub const RIG_SECRET: &str = "sk-rig-secret-0123456789abcdef";
+
 pub const AGENT_GIT: &str = "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
      GIT_AUTHOR_NAME=agent GIT_AUTHOR_EMAIL=agent@example.com \
      GIT_COMMITTER_NAME=agent GIT_COMMITTER_EMAIL=agent@example.com";
@@ -165,7 +168,9 @@ impl Rig {
                 native,
             )),
             default_model: "mock".into(),
-            secrets: harness_core::SecretSet::new(vec![]),
+            secrets: harness_core::SecretSet::new(vec![harness_core::Secret::new(
+                RIG_SECRET.to_string(),
+            )]),
             profile: harness_core::event::Profile::Agentic,
             incognito_ttl: None,
             checkpoints_dir: Some(dir.path().join("checkpoints")),
@@ -542,7 +547,26 @@ impl Rig {
             session_id: sid,
             turn_id: turn.into(),
             rewind,
+            all: false,
         });
+        self.diff_answer(req).await
+    }
+
+    /// Everything the chat changed (X.61): the node's whole-chat diff.
+    pub async fn diff_all(&mut self) -> Result<harness_protocol::TurnDiff, String> {
+        self.n += 1;
+        let req = format!("d{}", self.n);
+        self.send(MasterToNode::Diff {
+            req_id: req.clone(),
+            session_id: self.sid,
+            turn_id: String::new(),
+            rewind: false,
+            all: true,
+        });
+        self.diff_answer(req).await
+    }
+
+    async fn diff_answer(&mut self, req: String) -> Result<harness_protocol::TurnDiff, String> {
         loop {
             match self.recv().await {
                 NodeToMaster::Event { event } => self.seen.push(event),

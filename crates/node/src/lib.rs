@@ -989,6 +989,8 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_BACKGROUND.into());
                 // A turn's changes, read from its checkpoints (X.12).
                 capabilities.push(harness_protocol::CAP_DIFF.into());
+                // ...and the whole chat's changes in one diff (X.61).
+                capabilities.push(harness_protocol::CAP_DIFF_ALL.into());
                 // `@` file mentions and their completion (T63).
                 capabilities.push(harness_protocol::CAP_FILES.into());
                 // A Word or Excel file of a folder for the page's panel
@@ -1151,7 +1153,8 @@ impl NodeRuntime {
                         session_id,
                         turn_id,
                         rewind,
-                    } => this.diff(req_id, session_id, turn_id, rewind),
+                        all,
+                    } => this.diff(req_id, session_id, turn_id, rewind, all),
                     // The composer's completion (T63): a bounded walk of
                     // names, in a task of its own, nothing logged.
                     MasterToNode::Files {
@@ -1438,7 +1441,7 @@ impl NodeRuntime {
     /// the result is the answer. Nothing is logged or stored: a diff is a
     /// view of two checkpoints the log already names. A stopping node
     /// still answers (it starts no work).
-    fn diff(&self, req_id: String, sid: SessionId, turn_id: String, rewind: bool) {
+    fn diff(&self, req_id: String, sid: SessionId, turn_id: String, rewind: bool, all: bool) {
         // The node's own record that its master read a chat's files (the
         // session id only, never a path or a line).
         self.audit_inline("session.diff", sid);
@@ -1453,6 +1456,7 @@ impl NodeRuntime {
         tokio::spawn(async move {
             let _permit = permit;
             let res = match inner.session(sid) {
+                Some(s) if all => s.diff_all().await,
                 Some(s) => s.diff(&turn_id, rewind).await,
                 None => Err("unknown session".to_string()),
             };
@@ -2377,8 +2381,9 @@ impl NodeRuntime {
                 session_id,
                 turn_id,
                 rewind,
+                all,
             } => {
-                self.diff(req_id, session_id, turn_id, rewind);
+                self.diff(req_id, session_id, turn_id, rewind, all);
                 Ok(())
             }
             MasterToNode::Files {

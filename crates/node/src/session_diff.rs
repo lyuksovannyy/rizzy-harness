@@ -43,7 +43,104 @@ fn range_of(cps: impl Iterator<Item = Checkpoint>, turn_id: &str) -> Range {
     r
 }
 
+/// The whole chat's range (X.61), as the fold reads the `checkpoint` events
+/// in log order: every snapshot of a state before work (a turn's `before`, a
+/// restore's `before_restore`), oldest first, and the latest recorded state
+/// that is not one. The range runs from the oldest of the first that is
+/// still kept to the second. An undo or a rewind is in the log as a restore
+/// whose `after` is the latest state, so undone work drops out by itself; a
+/// turn still running has a `before` and no `after` yet, so it is left out
+/// until it ends.
+fn whole_range(cps: impl Iterator<Item = Checkpoint>) -> (Vec<String>, Option<String>) {
+    let (mut starts, mut latest) = (Vec::new(), None);
+    for c in cps {
+        match c.phase {
+            CheckpointPhase::Before | CheckpointPhase::BeforeRestore => starts.push(c.git_ref),
+            _ => latest = Some(c.git_ref),
+        }
+    }
+    (starts, latest)
+}
+
 impl Session {
+    /// Everything this chat changed in its folder (X.61): the oldest
+    /// checkpoint still kept against the latest finished state. Scrubbed as
+    /// a turn's diff is.
+    pub(crate) async fn diff_all(&self) -> Result<TurnDiff, String> {
+        let secrets = self.node.cfg.secrets.clone();
+        self.diff_all_unscrubbed(&|s: &str| secrets.scrub(s))
+            .await
+            .map_err(|e| secrets.scrub(&e))
+    }
+
+    async fn diff_all_unscrubbed(
+        &self,
+        scrub: &(dyn Fn(&str) -> String + Sync),
+    ) -> Result<TurnDiff, String> {
+        let id = self.id;
+        let events = self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_of_kind(id, "checkpoint"))
+            .await
+            .map_err(|e| e.to_string())?;
+        let (starts, latest) = whole_range(events.iter().filter_map(|e| match e.typed() {
+            Ok(EventKind::Checkpoint(c)) => Some(c),
+            _ => None,
+        }));
+        // Nothing recorded and none can be: said, rather than an empty
+        // answer that reads as "this chat changed nothing".
+        let Some(repo) = self.checkpoint_repo().await? else {
+            return Err("checkpoints are not kept for this chat's folder, so its changes \
+                        cannot be shown"
+                .into());
+        };
+        let (Some(latest), false) = (latest, starts.is_empty()) else {
+            // No turn has finished (none yet, or the first is running).
+            return Ok(TurnDiff::default());
+        };
+        let pruned = || {
+            format!(
+                "this chat's checkpoints are no longer kept (only the latest {} changes are), \
+                 so its changes cannot be shown",
+                self.node.cfg.policy.checkpoints_keep
+            )
+        };
+        if !crate::git::exists(&repo, &latest).await {
+            return Err(pruned());
+        }
+        // Pruning drops the oldest first, so "kept" only turns from false to
+        // true along the list: the first kept one by bisection (a git call
+        // per probe, not per checkpoint of a long chat). Whatever is found
+        // was checked to exist, so a gap would only move the start later.
+        let (mut lo, mut hi) = (0, starts.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if crate::git::exists(&repo, &starts[mid]).await {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        let Some(start) = starts.get(lo) else {
+            return Err(pruned());
+        };
+        match crate::git::turn_diff(&repo, start, &latest, scrub).await {
+            Ok(mut d) => {
+                d.since_pruned = lo > 0;
+                Ok(d)
+            }
+            Err(_)
+                if !crate::git::exists(&repo, start).await
+                    || !crate::git::exists(&repo, &latest).await =>
+            {
+                Err(pruned())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// What turn `turn_id` changed: its `before` against its `after`, or,
     /// with `rewind`, against the latest state (that turn and every later
     /// one, what "Rewind files to before this turn" undoes). Every error is
@@ -205,6 +302,27 @@ mod tests {
             excluded_more: 0,
             head_moved: None,
         }
+    }
+
+    #[test]
+    fn the_whole_range_is_every_before_and_the_latest_state() {
+        use CheckpointPhase::*;
+        let (starts, latest) = whole_range(
+            vec![
+                cp("t1", Before, "b1"),
+                cp("t1", After, "a1"),
+                cp("t2", Before, "b2"),
+                cp("r", BeforeRestore, "s"),
+                cp("r", After, "ra"),
+                cp("t2", Restored, "ra"),
+                cp("t3", Before, "b3"),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(starts, ["b1", "b2", "s", "b3"]);
+        // A running turn (t3) has no after: the latest finished state.
+        assert_eq!(latest.as_deref(), Some("ra"));
+        assert_eq!(whole_range(std::iter::empty()), (vec![], None));
     }
 
     #[test]
