@@ -7,14 +7,15 @@
 //! and keeps nothing.
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use harness_protocol::{CAP_FILES, MAX_PROMPT_FILE_BYTES, MAX_PROMPT_FILES};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{ApiError, ApiResult, agentic_gate, require, visible_session};
+use super::caller::User;
+use super::{ApiError, ApiResult, agentic_gate, visible_session};
 use crate::Master;
 use crate::files::FilesError;
 
@@ -37,12 +38,11 @@ fn has_folder(row: &harness_store::SessionRow) -> bool {
 }
 
 async fn complete(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<FilesQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let row = visible_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     if !has_folder(&row) || q.q.len() > MAX_QUERY {
