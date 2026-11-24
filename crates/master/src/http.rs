@@ -10,6 +10,7 @@ use serde_json::json;
 
 use crate::workspaces::{self as ws, WsError};
 use crate::{CommandError, Master, auth, forge_repos};
+use caller::{Admin, Caller, User};
 use memory::{memory_err, memory_store};
 
 mod agent_edits;
@@ -595,8 +596,11 @@ async fn logout(State(m): State<Master>, headers: HeaderMap) -> Response {
         .into_response()
 }
 
-async fn me(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Response> {
-    let who = require_any(&m, &headers).await?;
+async fn me(
+    Caller(who): Caller,
+    State(m): State<Master>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
     // The active workspace comes along so the UI can key on it at once.
     let workspace = workspaces::active_summary(&m, &who).await?;
     let body = Json(
@@ -617,8 +621,7 @@ async fn me(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Response> 
 
 /// The nodes the caller may pick from: without the right to use the
 /// embedded agentic node (`[nodes] local_node_users`), it is left out.
-async fn nodes(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
+async fn nodes(User(who): User, State(m): State<Master>) -> ApiResult<Json<serde_json::Value>> {
     let local_ok = ws::may_use_local_node(&m, &who);
     let nodes: Vec<_> = m
         .nodes()
@@ -682,11 +685,10 @@ async fn scoped_resolver(
 
 /// The listed models; `default` is the scope's default model.
 async fn models(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<ScopeQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let r = scoped_resolver(&m, &who, &q).await?;
     Ok(Json(json!({ "models": r.models() })))
 }
@@ -715,11 +717,10 @@ fn agent_json(m: &Master, r: &crate::Resolver, a: &harness_agents::Agent) -> ser
 }
 
 async fn agents(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<ScopeQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let scope = settings_scope(&m, &who, &q).await?;
     let r = match &scope {
         Some(a) => a.resolver(&m).await,
@@ -750,11 +751,10 @@ async fn agents(
 }
 
 async fn notices(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<ScopeQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let scope = settings_scope(&m, &who, &q).await?;
     Ok(Json(
         json!({ "notices": crate::notices::for_viewer(&m, &who, scope.as_ref()).await }),
@@ -768,11 +768,10 @@ struct PasswordBody {
 }
 
 async fn change_password(
+    Caller(who): Caller,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<PasswordBody>,
 ) -> ApiResult<Response> {
-    let who = require_any(&m, &headers).await?;
     let Some(uid) = who.user_id.clone() else {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -826,11 +825,10 @@ struct SearchQuery {
 /// are the caller's own for everyone, admins included (T10); everything is
 /// in the one workspace asked for (members only).
 async fn search(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<SearchQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
     let kinds = search_kinds(&m, &who, scope.as_ref()).await;
     let owner = who.user_id.clone();
@@ -963,10 +961,9 @@ fn classifier_key(who: &auth::Principal) -> String {
 }
 
 async fn get_classifier(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let key = classifier_key(&who);
     let v = m.inner.mirror.call(move |s| s.kv_get(&key)).await?;
     Ok(Json(
@@ -978,11 +975,10 @@ async fn get_classifier(
 }
 
 async fn put_classifier(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(state): Json<ClassifierState>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     state
         .validate()
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
@@ -1056,11 +1052,10 @@ struct SessionsQuery {
 /// optionally in one workspace). The workspace is an extra filter: other
 /// members' chats stay private (T10).
 async fn list_sessions(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<SessionsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
     // Every listed chat is in the scope's workspace: the caller's level
     // there, against each chat's own mode (reading stays allowed).
@@ -1110,11 +1105,10 @@ async fn list_sessions(
 /// Any of the caller's chats, whatever its workspace (the UI follows a
 /// link to a chat into its workspace).
 async fn get_session(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let row = visible_session(&m, &who, &id).await?;
     let blocked = ws::agentic_blocked(&m, &who, &row).await;
     let mut v = session_json(&row, blocked.as_deref());
@@ -1139,12 +1133,11 @@ struct DeleteSessionQuery {
 }
 
 async fn delete_session(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<DeleteSessionQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let sid = acting_session(&m, &who, &id).await?.session_id;
     // Before the chat goes, while its items still name it.
     if q.media {
@@ -1163,12 +1156,11 @@ struct EventsQuery {
 }
 
 async fn events(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<EventsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let sid = visible_session(&m, &who, &id).await?.session_id;
     let limit = q.limit.unwrap_or(1000).min(5000);
     let evs = m
@@ -1217,11 +1209,10 @@ struct CreateBody {
 }
 
 async fn create_session(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<CreateBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     // Every request for the host shell is audited, whatever refuses it.
     let host = b.exec_mode == Some(harness_core::policy::ExecMode::Host);
     let mut seen = ws::HostAudit::default();
@@ -1364,12 +1355,11 @@ async fn give_back_files(m: &Master, ids: &[String]) {
 }
 
 async fn prompt(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<PromptBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     if b.text.trim().is_empty() && b.reply.is_none() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "empty prompt".into()));
     }
@@ -1578,13 +1568,12 @@ fn check_reply_body(r: &harness_core::event::FormReply, b: &PromptBody) -> ApiRe
 }
 
 async fn cancel(
+    Caller(who): Caller,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     // Stopping work is always allowed, even before a pending password
     // change (Gate 3 review P-7): only the owner's own chat, as ever.
-    let who = require_any(&m, &headers).await?;
     let sid = acting_session(&m, &who, &id).await?.session_id;
     m.cancel(sid).await?;
     Ok(Json(json!({ "ok": true })))
@@ -1596,12 +1585,11 @@ struct AgentBody {
 }
 
 async fn set_agent(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<AgentBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let row = acting_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     m.set_agent(row.session_id, &b.agent_id).await?;
@@ -1734,11 +1722,7 @@ fn refresh_embedder(m: &Master, rt: &crate::providers::ProviderRuntime) {
     }
 }
 
-async fn get_memory_cfg(
-    State(m): State<Master>,
-    headers: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
+async fn get_memory_cfg(_: Admin, State(m): State<Master>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(memory_cfg_json(&m, &runtime(&m)?.config())))
 }
 
@@ -1801,12 +1785,11 @@ fn embed_failure(
 /// meaning recall is tested with one embedding call first, so a typo cannot
 /// silently degrade recall.
 async fn put_memory_cfg(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<MemoryCfgBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     use crate::config::{EmbedSource, ProviderKind, Recall};
-    require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     let locked = rt.env().locked_under("memory.");
     if !locked.is_empty() {
@@ -1913,11 +1896,7 @@ async fn put_memory_cfg(
     Ok(Json(memory_cfg_json(&m, &latest)))
 }
 
-async fn admin_nodes(
-    State(m): State<Master>,
-    headers: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
+async fn admin_nodes(_: Admin, State(m): State<Master>) -> ApiResult<Json<serde_json::Value>> {
     let listener = m.node_listener();
     Ok(Json(json!({
         "nodes": m.registered_nodes().await?,
@@ -1928,10 +1907,9 @@ async fn admin_nodes(
 /// A join token plus everything the node needs, except the host name the
 /// node should dial (the browser knows that better than the server).
 async fn node_join_token(
+    Admin(who): Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require_admin(&m, &headers).await?;
     let Some((port, fingerprint)) = m.node_listener() else {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -1948,11 +1926,10 @@ async fn node_join_token(
 }
 
 async fn revoke_node(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     if !m.revoke_node(&id).await? {
         return Err(ApiError(StatusCode::NOT_FOUND, "no such node".into()));
     }
@@ -1969,12 +1946,11 @@ struct RestoreBody {
 }
 
 async fn restore_turn(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, turn)): Path<(String, String)>,
     Json(b): Json<RestoreBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let row = acting_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     m.restore_turn(row.session_id, turn, b.force, b.rewind)
@@ -1989,12 +1965,11 @@ struct VariantBody {
 }
 
 async fn select_variant(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<VariantBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let row = acting_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     m.select_variant(row.session_id, b.group, b.message_id)
@@ -2005,11 +1980,10 @@ async fn select_variant(
 /// What optional services this server has, and what the caller may use in
 /// a workspace (the sidebar shows an entry only when its `show` is true).
 async fn features(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<WorkspaceQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
     let scope = scope.as_ref();
     let routines = crate::routines::features(&m, &who, scope).await;
@@ -2027,11 +2001,11 @@ async fn features(
 }
 
 async fn transcribe(
+    User(who): User,
     State(m): State<Master>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let t = m.transcriber().ok_or_else(|| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2065,11 +2039,7 @@ async fn transcribe(
 }
 
 /// Chats waiting for the caller (approvals, unanswered questions).
-async fn attention(
-    State(m): State<Master>,
-    headers: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
+async fn attention(User(who): User, State(m): State<Master>) -> ApiResult<Json<serde_json::Value>> {
     let owner = who.user_id.clone();
     let viewer = owner.clone().unwrap_or_default();
     let (o, v) = (owner.clone(), viewer.clone());
@@ -2094,12 +2064,11 @@ struct SeenBody {
 }
 
 async fn mark_seen(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<SeenBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
     let sid = visible_session(&m, &who, &id).await?.session_id;
     let viewer = who.user_id.clone().unwrap_or_default();
     m.inner
@@ -2113,20 +2082,18 @@ async fn mark_seen(
 // ---- token savings -------------------------------------------------------
 
 async fn get_savings(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
 ) -> ApiResult<Json<harness_core::savings::TokenSavings>> {
-    require_admin(&m, &headers).await?;
     Ok(Json(runtime(&m)?.config().savings))
 }
 
 /// Replace the token-saving settings; the next turn uses them.
 async fn put_savings(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<harness_core::savings::TokenSavings>,
 ) -> ApiResult<Json<harness_core::savings::TokenSavings>> {
-    require_admin(&m, &headers).await?;
     let rt = runtime(&m)?;
     let _edits = rt.lock_edits().await;
     let mut cfg = rt.config();
@@ -2139,11 +2106,7 @@ async fn put_savings(
 /// Whether graphify is installed and allowed on the built-in node, and what to
 /// do on a node to turn it on. Read-only: node.toml is the node's, so no HTTP
 /// call installs graphify or edits it (FIX_PLAN 1.2, PLAN T5).
-async fn get_graphify(
-    State(m): State<Master>,
-    headers: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
+async fn get_graphify(_: Admin, State(m): State<Master>) -> ApiResult<Json<serde_json::Value>> {
     let local = m.graphify();
     Ok(Json(json!({
         "local_node": local.is_some(),

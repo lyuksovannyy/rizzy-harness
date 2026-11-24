@@ -12,14 +12,15 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use harness_core::Secret;
 use harness_core::policy::ExecLevel;
 use harness_store::Role;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{ApiError, ApiResult, require_admin};
+use super::caller::Admin;
+use super::{ApiError, ApiResult};
 use crate::workspaces as ws;
 use crate::{Master, auth};
 
@@ -48,10 +49,9 @@ fn with_password(u: &harness_store::UserRow, pw: &Secret<String>) -> serde_json:
 const CHOSEN: &str = "the server makes temporary passwords: leave out \"password\" (reset with POST /api/users/{id}/password)";
 
 pub(super) async fn list_users(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(&m, &headers).await?;
     let users = m.inner.mirror.call(|s| s.list_users()).await?;
     Ok(Json(
         json!({ "users": users.iter().map(user_json).collect::<Vec<_>>() }),
@@ -78,11 +78,10 @@ fn member() -> Role {
 }
 
 pub(super) async fn create_user(
+    Admin(who): Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<NewUserBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require_admin(&m, &headers).await?;
     if b.password.is_some() {
         return Err(ApiError(StatusCode::BAD_REQUEST, CHOSEN.into()));
     }
@@ -155,12 +154,11 @@ async fn load_user(m: &Master, id: &str) -> ApiResult<harness_store::UserRow> {
 }
 
 pub(super) async fn update_user(
+    Admin(who): Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<UserPatchBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require_admin(&m, &headers).await?;
     if b.password.is_some() {
         return Err(ApiError(StatusCode::BAD_REQUEST, CHOSEN.into()));
     }
@@ -221,11 +219,10 @@ pub(super) async fn update_user(
 /// working, every login of theirs ends (open sockets included), and the
 /// next login must change it. Admins change their own at `/api/me/password`.
 pub(super) async fn reset_password(
+    Admin(who): Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require_admin(&m, &headers).await?;
     let target = load_user(&m, &id).await?;
     if who.user_id.as_deref() == Some(target.user_id.as_str()) {
         return Err(ApiError(
@@ -239,11 +236,10 @@ pub(super) async fn reset_password(
 }
 
 pub(super) async fn delete_user(
+    Admin(who): Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require_admin(&m, &headers).await?;
     let target = load_user(&m, &id).await?;
     guard_admin_change(&m, &who, &target, true).await?;
     let uid = target.user_id.clone();
