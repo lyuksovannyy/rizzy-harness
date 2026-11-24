@@ -16,14 +16,15 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use harness_core::policy::ExecLevel;
 use harness_store::{Setter, StoreError};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::caller::{Admin, User};
 use super::workspaces::{changed, guard_target, load_member, member_json};
-use super::{ApiError, ApiResult, require, require_admin};
+use super::{ApiError, ApiResult};
 use crate::workspaces::{self, Perm, Role, access};
 use crate::{Master, levels};
 
@@ -51,12 +52,11 @@ fn store_err(e: StoreError) -> ApiError {
 }
 
 pub(super) async fn set_ceiling(
+    Admin(who): Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<LevelBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require_admin(&m, &headers).await?;
     if who.user_id.as_deref() == Some(id.as_str()) {
         return Err(conflict("you cannot change your own account's ceiling"));
     }
@@ -121,12 +121,11 @@ pub(super) async fn set_ceiling(
 }
 
 pub(super) async fn set_member_level(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, user_id)): Path<(String, String)>,
     Json(b): Json<LevelBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let a = access(&m, &who, &id).await?;
     if a.personal {
         return Err(conflict(
