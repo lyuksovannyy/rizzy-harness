@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -18,10 +18,8 @@ use harness_store::artifacts::{ArtifactQuery, ArtifactRow, VersionRow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::links::require_bytes;
-use super::{
-    ApiError, ApiResult, acting_session, agentic_gate, query_flag, require, visible_session,
-};
+use super::caller::{ByteCaller, User};
+use super::{ApiError, ApiResult, acting_session, agentic_gate, query_flag, visible_session};
 use crate::auth::Principal;
 use crate::workspaces::{self as ws, Perm};
 use crate::{CommandError, Master, artifacts, storage};
@@ -301,11 +299,10 @@ async fn usage(m: &Master, who: &Principal) -> ApiResult<Value> {
 }
 
 async fn list(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
     let kinds = match q.kind.as_deref().filter(|k| !k.is_empty()) {
         None => None,
@@ -362,11 +359,10 @@ async fn list(
 }
 
 async fn detail(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = visible(&m, &who, &id).await?;
     let aid = row.artifact_id.clone();
     let versions = m
@@ -400,12 +396,11 @@ struct Patch {
 }
 
 async fn update(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<Patch>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = visible(&m, &who, &id).await?;
     owner_only(&who, &row)?;
     let name = b
@@ -453,17 +448,16 @@ async fn update(
             .then(|| row.workspace_id.clone())
             .flatten(),
     );
-    detail(State(m), headers, Path(id)).await
+    detail(User(who), State(m), Path(id)).await
 }
 
 /// Delete for good: the owner, or for a shared artifact a member who may
 /// change the workspace's settings.
 async fn remove(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = visible(&m, &who, &id).await?;
     if !mine(&who, &row) {
         let w = row.effective_ws.clone().ok_or_else(unknown)?;
@@ -490,13 +484,12 @@ async fn remove(
 /// API token). Reached by link (a browser download), the redirect carries
 /// a fresh link of its own.
 async fn latest_download(
+    ByteCaller(who): ByteCaller,
     State(m): State<Master>,
     headers: HeaderMap,
-    uri: Uri,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
     let by_link = crate::auth::authenticate(&m, &headers).await.is_none();
-    let who = require_bytes(&m, &headers, &uri).await?;
     let row = visible(&m, &who, &id).await?;
     let aid = row.artifact_id.clone();
     let latest = m
@@ -519,11 +512,10 @@ async fn latest_download(
 }
 
 async fn version(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, vid)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (row, v) = visible_version(&m, &who, &id, &vid).await?;
     let view = View::new(&m, &who, &[&v]).await?;
     Ok(Json(view.version(&m, &row, &v)))
@@ -539,12 +531,11 @@ struct VersionPatch {
 }
 
 async fn version_update(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, vid)): Path<(String, String)>,
     Json(b): Json<VersionPatch>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (row, v) = visible_version(&m, &who, &id, &vid).await?;
     if let Some(pinned) = b.pinned {
         owner_only(&who, &row)?;
@@ -568,15 +559,14 @@ async fn version_update(
             .await?;
     }
     artifacts::notify(&m, row.owner_id.clone(), artifacts::shared_in(&row));
-    version(State(m), headers, Path((id, vid))).await
+    version(User(who), State(m), Path((id, vid))).await
 }
 
 async fn version_delete(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, vid)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (row, v) = visible_version(&m, &who, &id, &vid).await?;
     owner_only(&who, &row)?;
     let (aid, vid) = (row.artifact_id.clone(), v.version_id.clone());
@@ -631,12 +621,11 @@ async fn send(
 }
 
 async fn download(
+    ByteCaller(who): ByteCaller,
     State(m): State<Master>,
     headers: HeaderMap,
-    uri: Uri,
     Path((id, vid)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    let who = require_bytes(&m, &headers, &uri).await?;
     let (_, v) = visible_version(&m, &who, &id, &vid).await?;
     send(&m, &headers, &v, false).await
 }
@@ -644,12 +633,11 @@ async fn download(
 /// Only kinds a browser may show (`display` inline or img); never HTML,
 /// SVG outside `<img>`, PDF or anything else.
 async fn preview(
+    ByteCaller(who): ByteCaller,
     State(m): State<Master>,
     headers: HeaderMap,
-    uri: Uri,
     Path((id, vid)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    let who = require_bytes(&m, &headers, &uri).await?;
     let (_, v) = visible_version(&m, &who, &id, &vid).await?;
     let shown = v
         .blob
@@ -681,12 +669,11 @@ fn blob_owner(who: &Principal, v: &VersionRow) -> ApiResult<String> {
 }
 
 async fn thumb(
+    ByteCaller(who): ByteCaller,
     State(m): State<Master>,
     headers: HeaderMap,
-    uri: Uri,
     Path((id, vid)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    let who = require_bytes(&m, &headers, &uri).await?;
     let (_, v) = visible_version(&m, &who, &id, &vid).await?;
     let blob = v
         .blob
@@ -703,12 +690,11 @@ async fn thumb(
 }
 
 async fn put_thumb(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, vid)): Path<(String, String)>,
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let (row, v) = visible_version(&m, &who, &id, &vid).await?;
     let blob = blob_owner(&who, &v)?;
     if body.len() > MAX_THUMB {
@@ -734,11 +720,10 @@ async fn put_thumb(
 /// The chat's staged files, for its cards and failed "Save as artifact"
 /// items.
 async fn session_list(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = visible_session(&m, &who, &id).await?;
     let sid = row.session_id.to_string();
     let versions = m
@@ -788,12 +773,11 @@ fn conflict(msg: impl Into<String>) -> ApiError {
 /// ends in the chat's log (`artifact_staged` or `artifact_stage_failed`).
 /// No approval: the user clicked.
 async fn session_save(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<SaveBody>,
 ) -> ApiResult<Response> {
-    let who = require(&m, &headers).await?;
     let row = acting_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     if row.profile.as_deref() != Some("agentic") || row.incognito {
