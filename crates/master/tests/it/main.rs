@@ -32,6 +32,7 @@ mod attention_http;
 mod background_stop_http;
 mod board_http;
 mod callbacks_http;
+mod chat_diff_http;
 mod coding_memory_http;
 mod compact_http;
 mod deny_always_http;

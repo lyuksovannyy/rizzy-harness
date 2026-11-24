@@ -92,9 +92,11 @@ impl Session {
         // Nothing recorded and none can be: said, rather than an empty
         // answer that reads as "this chat changed nothing".
         let Some(repo) = self.checkpoint_repo().await? else {
-            return Err("checkpoints are not kept for this chat's folder, so its changes \
+            return Err(
+                "checkpoints are not kept for this chat's folder, so its changes \
                         cannot be shown"
-                .into());
+                    .into(),
+            );
         };
         let (Some(latest), false) = (latest, starts.is_empty()) else {
             // No turn has finished (none yet, or the first is running).

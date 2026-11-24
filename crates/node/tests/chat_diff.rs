@@ -161,10 +161,7 @@ async fn the_range_keeps_the_turn_diffs_caps() {
     rig.turn("seq 1 600000 > big.txt").await;
     let d = rig.diff_all().await.unwrap();
     assert_eq!(d.files.len(), MAX_FILES);
-    assert_eq!(
-        d.more_files as usize,
-        2 * each + 1 - MAX_FILES
-    );
+    assert_eq!(d.more_files as usize, 2 * each + 1 - MAX_FILES);
     assert!(d.cut);
     let json = serde_json::to_vec(&d).unwrap();
     assert!(json.len() <= MAX_DIFF_JSON, "{} bytes", json.len());
