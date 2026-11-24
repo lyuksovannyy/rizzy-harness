@@ -82,7 +82,7 @@ use harness_store::{AppendOutcome, HelloState, Store, SubSessions};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-pub use http::{router, router_with};
+pub use http::{router, router_before_identify, router_with};
 pub use resolver::Resolver;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);

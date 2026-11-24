@@ -45,17 +45,17 @@ use common::SameOrigin as _;
 // ---------------------------------------------------------------- lexer
 
 #[derive(Clone, Debug, PartialEq)]
-enum Tok {
+pub(crate) enum Tok {
     Id(String),
     Str(String),
     P(char),
 }
 
-type Toks = [(Tok, usize)];
+pub(crate) type Toks = [(Tok, usize)];
 
 /// Rust source as tokens with their lines: comments dropped, string
 /// contents kept apart from code, lifetimes told from char literals.
-fn lex(src: &str) -> Vec<(Tok, usize)> {
+pub(crate) fn lex(src: &str) -> Vec<(Tok, usize)> {
     let c: Vec<char> = src.chars().collect();
     let (mut i, mut line) = (0, 1);
     let mut out = Vec::new();
@@ -166,7 +166,7 @@ fn raw_string(c: &[char], i: usize) -> Option<(String, usize)> {
 // -------------------------------------------------------- route reading
 
 /// The index of the `)`, `]` or `}` that closes the group opened at `open`.
-fn close_of(t: &Toks, open: usize) -> Option<usize> {
+pub(crate) fn close_of(t: &Toks, open: usize) -> Option<usize> {
     let mut depth = 0;
     for (i, (tok, _)) in t.iter().enumerate().skip(open) {
         match tok {
@@ -183,12 +183,45 @@ fn close_of(t: &Toks, open: usize) -> Option<usize> {
     None
 }
 
-/// Helper functions in a `routes()` that build a method router, and what
-/// they register. A new helper must be written here on purpose.
-const HELPERS: &[(&str, &[&str])] = &[("image", &["PUT", "DELETE"])];
+/// Helper functions in a `routes()` that build a method router, what they
+/// register and the functions their closures call (`profile.rs`). A new
+/// helper must be written here on purpose.
+const HELPERS: &[(&str, &[&str], &[&str])] =
+    &[("image", &["PUT", "DELETE"], &["upload", "remove"])];
 
-/// The methods of the handler expression `get(a).post(b).layer(c)`.
-fn methods_of(args: &Toks) -> Result<Vec<String>, String> {
+/// What one method's handler expression names: the paths it calls
+/// (`upload(..)` in a closure) or is (`get(a::b)`), as segments.
+pub(crate) type Names = Vec<Vec<String>>;
+
+fn names_in(args: &Toks) -> Names {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let Tok::Id(first) = &args[i].0 else {
+            i += 1;
+            continue;
+        };
+        let start = i;
+        let mut segs = vec![first.clone()];
+        i += 1;
+        while let (Some((Tok::P(':'), _)), Some((Tok::P(':'), _)), Some((Tok::Id(n), _))) =
+            (args.get(i), args.get(i + 1), args.get(i + 2))
+        {
+            segs.push(n.clone());
+            i += 3;
+        }
+        let called = matches!(args.get(i), Some((Tok::P('('), _)));
+        let whole = start == 0 && i == args.len();
+        if called || whole {
+            out.push(segs);
+        }
+    }
+    out
+}
+
+/// The methods of the handler expression `get(a).post(b).layer(c)`, each
+/// with what its handler names.
+fn methods_of(args: &Toks) -> Result<Vec<(String, Names)>, String> {
     let mut i = 0;
     let mut out = Vec::new();
     loop {
@@ -210,14 +243,21 @@ fn methods_of(args: &Toks) -> Result<Vec<String>, String> {
         if !matches!(args.get(i), Some((Tok::P('('), _))) {
             return Err(format!("`{name}` is not called"));
         }
+        let open = i;
         i = close_of(args, i).ok_or("unbalanced handler")? + 1;
+        let inner = &args[open + 1..i - 1];
         match name.as_str() {
             "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "trace" => {
-                out.push(name.to_uppercase())
+                out.push((name.to_uppercase(), names_in(inner)))
             }
             "layer" | "route_layer" => {}
-            n => match HELPERS.iter().find(|(h, _)| *h == n) {
-                Some((_, ms)) => out.extend(ms.iter().map(|m| m.to_string())),
+            n => match HELPERS.iter().find(|(h, _, _)| *h == n) {
+                Some((_, ms, calls)) => out.extend(ms.iter().map(|m| {
+                    (
+                        m.to_string(),
+                        calls.iter().map(|c| vec![c.to_string()]).collect(),
+                    )
+                })),
                 None => return Err(format!("unknown method helper `{n}` (any/on/closure?)")),
             },
         }
@@ -231,12 +271,15 @@ fn methods_of(args: &Toks) -> Result<Vec<String>, String> {
 }
 
 #[derive(Debug, Default)]
-struct Table {
+pub(crate) struct Table {
     /// path template -> methods
-    routes: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) routes: BTreeMap<String, BTreeSet<String>>,
+    /// (method, path template) -> the file that registers it and what its
+    /// handler names there.
+    pub(crate) handlers: BTreeMap<(String, String), (PathBuf, Names)>,
 }
 
-fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+pub(crate) fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in std::fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
         if p.is_dir() {
@@ -249,7 +292,7 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Read the registrations of one file's tokens into `t`; return the modules
 /// it merges (`.merge(a::b::routes())`) as paths of segments.
-fn read_file(
+pub(crate) fn read_file(
     file: &Path,
     toks: &Toks,
     t: &mut Table,
@@ -281,7 +324,11 @@ fn read_file(
                 };
                 match methods_of(&args[2..]) {
                     Ok(ms) if !ms.is_empty() => {
-                        t.routes.entry(path.clone()).or_default().extend(ms)
+                        for (m, names) in ms {
+                            t.routes.entry(path.clone()).or_default().insert(m.clone());
+                            t.handlers
+                                .insert((m, path.clone()), (file.to_path_buf(), names));
+                        }
                     }
                     Ok(_) => problems.push(format!("{here}: `{path}` registers no method")),
                     Err(e) => problems.push(format!("{here}: `{path}`: {e}")),
@@ -349,7 +396,7 @@ fn read_file(
 }
 
 /// The module `segs` below file `from` (`http.rs` + `users` = `http/users.rs`).
-fn module_file(from: &Path, segs: &[String]) -> Option<PathBuf> {
+pub(crate) fn module_file(from: &Path, segs: &[String]) -> Option<PathBuf> {
     let mut cur = from.to_path_buf();
     for s in segs {
         let base = cur.with_extension("");
@@ -367,7 +414,7 @@ fn module_file(from: &Path, segs: &[String]) -> Option<PathBuf> {
 }
 
 /// Every registration the master's `router()` serves, or the problems.
-fn read_table(src_dir: &Path) -> Result<Table, Vec<String>> {
+pub(crate) fn read_table(src_dir: &Path) -> Result<Table, Vec<String>> {
     let mut files = Vec::new();
     rs_files(src_dir, &mut files);
     files.sort();
@@ -392,6 +439,7 @@ fn read_table(src_dir: &Path) -> Result<Table, Vec<String>> {
         for (p, ms) in &t.routes {
             all.routes.entry(p.clone()).or_default().extend(ms.clone());
         }
+        all.handlers.extend(t.handlers.clone());
         for m in merges {
             match module_file(&f, m) {
                 Some(next) if reached.insert(next.clone()) => todo.push(next),
@@ -415,7 +463,7 @@ fn read_table(src_dir: &Path) -> Result<Table, Vec<String>> {
     }
 }
 
-fn src_dir() -> PathBuf {
+pub(crate) fn src_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
@@ -494,11 +542,46 @@ fn the_real_route_table_is_readable() {
     );
 }
 
+/// The tokens of the body of `fn name` in `toks` (the first one).
+pub(crate) fn fn_body<'a>(toks: &'a Toks, name: &str) -> Option<&'a Toks> {
+    let at = toks
+        .windows(2)
+        .position(|w| w[0].0 == Tok::Id("fn".into()) && w[1].0 == Tok::Id(name.into()))?;
+    let open = (at..toks.len()).find(|&i| toks[i].0 == Tok::P('{'))?;
+    Some(&toks[open..=close_of(toks, open)?])
+}
+
+/// `http::public()` registers exactly the `PUBLIC` list: a private route
+/// moved there, or a public one added without its reason, fails here
+/// whatever it answers (a handler that still checks its caller itself
+/// would pass the walk below).
+#[test]
+fn the_public_router_is_exactly_the_public_list() {
+    let http = src_dir().join("http.rs");
+    let toks = lex(&std::fs::read_to_string(&http).unwrap());
+    let body = fn_body(&toks, "public").expect("http.rs has `fn public`");
+    let mut t = Table::default();
+    let mut problems = Vec::new();
+    let merges = read_file(&http, body, &mut t, &mut problems);
+    for m in merges {
+        let f = module_file(&http, &m).expect("merged module");
+        let toks = lex(&std::fs::read_to_string(&f).unwrap());
+        read_file(&f, &toks, &mut t, &mut problems);
+    }
+    assert!(problems.is_empty(), "{problems:?}");
+    let got: BTreeSet<(String, String)> = t.handlers.into_keys().collect();
+    let want: BTreeSet<(String, String)> = PUBLIC
+        .iter()
+        .map(|(m, p, _)| (m.to_string(), p.to_string()))
+        .collect();
+    assert_eq!(got, want, "http::public() and PUBLIC differ");
+}
+
 // ---------------------------------------------------------- the walk
 
 /// Public on purpose. Every line says why, and each reason was read in the
 /// handler. Anything else answering something but 401 is a finding.
-const PUBLIC: &[(&str, &str, &str)] = &[
+pub(crate) const PUBLIC: &[(&str, &str, &str)] = &[
     (
         "GET",
         "/api/setup",
@@ -543,7 +626,7 @@ const BODY_FIRST_CODES: &[u16] = &[400, 413, 415, 422];
 const QUERY_FIRST: &[(&str, &str)] = &[];
 const QUERY_FIRST_CODES: &[u16] = &[400];
 
-fn fill(path: &str) -> String {
+pub(crate) fn fill(path: &str) -> String {
     let mut out = String::new();
     let mut rest = path;
     while let Some(a) = rest.find('{') {

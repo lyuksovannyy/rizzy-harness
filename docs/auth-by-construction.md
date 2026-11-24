@@ -74,8 +74,9 @@ Per-route body limits (`DefaultBodyLimit` layers) are unchanged: they only tell 
 
 Unchanged for identified callers: status codes and sentences (the extractors use the old words), the Origin guard (an outer layer, runs first as before), the request time limits (an outer route layer), the throttles (keyed in the handlers after the principal, untouched), the API token's rights, and the byte routes (`a_link_counts_only_for_the_byte_routes`: a link gets a made file's download past the layer, the same link on another URL is 401, a link on a PUT to a linkable URL is 401).
 Changes: an unauthenticated caller now gets 401 where it got 400, 413, 415 or 422.
-After the handlers convert, one more, which needs a yes: a signed-in caller who is not allowed (a member on an admin route, a login with a pending password change) and also sent a bad body gets the 403 where it got 400 or 422, because the extractor runs before the body.
-That is the better order (a member no longer learns an admin route's fields) but it is a change in which error wins.
+A deliberate change in which error wins (decision 2 below): once a handler converts, a signed-in caller who lacks the right (a member on an admin route, a login with a pending password change) and also sent a bad body gets the 403 where it got 400, 413, 415 or 422, because the extractor runs before the body.
+A member no longer learns an admin route's fields that way.
+The member walk lists the handlers still in the old order (72 routes for one caller kind or another today); the list shrinks as they convert.
 Until a handler converts, it still calls `require` after the layer: two lookups per request (the second is a read, the login's expiry moves at most once a minute), which goes away with the conversion.
 
 ## Splitting the work
@@ -88,8 +89,33 @@ Until a handler converts, it still calls `require` after the layer: two lookups 
    Proof per step: the area's suites and the walk stay green, and the count of `require` calls goes down.
 3. **Delete `require`, `require_any`, `require_admin` and `require_bytes`** in the last step, so the compiler proves "no handler calls `require*` by hand" (the plan's done criterion).
 
+## Decisions (session lead, 2026-11-24; the owner may overrule any)
+
+1. The layer and the four extractors replace the plan's three routers; FIX_PLAN 4.1 says so.
+2. Once handlers convert, a signed-in caller without the right gets 403 before a bad body's 400 or 422 (above); T2 says so.
+3. A member walk lands with the layer (`crates/master/tests/it/member_walk_http.rs`), below.
+4. A link authorises a GET or HEAD only, in the layer and in `ByteCaller` (`a_link_passes_the_byte_extractor_only_to_read` for the extractor alone, which the layer otherwise hides).
+
+## The member walk and the agreement walk
+
+`member_walk_http.rs` reads the route table as the route walk does, resolves each registration to its handler function (through closures, `use` imports and helpers in the same file), and reads that function's checks: `require_admin` or `Admin` is admin-only, `require_agent_editor` needs an admin for `?scope=server`, `require_any` or `Caller` works during a pending password change, `require_bytes`, `ByteCaller` or `link_principal` take a link.
+A handler it cannot find, or one with no check at all, fails the test.
+The routes it reads as admin-only (43 today) must equal the written `ADMIN_ONLY` list, so a handler that loses its admin check when it converts fails until someone changes that list on purpose; nothing under `/api/admin/` may be open.
+Then every route, every registered method, as:
+a member (empty, small JSON and 1 MB bodies: 403 or 404 on admin-only routes, never 401, never "admins only" elsewhere, never 500);
+a login whose password must change (403 "change your password first" except where `require_any` lets it in);
+a disabled account's still-stored login and an expired login (401);
+a member's cookie with a link on every write (401);
+and the API token, the machine owner's root key with admin rights and every session (`auth.rs`): never 401, never "admins only", never "change your password first".
+Proven able to fail: an `Admin` extractor that let members through made it fail on `/api/admin/storage`.
+The "admin" in module docs was tried as a second source and dropped: 83 open routes match it, because the docs say "admins included" of rules that keep admins out of other people's things; the `ADMIN_ONLY` snapshot does that job.
+
+`the_layer_and_the_handlers_checks_agree` sends the same requests in the same order to a server with the layer and to one built without it (`router_before_identify`, test-only), as nobody, a wrong token, a made-up cookie, a foreign page, a member, an admin, a login that must change its password, the API token, and a cookie with a link (on a byte route, and carried to every other URL), with HEAD added on the byte routes: 1,989 request pairs.
+Every answer must be the same, except a caller who is nobody getting 401 where the old order answered the body first; a foreign page gets the guard's 403 on both.
+The handlers already converted cannot run without the layer, so their answers are pinned against what `require*` gave (the made-file download among them).
+`the_origin_guard_answers_first` pins the guard's place: another site's write with no credentials is 403 "origin not allowed", a cookie write without `Origin` is 403 "origin required", the page's own GET and login pass through.
+`the_public_router_is_exactly_the_public_list` reads `http::public()`: moving `GET /api/me` there made it fail while the route walk stayed green (the handler still checks its caller), which is why it exists.
+
 ## Open questions
 
-- The 403-before-the-body order for signed-in callers who lack the right (above): recommend yes.
-- A forgotten `Admin` on an admin handler is authorisation, not this fix, and neither design catches it at compile time; recommend a member walk next to the route walk (a plain member's login against every `/api/admin/*` and `/api/users*` route, expecting 403), cheap and source-driven like the route walk.
-- Keep the layer's GET/HEAD rule for links, or let `ByteCaller` alone decide: recommend keeping both (the layer refuses a link on any write even if a handler later takes the wrong extractor).
+- None from stage 0; the four decisions above stand unless the owner says otherwise.

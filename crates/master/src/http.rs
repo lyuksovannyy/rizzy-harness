@@ -67,9 +67,23 @@ pub fn router(master: Master) -> Router {
 
 /// `router` with explicit request timeouts (tests shorten them).
 pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router {
-    let api = Router::new()
+    let private = private(&master);
+    assemble(master, timeouts, private)
+}
+
+/// Tests only (FIX_PLAN 4.1, `docs/auth-by-construction.md`): the router as
+/// it was before `caller::identify`, the same routes with no caller layer,
+/// so the agreement walk can show that the layer and each handler's own
+/// `require*` decide alike. Goes with `require*`.
+#[doc(hidden)]
+pub fn router_before_identify(master: Master) -> Router {
+    assemble(master, crate::limits::Timeouts::default(), private_routes())
+}
+
+fn assemble(master: Master, timeouts: crate::limits::Timeouts, private: Router<Master>) -> Router {
+    // `private` already carries its caller layer; `public()` must not.
+    let api = private
         .merge(public())
-        .merge(private(&master))
         // Matched routes only (the embedded UI files are not handlers); which
         // routes get which limit is the table in `limits.rs`.
         .route_layer(axum::middleware::from_fn_with_state(
@@ -113,6 +127,14 @@ fn public() -> Router<Master> {
 /// Every other route: the caller is identified (`caller::identify`) before
 /// the handler reads anything of the request.
 fn private(master: &Master) -> Router<Master> {
+    private_routes().route_layer(axum::middleware::from_fn_with_state(
+        master.clone(),
+        caller::identify,
+    ))
+}
+
+/// The routes of [`private`], without its layer.
+fn private_routes() -> Router<Master> {
     Router::new()
         .route("/api/me", get(me))
         .route("/api/me/password", post(change_password))
@@ -314,11 +336,6 @@ fn private(master: &Master) -> Router<Master> {
         .merge(connection_repos::routes())
         .merge(custom_connectors::routes())
         .merge(sessions::routes())
-        // Last, so it covers every route above.
-        .route_layer(axum::middleware::from_fn_with_state(
-            master.clone(),
-            caller::identify,
-        ))
 }
 
 struct ApiError(StatusCode, String);

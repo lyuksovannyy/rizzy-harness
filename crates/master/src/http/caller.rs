@@ -132,7 +132,65 @@ impl<S: Send + Sync> FromRequestParts<S> for ByteCaller {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, ApiError> {
         let f = found(parts)?;
+        // A link reads, never writes: the layer takes one only on a GET or
+        // HEAD, and so does this, whatever route it is put on.
+        if f.by_link && !matches!(parts.method, Method::GET | Method::HEAD) {
+            return Err(not_logged_in());
+        }
         settled(&f.who)?;
         Ok(ByteCaller(f.who.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parts(method: Method, by_link: bool) -> Parts {
+        let (mut p, ()) = axum::http::Request::builder()
+            .method(method)
+            .uri("/api/media/m1/thumb")
+            .body(())
+            .unwrap()
+            .into_parts();
+        p.extensions.insert(Identified {
+            who: Principal::api_token(),
+            by_link,
+        });
+        p
+    }
+
+    /// A link passes `ByteCaller` on a GET or HEAD only, even if a write
+    /// route took it; the key or the token pass on every method.
+    #[tokio::test]
+    async fn a_link_passes_the_byte_extractor_only_to_read() {
+        for m in [Method::GET, Method::HEAD] {
+            assert!(
+                ByteCaller::from_request_parts(&mut parts(m, true), &())
+                    .await
+                    .is_ok()
+            );
+        }
+        for m in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            let e = ByteCaller::from_request_parts(&mut parts(m.clone(), true), &())
+                .await
+                .err()
+                .expect("refused");
+            assert_eq!(e.0, StatusCode::UNAUTHORIZED, "{m}");
+            assert!(
+                ByteCaller::from_request_parts(&mut parts(m, false), &())
+                    .await
+                    .is_ok()
+            );
+        }
+        // Nothing found (a route outside the layer): nobody passes.
+        let (mut bare, ()) = axum::http::Request::new(()).into_parts();
+        assert!(User::from_request_parts(&mut bare, &()).await.is_err());
+        // A link is never a `User` or a `Caller`.
+        assert!(
+            User::from_request_parts(&mut parts(Method::GET, true), &())
+                .await
+                .is_err()
+        );
     }
 }
