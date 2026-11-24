@@ -8,11 +8,11 @@
 
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
 
-use super::links::require_bytes;
+use super::caller::ByteCaller;
 use super::{ApiError, ApiResult, visible_session};
 use crate::{Master, storage};
 
@@ -24,14 +24,14 @@ fn unknown() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "unknown file".into())
 }
 
+/// The caller: a download button's link (`POST /api/links`) or the
+/// login's own key.
 async fn download(
+    ByteCaller(who): ByteCaller,
     State(m): State<Master>,
     headers: HeaderMap,
-    uri: Uri,
     Path((id, file_id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    // A download button's link (`POST /api/links`) or the login's own key.
-    let who = require_bytes(&m, &headers, &uri).await?;
     let row = visible_session(&m, &who, &id).await?;
     // Only a plain chat keeps made files: a coding chat's are in its folder.
     if row.profile.as_deref() != Some("chat") || row.parent_id.is_some() || row.incognito {

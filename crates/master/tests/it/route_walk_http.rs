@@ -322,9 +322,21 @@ fn read_file(
                         _ => break false,
                     }
                 };
+                // `local(..)`: a function of this same file, whose routes
+                // this loop reads anyway (`http.rs`'s `public` and
+                // `private`).
+                let local = match args.first().map(|x| &x.0) {
+                    Some(Tok::Id(f)) if matches!(args.get(1), Some((Tok::P('('), _))) => {
+                        close_of(args, 1) == Some(args.len() - 1)
+                            && toks.windows(2).any(|w| {
+                                w[0].0 == Tok::Id("fn".into()) && w[1].0 == Tok::Id(f.clone())
+                            })
+                    }
+                    _ => false,
+                };
                 if ok && !segs.is_empty() {
                     merges.push(segs);
-                } else {
+                } else if !local {
                     problems.push(format!(
                         "{here}: `.merge` of something but `module::routes()`"
                     ));
@@ -461,6 +473,13 @@ fn route_table_is_read_strictly() {
     let (_, p, merges) = m("use axum::Router; fn f() { Router::new().merge(a::b::routes()) }");
     assert!(p.is_empty(), "{p:?}");
     assert_eq!(merges, [vec!["a".to_string(), "b".to_string()]]);
+    // A function of the same file is read with the file; one from
+    // elsewhere is not.
+    let (_, p, merges) =
+        m("use axum::Router; fn g(m: &M) -> Router { x } fn f() { Router::new().merge(g(&m)) }");
+    assert!(p.is_empty() && merges.is_empty(), "{p:?}");
+    let (_, p, _) = m("use axum::Router; fn f() { Router::new().merge(h(&m)) }");
+    assert_eq!(p.len(), 1, "{p:?}");
 }
 
 /// The real tree reads cleanly and the walk sees a plausible table.
@@ -512,105 +531,16 @@ const PUBLIC: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// FINDING 1, left as it is (the second half of 4.1 fixes it): these routes
-/// read and parse the body (`Json<T>`, `Bytes`, a limit) BEFORE the handler
-/// asks who is calling, so an unauthenticated caller gets 400, 413, 415 or
-/// 422 (with the framework's text about the expected fields) instead of 401,
-/// and the body of up to the route's limit is buffered first. Today's answers
-/// are pinned to those codes: a 500, a 200 or a new route in this shape fails
-/// the test. A route that answers 401 everywhere now is STALE: delete it.
-const BODY_FIRST: &[(&str, &str)] = &[
-    ("PATCH", "/api/admin/workspaces/{id}"),
-    ("PATCH", "/api/agents/{id}"),
-    ("PATCH", "/api/artifacts/{id}"),
-    ("PATCH", "/api/artifacts/{id}/versions/{vid}"),
-    ("PATCH", "/api/media/{id}"),
-    ("PATCH", "/api/memory/{id}"),
-    ("PATCH", "/api/projects/{id}"),
-    ("PATCH", "/api/projects/{id}/board/cards/{card}"),
-    ("PATCH", "/api/projects/{id}/board/columns/{col}"),
-    ("PATCH", "/api/projects/{id}/memory/{fact}"),
-    ("PATCH", "/api/routines/{id}"),
-    ("PATCH", "/api/users/{id}"),
-    ("PATCH", "/api/workspaces/{id}"),
-    ("PATCH", "/api/workspaces/{id}/facts/{fact}"),
-    ("PATCH", "/api/workspaces/{id}/members/{user_id}"),
-    ("POST", "/api/admin/providers/models/test"),
-    ("POST", "/api/admin/providers/test"),
-    ("POST", "/api/agents"),
-    ("POST", "/api/agent-summary"),
-    ("POST", "/api/board-templates"),
-    ("POST", "/api/connections"),
-    ("POST", "/api/links"),
-    ("POST", "/api/media/delete"),
-    ("POST", "/api/memory"),
-    ("POST", "/api/me/password"),
-    ("POST", "/api/projects"),
-    ("POST", "/api/projects/{id}/board/cards"),
-    ("POST", "/api/projects/{id}/board/columns"),
-    ("POST", "/api/projects/{id}/board/template"),
-    ("POST", "/api/projects/{id}/folder"),
-    ("POST", "/api/projects/{id}/mcp/approve"),
-    ("POST", "/api/projects/{id}/mcp/remove"),
-    ("POST", "/api/projects/{id}/memory"),
-    ("POST", "/api/routines"),
-    ("POST", "/api/routines/{id}/run"),
-    ("POST", "/api/routines/preview"),
-    ("POST", "/api/sessions"),
-    ("POST", "/api/sessions/{id}/agent"),
-    ("POST", "/api/sessions/{id}/approval-mode"),
-    ("POST", "/api/sessions/{id}/approvals/{approval_id}"),
-    ("POST", "/api/sessions/{id}/artifacts"),
-    ("POST", "/api/sessions/{id}/compact"),
-    ("POST", "/api/sessions/{id}/exec-mode"),
-    ("POST", "/api/sessions/{id}/fork"),
-    ("POST", "/api/sessions/{id}/pins"),
-    ("POST", "/api/sessions/{id}/prompt"),
-    ("POST", "/api/sessions/{id}/rewind"),
-    ("POST", "/api/sessions/{id}/seen"),
-    ("POST", "/api/sessions/{id}/step-limit"),
-    ("POST", "/api/sessions/{id}/turns/{turn}/restore"),
-    ("POST", "/api/sessions/{id}/variants"),
-    ("POST", "/api/users"),
-    ("POST", "/api/workspaces"),
-    ("POST", "/api/workspaces/{id}/connectors"),
-    ("POST", "/api/workspaces/{id}/connectors/{cid}/check"),
-    ("POST", "/api/workspaces/{id}/facts"),
-    ("POST", "/api/workspaces/{id}/members"),
-    ("POST", "/api/workspaces/{id}/skills"),
-    ("PUT", "/api/admin/agent-models"),
-    ("PUT", "/api/admin/memory"),
-    ("PUT", "/api/admin/pricing"),
-    ("PUT", "/api/admin/providers/demo"),
-    ("PUT", "/api/admin/providers/{id}"),
-    ("PUT", "/api/admin/providers/test"),
-    ("PUT", "/api/admin/savings"),
-    ("PUT", "/api/admin/storage"),
-    ("PUT", "/api/admin/workspaces/policy"),
-    ("PUT", "/api/artifacts/{id}/versions/{vid}/thumb"),
-    ("PUT", "/api/connections/{id}/token"),
-    ("PUT", "/api/me/avatar"),
-    ("PUT", "/api/me/classifier"),
-    ("PUT", "/api/media/{id}/thumb"),
-    ("PUT", "/api/me/settings"),
-    ("PUT", "/api/me/settings/personalisation"),
-    ("PUT", "/api/me/workspace"),
-    ("PUT", "/api/sessions/{id}/project"),
-    ("PUT", "/api/sessions/{id}/title"),
-    ("PUT", "/api/users/{id}/exec-ceiling"),
-    ("PUT", "/api/workspaces/{id}/connectors/{cid}"),
-    ("PUT", "/api/workspaces/{id}/connectors/{cid}/account"),
-    ("PUT", "/api/workspaces/{id}/facts/settings"),
-    ("PUT", "/api/workspaces/{id}/members/{user_id}/exec-level"),
-    ("PUT", "/api/workspaces/{id}/memory"),
-    ("PUT", "/api/workspaces/{id}/plugins/{kind}/{name}"),
-    ("PUT", "/api/workspaces/{id}/skills/{scope}/{name}"),
-];
+/// FINDING 1 and 2 of the first half, fixed: routes that read the body
+/// (`Json<T>`, `Bytes`, a limit) or a required query before the handler
+/// asked who was calling. Every non-public route now sits behind
+/// `http::caller::identify`, which runs before any of its handler's
+/// extractors. A route that answers 400, 413, 415 or 422 without
+/// credentials again is a finding like any other. The lists stay as the
+/// place a known exception would be pinned, and must stay empty.
+const BODY_FIRST: &[(&str, &str)] = &[];
 const BODY_FIRST_CODES: &[u16] = &[400, 413, 415, 422];
-
-/// FINDING 2, left as it is: `Query<UploadQuery>` (a required `name`) runs
-/// before the handler's login check, so the answer without credentials is 400.
-const QUERY_FIRST: &[(&str, &str)] = &[("POST", "/api/attachments")];
+const QUERY_FIRST: &[(&str, &str)] = &[];
 const QUERY_FIRST_CODES: &[u16] = &[400];
 
 fn fill(path: &str) -> String {
@@ -877,4 +807,127 @@ async fn websocket_authenticates_itself() {
             Ok(other) => panic!("an unauthenticated socket was sent {other:?}"),
         }
     }
+}
+
+/// What an unauthenticated upload costs: nothing of its body is read. A
+/// 1 GB `Content-Length` with `Expect: 100-continue` is answered 401 with
+/// no `100 Continue` first (so a well-behaved client never sends the body),
+/// and the server closes the connection instead of draining the rest; a
+/// client that sends anyway gets the same 401 and the same close.
+#[tokio::test]
+async fn an_unauthenticated_upload_is_refused_unread() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let rig = start().await;
+    let addr = rig.base.trim_start_matches("http://").to_string();
+    for (expect, sent) in [(true, 0usize), (false, 64 * 1024)] {
+        let mut s = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        let mut head = format!(
+            "POST /api/sessions HTTP/1.1\r\nHost: {addr}\r\ncontent-type: application/json\r\ncontent-length: 1000000000\r\n"
+        );
+        if expect {
+            head.push_str("expect: 100-continue\r\n");
+        }
+        head.push_str("\r\n");
+        s.write_all(head.as_bytes()).await.unwrap();
+        s.write_all(&vec![b'{'; sent]).await.unwrap();
+        // Read until the server closes; a server that waited for the rest
+        // of the gigabyte would time out here.
+        let mut got = Vec::new();
+        let read = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut buf = [0u8; 4096];
+            loop {
+                match s.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+            }
+        })
+        .await;
+        let text = String::from_utf8_lossy(&got);
+        assert!(
+            read.is_ok(),
+            "expect={expect}: the server kept the connection open: {text}"
+        );
+        assert!(
+            text.starts_with("HTTP/1.1 401"),
+            "expect={expect}: not a bare 401: {text}"
+        );
+        assert!(!text.contains("100 Continue"), "expect={expect}: {text}");
+    }
+}
+
+/// The layer takes a link (a live login's cookie and a URL minted for it,
+/// no login key) only where the byte handlers take one today: a GET of a
+/// linkable URL. A made file's download gets past it (and answers 404 for
+/// a chat that does not exist, as before); a PUT to a linkable URL with
+/// the same kind of link is 401 before its body is read.
+#[tokio::test]
+async fn a_link_counts_only_for_the_byte_routes() {
+    let rig = start().await;
+    let c = reqwest::Client::new();
+    let r = c
+        .post(format!("{}/api/login", rig.base))
+        .json(&json!({"username": "alex", "password": "admin password"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let cookie = r
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let key = r.json::<serde_json::Value>().await.unwrap()["login_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let made = format!("/api/sessions/{}/made/f1", fill("{id}"));
+    let thumb = "/api/media/m1/thumb";
+    let links: serde_json::Value = c
+        .post(format!("{}/api/links", rig.base))
+        .header("cookie", &cookie)
+        .header(common::LOGIN_HEADER, &key)
+        .same_origin()
+        .json(&json!({"urls": [made, thumb]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let link = |u: &str| links["links"][u].as_str().unwrap().to_string();
+    let r = c
+        .get(format!("{}{}", rig.base, link(&made)))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::NOT_FOUND,
+        "the link got past the layer"
+    );
+    // The same link on another URL is nobody.
+    let other = link(&made).replace("/f1?", "/f2?");
+    let r = c
+        .get(format!("{}{other}", rig.base))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    let r = c
+        .put(format!("{}{}", rig.base, link(thumb)))
+        .header("cookie", &cookie)
+        .same_origin()
+        .body(vec![0u8; 1 << 20])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "a link never writes");
 }
