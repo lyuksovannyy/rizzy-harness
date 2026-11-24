@@ -1,5 +1,5 @@
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -14,6 +14,7 @@ pub(crate) use caller::ByteCaller;
 use caller::{Admin, Caller, User};
 use memory::{memory_err, memory_store};
 
+mod account;
 mod agent_edits;
 mod approval_mode;
 mod artifacts;
@@ -23,6 +24,7 @@ mod bg_output;
 mod caller;
 mod chat_allows;
 mod chat_diff;
+mod classifier;
 mod compact;
 mod connection_repos;
 mod connections;
@@ -43,6 +45,7 @@ mod links;
 mod made_files;
 mod media;
 mod memory;
+mod nodes;
 mod pins;
 mod plugins;
 mod pricing;
@@ -53,6 +56,8 @@ mod push;
 mod retry;
 mod rewind;
 mod routines;
+mod search;
+mod server_settings;
 mod sessions;
 mod skills;
 mod skills_menu;
@@ -61,6 +66,7 @@ mod storage;
 mod usage;
 pub(crate) use usage::TIME_LIMIT as USAGE_TIME_LIMIT;
 mod users;
+mod voice;
 mod workspaces;
 
 pub fn router(master: Master) -> Router {
@@ -104,15 +110,15 @@ fn public() -> Router<Master> {
     Router::new()
         .route(
             "/api/setup",
-            get(setup_status)
-                .post(setup)
+            get(account::setup_status)
+                .post(account::setup)
                 .layer(axum::extract::DefaultBodyLimit::max(auth::AUTH_BODY_LIMIT)),
         )
         .route(
             "/api/login",
-            post(login).layer(axum::extract::DefaultBodyLimit::max(auth::AUTH_BODY_LIMIT)),
+            post(account::login).layer(axum::extract::DefaultBodyLimit::max(auth::AUTH_BODY_LIMIT)),
         )
-        .route("/api/logout", post(logout))
+        .route("/api/logout", post(account::logout))
         .route("/api/ws", get(crate::ws::upgrade))
         .merge(hooks::routes())
 }
@@ -129,17 +135,10 @@ fn private(master: &Master) -> Router<Master> {
 /// The routes of [`private`], without its layer.
 fn private_routes() -> Router<Master> {
     Router::new()
-        .route("/api/me", get(me))
-        .route("/api/me/password", post(change_password))
         .route(
             "/api/me/workspace",
             axum::routing::put(workspaces::set_active),
         )
-        .route(
-            "/api/me/classifier",
-            get(get_classifier).put(put_classifier),
-        )
-        .route("/api/search", get(search))
         .route("/api/favicon", get(crate::favicon::favicon))
         .route("/api/admin/providers", get(providers::get_providers))
         .route(
@@ -186,7 +185,6 @@ fn private_routes() -> Router<Master> {
             "/api/admin/agents/{id}/avatar",
             axum::routing::put(providers::put_agent_avatar),
         )
-        .route("/api/notices", get(notices))
         .route(
             "/api/workspaces",
             get(workspaces::list).post(workspaces::create),
@@ -252,29 +250,7 @@ fn private_routes() -> Router<Master> {
             "/api/users/{id}/exec-ceiling",
             axum::routing::put(levels::set_ceiling),
         )
-        .route("/api/nodes", get(nodes))
-        .route("/api/admin/nodes", get(admin_nodes))
-        .route("/api/admin/nodes/join", post(node_join_token))
-        .route("/api/admin/nodes/{id}", axum::routing::delete(revoke_node))
-        .route("/api/models", get(models))
-        .route("/api/agents", get(agents).post(agent_edits::create_agent))
-        .route(
-            "/api/agents/{id}",
-            get(agent_edits::get_agent)
-                .patch(agent_edits::update_agent)
-                .delete(agent_edits::delete_agent),
-        )
-        .route("/api/agent-summary", post(agent_edits::generate_summary))
-        .route("/api/features", get(features))
-        .route(
-            "/api/transcribe",
-            post(transcribe).layer(axum::extract::DefaultBodyLimit::max(
-                crate::voice::MAX_AUDIO,
-            )),
-        )
         .route("/api/admin/memory", get(get_memory_cfg).put(put_memory_cfg))
-        .route("/api/admin/savings", get(get_savings).put(put_savings))
-        .route("/api/admin/graphify", get(get_graphify))
         .route("/api/attention", get(attention))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}/seen", post(mark_seen))
@@ -329,6 +305,13 @@ fn private_routes() -> Router<Master> {
         .merge(connection_repos::routes())
         .merge(custom_connectors::routes())
         .merge(sessions::routes())
+        .merge(account::routes())
+        .merge(nodes::routes())
+        .merge(server_settings::routes())
+        .merge(voice::routes())
+        .merge(search::routes())
+        .merge(classifier::routes())
+        .merge(agent_edits::routes())
 }
 
 pub(crate) struct ApiError(StatusCode, String);
@@ -478,480 +461,6 @@ async fn agentic_gate(
 fn parse_sid(id: &str) -> ApiResult<SessionId> {
     id.parse()
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "bad session id".into()))
-}
-
-async fn setup_status(State(m): State<Master>) -> ApiResult<Json<serde_json::Value>> {
-    let users = m.inner.mirror.call(|s| s.user_count()).await?;
-    Ok(Json(json!({ "claimed": users > 0 })))
-}
-
-#[derive(Deserialize)]
-struct SetupBody {
-    claim_code: String,
-    username: String,
-    password: String,
-}
-
-async fn setup(State(m): State<Master>, Json(b): Json<SetupBody>) -> ApiResult<Response> {
-    let user = match m
-        .inner
-        .auth
-        .claim(&m.inner.mirror, &b.claim_code, b.username, b.password)
-        .await
-    {
-        Ok(u) => u,
-        Err(e) => return Ok(e.into_response()),
-    };
-    tracing::info!(username = %user.username, "server claimed by owner");
-    session_response(&m, &user.user_id).await
-}
-
-/// A new login for `user_id`: the session cookie, and the login key in
-/// the body, this once (P-1, `auth`). Login, the first-run claim and a
-/// password change are the only callers.
-async fn session_response(m: &Master, user_id: &str) -> ApiResult<Response> {
-    let login = auth::create_ui_session(&m.inner.mirror, user_id).await?;
-    Ok((
-        [(
-            header::SET_COOKIE,
-            m.inner.auth.session_cookie(login.cookie.expose()),
-        )],
-        Json(json!({"ok": true, "login_key": login.key.expose()})),
-    )
-        .into_response())
-}
-
-#[derive(Deserialize)]
-struct LoginBody {
-    username: String,
-    password: String,
-}
-
-async fn login(State(m): State<Master>, Json(b): Json<LoginBody>) -> ApiResult<Response> {
-    // Format, throttle, hash permit and verification: auth::Auth::login.
-    match m
-        .inner
-        .auth
-        .login(&m.inner.mirror, &b.username, b.password)
-        .await
-    {
-        Ok(user) => session_response(&m, &user.user_id).await,
-        Err(e) => Ok(e.into_response()),
-    }
-}
-
-async fn logout(State(m): State<Master>, headers: HeaderMap) -> Response {
-    // The session row goes, so a copy of the cookie is useless from now on.
-    // The cookie alone is enough (Gate 3 fix review 2, R2-3): a page that
-    // lost its key (storage cleared) must be able to end its login, which
-    // would otherwise live for 30 days. Ending a login never harms its
-    // owner and reveals nothing (the answer is the same whether the cookie
-    // was live, dead or made up); the worst a holder of the cookie (another
-    // local port's server, P-1) can do is sign the person out, which it
-    // could only repeat after they visit it again. It ends that one login,
-    // never the person's others. The browser's cookie is cleared either way.
-    if let Some(id) = auth::cookie_value(&headers) {
-        auth::delete_ui_session(&m, &id).await;
-    }
-    (
-        [(header::SET_COOKIE, m.inner.auth.clear_cookie())],
-        Json(json!({"ok": true})),
-    )
-        .into_response()
-}
-
-async fn me(
-    Caller(who): Caller,
-    State(m): State<Master>,
-    headers: HeaderMap,
-) -> ApiResult<Response> {
-    // The active workspace comes along so the UI can key on it at once.
-    let workspace = workspaces::active_summary(&m, &who).await?;
-    let body = Json(
-        json!({ "ok": true, "app": harness_core::APP_NAME, "user": who, "workspace": workspace }),
-    );
-    // The server-side expiry slides with use; the browser's copy of the
-    // cookie has to slide too, so it is sent again here (the UI asks for
-    // /api/me each time it loads).
-    Ok(match auth::cookie_value(&headers) {
-        Some(id) if who.user_id.is_some() => (
-            [(header::SET_COOKIE, m.inner.auth.session_cookie(&id))],
-            body,
-        )
-            .into_response(),
-        _ => body.into_response(),
-    })
-}
-
-/// The nodes the caller may pick from: without the right to use the
-/// embedded agentic node (`[nodes] local_node_users`), it is left out.
-async fn nodes(User(who): User, State(m): State<Master>) -> ApiResult<Json<serde_json::Value>> {
-    let local_ok = ws::may_use_local_node(&m, &who);
-    let nodes: Vec<_> = m
-        .nodes()
-        .into_iter()
-        .filter(|n| local_ok || !m.is_local_node(&n.node_id))
-        // What a node can contain says how to get out of it: only for those
-        // whose account may run agent chats at all (N.10a).
-        .map(|mut n| {
-            if who.exec_ceiling < harness_core::policy::ExecLevel::Sandbox {
-                (n.exec_modes, n.exec_gaps) = Default::default();
-                n.exec_switch = false;
-            }
-            n
-        })
-        .collect();
-    Ok(Json(json!({ "nodes": nodes })))
-}
-
-/// Which settings a read of models, agents or notices follows.
-#[derive(Deserialize)]
-struct ScopeQuery {
-    /// A workspace the caller is a member of (users: defaults to the
-    /// active one; the API token: the server's without it).
-    #[serde(default)]
-    workspace: Option<String>,
-    /// `server`: the server's own values, without any workspace's.
-    #[serde(default)]
-    scope: Option<String>,
-}
-
-/// The workspace whose settings apply, or `None` for the server's own.
-async fn settings_scope(
-    m: &Master,
-    who: &auth::Principal,
-    q: &ScopeQuery,
-) -> ApiResult<Option<ws::Access>> {
-    match q.scope.as_deref() {
-        None => Ok(ws::scope(m, who, q.workspace.as_deref()).await?),
-        Some("server") if q.workspace.is_none() => Ok(None),
-        Some("server") => Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "ask for a workspace or for the server scope, not both".into(),
-        )),
-        Some(_) => Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "scope must be server".into(),
-        )),
-    }
-}
-
-async fn scoped_resolver(
-    m: &Master,
-    who: &auth::Principal,
-    q: &ScopeQuery,
-) -> ApiResult<crate::Resolver> {
-    Ok(match settings_scope(m, who, q).await? {
-        Some(a) => a.resolver(m).await,
-        None => m.resolver(None),
-    })
-}
-
-/// The listed models; `default` is the scope's default model.
-async fn models(
-    User(who): User,
-    State(m): State<Master>,
-    Query(q): Query<ScopeQuery>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let r = scoped_resolver(&m, &who, &q).await?;
-    Ok(Json(json!({ "models": r.models() })))
-}
-
-/// An agent as the UI lists it in a scope: its definition, the model
-/// assigned to it there, the model it runs on and the fallbacks it has
-/// there (its own chain's, else the ones it inherits with the default),
-/// which of those are unavailable, and its avatar (server-wide).
-fn agent_json(m: &Master, r: &crate::Resolver, a: &harness_agents::Agent) -> serde_json::Value {
-    let chain = r.agent_chain(&a.id);
-    let main = r.agent_main_model(a);
-    let fallbacks = r.agent_fallbacks(&a.id, main.as_deref());
-    let mut unavailable: Vec<String> = Vec::new();
-    for x in main.iter().chain(&fallbacks) {
-        if r.model_unavailable(x) && !unavailable.contains(x) {
-            unavailable.push(x.clone());
-        }
-    }
-    let mut v = json!(a);
-    v["default_model"] = json!(chain.map(|c| c.model));
-    v["main_model"] = json!(main);
-    v["fallbacks"] = json!(fallbacks);
-    v["unavailable"] = json!(unavailable);
-    v["avatar"] = json!(m.agent_avatar(&a.id));
-    v
-}
-
-async fn agents(
-    User(who): User,
-    State(m): State<Master>,
-    Query(q): Query<ScopeQuery>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let scope = settings_scope(&m, &who, &q).await?;
-    let r = match &scope {
-        Some(a) => a.resolver(&m).await,
-        None => m.resolver(None),
-    };
-    let agents: Vec<serde_json::Value> = r
-        .agents()
-        .list()
-        .iter()
-        .map(|a| agent_json(&m, &r, a))
-        .collect();
-    Ok(Json(json!({
-        "agents": agents,
-        // The ordinary-mode default, as before.
-        "default": r.default_agent(),
-        // The default per mode, for the picker to preselect; null when
-        // the setting names an agent that cannot work there.
-        "defaults": {
-            "chat": r.default_for(harness_core::event::Profile::Chat).ok(),
-            "agentic": r.default_for(harness_core::event::Profile::Agentic).ok(),
-        },
-        // Whether the caller may make and change agents in this scope.
-        "may_edit": agent_edits::may_edit(&who, scope.as_ref()),
-        // For the workspace's editors: its own agents a server agent with
-        // the same id hides (PLAN.md T79), to delete or remake.
-        "hidden": agent_edits::hidden(&m, &who, scope.as_ref()).await,
-    })))
-}
-
-async fn notices(
-    User(who): User,
-    State(m): State<Master>,
-    Query(q): Query<ScopeQuery>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let scope = settings_scope(&m, &who, &q).await?;
-    Ok(Json(
-        json!({ "notices": crate::notices::for_viewer(&m, &who, scope.as_ref()).await }),
-    ))
-}
-
-#[derive(Deserialize)]
-struct PasswordBody {
-    current: String,
-    new: String,
-}
-
-async fn change_password(
-    Caller(who): Caller,
-    State(m): State<Master>,
-    Json(b): Json<PasswordBody>,
-) -> ApiResult<Response> {
-    let Some(uid) = who.user_id.clone() else {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "the API token has no password".into(),
-        ));
-    };
-    let lookup = uid.clone();
-    let phc = m
-        .inner
-        .mirror
-        .call(move |s| s.user_by_id(&lookup))
-        .await?
-        .map(|u| u.password_hash);
-    let hasher = m.inner.auth.hasher();
-    // 403, not 401: a 401 means "not logged in", which signs the page out
-    // and forgets its login key.
-    if !auth::verify_password(hasher, b.current, phc).await? {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "current password is wrong".into(),
-        ));
-    }
-    auth::set_password(&m, &uid, b.new, false).await?;
-    // Every session was revoked; give this browser a fresh one.
-    session_response(&m, &uid).await
-}
-
-#[derive(Deserialize)]
-struct SearchQuery {
-    /// Empty: the newest items.
-    #[serde(default)]
-    q: String,
-    /// `all`, `chats`, `projects`, `media` or `artifacts`; `chats` when left
-    /// out (the panel always names it).
-    #[serde(default, rename = "in")]
-    kind: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-    /// The previous page's `next`.
-    #[serde(default)]
-    cursor: Option<String>,
-    /// Similar-chat suggestions for the bar (strict; may return nothing).
-    #[serde(default, deserialize_with = "query_flag")]
-    suggest: bool,
-    /// Users: defaults to the active workspace. The API token: no filter.
-    #[serde(default)]
-    workspace: Option<String>,
-}
-
-/// The search panel (docs/sidebar-search.md): one tab's page, or All. Chats
-/// are the caller's own for everyone, admins included (T10); everything is
-/// in the one workspace asked for (members only).
-async fn search(
-    User(who): User,
-    State(m): State<Master>,
-    Query(q): Query<SearchQuery>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
-    let kinds = search_kinds(&m, &who, scope.as_ref()).await;
-    let owner = who.user_id.clone();
-    let workspace = scope.map(|a| a.workspace.workspace_id);
-    let text: String = q.q.chars().take(500).collect();
-    if q.suggest {
-        let results = m
-            .inner
-            .mirror
-            .call(move |s| crate::search::suggest(s, &text, owner.as_deref(), workspace.as_deref()))
-            .await?;
-        return Ok(Json(
-            json!({ "results": results, "next": null, "kinds": kinds }),
-        ));
-    }
-    let asked = q.kind.as_deref().unwrap_or("chats");
-    let all = asked == "all";
-    if !all && !crate::search::KINDS.contains(&asked) {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "in must be all, chats, projects, media or artifacts".into(),
-        ));
-    }
-    let offset = match q.cursor.as_deref() {
-        None | Some("") => 0,
-        Some(c) => c
-            .parse::<u32>()
-            .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "bad cursor".into()))?
-            as usize,
-    };
-    // A kind whose area the viewer does not have answers nothing.
-    let searched = kinds
-        .iter()
-        .copied()
-        .filter(|k| all || *k == asked)
-        .collect();
-    let r = crate::search::Request {
-        q: text,
-        kinds: searched,
-        all,
-        owner,
-        workspace,
-        limit: q.limit.unwrap_or(20).clamp(1, 50),
-        offset,
-    };
-    let page = m
-        .inner
-        .mirror
-        .call(move |s| crate::search::run(s, &r))
-        .await?;
-    Ok(Json(json!({
-        "results": page.results,
-        "next": page.next.map(|n| n.to_string()),
-        "kinds": kinds,
-    })))
-}
-
-/// The search tabs `who` has in `scope`: chats and projects always, media
-/// and artifacts while their areas show (the same flags `/api/features`
-/// sends).
-async fn search_kinds(
-    m: &Master,
-    who: &auth::Principal,
-    scope: Option<&ws::Access>,
-) -> Vec<&'static str> {
-    let media = crate::media::features(m, who, scope).await;
-    let artifacts = crate::artifacts::features(m, who, scope).await;
-    kinds_shown(&media, &artifacts)
-}
-
-fn kinds_shown(media: &serde_json::Value, artifacts: &serde_json::Value) -> Vec<&'static str> {
-    let mut kinds = vec!["chats", "projects"];
-    for (kind, block) in [("media", media), ("artifacts", artifacts)] {
-        if block["show"] == true {
-            kinds.push(kind);
-        }
-    }
-    kinds
-}
-
-/// The bar's mode classifier, per user. Only weights and accuracy windows:
-/// no typed text is ever stored.
-#[derive(Debug, Clone, serde::Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ClassifierState {
-    version: u32,
-    weights: Vec<f32>,
-    bias: Vec<f32>,
-    labels: u32,
-    /// Last <= 100 outcomes (1 = right) for the rules and for the model.
-    rules_window: Vec<u8>,
-    model_window: Vec<u8>,
-}
-
-const CLASSIFIER_BUCKETS: usize = 4096;
-const CLASSIFIER_CLASSES: usize = 3;
-
-impl ClassifierState {
-    fn validate(&self) -> Result<(), String> {
-        if self.version != 1 {
-            return Err("unsupported classifier version".into());
-        }
-        if self.weights.len() != CLASSIFIER_BUCKETS * CLASSIFIER_CLASSES
-            || self.bias.len() != CLASSIFIER_CLASSES
-        {
-            return Err("classifier weights have the wrong shape".into());
-        }
-        if !self
-            .weights
-            .iter()
-            .chain(&self.bias)
-            .all(|w| w.is_finite() && w.abs() < 1e4)
-        {
-            return Err("classifier weights must be finite and bounded".into());
-        }
-        for w in [&self.rules_window, &self.model_window] {
-            if w.len() > 100 || w.iter().any(|x| *x > 1) {
-                return Err("accuracy windows hold at most 100 values of 0 or 1".into());
-            }
-        }
-        Ok(())
-    }
-}
-
-fn classifier_key(who: &auth::Principal) -> String {
-    format!(
-        "classifier:{}",
-        who.user_id.as_deref().unwrap_or("api-token")
-    )
-}
-
-async fn get_classifier(
-    User(who): User,
-    State(m): State<Master>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let key = classifier_key(&who);
-    let v = m.inner.mirror.call(move |s| s.kv_get(&key)).await?;
-    Ok(Json(
-        match v.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok()) {
-            Some(state) => state,
-            None => serde_json::Value::Null,
-        },
-    ))
-}
-
-async fn put_classifier(
-    User(who): User,
-    State(m): State<Master>,
-    Json(state): Json<ClassifierState>,
-) -> ApiResult<Json<serde_json::Value>> {
-    state
-        .validate()
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
-    let (key, v) = (
-        classifier_key(&who),
-        serde_json::to_string(&state).expect("serialize"),
-    );
-    m.inner.mirror.call(move |s| s.kv_set(&key, &v)).await?;
-    Ok(Json(json!({ "ok": true })))
 }
 
 fn runtime(m: &Master) -> ApiResult<std::sync::Arc<crate::providers::ProviderRuntime>> {
@@ -1859,47 +1368,6 @@ async fn put_memory_cfg(
     Ok(Json(memory_cfg_json(&m, &latest)))
 }
 
-async fn admin_nodes(_: Admin, State(m): State<Master>) -> ApiResult<Json<serde_json::Value>> {
-    let listener = m.node_listener();
-    Ok(Json(json!({
-        "nodes": m.registered_nodes().await?,
-        "listener": listener.map(|(port, fp)| json!({ "port": port, "fingerprint": fp })),
-    })))
-}
-
-/// A join token plus everything the node needs, except the host name the
-/// node should dial (the browser knows that better than the server).
-async fn node_join_token(
-    Admin(who): Admin,
-    State(m): State<Master>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let Some((port, fingerprint)) = m.node_listener() else {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "remote nodes are off: start the server with --node-listen 0.0.0.0:7443".into(),
-        ));
-    };
-    let token = m.create_join_token(who.user_id.clone()).await?;
-    Ok(Json(json!({
-        "token": token,
-        "port": port,
-        "fingerprint": fingerprint,
-        "expires_in_s": crate::nodes::JOIN_TOKEN_TTL.as_secs(),
-    })))
-}
-
-async fn revoke_node(
-    _: Admin,
-    State(m): State<Master>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    if !m.revoke_node(&id).await? {
-        return Err(ApiError(StatusCode::NOT_FOUND, "no such node".into()));
-    }
-    crate::artifacts::on_node_revoked(&m, &id).await;
-    Ok(Json(json!({ "ok": true })))
-}
-
 #[derive(Deserialize)]
 struct RestoreBody {
     #[serde(default)]
@@ -1938,67 +1406,6 @@ async fn select_variant(
     m.select_variant(row.session_id, b.group, b.message_id)
         .await?;
     Ok(Json(json!({ "ok": true })))
-}
-
-/// What optional services this server has, and what the caller may use in
-/// a workspace (the sidebar shows an entry only when its `show` is true).
-async fn features(
-    User(who): User,
-    State(m): State<Master>,
-    Query(q): Query<WorkspaceQuery>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
-    let scope = scope.as_ref();
-    let routines = crate::routines::features(&m, &who, scope).await;
-    let media = crate::media::features(&m, &who, scope).await;
-    let artifacts = crate::artifacts::features(&m, &who, scope).await;
-    let kinds = kinds_shown(&media, &artifacts);
-    Ok(Json(json!({
-        "voice": m.transcriber().is_some(),
-        "memory": m.memory().is_some(),
-        "routines": routines,
-        "media": media,
-        "artifacts": artifacts,
-        "search": { "kinds": kinds },
-    })))
-}
-
-async fn transcribe(
-    User(who): User,
-    State(m): State<Master>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> ApiResult<Json<serde_json::Value>> {
-    let t = m.transcriber().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "voice is not set up on this server".into(),
-        )
-    })?;
-    if body.is_empty() {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "no audio".into()));
-    }
-    // Held until the answer (or the dropped request) ends.
-    let _slot = m
-        .voice_usage()
-        .begin(
-            who.user_id.as_deref().unwrap_or(""),
-            body.len() as u64,
-            t.limits(),
-            harness_core::now_ms(),
-        )
-        .map_err(|e| ApiError(StatusCode::TOO_MANY_REQUESTS, e.to_string()))?;
-    let mime = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| v.starts_with("audio/"))
-        .unwrap_or("audio/webm")
-        .to_string();
-    let text = t
-        .transcribe(body.to_vec(), &mime)
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
-    Ok(Json(json!({ "text": text })))
 }
 
 /// Chats waiting for the caller (approvals, unanswered questions).
@@ -2040,46 +1447,4 @@ async fn mark_seen(
         .await?;
     m.nudge(crate::Live::SessionsChanged(crate::Audience::Chat(sid)));
     Ok(Json(json!({ "ok": true })))
-}
-
-// ---- token savings -------------------------------------------------------
-
-async fn get_savings(
-    _: Admin,
-    State(m): State<Master>,
-) -> ApiResult<Json<harness_core::savings::TokenSavings>> {
-    Ok(Json(runtime(&m)?.config().savings))
-}
-
-/// Replace the token-saving settings; the next turn uses them.
-async fn put_savings(
-    _: Admin,
-    State(m): State<Master>,
-    Json(b): Json<harness_core::savings::TokenSavings>,
-) -> ApiResult<Json<harness_core::savings::TokenSavings>> {
-    let rt = runtime(&m)?;
-    let _edits = rt.lock_edits().await;
-    let mut cfg = rt.config();
-    cfg.savings = b;
-    rt.save(cfg.clone())
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(cfg.savings))
-}
-
-/// Whether graphify is installed and allowed on the built-in node, and what to
-/// do on a node to turn it on. Read-only: node.toml is the node's, so no HTTP
-/// call installs graphify or edits it (FIX_PLAN 1.2, PLAN T5).
-async fn get_graphify(_: Admin, State(m): State<Master>) -> ApiResult<Json<serde_json::Value>> {
-    let local = m.graphify();
-    Ok(Json(json!({
-        "local_node": local.is_some(),
-        "allowed": local.as_ref().is_some_and(|(s, _)| s.allowed()),
-        "node_toml": local.as_ref().map(|(_, p)| p.display().to_string()),
-        "installed": harness_tools::graphify::installed_version().await,
-        "pinned_version": harness_tools::graphify::VERSION,
-        "steps": [
-            "rizzy-harness graphify install",
-            "graphify = true    # add to node.toml, then restart the node",
-        ],
-    })))
 }
