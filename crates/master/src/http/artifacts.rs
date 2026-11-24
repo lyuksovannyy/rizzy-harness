@@ -18,7 +18,7 @@ use harness_store::artifacts::{ArtifactQuery, ArtifactRow, VersionRow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::caller::{ByteCaller, User};
+use super::caller::{ByteCaller, User, ViaLink};
 use super::{ApiError, ApiResult, acting_session, agentic_gate, query_flag, visible_session};
 use crate::auth::Principal;
 use crate::workspaces::{self as ws, Perm};
@@ -485,11 +485,11 @@ async fn remove(
 /// a fresh link of its own.
 async fn latest_download(
     ByteCaller(who): ByteCaller,
+    ViaLink(by_link): ViaLink,
     State(m): State<Master>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
-    let by_link = crate::auth::authenticate(&m, &headers).await.is_none();
     let row = visible(&m, &who, &id).await?;
     let aid = row.artifact_id.clone();
     let latest = m

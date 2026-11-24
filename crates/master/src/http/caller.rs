@@ -99,6 +99,19 @@ pub(super) struct Admin(pub Principal);
 /// element or a download.
 pub(crate) struct ByteCaller(pub Principal);
 
+/// Whether the caller came by a link (no login key, no token), as the layer
+/// found it: for a byte route that must tell the two apart (the latest
+/// download's redirect carries a fresh link only for a link). It says
+/// nothing about who may call; take a [`ByteCaller`] first.
+pub(super) struct ViaLink(pub bool);
+
+impl<S: Send + Sync> FromRequestParts<S> for ViaLink {
+    type Rejection = ApiError;
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, ApiError> {
+        Ok(ViaLink(found(parts)?.by_link))
+    }
+}
+
 impl<S: Send + Sync> FromRequestParts<S> for Caller {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, ApiError> {
