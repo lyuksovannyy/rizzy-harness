@@ -45,17 +45,17 @@ use common::SameOrigin as _;
 // ---------------------------------------------------------------- lexer
 
 #[derive(Clone, Debug, PartialEq)]
-enum Tok {
+pub(crate) enum Tok {
     Id(String),
     Str(String),
     P(char),
 }
 
-type Toks = [(Tok, usize)];
+pub(crate) type Toks = [(Tok, usize)];
 
 /// Rust source as tokens with their lines: comments dropped, string
 /// contents kept apart from code, lifetimes told from char literals.
-fn lex(src: &str) -> Vec<(Tok, usize)> {
+pub(crate) fn lex(src: &str) -> Vec<(Tok, usize)> {
     let c: Vec<char> = src.chars().collect();
     let (mut i, mut line) = (0, 1);
     let mut out = Vec::new();
@@ -166,7 +166,7 @@ fn raw_string(c: &[char], i: usize) -> Option<(String, usize)> {
 // -------------------------------------------------------- route reading
 
 /// The index of the `)`, `]` or `}` that closes the group opened at `open`.
-fn close_of(t: &Toks, open: usize) -> Option<usize> {
+pub(crate) fn close_of(t: &Toks, open: usize) -> Option<usize> {
     let mut depth = 0;
     for (i, (tok, _)) in t.iter().enumerate().skip(open) {
         match tok {
@@ -183,12 +183,45 @@ fn close_of(t: &Toks, open: usize) -> Option<usize> {
     None
 }
 
-/// Helper functions in a `routes()` that build a method router, and what
-/// they register. A new helper must be written here on purpose.
-const HELPERS: &[(&str, &[&str])] = &[("image", &["PUT", "DELETE"])];
+/// Helper functions in a `routes()` that build a method router, what they
+/// register and the functions their closures call (`profile.rs`). A new
+/// helper must be written here on purpose.
+const HELPERS: &[(&str, &[&str], &[&str])] =
+    &[("image", &["PUT", "DELETE"], &["upload", "remove"])];
 
-/// The methods of the handler expression `get(a).post(b).layer(c)`.
-fn methods_of(args: &Toks) -> Result<Vec<String>, String> {
+/// What one method's handler expression names: the paths it calls
+/// (`upload(..)` in a closure) or is (`get(a::b)`), as segments.
+pub(crate) type Names = Vec<Vec<String>>;
+
+fn names_in(args: &Toks) -> Names {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let Tok::Id(first) = &args[i].0 else {
+            i += 1;
+            continue;
+        };
+        let start = i;
+        let mut segs = vec![first.clone()];
+        i += 1;
+        while let (Some((Tok::P(':'), _)), Some((Tok::P(':'), _)), Some((Tok::Id(n), _))) =
+            (args.get(i), args.get(i + 1), args.get(i + 2))
+        {
+            segs.push(n.clone());
+            i += 3;
+        }
+        let called = matches!(args.get(i), Some((Tok::P('('), _)));
+        let whole = start == 0 && i == args.len();
+        if called || whole {
+            out.push(segs);
+        }
+    }
+    out
+}
+
+/// The methods of the handler expression `get(a).post(b).layer(c)`, each
+/// with what its handler names.
+fn methods_of(args: &Toks) -> Result<Vec<(String, Names)>, String> {
     let mut i = 0;
     let mut out = Vec::new();
     loop {
@@ -210,14 +243,21 @@ fn methods_of(args: &Toks) -> Result<Vec<String>, String> {
         if !matches!(args.get(i), Some((Tok::P('('), _))) {
             return Err(format!("`{name}` is not called"));
         }
+        let open = i;
         i = close_of(args, i).ok_or("unbalanced handler")? + 1;
+        let inner = &args[open + 1..i - 1];
         match name.as_str() {
             "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "trace" => {
-                out.push(name.to_uppercase())
+                out.push((name.to_uppercase(), names_in(inner)))
             }
             "layer" | "route_layer" => {}
-            n => match HELPERS.iter().find(|(h, _)| *h == n) {
-                Some((_, ms)) => out.extend(ms.iter().map(|m| m.to_string())),
+            n => match HELPERS.iter().find(|(h, _, _)| *h == n) {
+                Some((_, ms, calls)) => out.extend(ms.iter().map(|m| {
+                    (
+                        m.to_string(),
+                        calls.iter().map(|c| vec![c.to_string()]).collect(),
+                    )
+                })),
                 None => return Err(format!("unknown method helper `{n}` (any/on/closure?)")),
             },
         }
@@ -231,12 +271,15 @@ fn methods_of(args: &Toks) -> Result<Vec<String>, String> {
 }
 
 #[derive(Debug, Default)]
-struct Table {
+pub(crate) struct Table {
     /// path template -> methods
-    routes: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) routes: BTreeMap<String, BTreeSet<String>>,
+    /// (method, path template) -> the file that registers it and what its
+    /// handler names there.
+    pub(crate) handlers: BTreeMap<(String, String), (PathBuf, Names)>,
 }
 
-fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+pub(crate) fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in std::fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
         if p.is_dir() {
@@ -249,7 +292,7 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Read the registrations of one file's tokens into `t`; return the modules
 /// it merges (`.merge(a::b::routes())`) as paths of segments.
-fn read_file(
+pub(crate) fn read_file(
     file: &Path,
     toks: &Toks,
     t: &mut Table,
@@ -281,7 +324,11 @@ fn read_file(
                 };
                 match methods_of(&args[2..]) {
                     Ok(ms) if !ms.is_empty() => {
-                        t.routes.entry(path.clone()).or_default().extend(ms)
+                        for (m, names) in ms {
+                            t.routes.entry(path.clone()).or_default().insert(m.clone());
+                            t.handlers
+                                .insert((m, path.clone()), (file.to_path_buf(), names));
+                        }
                     }
                     Ok(_) => problems.push(format!("{here}: `{path}` registers no method")),
                     Err(e) => problems.push(format!("{here}: `{path}`: {e}")),
@@ -322,9 +369,21 @@ fn read_file(
                         _ => break false,
                     }
                 };
+                // `local(..)`: a function of this same file, whose routes
+                // this loop reads anyway (`http.rs`'s `public` and
+                // `private`).
+                let local = match args.first().map(|x| &x.0) {
+                    Some(Tok::Id(f)) if matches!(args.get(1), Some((Tok::P('('), _))) => {
+                        close_of(args, 1) == Some(args.len() - 1)
+                            && toks.windows(2).any(|w| {
+                                w[0].0 == Tok::Id("fn".into()) && w[1].0 == Tok::Id(f.clone())
+                            })
+                    }
+                    _ => false,
+                };
                 if ok && !segs.is_empty() {
                     merges.push(segs);
-                } else {
+                } else if !local {
                     problems.push(format!(
                         "{here}: `.merge` of something but `module::routes()`"
                     ));
@@ -337,7 +396,7 @@ fn read_file(
 }
 
 /// The module `segs` below file `from` (`http.rs` + `users` = `http/users.rs`).
-fn module_file(from: &Path, segs: &[String]) -> Option<PathBuf> {
+pub(crate) fn module_file(from: &Path, segs: &[String]) -> Option<PathBuf> {
     let mut cur = from.to_path_buf();
     for s in segs {
         let base = cur.with_extension("");
@@ -354,15 +413,44 @@ fn module_file(from: &Path, segs: &[String]) -> Option<PathBuf> {
     Some(cur)
 }
 
+/// The tokens without the `#[cfg(test)] mod name { .. }` blocks: a unit
+/// test's own small router is not served.
+pub(crate) fn without_test_modules(t: Vec<(Tok, usize)>) -> Vec<(Tok, usize)> {
+    let head = [
+        Tok::P('#'),
+        Tok::P('['),
+        Tok::Id("cfg".into()),
+        Tok::P('('),
+        Tok::Id("test".into()),
+        Tok::P(')'),
+        Tok::P(']'),
+        Tok::Id("mod".into()),
+    ];
+    let mut out = Vec::with_capacity(t.len());
+    let mut i = 0;
+    while i < t.len() {
+        let at_head = t.len() > i + head.len() + 1
+            && head.iter().enumerate().all(|(k, h)| t[i + k].0 == *h)
+            && t[i + head.len() + 1].0 == Tok::P('{');
+        if at_head && let Some(end) = close_of(&t, i + head.len() + 1) {
+            i = end + 1;
+            continue;
+        }
+        out.push(t[i].clone());
+        i += 1;
+    }
+    out
+}
+
 /// Every registration the master's `router()` serves, or the problems.
-fn read_table(src_dir: &Path) -> Result<Table, Vec<String>> {
+pub(crate) fn read_table(src_dir: &Path) -> Result<Table, Vec<String>> {
     let mut files = Vec::new();
     rs_files(src_dir, &mut files);
     files.sort();
     let mut problems = Vec::new();
     let mut per_file: BTreeMap<PathBuf, (Table, Vec<Vec<String>>)> = BTreeMap::new();
     for f in &files {
-        let toks = lex(&std::fs::read_to_string(f).unwrap());
+        let toks = without_test_modules(lex(&std::fs::read_to_string(f).unwrap()));
         let mut t = Table::default();
         let merges = read_file(f, &toks, &mut t, &mut problems);
         per_file.insert(f.clone(), (t, merges));
@@ -380,6 +468,7 @@ fn read_table(src_dir: &Path) -> Result<Table, Vec<String>> {
         for (p, ms) in &t.routes {
             all.routes.entry(p.clone()).or_default().extend(ms.clone());
         }
+        all.handlers.extend(t.handlers.clone());
         for m in merges {
             match module_file(&f, m) {
                 Some(next) if reached.insert(next.clone()) => todo.push(next),
@@ -403,7 +492,7 @@ fn read_table(src_dir: &Path) -> Result<Table, Vec<String>> {
     }
 }
 
-fn src_dir() -> PathBuf {
+pub(crate) fn src_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
@@ -458,9 +547,22 @@ fn route_table_is_read_strictly() {
         ));
         assert_eq!(p.len(), 1, "{why}: {p:?}");
     }
+    // A unit test's module is not served.
+    let toks = without_test_modules(lex(
+        "fn a() {} #[cfg(test)] mod tests { fn t() { Router::new().route(\"/x\", any(h)); } } fn b() {}",
+    ));
+    assert!(!toks.iter().any(|(t, _)| *t == Tok::Str("/x".into())));
+    assert!(toks.iter().any(|(t, _)| *t == Tok::Id("b".into())));
     let (_, p, merges) = m("use axum::Router; fn f() { Router::new().merge(a::b::routes()) }");
     assert!(p.is_empty(), "{p:?}");
     assert_eq!(merges, [vec!["a".to_string(), "b".to_string()]]);
+    // A function of the same file is read with the file; one from
+    // elsewhere is not.
+    let (_, p, merges) =
+        m("use axum::Router; fn g(m: &M) -> Router { x } fn f() { Router::new().merge(g(&m)) }");
+    assert!(p.is_empty() && merges.is_empty(), "{p:?}");
+    let (_, p, _) = m("use axum::Router; fn f() { Router::new().merge(h(&m)) }");
+    assert_eq!(p.len(), 1, "{p:?}");
 }
 
 /// The real tree reads cleanly and the walk sees a plausible table.
@@ -475,11 +577,46 @@ fn the_real_route_table_is_readable() {
     );
 }
 
+/// The tokens of the body of `fn name` in `toks` (the first one).
+pub(crate) fn fn_body<'a>(toks: &'a Toks, name: &str) -> Option<&'a Toks> {
+    let at = toks
+        .windows(2)
+        .position(|w| w[0].0 == Tok::Id("fn".into()) && w[1].0 == Tok::Id(name.into()))?;
+    let open = (at..toks.len()).find(|&i| toks[i].0 == Tok::P('{'))?;
+    Some(&toks[open..=close_of(toks, open)?])
+}
+
+/// `http::public()` registers exactly the `PUBLIC` list: a private route
+/// moved there, or a public one added without its reason, fails here
+/// whatever it answers (a handler that still checks its caller itself
+/// would pass the walk below).
+#[test]
+fn the_public_router_is_exactly_the_public_list() {
+    let http = src_dir().join("http.rs");
+    let toks = lex(&std::fs::read_to_string(&http).unwrap());
+    let body = fn_body(&toks, "public").expect("http.rs has `fn public`");
+    let mut t = Table::default();
+    let mut problems = Vec::new();
+    let merges = read_file(&http, body, &mut t, &mut problems);
+    for m in merges {
+        let f = module_file(&http, &m).expect("merged module");
+        let toks = lex(&std::fs::read_to_string(&f).unwrap());
+        read_file(&f, &toks, &mut t, &mut problems);
+    }
+    assert!(problems.is_empty(), "{problems:?}");
+    let got: BTreeSet<(String, String)> = t.handlers.into_keys().collect();
+    let want: BTreeSet<(String, String)> = PUBLIC
+        .iter()
+        .map(|(m, p, _)| (m.to_string(), p.to_string()))
+        .collect();
+    assert_eq!(got, want, "http::public() and PUBLIC differ");
+}
+
 // ---------------------------------------------------------- the walk
 
 /// Public on purpose. Every line says why, and each reason was read in the
 /// handler. Anything else answering something but 401 is a finding.
-const PUBLIC: &[(&str, &str, &str)] = &[
+pub(crate) const PUBLIC: &[(&str, &str, &str)] = &[
     (
         "GET",
         "/api/setup",
@@ -512,108 +649,19 @@ const PUBLIC: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// FINDING 1, left as it is (the second half of 4.1 fixes it): these routes
-/// read and parse the body (`Json<T>`, `Bytes`, a limit) BEFORE the handler
-/// asks who is calling, so an unauthenticated caller gets 400, 413, 415 or
-/// 422 (with the framework's text about the expected fields) instead of 401,
-/// and the body of up to the route's limit is buffered first. Today's answers
-/// are pinned to those codes: a 500, a 200 or a new route in this shape fails
-/// the test. A route that answers 401 everywhere now is STALE: delete it.
-const BODY_FIRST: &[(&str, &str)] = &[
-    ("PATCH", "/api/admin/workspaces/{id}"),
-    ("PATCH", "/api/agents/{id}"),
-    ("PATCH", "/api/artifacts/{id}"),
-    ("PATCH", "/api/artifacts/{id}/versions/{vid}"),
-    ("PATCH", "/api/media/{id}"),
-    ("PATCH", "/api/memory/{id}"),
-    ("PATCH", "/api/projects/{id}"),
-    ("PATCH", "/api/projects/{id}/board/cards/{card}"),
-    ("PATCH", "/api/projects/{id}/board/columns/{col}"),
-    ("PATCH", "/api/projects/{id}/memory/{fact}"),
-    ("PATCH", "/api/routines/{id}"),
-    ("PATCH", "/api/users/{id}"),
-    ("PATCH", "/api/workspaces/{id}"),
-    ("PATCH", "/api/workspaces/{id}/facts/{fact}"),
-    ("PATCH", "/api/workspaces/{id}/members/{user_id}"),
-    ("POST", "/api/admin/providers/models/test"),
-    ("POST", "/api/admin/providers/test"),
-    ("POST", "/api/agents"),
-    ("POST", "/api/agent-summary"),
-    ("POST", "/api/board-templates"),
-    ("POST", "/api/connections"),
-    ("POST", "/api/links"),
-    ("POST", "/api/media/delete"),
-    ("POST", "/api/memory"),
-    ("POST", "/api/me/password"),
-    ("POST", "/api/projects"),
-    ("POST", "/api/projects/{id}/board/cards"),
-    ("POST", "/api/projects/{id}/board/columns"),
-    ("POST", "/api/projects/{id}/board/template"),
-    ("POST", "/api/projects/{id}/folder"),
-    ("POST", "/api/projects/{id}/mcp/approve"),
-    ("POST", "/api/projects/{id}/mcp/remove"),
-    ("POST", "/api/projects/{id}/memory"),
-    ("POST", "/api/routines"),
-    ("POST", "/api/routines/{id}/run"),
-    ("POST", "/api/routines/preview"),
-    ("POST", "/api/sessions"),
-    ("POST", "/api/sessions/{id}/agent"),
-    ("POST", "/api/sessions/{id}/approval-mode"),
-    ("POST", "/api/sessions/{id}/approvals/{approval_id}"),
-    ("POST", "/api/sessions/{id}/artifacts"),
-    ("POST", "/api/sessions/{id}/compact"),
-    ("POST", "/api/sessions/{id}/exec-mode"),
-    ("POST", "/api/sessions/{id}/fork"),
-    ("POST", "/api/sessions/{id}/pins"),
-    ("POST", "/api/sessions/{id}/prompt"),
-    ("POST", "/api/sessions/{id}/rewind"),
-    ("POST", "/api/sessions/{id}/seen"),
-    ("POST", "/api/sessions/{id}/step-limit"),
-    ("POST", "/api/sessions/{id}/turns/{turn}/restore"),
-    ("POST", "/api/sessions/{id}/variants"),
-    ("POST", "/api/users"),
-    ("POST", "/api/workspaces"),
-    ("POST", "/api/workspaces/{id}/connectors"),
-    ("POST", "/api/workspaces/{id}/connectors/{cid}/check"),
-    ("POST", "/api/workspaces/{id}/facts"),
-    ("POST", "/api/workspaces/{id}/members"),
-    ("POST", "/api/workspaces/{id}/skills"),
-    ("PUT", "/api/admin/agent-models"),
-    ("PUT", "/api/admin/memory"),
-    ("PUT", "/api/admin/pricing"),
-    ("PUT", "/api/admin/providers/demo"),
-    ("PUT", "/api/admin/providers/{id}"),
-    ("PUT", "/api/admin/providers/test"),
-    ("PUT", "/api/admin/savings"),
-    ("PUT", "/api/admin/storage"),
-    ("PUT", "/api/admin/workspaces/policy"),
-    ("PUT", "/api/artifacts/{id}/versions/{vid}/thumb"),
-    ("PUT", "/api/connections/{id}/token"),
-    ("PUT", "/api/me/avatar"),
-    ("PUT", "/api/me/classifier"),
-    ("PUT", "/api/media/{id}/thumb"),
-    ("PUT", "/api/me/settings"),
-    ("PUT", "/api/me/settings/personalisation"),
-    ("PUT", "/api/me/workspace"),
-    ("PUT", "/api/sessions/{id}/project"),
-    ("PUT", "/api/sessions/{id}/title"),
-    ("PUT", "/api/users/{id}/exec-ceiling"),
-    ("PUT", "/api/workspaces/{id}/connectors/{cid}"),
-    ("PUT", "/api/workspaces/{id}/connectors/{cid}/account"),
-    ("PUT", "/api/workspaces/{id}/facts/settings"),
-    ("PUT", "/api/workspaces/{id}/members/{user_id}/exec-level"),
-    ("PUT", "/api/workspaces/{id}/memory"),
-    ("PUT", "/api/workspaces/{id}/plugins/{kind}/{name}"),
-    ("PUT", "/api/workspaces/{id}/skills/{scope}/{name}"),
-];
+/// FINDING 1 and 2 of the first half, fixed: routes that read the body
+/// (`Json<T>`, `Bytes`, a limit) or a required query before the handler
+/// asked who was calling. Every non-public route now sits behind
+/// `http::caller::identify`, which runs before any of its handler's
+/// extractors. A route that answers 400, 413, 415 or 422 without
+/// credentials again is a finding like any other. The lists stay as the
+/// place a known exception would be pinned, and must stay empty.
+const BODY_FIRST: &[(&str, &str)] = &[];
 const BODY_FIRST_CODES: &[u16] = &[400, 413, 415, 422];
-
-/// FINDING 2, left as it is: `Query<UploadQuery>` (a required `name`) runs
-/// before the handler's login check, so the answer without credentials is 400.
-const QUERY_FIRST: &[(&str, &str)] = &[("POST", "/api/attachments")];
+const QUERY_FIRST: &[(&str, &str)] = &[];
 const QUERY_FIRST_CODES: &[u16] = &[400];
 
-fn fill(path: &str) -> String {
+pub(crate) fn fill(path: &str) -> String {
     let mut out = String::new();
     let mut rest = path;
     while let Some(a) = rest.find('{') {
@@ -633,6 +681,7 @@ fn fill(path: &str) -> String {
 
 struct Rig {
     base: String,
+    auth: Auth,
     _dir: tempfile::TempDir,
 }
 
@@ -651,7 +700,7 @@ async fn start() -> Rig {
         code: Secret::new("CLAIM".into()),
         path: claim_path,
     });
-    let master = Master::new(Store::open_in_memory().unwrap(), auth);
+    let master = Master::new(Store::open_in_memory().unwrap(), auth.clone());
     tokio::spawn(async move { axum::serve(listener, router(master)).await.unwrap() });
     let base = format!("http://{addr}");
     // An admin exists, so the walk does not stand in front of an open setup.
@@ -662,7 +711,11 @@ async fn start() -> Rig {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
-    Rig { base, _dir: dir }
+    Rig {
+        base,
+        auth,
+        _dir: dir,
+    }
 }
 
 const NO_BODY: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
@@ -876,5 +929,231 @@ async fn websocket_authenticates_itself() {
             Ok(Message::Ping(_) | Message::Pong(_)) => {}
             Ok(other) => panic!("an unauthenticated socket was sent {other:?}"),
         }
+    }
+}
+
+/// What an unauthenticated upload costs: nothing of its body is read. A
+/// 1 GB `Content-Length` with `Expect: 100-continue` is answered 401 with
+/// no `100 Continue` first (so a well-behaved client never sends the body),
+/// and the server closes the connection instead of draining the rest; a
+/// client that sends anyway gets the same 401 and the same close.
+#[tokio::test]
+async fn an_unauthenticated_upload_is_refused_unread() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let rig = start().await;
+    let addr = rig.base.trim_start_matches("http://").to_string();
+    for (expect, sent) in [(true, 0usize), (false, 64 * 1024)] {
+        let mut s = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        let mut head = format!(
+            "POST /api/sessions HTTP/1.1\r\nHost: {addr}\r\ncontent-type: application/json\r\ncontent-length: 1000000000\r\n"
+        );
+        if expect {
+            head.push_str("expect: 100-continue\r\n");
+        }
+        head.push_str("\r\n");
+        s.write_all(head.as_bytes()).await.unwrap();
+        s.write_all(&vec![b'{'; sent]).await.unwrap();
+        // Read until the server closes; a server that waited for the rest
+        // of the gigabyte would time out here.
+        let mut got = Vec::new();
+        let read = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut buf = [0u8; 4096];
+            loop {
+                match s.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+            }
+        })
+        .await;
+        let text = String::from_utf8_lossy(&got);
+        assert!(
+            read.is_ok(),
+            "expect={expect}: the server kept the connection open: {text}"
+        );
+        assert!(
+            text.starts_with("HTTP/1.1 401"),
+            "expect={expect}: not a bare 401: {text}"
+        );
+        assert!(!text.contains("100 Continue"), "expect={expect}: {text}");
+    }
+}
+
+/// The layer takes a link (a live login's cookie and a URL minted for it,
+/// no login key) only where the byte handlers take one today: a GET of a
+/// linkable URL. A made file's download gets past it (and answers 404 for
+/// a chat that does not exist, as before); a PUT to a linkable URL with
+/// the same kind of link is 401 before its body is read.
+#[tokio::test]
+async fn a_link_counts_only_for_the_byte_routes() {
+    let rig = start().await;
+    let c = reqwest::Client::new();
+    let r = c
+        .post(format!("{}/api/login", rig.base))
+        .json(&json!({"username": "alex", "password": "admin password"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let cookie = r
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let key = r.json::<serde_json::Value>().await.unwrap()["login_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let made = format!("/api/sessions/{}/made/f1", fill("{id}"));
+    let thumb = "/api/media/m1/thumb";
+    let links: serde_json::Value = c
+        .post(format!("{}/api/links", rig.base))
+        .header("cookie", &cookie)
+        .header(common::LOGIN_HEADER, &key)
+        .same_origin()
+        .json(&json!({"urls": [made, thumb]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let link = |u: &str| links["links"][u].as_str().unwrap().to_string();
+    let r = c
+        .get(format!("{}{}", rig.base, link(&made)))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::NOT_FOUND,
+        "the link got past the layer"
+    );
+    // The same link on another URL is nobody.
+    let other = link(&made).replace("/f1?", "/f2?");
+    let r = c
+        .get(format!("{}{other}", rig.base))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    let r = c
+        .put(format!("{}{}", rig.base, link(thumb)))
+        .header("cookie", &cookie)
+        .same_origin()
+        .body(vec![0u8; 1 << 20])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "a link never writes");
+}
+
+/// A link is checked (a MAC over the cookie's hash, the URL and a time)
+/// before the store is read for its login: a GET with a cookie and no key
+/// on a route that takes no link, or on a byte route with a bad link,
+/// costs no store read (the layer tries a link on every private GET).
+#[tokio::test]
+async fn a_link_is_checked_before_the_store_is_read() {
+    let rig = start().await;
+    let c = reqwest::Client::new();
+    let r = c
+        .post(format!("{}/api/login", rig.base))
+        .json(&json!({"username": "alex", "password": "admin password"}))
+        .send()
+        .await
+        .unwrap();
+    let cookie = r.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let key = r.json::<serde_json::Value>().await.unwrap()["login_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let made = format!("/api/sessions/{}/made/f1", fill("{id}"));
+    let links: serde_json::Value = c
+        .post(format!("{}/api/links", rig.base))
+        .header("cookie", &cookie)
+        .header(common::LOGIN_HEADER, &key)
+        .same_origin()
+        .json(&json!({"urls": [made]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let good = links["links"][&made].as_str().unwrap().to_string();
+    let before = rig.auth.link_store_reads();
+    let bad = good.replace("link=", "link=1");
+    for url in ["/api/me/storage", "/api/me", made.as_str(), bad.as_str()] {
+        let r = c
+            .get(format!("{}{url}", rig.base))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "{url}");
+    }
+    assert_eq!(
+        rig.auth.link_store_reads(),
+        before,
+        "a store read for no valid link"
+    );
+    let r = c
+        .get(format!("{}{good}", rig.base))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    assert_eq!(rig.auth.link_store_reads(), before + 1);
+}
+
+/// No request smuggling past the layer: an unauthenticated POST whose
+/// body is itself a request, with `Content-Length` or chunked framing, then
+/// a real pipelined request. The body arrived whole, so hyper drains it by
+/// its framing and keeps the connection: exactly two answers, the 401 and
+/// the real request's, and the request inside the body is never answered.
+#[tokio::test]
+async fn a_refused_body_is_never_read_as_a_request() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let rig = start().await;
+    let addr = rig.base.trim_start_matches("http://").to_string();
+    let inner = format!("GET /api/setup?smuggled=1 HTTP/1.1\r\nHost: {addr}\r\n\r\n");
+    let chunked = format!("{:x}\r\n{inner}\r\n0\r\n\r\n", inner.len());
+    for (framing, body) in [
+        (format!("content-length: {}", inner.len()), inner.clone()),
+        ("transfer-encoding: chunked".to_string(), chunked),
+    ] {
+        let mut s = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        let req = format!(
+            "POST /api/sessions HTTP/1.1\r\nHost: {addr}\r\ncontent-type: application/json\r\n{framing}\r\n\r\n{body}GET /api/setup HTTP/1.1\r\nHost: {addr}\r\nconnection: close\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut got = Vec::new();
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(10), s.read_to_end(&mut got)).await;
+        let text = String::from_utf8_lossy(&got);
+        let answers: Vec<&str> = text
+            .match_indices("HTTP/1.1 ")
+            .map(|(i, _)| &text[i..i + 12])
+            .collect();
+        assert_eq!(
+            answers,
+            ["HTTP/1.1 401", "HTTP/1.1 200"],
+            "{framing}: {text}"
+        );
+        assert_eq!(text.matches("\"claimed\"").count(), 1, "{framing}: {text}");
     }
 }

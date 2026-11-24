@@ -82,6 +82,8 @@ use harness_store::{AppendOutcome, HelloState, Store, SubSessions};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+#[cfg(feature = "testing")]
+pub use http::router_before_identify;
 pub use http::{router, router_with};
 pub use resolver::Resolver;
 

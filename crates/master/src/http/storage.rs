@@ -3,12 +3,13 @@
 //! names or contents ever reach the admin.
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require, require_admin, runtime};
+use super::caller::{Admin, User};
+use super::{ApiError, ApiResult, runtime};
 use crate::Master;
 use crate::storage::{self, StorageConfig};
 
@@ -21,8 +22,7 @@ pub(super) fn routes() -> Router<Master> {
 
 /// The caller's usage across Media and Artifacts. `quota` is 0 when
 /// unlimited (the API token, or `account_quota_mb = 0`).
-async fn mine(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
+async fn mine(User(who): User, State(m): State<Master>) -> ApiResult<Json<Value>> {
     let owner = who.user_id.clone();
     let u = m
         .inner
@@ -47,8 +47,7 @@ fn settings_json(c: &StorageConfig) -> Value {
     })
 }
 
-async fn admin(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    require_admin(&m, &headers).await?;
+async fn admin(_: Admin, State(m): State<Master>) -> ApiResult<Json<Value>> {
     let (rows, total) = m.inner.mirror.call(|s| s.storage_usage_all()).await?;
     let disk = storage::disk(&m);
     Ok(Json(json!({
@@ -71,11 +70,10 @@ async fn admin(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<Va
 /// Replace the limits; the next upload or publish uses them. Lowering a
 /// quota never deletes anything: files over it stay, new ones are refused.
 async fn put_settings(
+    _: Admin,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<Value>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(&m, &headers).await?;
     let bad = |e: String| ApiError(StatusCode::BAD_REQUEST, e);
     let b: StorageConfig = serde_json::from_value(b).map_err(|e| bad(e.to_string()))?;
     b.check().map_err(bad)?;

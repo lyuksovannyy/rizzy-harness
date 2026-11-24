@@ -18,6 +18,7 @@ mod artifacts;
 mod attachments;
 mod background;
 mod bg_output;
+mod caller;
 mod chat_allows;
 mod chat_diff;
 mod compact;
@@ -66,7 +67,49 @@ pub fn router(master: Master) -> Router {
 
 /// `router` with explicit request timeouts (tests shorten them).
 pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router {
-    let api = Router::new()
+    let private = private(&master);
+    assemble(master, timeouts, private)
+}
+
+/// Tests only, with the `testing` feature (FIX_PLAN 4.1,
+/// `docs/auth-by-construction.md`): the router as it was before
+/// `caller::identify`, the same routes with no caller layer. It wrote the
+/// golden file of what `require*` answered; a handler converted to the
+/// extractors refuses everyone here. Goes with `require*`.
+#[cfg(feature = "testing")]
+pub fn router_before_identify(master: Master) -> Router {
+    assemble(master, crate::limits::Timeouts::default(), private_routes())
+}
+
+fn assemble(master: Master, timeouts: crate::limits::Timeouts, private: Router<Master>) -> Router {
+    // `private` already carries its caller layer; `public()` must not.
+    let api = private
+        .merge(public())
+        // Matched routes only (the embedded UI files are not handlers); which
+        // routes get which limit is the table in `limits.rs`.
+        .route_layer(axum::middleware::from_fn_with_state(
+            timeouts,
+            crate::limits::enforce,
+        ));
+    api.fallback(crate::assets::serve)
+        .layer(axum::middleware::from_fn_with_state(
+            master.clone(),
+            auth::guard,
+        ))
+        // Outermost: request ids, 500 bodies and cache/transport headers
+        // for every response, the guard's refusals included.
+        .layer(axum::middleware::from_fn_with_state(
+            master.clone(),
+            crate::response::finish,
+        ))
+        .with_state(master)
+}
+
+/// The routes anyone may call: each checks its caller itself, or has none
+/// (the route walk's `PUBLIC` list says why for each). Nothing else goes
+/// here.
+fn public() -> Router<Master> {
+    Router::new()
         .route(
             "/api/setup",
             get(setup_status)
@@ -78,6 +121,22 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
             post(login).layer(axum::extract::DefaultBodyLimit::max(auth::AUTH_BODY_LIMIT)),
         )
         .route("/api/logout", post(logout))
+        .route("/api/ws", get(crate::ws::upgrade))
+        .merge(hooks::routes())
+}
+
+/// Every other route: the caller is identified (`caller::identify`) before
+/// the handler reads anything of the request.
+fn private(master: &Master) -> Router<Master> {
+    private_routes().route_layer(axum::middleware::from_fn_with_state(
+        master.clone(),
+        caller::identify,
+    ))
+}
+
+/// The routes of [`private`], without its layer.
+fn private_routes() -> Router<Master> {
+    Router::new()
         .route("/api/me", get(me))
         .route("/api/me/password", post(change_password))
         .route(
@@ -241,11 +300,9 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
             post(restore_turn),
         )
         .route("/api/sessions/{id}/approvals/{approval_id}", post(approval))
-        .route("/api/ws", get(crate::ws::upgrade))
         .merge(projects::routes())
         .merge(memory::routes())
         .merge(routines::routes())
-        .merge(hooks::routes())
         .merge(attachments::routes())
         .merge(media::routes())
         .merge(artifacts::routes())
@@ -280,24 +337,6 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(connection_repos::routes())
         .merge(custom_connectors::routes())
         .merge(sessions::routes())
-        // Matched routes only (the embedded UI files are not handlers); which
-        // routes get which limit is the table in `limits.rs`.
-        .route_layer(axum::middleware::from_fn_with_state(
-            timeouts,
-            crate::limits::enforce,
-        ));
-    api.fallback(crate::assets::serve)
-        .layer(axum::middleware::from_fn_with_state(
-            master.clone(),
-            auth::guard,
-        ))
-        // Outermost: request ids, 500 bodies and cache/transport headers
-        // for every response, the guard's refusals included.
-        .layer(axum::middleware::from_fn_with_state(
-            master.clone(),
-            crate::response::finish,
-        ))
-        .with_state(master)
 }
 
 struct ApiError(StatusCode, String);

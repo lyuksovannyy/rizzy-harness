@@ -62,6 +62,7 @@ mod local_node_http;
 mod login_limits_http;
 mod made_http;
 mod media_http;
+mod member_walk_http;
 mod memory_http;
 mod memory_places_http;
 mod mirror;

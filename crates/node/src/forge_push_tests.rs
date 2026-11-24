@@ -630,6 +630,14 @@ async fn a_stalled_push_ends_at_its_limit() {
     .unwrap_err();
     assert!(e.contains("clone_timeout_s"), "{e}");
     assert!(!e.contains(CANARY), "{e}");
+    // The group was killed; a killed process leaves /proc a moment later
+    // (seen on a slow runner), so look for up to five seconds.
+    for _ in 0..250 {
+        if pids_with(&forge.host()).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(pids_with(&forge.host()), Vec::<i32>::new());
 }
 
