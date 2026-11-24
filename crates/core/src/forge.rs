@@ -13,6 +13,105 @@ use serde::{Deserialize, Serialize};
 /// The tool's name.
 pub const PUSH_TOOL: &str = "push";
 
+/// The open-pull-request tool's name (GitLab: a merge request; X.27,
+/// PLAN.md T102, `docs/forge-pr.md`). It runs on the master: the node shows
+/// the card and files the request; the master creates the pull request from
+/// the call's input as its own log holds it.
+pub const PR_TOOL: &str = "pull_request";
+
+/// The tools that act as the person on their forge account: never brought
+/// by `tools: all`, a card every time.
+pub const FORGE_TOOLS: [&str; 2] = [PUSH_TOOL, PR_TOOL];
+
+/// The longest title of a pull request, in characters.
+pub const MAX_PR_TITLE: usize = 256;
+
+/// The longest description of a pull request, in characters.
+pub const MAX_PR_BODY: usize = 20_000;
+
+/// A pull request the agent asks for, checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrRequest {
+    /// The branch with the work (on the source repository itself).
+    pub head: String,
+    /// The branch to merge into; `None`: the repository's default branch.
+    pub base: Option<String>,
+    pub title: String,
+    pub body: String,
+    pub draft: bool,
+}
+
+/// The tool's input as a [`PrRequest`], by the one rule the node (before
+/// its card) and the master (on the input its own log holds) both apply:
+/// only the keys `head`, `base`, `title`, `body`, `draft`; branch names by
+/// [`valid_branch`], head and base different; a title of 1 to
+/// [`MAX_PR_TITLE`] characters with no control character; a body of at
+/// most [`MAX_PR_BODY`] characters with no control character but newline
+/// and tab. Hidden and bidirectional characters are kept (the card shows
+/// them) and sent as they are.
+pub fn parse_pr(input: &serde_json::Value) -> Result<PrRequest, String> {
+    let o = input.as_object().ok_or("the arguments must be an object")?;
+    if let Some(k) = o
+        .keys()
+        .find(|k| !matches!(k.as_str(), "head" | "base" | "title" | "body" | "draft"))
+    {
+        return Err(format!(
+            "unknown argument `{}`: only head, base, title, body and draft",
+            k.chars().take(40).collect::<String>()
+        ));
+    }
+    let text = |k: &str| match o.get(k) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(format!("`{k}` must be a string")),
+    };
+    let branch = |k: &str| -> Result<Option<String>, String> {
+        match text(k)? {
+            None => Ok(None),
+            Some(b) if valid_branch(&b) => Ok(Some(b)),
+            Some(_) => Err(format!(
+                "`{k}` is not a branch name this tool takes (letters, digits and `. _ - + @`, \
+                 parts separated by `/`, none starting with `.`, `-` or `+`, no `..`)"
+            )),
+        }
+    };
+    let head = branch("head")?.ok_or("`head` (the branch with the work) is required")?;
+    let base = branch("base")?;
+    if base.as_deref() == Some(head.as_str()) {
+        return Err("`head` and `base` are the same branch".into());
+    }
+    let title = text("title")?.unwrap_or_default();
+    let n = title.chars().count();
+    if n == 0 || n > MAX_PR_TITLE {
+        return Err(format!("`title` must be 1 to {MAX_PR_TITLE} characters"));
+    }
+    if title.chars().any(char::is_control) {
+        return Err("`title` must be one line with no control characters".into());
+    }
+    let body = text("body")?.unwrap_or_default();
+    if body.chars().count() > MAX_PR_BODY {
+        return Err(format!("`body` must be at most {MAX_PR_BODY} characters"));
+    }
+    if body
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Err("`body` may hold no control characters but newlines and tabs".into());
+    }
+    let draft = match o.get("draft") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => return Err("`draft` must be true or false".into()),
+    };
+    Ok(PrRequest {
+        head,
+        base,
+        title,
+        body,
+        draft,
+    })
+}
+
 /// The longest branch name the tool takes, in bytes.
 pub const MAX_BRANCH: usize = 255;
 
@@ -37,6 +136,15 @@ pub trait PushHost: Send + Sync {
     /// Run call `call_id` with the tool's `input`: the card, the person's
     /// answer, the push. The text for the model, or why nothing was pushed.
     async fn push(
+        &self,
+        call_id: &str,
+        input: &serde_json::Value,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, String>;
+
+    /// Run call `call_id` of the open-pull-request tool: the card, the
+    /// person's answer, the master's request (PLAN.md T102).
+    async fn open_pull_request(
         &self,
         call_id: &str,
         input: &serde_json::Value,
@@ -101,6 +209,44 @@ mod tests {
             assert!(!valid_branch(bad), "{bad:?}");
         }
         assert!(valid_branch(&"b".repeat(MAX_BRANCH)));
+    }
+
+    #[test]
+    fn pull_request_input() {
+        use serde_json::json;
+        let ok =
+            parse_pr(&json!({"head": "feat/x", "title": "Add x", "body": "a\n\tb", "draft": true}))
+                .unwrap();
+        assert_eq!(ok.head, "feat/x");
+        assert_eq!(ok.base, None);
+        assert!(ok.draft);
+        assert_eq!(
+            parse_pr(&json!({"head": "a", "base": "main", "title": "t"}))
+                .unwrap()
+                .base
+                .as_deref(),
+            Some("main")
+        );
+        // Hidden and bidi characters are kept.
+        assert!(parse_pr(&json!({"head": "a", "title": "t\u{202e}x"})).is_ok());
+        let long_body = "b".repeat(MAX_PR_BODY + 1);
+        for bad in [
+            json!({"head": "a", "base": "a", "title": "t"}),
+            json!({"head": "a..b", "title": "t"}),
+            json!({"head": "a~1", "title": "t"}),
+            json!({"head": "a b", "title": "t"}),
+            json!({"head": "-a", "title": "t"}),
+            json!({"head": "a", "title": "t".repeat(MAX_PR_TITLE + 1)}),
+            json!({"head": "a", "title": "two\nlines"}),
+            json!({"head": "a", "title": ""}),
+            json!({"head": "a", "title": "t", "body": long_body}),
+            json!({"head": "a", "title": "t", "body": "bell\u{7}"}),
+            json!({"head": "a", "title": "t", "repo": "other/x"}),
+            json!({"title": "t"}),
+            json!({"head": "a", "title": "t", "draft": "yes"}),
+        ] {
+            assert!(parse_pr(&bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

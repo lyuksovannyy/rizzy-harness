@@ -371,6 +371,7 @@ fn features() -> harness_agents::Features {
         office: false,
         board: false,
         push: false,
+        pull_requests: false,
         web: true,
         read_files: true,
         edit_files: false,
@@ -395,7 +396,19 @@ fn pushing_is_its_own_switch_and_never_comes_with_all() {
         let want = a.id == "coder" || a.id == "teamlead";
         assert_eq!(a.features.push, want, "{}", a.id);
         assert_eq!(a.spec.allows_tool("push"), want, "{}", a.id);
+        // Opening pull requests (PLAN.md T102): the same two, its own switch.
+        assert_eq!(a.features.pull_requests, want, "{}", a.id);
+        assert_eq!(a.spec.allows_tool("pull_request"), want, "{}", a.id);
     }
+    let all_pr = parse("other", "---\nname: O\ntools: all\n---\nhi\n", false).unwrap();
+    assert!(!all_pr.features.pull_requests && !all_pr.spec.allows_tool("pull_request"));
+    let named_pr = parse(
+        "other",
+        "---\nname: O\ntools: [bash, pull_request]\n---\nhi\n",
+        false,
+    )
+    .unwrap();
+    assert!(named_pr.features.pull_requests && !named_pr.features.push);
     let make = |push: bool| {
         harness_agents::custom(
             "r",

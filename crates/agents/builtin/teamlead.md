@@ -2,7 +2,7 @@
 name: Senior Teamlead
 description: Plans larger jobs, hands sub-tasks to Software Developer, Researcher, Writer, Scout and Reviewer, checks their work and integrates it.
 category: IT
-tools: [bash, bash_output, bash_stop, tool_output, read, write, edit, grep, glob, outline, graph_query, publish, todo, skill, web_search, web_fetch, remember, mcp, board, board_edit, push]
+tools: [bash, bash_output, bash_stop, tool_output, read, write, edit, grep, glob, outline, graph_query, publish, todo, skill, web_search, web_fetch, remember, mcp, board, board_edit, push, pull_request]
 ui: rich
 delegates: [coder, researcher, writer, scout, reviewer]
 max_subagents: 4

@@ -238,6 +238,10 @@ const SKILL_TOOL: &str = "skill";
 /// lead's choice of 2026-11-24, the owner may overrule); never brought by
 /// `tools: all`, only by naming it.
 const PUSH_TOOL: &str = harness_core::forge::PUSH_TOOL;
+/// Opening a pull request in the project's source repository as the chat's
+/// owner (PLAN.md T102): its own switch, off when absent, on for the same
+/// two built-ins as push, never brought by `tools: all`.
+const PR_TOOL: &str = harness_core::forge::PR_TOOL;
 
 /// Which set an agent belongs to (X.33): the server's (built-ins, files and
 /// agents made at the server's scope) or one workspace's own. Reported in
@@ -303,6 +307,11 @@ pub struct Features {
     /// PLAN.md T101). Its own switch, off when absent.
     #[serde(default)]
     pub push: bool,
+    /// `pull_request`: open a pull request (GitLab: a merge request) in the
+    /// project's source repository, a card every time (PLAN.md T102). Its
+    /// own switch, off when absent.
+    #[serde(default)]
+    pub pull_requests: bool,
     /// `web_search` and `web_fetch`.
     pub web: bool,
     /// Read and search files.
@@ -366,6 +375,7 @@ impl Features {
             ),
             (self.skills, &[SKILL_TOOL][..]),
             (self.push, &[PUSH_TOOL][..]),
+            (self.pull_requests, &[PR_TOOL][..]),
         ];
         let mut tools: Vec<String> = groups
             .iter()
@@ -605,6 +615,7 @@ fn build(id: &str, mut fm: Frontmatter, body: &str, origin: Origin) -> Result<Ag
         board: fm.tools.allows(BOARD_TOOL),
         // Named, never `all` (the spec's rule: `AgentSpec::allows_tool`).
         push: matches!(&fm.tools, ToolSelection::List(l) if l.iter().any(|t| t == PUSH_TOOL)),
+        pull_requests: matches!(&fm.tools, ToolSelection::List(l) if l.iter().any(|t| t == PR_TOOL)),
         web: any(WEB_TOOLS),
         read_files: any(READ_TOOLS),
         edit_files: any(EDIT_TOOLS),
