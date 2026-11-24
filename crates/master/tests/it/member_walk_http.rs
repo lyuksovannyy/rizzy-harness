@@ -567,6 +567,14 @@ enum As {
     Foreign,
 }
 
+// The class lists below (ADMIN_ONLY, ANY_LOGIN, BYTE_ROUTES) and VALID_BODIES
+// are written by hand on purpose. An edit to one needs a line of reason in
+// the pull request: a route that moves between classes changes who may call
+// it. Nothing checks that a list and a handler were not changed together;
+// for a route that takes a body whose valid body is missing from
+// VALID_BODIES, the lists are the only guard (the golden file's bodies are
+// empty, `{}` or a small object, so they stop at a body error before the
+// role check; `the_written_lists_hold_over_http` sends the valid ones).
 /// A body each admin-only route parses (its required fields, read from
 /// its body type), so a member's request gets past the body extractor to
 /// the handler's own admin check, which then refuses it before acting.
@@ -592,11 +600,106 @@ const VALID_BODIES: &[(&str, &str, &str)] = &[
     ),
     ("PUT", "/api/users/{id}/exec-ceiling", r#"{"level":"none"}"#),
     ("POST", "/api/agents", NEW_AGENT),
+    ("PUT", "/api/admin/agent-models", "{}"),
+    ("PUT", "/api/admin/agents/{id}/avatar", "x"),
+    ("PUT", "/api/admin/savings", "{}"),
+    ("PUT", "/api/admin/storage", "{}"),
+    ("PATCH", "/api/users/{id}", "{}"),
+    ("PATCH", "/api/agents/{id}", r#"{"name":"x"}"#),
+    ("POST", "/api/me/password", r#"{"current":"x","new":"y"}"#),
+    (
+        "POST",
+        "/api/sessions/{id}/approval-mode",
+        r#"{"mode":"ask"}"#,
+    ),
+    (
+        "POST",
+        "/api/sessions/{id}/approvals/{approval_id}",
+        r#"{"decision":"deny"}"#,
+    ),
+    (
+        "POST",
+        "/api/sessions/{id}/step-limit",
+        r#"{"max_steps":5}"#,
+    ),
 ];
 
 const NEW_AGENT: &str = "{\"id\":\"x\",\"name\":\"x\",\"prompt\":\"x\",\"features\":{\"memory\":false,\"project_memory\":false,\"personalisation\":false,\"history\":false,\"recall\":false,\"attached_files\":false,\"office\":false,\"board\":false,\"push\":false,\"pull_requests\":false,\"web\":false,\"read_files\":false,\"edit_files\":false,\"commands\":false,\"read_only_commands\":false,\"mcp\":false,\"skills\":false,\"delegate\":false,\"background_subagents\":false,\"as_agent\":false,\"as_subagent\":false}}";
 
 const SMALL_JSON: &[u8] = br#"{"name":"x"}"#;
+
+/// What the written lists promise, asked over HTTP with the valid bodies,
+/// without reading any handler for the expectation (so a handler that
+/// changes its role fails here even if its list line is changed with it):
+/// a member gets 403 on every admin-only route, a login that must change
+/// its password gets 403 "change your password first" everywhere but on
+/// the any-login routes, and the any-login routes let it in.
+#[tokio::test]
+async fn the_written_lists_hold_over_http() {
+    let t = read_table(&src_dir()).unwrap_or_else(|p| panic!("{p:?}"));
+    let (class, _) = classify(&t);
+    let all = pairs(&t);
+    // Every admin-only or any-login route that takes a body has one.
+    let mut bodiless: Vec<String> = Vec::new();
+    for (m, p) in &all {
+        let listed = ADMIN_ONLY.iter().any(|(lm, lp)| lm == m && lp == p)
+            || ANY_LOGIN.iter().any(|(lm, lp)| lm == m && lp == p);
+        let writes = matches!(m.as_str(), "POST" | "PUT" | "PATCH");
+        let has = VALID_BODIES.iter().any(|(vm, vp, _)| vm == m && vp == p);
+        if listed && writes && class[&(m.clone(), p.clone())].input && !has {
+            bodiless.push(format!("{m} {p}"));
+        }
+    }
+    assert!(
+        bodiless.is_empty(),
+        "admin-only and any-login routes with a body and no VALID_BODIES entry:\n{}",
+        bodiless.join("\n")
+    );
+    let (rig, people) = start(router).await;
+    let mut findings = Vec::new();
+    let editor = "only the server's admins change the server's agents";
+    for (m, p) in &all {
+        let (m, p) = (m.as_str(), p.as_str());
+        let url = fill(p);
+        let body: Option<&[u8]> = match VALID_BODIES.iter().find(|(vm, vp, _)| *vm == m && *vp == p)
+        {
+            Some((_, _, b)) => Some(b.as_bytes()),
+            None if m == "GET" => None,
+            None => Some(b""),
+        };
+        let admin = ADMIN_ONLY.iter().any(|(lm, lp)| *lm == m && *lp == p);
+        let any = ANY_LOGIN.iter().any(|(lm, lp)| *lm == m && *lp == p);
+        // A member, on the agent editor's routes asking for the server's.
+        let target = if admin && p.contains("/agent") && !p.starts_with("/api/admin/") {
+            format!("{url}?scope=server")
+        } else {
+            url.clone()
+        };
+        if admin {
+            let (code, err) =
+                send(&rig, &As::Cookie(people.member.clone()), m, &target, body).await;
+            if code != 403 || (err != ADMINS_ONLY && err != editor) {
+                findings.push(format!("member {m} {p}: {code} {err}"));
+            }
+        }
+        let (code, err) = send(
+            &rig,
+            &As::Cookie(people.must_change.clone()),
+            m,
+            &target,
+            body,
+        )
+        .await;
+        if any {
+            if code == 401 || err == CHANGE_FIRST {
+                findings.push(format!("must-change {m} {p}: {code} {err}: meant to work"));
+            }
+        } else if code != 403 || err != CHANGE_FIRST {
+            findings.push(format!("must-change {m} {p}: {code} {err}"));
+        }
+    }
+    assert!(findings.is_empty(), "\n{}\n", findings.join("\n"));
+}
 
 async fn send(rig: &Rig, who: &As, m: &str, url: &str, body: Option<&[u8]>) -> (u16, String) {
     let mut rb = client().request(
