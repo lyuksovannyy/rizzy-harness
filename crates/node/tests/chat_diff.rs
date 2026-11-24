@@ -208,3 +208,58 @@ async fn a_sibling_chats_turns_can_prune_the_start() {
         "from its oldest kept start to its latest end"
     );
 }
+
+/// The chat's folder is a subfolder of the repository the checkpoints follow:
+/// the paths stay relative to the repository (as the diff has always shown
+/// them) and the answer says where the folder is in it, for a turn's diff and
+/// the whole chat's alike. A folder that is the repository's own says nothing.
+#[tokio::test]
+async fn a_folder_inside_a_repository_says_where_it_is() {
+    use harness_core::event::EventKind;
+    use harness_core::policy::ApprovalMode;
+    use harness_protocol::MasterToNode;
+    let mut rig = Rig::new().await;
+    let top = rig.ws.clone();
+    rig.git_in(&top, &["init", "-q"]);
+    std::fs::create_dir_all(top.join("pkg")).unwrap();
+    std::fs::write(top.join("a.txt"), "the repository's own\n").unwrap();
+    let sid = harness_core::SessionId::new();
+    rig.send(MasterToNode::Create {
+        exec_mode: None,
+        no_callbacks: false,
+        profile: None,
+        incognito: false,
+        agent: None,
+        req_id: "c-sub".into(),
+        session_id: sid,
+        title: "t".into(),
+        cwd: top.join("pkg").display().to_string(),
+        model: None,
+        approval_mode: Some(ApprovalMode::Auto),
+    });
+    rig.until(|k| matches!(k, EventKind::SessionCreated(_)))
+        .await;
+    rig.turn_in(sid, "echo hi > a.txt").await;
+    let d = rig.diff_all_of(sid).await.unwrap();
+    assert_eq!(names(&d), ["pkg/a.txt"], "paths are the repository's");
+    assert_eq!(d.folder, "pkg");
+    let turn = rig
+        .seen
+        .iter()
+        .rev()
+        .find_map(|e| match e.typed() {
+            Ok(EventKind::Checkpoint(c)) if e.session_id == sid => Some(c.turn_id),
+            _ => None,
+        })
+        .unwrap();
+    let one = rig.diff_of(sid, &turn, false).await.unwrap();
+    assert_eq!(
+        (names(&one), one.folder.as_str()),
+        (vec!["pkg/a.txt"], "pkg")
+    );
+    // A folder that is the repository's own: nothing to strip.
+    rig.turn("echo hi > b.txt").await;
+    let d = rig.diff_all().await.unwrap();
+    assert_eq!(d.folder, "", "{:?}", names(&d));
+    assert!(names(&d).contains(&"b.txt"));
+}

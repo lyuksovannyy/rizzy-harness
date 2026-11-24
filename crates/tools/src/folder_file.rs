@@ -9,8 +9,8 @@
 //!
 //! The text goes through the node's secret scrubber before it leaves, as a
 //! `read` result does before it becomes an event; the scrubber sees the
-//! margin too, so a secret that straddles the cut is redacted whole and not
-//! shown in part. What goes back is the text or one word of [`Refusal`]:
+//! margin too, and what lies in the margin is never shown (see `decode`), so
+//! a secret that straddles the end of the read is never shown in part. What goes back is the text or one word of [`Refusal`]:
 //! every way of not reaching the path is the one [`Refusal::NotFound`].
 
 use std::io::Read as _;
@@ -54,7 +54,10 @@ pub async fn read_text(
     tokio::task::spawn_blocking(move || -> Result<FileText, Refusal> {
         let f = crate::open_regular(&real).map_err(|_| Refusal::NotFound)?;
         let size = f.metadata().map_err(|_| Refusal::NotFound)?.len();
-        let mut f = f.take((MAX_TEXT_BYTES + MARGIN) as u64);
+        // One byte more than the window: whether the read stopped before the
+        // end of the file is decided from what was read, not from a size that
+        // a growing file or a pseudo-file does not tell.
+        let mut f = f.take((MAX_TEXT_BYTES + MARGIN + 1) as u64);
         // The first block alone decides "binary": a huge file of zeros costs
         // one block.
         let mut bytes = Vec::new();
@@ -66,19 +69,30 @@ pub async fn read_text(
             return Err(Refusal::Binary);
         }
         f.read_to_end(&mut bytes).map_err(|_| Refusal::NotFound)?;
-        Ok(decode(&bytes, size, &scrub))
+        let more = bytes.len() > MAX_TEXT_BYTES + MARGIN;
+        bytes.truncate(MAX_TEXT_BYTES + MARGIN);
+        Ok(decode(&bytes, more, size, &scrub))
     })
     .await
     .map_err(|_| Refusal::NotFound)?
 }
 
-/// `bytes` (the file's start, at most the text and the margin) as text:
-/// scrubbed whole, then cut at the bound on a character boundary.
-fn decode(bytes: &[u8], size: u64, scrub: &dyn Fn(&str) -> String) -> FileText {
-    let cut = (bytes.len() as u64) < size;
+/// `bytes` (the file's start, at most the text and the margin) as text, scrubbed
+/// and cut at the bound. `more`: the read stopped before the end of the file.
+///
+/// A secret may begin inside the window and end after it, and then the
+/// scrubber cannot see it: its beginning would show. So when `more`, the text
+/// is also scrubbed without the last [`MARGIN`] raw bytes, and only what both
+/// scrubbings agree on is shown: a secret that starts in the head and runs
+/// into the margin is redacted in the one and not in the other, so the texts
+/// part where it starts (a cut by the scrubbed text's length would not do:
+/// redactions shorten it and move the unscrubbed end into view). A secret
+/// that starts in the margin is not shown at all. A file read to its end has
+/// no such secret, and its scrubbed text is cut at the bound directly.
+fn decode(bytes: &[u8], more: bool, size: u64, scrub: &dyn Fn(&str) -> String) -> FileText {
     // A read that stopped inside a character is not a bad byte.
     let mut whole = bytes;
-    if cut
+    if more
         && let Err(e) = std::str::from_utf8(bytes)
         && e.error_len().is_none()
     {
@@ -86,8 +100,22 @@ fn decode(bytes: &[u8], size: u64, scrub: &dyn Fn(&str) -> String) -> FileText {
     }
     let decoded = String::from_utf8_lossy(whole);
     let lossy = matches!(decoded, std::borrow::Cow::Owned(_));
-    let mut text = scrub(&decoded);
-    let truncated = size > MAX_TEXT_BYTES as u64;
+    let full = scrub(&decoded);
+    let mut text = if more {
+        let head = String::from_utf8_lossy(&whole[..whole.len().saturating_sub(MARGIN)]);
+        let head = scrub(&head);
+        let mut at = full
+            .bytes()
+            .zip(head.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        while !full.is_char_boundary(at) {
+            at -= 1;
+        }
+        full[..at].to_string()
+    } else {
+        full
+    };
     if text.len() > MAX_TEXT_BYTES {
         let mut at = MAX_TEXT_BYTES;
         while !text.is_char_boundary(at) {
@@ -97,8 +125,8 @@ fn decode(bytes: &[u8], size: u64, scrub: &dyn Fn(&str) -> String) -> FileText {
     }
     FileText {
         text,
-        size,
-        truncated,
+        size: size.max(bytes.len() as u64),
+        truncated: bytes.len() > MAX_TEXT_BYTES,
         lossy,
     }
 }
@@ -341,5 +369,156 @@ mod tests {
         // Without the scrubber the key is there: the test would fail.
         let raw = ask(&r, "cut.txt").await.unwrap();
         assert!(raw.text.contains("sk-live"));
+    }
+
+    /// The reviewer's probe: a hundred keys early on shorten the scrubbed text
+    /// by more than the margin, then a key starts 20 bytes before the end of
+    /// what was read. Nothing of it may show.
+    #[test]
+    fn a_key_at_the_end_of_the_read_is_not_shown_in_part_after_many_redactions() {
+        let key = "sk-live-".to_string() + &"k".repeat(56);
+        let scrub = |s: &str| s.replace(&key, "[R]");
+        let mut raw = String::new();
+        for _ in 0..100 {
+            raw.push_str(&key);
+            raw.push('\n');
+        }
+        let window = MAX_TEXT_BYTES + MARGIN;
+        while raw.len() < window - 20 {
+            raw.push_str("filler filler filler filler filler filler filler\n");
+        }
+        raw.truncate(window - 20);
+        raw.push_str(&key);
+        raw.truncate(window);
+        let got = decode(raw.as_bytes(), true, (window * 2) as u64, &scrub);
+        assert!(
+            !got.text.contains("sk-live"),
+            "ends: {:?}",
+            &got.text[got.text.len().saturating_sub(40)..]
+        );
+    }
+
+    /// A small generator (no dependency): the same sequence every run.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// For random text with random keys at random places around the cut, no
+    /// key shows anywhere and no beginning of a key of 8 or more characters
+    /// ends the answer, whether the read stopped in the file (`more`) or at
+    /// its end; with keys of several lengths and many early keys that shorten
+    /// the scrubbed text by more than the margin.
+    #[test]
+    fn no_key_and_no_part_of_one_shows_wherever_the_keys_lie_around_the_cut() {
+        let mut g = Lcg(7);
+        let window = MAX_TEXT_BYTES + MARGIN;
+        for round in 0..60 {
+            let keys: Vec<String> = (0..3)
+                .map(|i| {
+                    let len = 12 + g.below(80) as usize;
+                    let body: String = (0..len)
+                        .map(|_| char::from(b'a' + g.below(26) as u8))
+                        .collect();
+                    format!("sk-{i}-{body}")
+                })
+                .collect();
+            let scrub = |s: &str| {
+                let mut t = s.to_string();
+                for k in &keys {
+                    t = t.replace(k.as_str(), "[R]");
+                }
+                t
+            };
+            let mut raw = String::new();
+            // Early keys, so that redactions shorten the text a lot.
+            for _ in 0..g.below(400) {
+                raw.push_str(&keys[g.below(3) as usize]);
+                raw.push(' ');
+            }
+            let fill = "lorem ipsum dolor sit amet, ";
+            // Keys near the margin's start, the cut and the end of the window.
+            let spots = [
+                window - MARGIN - 40..window - MARGIN + 40,
+                window - 100..window,
+            ];
+            for r in spots {
+                for at in r.step_by(1 + g.below(7) as usize) {
+                    // Never cut into a key already written: a cut key is no key.
+                    if g.below(4) != 0 || raw.len() > at {
+                        continue;
+                    }
+                    while raw.len() < at {
+                        raw.push_str(fill);
+                    }
+                    raw.truncate(at);
+                    raw.push_str(&keys[g.below(3) as usize]);
+                }
+            }
+            while raw.len() < window + 50 {
+                raw.push_str(fill);
+            }
+            let mut end = window;
+            while !raw.is_char_boundary(end) {
+                end -= 1;
+            }
+            let more = round % 5 != 0;
+            let bytes = if more {
+                &raw.as_bytes()[..end]
+            } else {
+                &raw.as_bytes()[..window / 2]
+            };
+            let got = decode(bytes, more, raw.len() as u64, &scrub);
+            for k in &keys {
+                assert!(!got.text.contains(k.as_str()), "round {round}: a key shows");
+                for l in 8..k.len() {
+                    assert!(
+                        !got.text.ends_with(&k[..l]),
+                        "round {round}: {l} characters of a key end the answer"
+                    );
+                }
+            }
+            assert!(got.text.len() <= MAX_TEXT_BYTES);
+        }
+    }
+
+    /// Whether the text was cut is told by what was read, not by the size at
+    /// open: a file that grew, or a pseudo-file that reports size 0.
+    #[test]
+    fn truncated_comes_from_what_was_read() {
+        let big = vec![b'a'; MAX_TEXT_BYTES + 1];
+        let t = decode(&big, false, 0, &|s: &str| s.to_string());
+        assert!(t.truncated && t.size == big.len() as u64);
+        let whole = vec![b'a'; MAX_TEXT_BYTES];
+        assert!(!decode(&whole, false, 0, &|s: &str| s.to_string()).truncated);
+    }
+
+    #[tokio::test]
+    async fn the_window_edges_are_cut_or_whole_as_read() {
+        let r = rig();
+        let at = |n: usize| {
+            std::fs::write(r.ws.join(format!("f{n}.txt")), "a".repeat(n)).unwrap();
+            format!("f{n}.txt")
+        };
+        for (n, trunc) in [
+            (MAX_TEXT_BYTES, false),
+            (MAX_TEXT_BYTES + 1, true),
+            (MAX_TEXT_BYTES + MARGIN, true),
+            (MAX_TEXT_BYTES + MARGIN + 1, true),
+        ] {
+            let got = ask(&r, &at(n)).await.unwrap();
+            assert_eq!(got.truncated, trunc, "{n}");
+            assert_eq!(got.size, n as u64);
+            assert!(got.text.len() <= MAX_TEXT_BYTES);
+        }
     }
 }

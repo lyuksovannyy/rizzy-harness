@@ -309,3 +309,25 @@ test("each changed file that still exists has an Open control; a deleted one has
   const labels = [...host.querySelectorAll("summary button")].map((b) => b.getAttribute("aria-label"));
   expect(labels).toEqual(["Open a.rs", "Open new.rs"]);
 });
+
+test("when the chat's folder is a subfolder of the repository, Open asks for the folder's own path and a file outside it has none", async () => {
+  const open = vi.fn();
+  const store = await import("../lib/docPreview");
+  const files = ["pkg/src/a.rs", "pkg/b.rs", "pkgx/c.rs", "top.txt"].map((path) => ({ path, status: "modified", content: "text", added: 1, removed: 0 }));
+  turnDiff.mockResolvedValueOnce({ files, folder: "pkg" } as TurnDiff);
+  await render();
+  const labels = [...host.querySelectorAll("summary button")].map((b) => b.getAttribute("aria-label"));
+  // The row still shows the repository's path; Open takes the folder's.
+  expect(labels).toEqual(["Open a.rs", "Open b.rs"]);
+  expect(host.textContent).toContain("pkg/src/a.rs");
+  void open;
+  host.querySelector<HTMLButtonElement>('summary button[aria-label="Open a.rs"]')!.click();
+  let seen: unknown = null;
+  function P() {
+    seen = store.usePreview();
+    return null;
+  }
+  act(() => root.render(<P />));
+  expect(seen).toMatchObject({ session: "s1", path: "src/a.rs", text: true });
+  store.closePreview();
+});

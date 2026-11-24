@@ -172,7 +172,13 @@ function FileLines({ f, limit }: { f: DiffFile; limit: number }) {
   );
 }
 
-function FileBlock({ f, index, sessionId }: { f: DiffFile; index: number; sessionId: string }) {
+/** The path of a changed file inside the chat's folder (the diff's paths are the repository's, and the folder may be a subfolder of it), or none: a file outside the folder has no Open. */
+export function inFolder(path: string, folder: string | undefined): string | null {
+  if (!folder) return path;
+  return path.startsWith(`${folder}/`) ? path.slice(folder.length + 1) : null;
+}
+
+function FileBlock({ f, index, sessionId, folder }: { f: DiffFile; index: number; sessionId: string; folder?: string }) {
   const s = own(STATUS, f.status) ?? STATUS.modified;
   const why = noLines(f);
   const [open, setOpen] = useState(index < OPEN_FILES);
@@ -195,7 +201,7 @@ function FileBlock({ f, index, sessionId }: { f: DiffFile; index: number; sessio
           {(f.new_mode ?? f.old_mode) === "120000" && <span className="muted"> (link)</span>}
         </span>
         {/* The file as it is now, beside the chat; a deleted file is not there. */}
-        {f.status !== "deleted" && <FileButton sessionId={sessionId} path={f.path} />}
+        {f.status !== "deleted" && inFolder(f.path, folder) !== null && <FileButton sessionId={sessionId} path={inFolder(f.path, folder)!} />}
         <span className="diff-counts">
           {f.added > 0 && <span className="diff-plus">+{f.added}</span>} {f.removed > 0 && <span className="diff-minus">−{f.removed}</span>}
         </span>
@@ -414,7 +420,7 @@ export default function DiffPanel(props: {
           </nav>
         )}
         {files.map((f, i) => (
-          <FileBlock key={i} f={f} index={i} sessionId={sessionId} />
+          <FileBlock key={i} f={f} index={i} sessionId={sessionId} folder={diff?.folder} />
         ))}
       </div>
     </aside>

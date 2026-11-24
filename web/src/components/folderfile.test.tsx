@@ -209,3 +209,38 @@ test("opening a file while changes wait in the Word panel asks first", async () 
   act(() => root.render(<P />));
   expect(seen).toMatchObject({ path: "a.docx" });
 });
+
+test("Windows line endings are one note, not a code on every line; a lone carriage return stays marked", async () => {
+  await show(file("one\r\ntwo\r\nthree\rfour\r\n"));
+  const t = host.querySelector(".fv-text")!.textContent!;
+  expect(t).toBe("one\ntwo\nthree<U+000D>four\n");
+  expect(host.textContent).toContain("Windows line endings (CRLF)");
+  expect(host.querySelector(".fv-gutter")!.textContent).toBe("1\n2\n3");
+  act(() => root.unmount());
+  root = createRoot(host);
+  await show(file("one\ntwo\n"));
+  expect(host.textContent).not.toContain("Windows line endings");
+});
+
+test("Open on a card of a sub-agent's own chat asks for that chat's session, never the parent's", async () => {
+  const { ToolCard } = await import("./ToolCard");
+  const item = {
+    type: "tool" as const,
+    call_id: "c1",
+    author: null,
+    tool: "read",
+    input: { path: "src/a.rs" },
+    live_output: "",
+    result: { ok: true, output: "x", exit_code: null },
+    approval: null,
+  };
+  act(() => root.render(<ToolCard sessionId="child-session" item={item} cwd="/own/copy" />));
+  host.querySelector<HTMLButtonElement>('button[aria-label="Open a.rs"]')!.click();
+  let seen: PreviewTarget | null = null;
+  function P() {
+    seen = store.usePreview();
+    return null;
+  }
+  act(() => root.render(<P />));
+  expect(seen).toMatchObject({ session: "child-session", path: "src/a.rs", text: true });
+});

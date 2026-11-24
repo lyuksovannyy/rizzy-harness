@@ -514,6 +514,9 @@ export interface TurnDiff {
   /** The whole-chat diff only (X.61): the chat's first checkpoint is no
    * longer kept, so the range starts at the oldest one that is. */
   since_pruned?: boolean;
+  /** The chat's folder inside the folder the file paths are relative to (the
+   * repository): "Open" strips it; none when they are the same. */
+  folder?: string;
 }
 
 export type DiffStatus = "added" | "deleted" | "modified" | "renamed" | "type_changed";

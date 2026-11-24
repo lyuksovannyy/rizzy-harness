@@ -15,9 +15,10 @@ const os = require('os');
 const { claimCode, createOwner, keywordsOnly, keyed, pickAgent, pickFolder } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e-folderfile-'));
-const D = `${S}/data`, R = `${S}/repo`;
+const D = `${S}/data`, R = `${S}/repo`, R2 = `${S}/repo2`;
 fs.mkdirSync(D, { recursive: true });
 fs.mkdirSync(`${R}/src`, { recursive: true });
+fs.mkdirSync(`${R2}/pkg`, { recursive: true });
 const log = (...a) => console.log('•', ...a);
 const check = (cond, msg) => { if (!cond) throw new Error(msg); };
 const freePort = () => new Promise((res) => {
@@ -29,7 +30,7 @@ let PAGE = null;
 (async () => {
   const port = await freePort();
   const URL_ = `http://127.0.0.1:${port}/`;
-  fs.writeFileSync(`${D}/node.toml`, `workspace_roots = ["${R}"]\nmax_approval_mode = "ask"\n`);
+  fs.writeFileSync(`${D}/node.toml`, `workspace_roots = ["${R}", "${R2}"]\nmax_approval_mode = "ask"\n`);
   const git = (...a) => execFileSync('git', ['-C', R, ...a], { env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
   git('init', '-q');
   fs.writeFileSync(`${R}/src/main.rs`, 'fn main() {\n    println!("one");\n}\n');
@@ -42,6 +43,15 @@ let PAGE = null;
   fs.writeFileSync(`${R}/big.log`, 'x'.repeat(1024 * 1024) + '\n');
   const secretFile = `${S}/outside.txt`;
   fs.writeFileSync(secretFile, 'outside the folder\n');
+
+  // A second repository whose chat works in a subfolder: the same relative
+  // name is a different file at the top.
+  const git2 = (...a) => execFileSync('git', ['-C', R2, ...a], { env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+  git2('init', '-q');
+  fs.writeFileSync(`${R2}/a.txt`, 'THE REPOSITORY TOP FILE\n');
+  fs.writeFileSync(`${R2}/pkg/a.txt`, 'the package file\n');
+  git2('add', '.');
+  git2('commit', '-qm', 'init');
 
   const srv = spawn(BIN, ['--data-dir', D, 'serve', '--bind', `127.0.0.1:${port}`], { detached: true, stdio: 'ignore' });
   try {
@@ -197,6 +207,32 @@ let PAGE = null;
     });
     check(phone.w > 300 && !phone.overflow, 'phone: ' + JSON.stringify(phone));
     await p.screenshot({ path: `${S}/folder-file-5-phone.png` });
+    await p.keyboard.press('Escape');
+
+    // 9. A chat whose folder is a subfolder of a repository: the diff's rows
+    // are the repository's paths, and Open opens the folder's file.
+    await p.setViewportSize({ width: 1280, height: 900 });
+    await p.goto(URL_);
+    await p.waitForSelector('h1.greeting, .composer textarea');
+    await p.click('text=New chat');
+    await p.waitForSelector('h1.greeting');
+    await p.fill('.composer textarea', 'run: echo "the package file, changed" > a.txt');
+    await p.click('.mode-switch button:has-text("Agentic")');
+    await pickFolder(p, `${R2}/pkg`);
+    await pickAgent(p);
+    await p.click('.composer .send');
+    await p.click('.approval button:has-text("Allow")');
+    await p.waitForSelector('.undo >> text=1 file changed');
+    await p.click('button[aria-label="All changes"]');
+    await p.waitForSelector('.diff-panel .diff-file');
+    const rowPath = (await p.textContent('.diff-panel .diff-file .diff-path')).trim();
+    check(rowPath === 'pkg/a.txt', 'the row shows the repository\'s path: ' + rowPath);
+    await p.locator('.diff-panel summary button[aria-label="Open a.txt"]').click();
+    await p.waitForSelector('.file-view .fv-text');
+    const sub = await p.textContent('.fv-text');
+    check(sub === 'the package file, changed\n', 'the folder\'s file, not the top one: ' + JSON.stringify(sub));
+    check((await p.textContent('.fv-path')).trim() === 'a.txt', 'the path is the folder\'s');
+    await p.screenshot({ path: `${S}/folder-file-6-subfolder.png` });
     await p.keyboard.press('Escape');
 
     check(errors.length === 0, 'page errors: ' + errors.join('; '));

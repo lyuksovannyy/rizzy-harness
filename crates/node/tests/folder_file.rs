@@ -27,23 +27,27 @@ struct Node {
     link: NodeLink,
 }
 
-async fn start(denied: &[&str], profile: Profile) -> Node {
-    let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().canonicalize().unwrap();
-    let ws = base.join("ws");
-    let data = base.join("data");
-    std::fs::create_dir_all(&ws).unwrap();
-    std::fs::create_dir_all(&data).unwrap();
+fn config(
+    base: &std::path::Path,
+    data: &std::path::Path,
+    denied: &[&str],
+    profile: Profile,
+    exec_off: bool,
+) -> NodeConfig {
     let mut policy = NodePolicy {
-        workspace_roots: vec![base.clone()],
+        workspace_roots: vec![base.to_path_buf()],
         max_approval_mode: ApprovalMode::Auto,
         denied_tools: denied.iter().map(|s| s.to_string()).collect(),
         // A node that lets the agent read outside does not let the page.
         allow_outside_workspace: true,
         ..Default::default()
     };
-    policy.protect(&data);
-    let cfg = NodeConfig {
+    if exec_off {
+        let why = || Err("narrowed in node.toml".to_string());
+        policy.exec = harness_node::exec::ExecOffers::new(why(), why(), vec![]);
+    }
+    policy.protect(data);
+    NodeConfig {
         node_id: "n".into(),
         hostname: "test".into(),
         backend: Arc::new(NativeBackend::new(
@@ -65,8 +69,19 @@ async fn start(denied: &[&str], profile: Profile) -> Node {
         checkpoints_dir: None,
         git_sandbox: None,
         artifacts: None,
-    };
-    let node = NodeRuntime::start(cfg).await.unwrap();
+    }
+}
+
+async fn start(denied: &[&str], profile: Profile) -> Node {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let ws = base.join("ws");
+    let data = base.join("data");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let node = NodeRuntime::start(config(&base, &data, denied, profile, false))
+        .await
+        .unwrap();
     let mut link = node.attach().await;
     match link.from_node.recv().await.unwrap() {
         NodeToMaster::Hello { capabilities, .. } => {
@@ -287,4 +302,40 @@ async fn requests_beyond_the_one_place_are_answered_a_file_or_busy() {
         }
     }
     assert!(ok >= 1 && ok + busy == 40, "{ok} {busy}");
+}
+
+/// node.toml narrowed after the chat was made (the node no longer offers the
+/// mode the chat runs in): the chat's folder is no longer one this node lets
+/// the chat use, so nothing of it is read, though the file is there.
+#[tokio::test]
+async fn a_chat_the_node_no_longer_lets_use_its_folder_shows_nothing() {
+    let mut n = start(&[], Profile::Agentic).await;
+    std::fs::write(n.ws.join("a.txt"), "hello\n").unwrap();
+    let sid = n.create(None).await;
+    assert!(
+        n.ask(sid, "a.txt").await.0.is_some(),
+        "read before the change"
+    );
+    // The node restarts on the same data with the mode no longer offered.
+    let (base, data, ws, dir) = (n.base.clone(), n.data.clone(), n.ws.clone(), n._dir);
+    drop(n.link);
+    drop(n.node);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let node = NodeRuntime::start(config(&base, &data, &[], Profile::Agentic, true))
+        .await
+        .unwrap();
+    let mut link = node.attach().await;
+    let _ = link.from_node.recv().await;
+    let mut n = Node {
+        _dir: dir,
+        base,
+        ws,
+        data,
+        node,
+        link,
+    };
+    assert_eq!(
+        n.ask(sid, "a.txt").await,
+        (None, Some(FileRefusal::NotFound))
+    );
 }

@@ -1675,8 +1675,11 @@ chat shows the file as a chip with its name and size.
   256 KiB are shown; a longer file says how much, and invalid bytes are shown as
   �. Keys the node knows are replaced by `[REDACTED]` as in the chat's log.
   Markup, escape sequences and direction characters in a file are only text:
-  hidden and control characters show as codes. Only you can open your chat's
-  files, and a temporary chat shows none.
+  hidden and control characters show as codes (a Windows file's line endings
+  are one note, not a code on every line). In a chat whose folder is a subfolder
+  of a repository, a diff row shows the repository's path and Open opens the file
+  in the folder; a row outside the folder has no Open. Only you can open your
+  chat's files.
 - **Changing text and saving a copy.** In the same panel, click a paragraph,
   heading or list item of a Word file, or a cell of an Excel sheet (an empty
   cell of the shown grid too), and it becomes a text field with its text (a

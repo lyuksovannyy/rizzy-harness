@@ -643,6 +643,12 @@ pub struct TurnDiff {
     /// longer kept, so the range starts at the oldest one that is.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub since_pruned: bool,
+    /// The chat's folder as a path inside the folder the paths of `files`
+    /// are relative to (the repository being checkpointed: the chat's folder
+    /// may be a subfolder of it), `/`-separated; empty, and not sent, when
+    /// they are the same (X.63: what "Open" strips from a row's path).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder: String,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -2908,6 +2914,21 @@ mod tests {
                 .get("since_pruned")
                 .is_none()
         );
+        // The chat's folder inside the repository: sent only when it is not
+        // the repository's own.
+        assert!(
+            serde_json::to_value(TurnDiff::default())
+                .unwrap()
+                .get("folder")
+                .is_none()
+        );
+        let sub = TurnDiff {
+            folder: "pkg/app".into(),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&sub).unwrap();
+        assert_eq!(v["folder"], "pkg/app");
+        assert_eq!(serde_json::from_value::<TurnDiff>(v).unwrap(), sub);
     }
 
     /// X.62: the strip's output request is answered by its result, never

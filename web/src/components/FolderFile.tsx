@@ -60,7 +60,11 @@ export default function FolderFile(props: { target: PreviewTarget; onClose: () =
     head.current?.focus();
   }, []);
 
-  const text = useMemo(() => (data ? showHidden(data.a.text) : ""), [data]);
+  // A carriage return right before a line break is the line ending of a Windows
+  // file, said once in a note and not drawn on every line; any other one is
+  // marked like the rest of the hidden characters.
+  const crlf = !!data && data.a.text.includes("\r\n");
+  const text = useMemo(() => (data ? showHidden(data.a.text.replace(/\r\n/g, "\n")) : ""), [data]);
   const lines = useMemo(() => lineCount(text), [text]);
   const gutter = useMemo(() => Array.from({ length: lines }, (_, i) => i + 1).join("\n"), [lines]);
 
@@ -123,6 +127,11 @@ export default function FolderFile(props: { target: PreviewTarget; onClose: () =
             {a.truncated && (
               <p className="pv-more small" role="note">
                 Only the first {bytes(new TextEncoder().encode(a.text).length)} of this {bytes(a.size)} file is shown; the rest is not shown.
+              </p>
+            )}
+            {crlf && (
+              <p className="muted small" role="note">
+                Windows line endings (CRLF): not drawn on each line.
               </p>
             )}
             {a.lossy && (
