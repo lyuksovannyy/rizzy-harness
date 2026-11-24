@@ -130,8 +130,10 @@ async fn describe_does_not_run_a_submodules_filter() {
     }
 }
 
-/// Turn checkpoints over a folder whose user index holds the gitlink (the
-/// shadow is seeded from that index) and over one with only a nested folder.
+/// Turn checkpoints over a folder whose user index holds the gitlink and
+/// over one with only a nested folder. The shadow starts from its own index,
+/// never the user's, so this pins that a checkpoint runs nothing; the removal
+/// of a gitlink from the shadow's index is pinned by the test further down.
 #[tokio::test]
 async fn a_checkpoint_does_not_run_a_nested_repositorys_filter() {
     for (gitlink, gitmodules) in [(true, false), (true, true), (false, false)] {
