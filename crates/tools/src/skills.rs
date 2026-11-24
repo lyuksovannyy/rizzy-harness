@@ -205,7 +205,7 @@ pub fn discover(roots: &[Root], protected: &[PathBuf]) -> Found {
                     }
                     found.catalogue.refused.push(shown);
                 }
-                Ok(Some((name, description, manual, dir))) => {
+                Ok(Some((name, description, manual, invocable, dir))) => {
                     if !seen.insert(name.clone()) {
                         let first = from
                             .iter()
@@ -223,6 +223,9 @@ pub fn discover(roots: &[Root], protected: &[PathBuf]) -> Found {
                         && !found.catalogue.read.contains(&dir)
                     {
                         found.catalogue.read.push(dir.clone());
+                    }
+                    if !invocable {
+                        found.catalogue.not_invocable.push(name.clone());
                     }
                     from.push((name.clone(), dir.clone()));
                     found.catalogue.skills.push(Skill {
@@ -248,7 +251,7 @@ fn one(
     folder: &str,
     bound: &Path,
     protected: &[PathBuf],
-) -> Result<Option<(String, String, bool, PathBuf)>, String> {
+) -> Result<Option<(String, String, bool, bool, PathBuf)>, String> {
     let md = std::fs::metadata(entry).map_err(|e| format!("it could not be read: {e}"))?;
     if !md.is_dir() {
         return Ok(None);
@@ -294,7 +297,13 @@ fn one(
     if description.is_empty() {
         return Err("SKILL.md: it has no description".into());
     }
-    Ok(Some((name, description, fm.manual.unwrap_or(false), dir)))
+    Ok(Some((
+        name,
+        description,
+        fm.manual.unwrap_or(false),
+        fm.invocable.unwrap_or(true),
+        dir,
+    )))
 }
 
 /// The front matter keys read; every other key (`allowed-tools`, `hooks`,
@@ -306,6 +315,26 @@ struct Front {
     description: Option<String>,
     #[serde(rename = "disable-model-invocation")]
     manual: Option<bool>,
+    /// `user-invocable: false` hides the skill from the composer's menu.
+    #[serde(rename = "user-invocable", default, deserialize_with = "lenient_bool")]
+    invocable: Option<bool>,
+}
+
+/// A boolean, or nothing: any other value (`maybe`, a list) is as if the key
+/// were absent, so an odd value of a key that only the menu reads cannot make
+/// the typed parse fail and change what the model reads (the line reader
+/// would read a quoted description differently).
+fn lenient_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum B {
+        Yes(bool),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match B::deserialize(d)? {
+        B::Yes(b) => Some(b),
+        B::Other(_) => None,
+    })
 }
 
 /// The keys of front matter that is not valid YAML, read line by line: a
@@ -324,6 +353,7 @@ fn front_by_lines(y: &str) -> Front {
             "name" => f.name = Some(v),
             "description" => f.description = Some(v),
             "disable-model-invocation" => f.manual = Some(v == "true"),
+            "user-invocable" => f.invocable = Some(v != "false"),
             _ => {}
         }
     }
@@ -587,20 +617,58 @@ pub fn asked_line(n: &str) -> String {
     )
 }
 
+/// The most characters of a description the `/` menu carries.
+pub const MENU_DESCRIPTION_MAX: usize = 200;
+
+/// What the composer's `/` menu lists (X.65): the skills this turn's
+/// catalogue lets a person ask for with `/name`, as (name, description),
+/// in name order, at most [`MAX_LISTED`]. Left out: a skill with
+/// `user-invocable: false`, a name that is not a [`valid_name`], one
+/// `/name` would read as another (a trailing `.`, `:` or `,`) and a
+/// [`RESERVED`] one (the built-in command wins; `/name` never invokes the
+/// skill). A `disable-model-invocation` skill is listed: the person may ask
+/// for it. A description is cut at [`MENU_DESCRIPTION_MAX`] characters with
+/// an ellipsis. The catalogue is the turn's own (`withhold` and
+/// `merge_stored` applied), so a denied skill is not here either.
+pub fn menu(c: &Catalogue) -> Vec<(String, String)> {
+    c.skills
+        .iter()
+        .filter(|s| {
+            valid_name(&s.name)
+                && typed_name(&s.name) == s.name
+                && !RESERVED.contains(&s.name.as_str())
+                && !c.not_invocable.contains(&s.name)
+        })
+        .take(MAX_LISTED)
+        .map(|s| {
+            let mut d: String = s.description.chars().take(MENU_DESCRIPTION_MAX).collect();
+            if s.description.chars().count() > MENU_DESCRIPTION_MAX {
+                d.pop();
+                d.push('…');
+            }
+            (s.name.clone(), d)
+        })
+        .collect()
+}
+
 /// Names whose `/name` is a built-in command of the chat's composer, not a
 /// skill's shortcut (`/compact`, ADOPTION_PLAN X.20): a skill of that name
 /// is still listed to the model and loads through the `skill` tool, but
 /// `/name` never invokes it.
 pub const RESERVED: &[&str] = &["compact"];
 
+/// The name a typed first word stands for: without the `:`, `,` or `.` that
+/// ends a sentence after it. The one rule for `/name` ([`invoked`]) and for
+/// the `/` menu ([`menu`] lists only names that are their own typed name).
+fn typed_name(word: &str) -> &str {
+    word.trim_end_matches([':', ',', '.'])
+}
+
 /// The name a message's leading `/name` gives (the first word, without a
 /// trailing `:`, `,` or `.`), unless it is [`RESERVED`].
 fn slash_name(text: &str) -> Option<&str> {
     let rest = text.trim_start().strip_prefix('/')?;
-    let name = rest
-        .split(char::is_whitespace)
-        .next()?
-        .trim_end_matches([':', ',', '.']);
+    let name = typed_name(rest.split(char::is_whitespace).next()?);
     (!RESERVED.contains(&name)).then_some(name)
 }
 
@@ -886,6 +954,9 @@ pub fn merge_stored(
         if description.is_empty() {
             continue;
         }
+        // A stored skill is always invocable, whatever flag a skill it
+        // replaced carried.
+        c.not_invocable.retain(|n| *n != e.name);
         c.skills.push(Skill {
             name: e.name.clone(),
             description,

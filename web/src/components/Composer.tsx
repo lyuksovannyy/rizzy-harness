@@ -9,7 +9,8 @@ import { radioKeys, radioTab } from "../lib/radios";
 import { api } from "../api";
 import { readDraft, writeDraft } from "../lib/drafts";
 import { bytes } from "../lib/bytes";
-import { parseCompact } from "../lib/compactCommand";
+import { parseCompact, slashQuery } from "../lib/compactCommand";
+import type { SlashKeys } from "./SlashMenu";
 import type { Picture } from "../lib/downscale";
 import { abilities, allEngines, type CustomEngine, engineByUrl, engineMention, engineOrigin, type SearchKind, supports } from "../lib/engines";
 import { EngineIcon } from "./EngineIcon";
@@ -31,6 +32,8 @@ const ExecChoice = lazy(() => import("./ExecChoice"));
 const ApprovalModePick = lazy(() => import("./ApprovalModePick"));
 // The chat's step limit (X.14), beside the approval mode: same chats.
 const StepLimitPick = lazy(() => import("./StepLimitPick"));
+// A chunk that fails to load leaves no menu, never a broken screen: the box keeps working.
+const SlashMenu = lazy(() => import("./SlashMenu").catch(() => ({ default: () => null })));
 const ExecSwitch = lazy(() => import("./ExecSwitch"));
 // Where a new agentic chat works (X.26): the Project button and its popup.
 const ProjectPicker = lazy(() => import("./ProjectPicker"));
@@ -512,6 +515,9 @@ export function Composer(props: {
           agent: a,
         }));
   const popupOpen = suggestions.length > 0;
+  // `/` at the start of a message in a chat: the menu of commands and skills (X.65).
+  const slashKeys = useRef<SlashKeys["current"]>(null);
+  const slash = !popupClosed && !home && props.chatId && props.compact ? slashQuery(text, caret) : null;
   const pickedAgent = props.agents.find((a) => a.id === props.agentId);
   const pickedAlert = pickedAgent ? agentAlert(pickedAgent) : null;
   // A chat's agent changes between turns only (the node refuses it otherwise).
@@ -528,13 +534,16 @@ export function Composer(props: {
   const imageRoom = Math.min(MAX_IMAGES, props.images?.left ?? MAX_IMAGES, MAX_ATTACHMENTS - files.length) - pictures.length;
   const sendingImages = pictures.some((x) => !x.media_id);
 
+  const put = (t: string, c: number) => {
+    pendingCaret.current = c;
+    setText(t);
+    setCaret(c);
+    ta.current?.focus();
+  };
   const choose = (id: string) => {
     if (!mention) return;
     const r = insertMention(text, mention.start, caret, id);
-    pendingCaret.current = r.caret;
-    setText(r.text);
-    setCaret(r.caret);
-    ta.current?.focus();
+    put(r.text, r.caret);
   };
 
   const submit = async () => {
@@ -663,6 +672,7 @@ export function Composer(props: {
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return;
+    if (slash != null && slashKeys.current?.(e)) return;
     if (popupOpen) {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
@@ -724,6 +734,19 @@ export function Composer(props: {
         <div className="mention-popup mention-none muted" role="status">
           {t("composer.noFile")}
         </div>
+      )}
+      {slash != null && (
+        <Suspense fallback={null}>
+          <SlashMenu
+            chatId={props.chatId!}
+            query={slash}
+            text={text}
+            running={!!props.running}
+            keys={slashKeys}
+            onPick={put}
+            onClose={() => setPopupClosed(true)}
+          />
+        </Suspense>
       )}
       {popupOpen && (
         <ul className="mention-popup" role="listbox" aria-label={fileQuery != null ? t("composer.files") : searching ? "search engines" : "agents"}>

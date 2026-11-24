@@ -21,3 +21,13 @@ export function parseCompact(text: string): CompactAsk | null {
   }
   return { focus: (m[1] ?? "").trim() };
 }
+
+/**
+ * The `/` menu's query (X.65): the word after a leading `/` while the caret
+ * is in that first word (`""` right after the `/`), else `null`. A path
+ * (`/usr/bin`) is no command word, so it opens nothing.
+ */
+export function slashQuery(text: string, caret: number): string | null {
+  const m = /^\/([\w.-]*)(?=\s|$)/.exec(text);
+  return m && caret >= 1 && caret <= m[0].length ? m[1]! : null;
+}

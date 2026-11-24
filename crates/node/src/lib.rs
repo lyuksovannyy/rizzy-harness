@@ -24,6 +24,9 @@ mod project_mcp;
 pub mod projects;
 mod recall;
 mod session;
+#[cfg(test)]
+#[path = "skills_menu_busy_tests.rs"]
+mod skills_menu_busy_tests;
 mod stored_skills;
 #[cfg(test)]
 mod test_script;
@@ -164,6 +167,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::DocPreview { .. }
         | MasterToNode::FolderFile { .. }
         | MasterToNode::GitState { .. }
+        | MasterToNode::SkillsMenu { .. }
         | MasterToNode::DocPageEdit { .. }
         | MasterToNode::ProjectCreate { .. }
         | MasterToNode::ProjectClone { .. }
@@ -286,6 +290,8 @@ pub(crate) struct Inner {
     /// The places a person's git-state requests (the header's branch chip)
     /// take (X.64): two, so a slow repository does not queue behind itself.
     git_states: Arc<tokio::sync::Semaphore>,
+    /// `session.skills_menu` answers at work (X.65): two at a time.
+    skills_menus: Arc<tokio::sync::Semaphore>,
     /// New project folders made in the last hour (T77), and room for the
     /// ones being made (one at a time).
     projects_made: projects::Made,
@@ -720,6 +726,7 @@ impl NodeRuntime {
             previews: Arc::new(tokio::sync::Semaphore::new(1)),
             file_views: Arc::new(tokio::sync::Semaphore::new(1)),
             git_states: Arc::new(tokio::sync::Semaphore::new(2)),
+            skills_menus: Arc::new(tokio::sync::Semaphore::new(2)),
             projects_made: Default::default(),
             project_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             clone_slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -968,6 +975,11 @@ impl NodeRuntime {
             if offers(harness_tools::skills::NAME) && self.inner.cfg.policy.skills.from_master {
                 capabilities.push(harness_protocol::CAP_STORED_SKILLS.into());
             }
+            // The `/` menu's skills (X.65), in either profile: where it
+            // offers `skill` (the menu lists what the turn would).
+            if offers(harness_tools::skills::NAME) {
+                capabilities.push(harness_protocol::CAP_SKILLS_MENU.into());
+            }
             // Custom connectors (X.35 step 2, PLAN.md T85), in either
             // profile: where node.toml `[mcp] master_connectors` is on and
             // `denied_tools` does not deny every MCP tool. Without it the
@@ -1214,6 +1226,12 @@ impl NodeRuntime {
                     MasterToNode::GitState { req_id, session_id } => {
                         this.git_state(req_id, session_id)
                     }
+                    // The skills for the composer's `/` menu (X.65).
+                    MasterToNode::SkillsMenu {
+                        req_id,
+                        session_id,
+                        agent,
+                    } => this.skills_menu(req_id, session_id, agent),
                     // A person's text changes to such a file (X.60): the same
                     // kind of task, answered by one
                     // `session.doc_page_edit_result`; no event.
@@ -1713,6 +1731,39 @@ impl NodeRuntime {
                 .publish_wait(NodeToMaster::GitStateResult {
                     req_id,
                     state,
+                    busy: false,
+                })
+                .await;
+        });
+    }
+
+    /// Answer `session.skills_menu` (X.65, T46) from a task of its own;
+    /// never acked, nothing logged but the node's audit line (the session
+    /// id only), no event, no turn. Two at a time: past that the answer is
+    /// `busy` and the page keeps what it shows. The list is bounded here
+    /// again, whatever the discovery returned.
+    fn skills_menu(&self, req_id: String, sid: SessionId, agent: harness_core::agent::AgentSpec) {
+        self.audit_inline("session.skills_menu", sid);
+        let Ok(permit) = self.inner.skills_menus.clone().try_acquire_owned() else {
+            self.inner.publish(NodeToMaster::SkillsMenuResult {
+                req_id,
+                skills: Vec::new(),
+                busy: true,
+            });
+            return;
+        };
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            // The place is held by the work (`bounded_holding`), not the wait.
+            let mut skills = match inner.session(sid) {
+                Some(s) => s.skills_menu(&agent, permit).await,
+                None => Vec::new(),
+            };
+            skills.truncate(harness_protocol::MAX_MENU_SKILLS);
+            inner
+                .publish_wait(NodeToMaster::SkillsMenuResult {
+                    req_id,
+                    skills,
                     busy: false,
                 })
                 .await;
@@ -2587,6 +2638,14 @@ impl NodeRuntime {
             }
             MasterToNode::GitState { req_id, session_id } => {
                 self.git_state(req_id, session_id);
+                Ok(())
+            }
+            MasterToNode::SkillsMenu {
+                req_id,
+                session_id,
+                agent,
+            } => {
+                self.skills_menu(req_id, session_id, agent);
                 Ok(())
             }
             MasterToNode::DocPageEdit {

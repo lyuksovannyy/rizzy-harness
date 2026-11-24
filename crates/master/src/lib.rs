@@ -57,6 +57,7 @@ pub mod sealed;
 pub mod search;
 pub mod secrets;
 pub mod serve;
+pub mod skills_menu;
 pub mod sniff;
 pub mod storage;
 pub mod stored_skills;
@@ -371,6 +372,8 @@ pub struct MasterInner {
     diffs: diff::Waiting,
     /// Git-state requests waiting for their node's answer (X.64).
     git_states: git_state::Waiting,
+    /// `/` menu requests waiting for their node's answer (X.65).
+    skills_menus: skills_menu::Waiting,
     /// Background command outputs waiting for their node's answer (X.62).
     bg_outputs: bg_output::Waiting,
     /// `@` completions waiting for their node's answer (T63).
@@ -779,6 +782,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::FolderFile { .. }
         // The folder's git branch for the header: no event.
         | MasterToNode::GitState { .. }
+        // The skills for the composer's `/` menu: no event.
+        | MasterToNode::SkillsMenu { .. }
         // A person's text changes to a file of the folder: no event.
         | MasterToNode::DocPageEdit { .. }
         // A new project's folder: no session at all.
@@ -886,6 +891,7 @@ impl Master {
                 pulls: Default::default(),
                 diffs: Default::default(),
                 git_states: Default::default(),
+                skills_menus: Default::default(),
                 bg_outputs: Default::default(),
                 files: Default::default(),
                 previews: Default::default(),
@@ -1547,6 +1553,7 @@ impl Master {
                 artifact_pull::node_down(&this, &nid);
                 diff::node_down(&this, &nid);
                 git_state::node_down(&this, &nid);
+                skills_menu::node_down(&this, &nid);
                 files::node_down(&this, &nid);
                 bg_output::node_down(&this, &nid);
                 folder_preview::node_down(&this, &nid);
@@ -1779,6 +1786,11 @@ impl Master {
                 state,
                 busy,
             } => git_state::on_answer(self, node_id, req_id, state, busy),
+            NodeToMaster::SkillsMenuResult {
+                req_id,
+                skills,
+                busy,
+            } => skills_menu::on_answer(self, node_id, req_id, skills, busy),
             NodeToMaster::BackgroundOutputResult {
                 req_id,
                 output,

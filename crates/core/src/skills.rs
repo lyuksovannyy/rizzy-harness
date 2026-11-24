@@ -119,6 +119,10 @@ pub struct Catalogue {
     /// `skills` and of `read`, so the tool and `/name` can say why rather
     /// than "no such skill".
     pub withheld: Vec<String>,
+    /// Skills whose front matter says `user-invocable: false` (X.65), by
+    /// name: left out of the composer's `/` menu and nothing else; the model
+    /// still sees them and `/name` still asks for them.
+    pub not_invocable: Vec<String>,
     /// Stored skills left out this turn because one of the node's own has
     /// the name (the node's wins), by name: for the node's log only.
     pub shadowed: Vec<String>,
