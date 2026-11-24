@@ -222,4 +222,31 @@ describe("a push's card (PLAN.md T101)", () => {
     act(() => root.unmount());
     host.remove();
   });
+
+  test("an id outside the rule (N4) is invalid, and a forced Allow through the API helper is sent encoded", async () => {
+    const { pageApi: real } = await vi.importActual<typeof import("../apiPages")>("../apiPages");
+    const sent: string[] = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (u) => {
+      sent.push(String(u));
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    });
+    for (const id of ["u1#x", "u1?x", "x/../u1", "u1%2Fx", "a b", "a".repeat(500)]) {
+      const ev = (seq: number, kind: string, payload: object) => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as Parameters<typeof apply>[1];
+      const v = emptyView();
+      [
+        ev(1, "turn_started", { turn_id: "t" }),
+        ev(2, "tool_call_started", { turn_id: "t", call_id: "cb", tool: "bash", input: { command: "ls" } }),
+        ev(3, "approval_requested", { approval_id: id, call_id: "cb", tool: "bash", input: {}, reason: "r" }),
+      ].forEach((e) => apply(v, e));
+      const host = await mount(v.items[0] as Tool);
+      await act(async () => {});
+      expect([...host.querySelector(".approval")!.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Deny"]);
+      cleanup?.();
+      cleanup = null;
+      await real.approve("S", id, "allow").catch(() => {});
+      const path = new URL(sent.at(-1)!, "http://x").pathname;
+      expect(path).toBe(`/api/sessions/S/approvals/${encodeURIComponent(id)}`);
+    }
+    fetchSpy.mockRestore();
+  });
 });

@@ -117,7 +117,7 @@ export interface BoardTemplate {
 /** Limits the server enforces (crates/master/src/projects.rs). */
 export const LIMITS = { name: 64, description: 280, instructions: 4000, title: 200, notes: 4000, column: 40 } as const;
 
-const base = (id: string) => `/api/projects/${id}`;
+const base = (id: string) => `/api/projects/${encodeURIComponent(id)}`;
 
 export const projectsApi = {
   list: (workspace?: string | null) => call<ProjectList>("GET", inWorkspace("/api/projects", workspace)),
@@ -147,32 +147,32 @@ export const projectsApi = {
   remove: (id: string) => call<{ ok: boolean }>("DELETE", base(id)),
   /** Put a chat into a project, or take it out (null). */
   setChatProject: (sessionId: string, projectId: string | null) =>
-    call<{ ok: boolean }>("PUT", `/api/sessions/${sessionId}/project`, { project_id: projectId }),
+    call<{ ok: boolean }>("PUT", `/api/sessions/${encodeURIComponent(sessionId)}/project`, { project_id: projectId }),
   board: (id: string) => call<Board>("GET", `${base(id)}/board`),
   addColumn: (id: string, name: string) => call<Board>("POST", `${base(id)}/board/columns`, { name }),
   updateColumn: (id: string, col: string, b: { name?: string; done?: boolean; position?: number }) =>
-    call<Board>("PATCH", `${base(id)}/board/columns/${col}`, b),
-  deleteColumn: (id: string, col: string) => call<Board>("DELETE", `${base(id)}/board/columns/${col}`),
+    call<Board>("PATCH", `${base(id)}/board/columns/${encodeURIComponent(col)}`, b),
+  deleteColumn: (id: string, col: string) => call<Board>("DELETE", `${base(id)}/board/columns/${encodeURIComponent(col)}`),
   addCard: (id: string, b: { column_id: string; title: string; notes?: string }) =>
     call<Board>("POST", `${base(id)}/board/cards`, b),
   updateCard: (
     id: string,
     card: string,
     b: { title?: string; notes?: string; column_id?: string; position?: number; session_id?: string | null },
-  ) => call<Board>("PATCH", `${base(id)}/board/cards/${card}`, b),
-  deleteCard: (id: string, card: string) => call<Board>("DELETE", `${base(id)}/board/cards/${card}`),
+  ) => call<Board>("PATCH", `${base(id)}/board/cards/${encodeURIComponent(card)}`, b),
+  deleteCard: (id: string, card: string) => call<Board>("DELETE", `${base(id)}/board/cards/${encodeURIComponent(card)}`),
   applyTemplate: (id: string, templateId: string) =>
     call<Board>("POST", `${base(id)}/board/template`, { template_id: templateId }),
   templates: (workspace?: string | null) =>
     call<{ templates: BoardTemplate[] }>("GET", inWorkspace("/api/board-templates", workspace)),
   saveTemplate: (name: string, projectId: string) =>
     call<BoardTemplate>("POST", "/api/board-templates", { name, project_id: projectId }),
-  deleteTemplate: (id: string) => call<{ ok: boolean }>("DELETE", `/api/board-templates/${id}`),
+  deleteTemplate: (id: string) => call<{ ok: boolean }>("DELETE", `/api/board-templates/${encodeURIComponent(id)}`),
   memories: (id: string) => call<{ memories: MemoryFact[] }>("GET", `${base(id)}/memory`),
   addMemory: (id: string, text: string) => call<MemoryFact>("POST", `${base(id)}/memory`, { text }),
   updateMemory: (id: string, fact: string, b: { text?: string; status?: "active" | "retired" }) =>
-    call<MemoryFact>("PATCH", `${base(id)}/memory/${fact}`, b),
-  deleteMemory: (id: string, fact: string) => call<{ ok: boolean }>("DELETE", `${base(id)}/memory/${fact}`),
+    call<MemoryFact>("PATCH", `${base(id)}/memory/${encodeURIComponent(fact)}`, b),
+  deleteMemory: (id: string, fact: string) => call<{ ok: boolean }>("DELETE", `${base(id)}/memory/${encodeURIComponent(fact)}`),
 };
 
 /** Where a card dropped before `before` (a card id; null = the end) lands in

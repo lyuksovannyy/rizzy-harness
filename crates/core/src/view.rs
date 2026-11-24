@@ -959,7 +959,10 @@ impl SessionView {
             EventKind::ApprovalRequested(a) => {
                 self.pending_approvals.push(a.approval_id.clone());
                 let dup = !self.approval_ids.insert(a.approval_id.clone())
-                    || self.dup_calls.contains(&a.call_id);
+                    || self.dup_calls.contains(&a.call_id)
+                    // An id outside the harness's rule (review N4).
+                    || !crate::valid_event_id(&a.approval_id)
+                    || !crate::valid_event_id(&a.call_id);
                 if dup {
                     let id = a.approval_id.clone();
                     self.invalidate(|_, ap| ap == id);
@@ -1476,6 +1479,23 @@ mod tests {
             ]),
             vec![true]
         );
+        // Review N4: an approval id or a call id outside the id rule.
+        let long = "a".repeat(500);
+        for (a, c) in [
+            ("u1#x", "c"),
+            ("u1?x", "c"),
+            ("x/../u1", "c"),
+            ("u1%2Fx", "c"),
+            ("a b", "c"),
+            (long.as_str(), "c"),
+            ("r", "c#1"),
+        ] {
+            assert_eq!(
+                fold(&[start(c, "bash"), ask(a, c, "bash")]),
+                vec![true],
+                "{a} {c}"
+            );
+        }
         // Unique: valid, and the field is absent on the wire.
         assert_eq!(
             fold(&[start("c", "push"), ask("r", "c", "push")]),

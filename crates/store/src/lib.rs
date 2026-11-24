@@ -2347,6 +2347,10 @@ impl Store {
         sid: SessionId,
         approval_id: &str,
     ) -> Result<Option<(String, Option<String>, bool)>> {
+        // Ids outside the harness's id rule never name a card (review N4).
+        if !harness_core::valid_event_id(approval_id) {
+            return Ok(None);
+        }
         let conn = self.lock();
         let s = sid.to_string();
         let mut asked: Vec<(String, String)> = Vec::new();
@@ -2368,6 +2372,9 @@ impl Store {
         let [(tool, call_id)] = asked.as_slice() else {
             return Ok(None);
         };
+        if !harness_core::valid_event_id(call_id) {
+            return Ok(None);
+        }
         let mut calls: Vec<String> = Vec::new();
         {
             let mut st = conn.prepare_cached(

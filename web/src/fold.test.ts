@@ -76,6 +76,18 @@ describe("fold", () => {
     expect((ok.v.items[0] as { approval: object }).approval).not.toHaveProperty("invalid");
   });
 
+  it("marks a card whose approval id or call id is outside the id rule invalid (review N4)", () => {
+    const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
+    for (const [a, c] of [["u1#x", "c"], ["u1?x", "c"], ["x/../u1", "c"], ["u1%2Fx", "c"], ["a b", "c"], ["a".repeat(500), "c"], ["r", "c#1"]] as const) {
+      const v = fold([
+        ev(1, "turn_started", { turn_id: "t" }),
+        ev(2, "tool_call_started", { turn_id: "t", call_id: c, tool: "bash", input: { command: "ls" } }),
+        ev(3, "approval_requested", { approval_id: a, call_id: c, tool: "bash", input: {}, reason: "r" }),
+      ]);
+      expect((v.items[0] as { approval: { invalid?: true } }).approval.invalid, `${a} ${c}`).toBe(true);
+    }
+  });
+
   it("shows the file a doc_create call made on its result (T97)", () => {
     const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
     const made = { name: "plan.docx", size: 1234, sha256: "ab".repeat(32), file_id: "f1" };

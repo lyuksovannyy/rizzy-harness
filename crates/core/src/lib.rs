@@ -64,3 +64,55 @@ pub fn now_ms() -> i64 {
 pub fn new_id() -> String {
     uuid::Uuid::now_v7().simple().to_string()
 }
+
+/// The most bytes an approval id or a call id may have to be drawn as a
+/// card a person may allow (review N4).
+pub const MAX_EVENT_ID: usize = 128;
+
+/// Whether `id` has the shape of an approval id or a call id as the
+/// harness and the providers make them: 1 to [`MAX_EVENT_ID`] of
+/// `[A-Za-z0-9_-]`. [`new_id`] gives 32 lower-case hex digits (unchanged
+/// since the first commit); call ids are the model provider's own
+/// (`toolu_…`, `call_…`, the mock's `new_id`), which this alphabet covers.
+/// An id outside it (`u1#x`, `x/../u1`, a space, 500 characters) is drawn
+/// as an invalid card, Deny only, and answered 404 by the approval route:
+/// it cannot be made to stand for another card in a URL (X.27 step 4,
+/// review N4). The page mirrors this rule (`web/src/fold.ts` `validId`).
+pub fn valid_event_id(id: &str) -> bool {
+    (1..=MAX_EVENT_ID).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+#[cfg(test)]
+mod id_tests {
+    use super::*;
+
+    #[test]
+    fn event_ids() {
+        for _ in 0..100 {
+            assert!(valid_event_id(&new_id()));
+        }
+        for ok in [
+            "a1",
+            "toolu_01A09q90qw90lq917835lq9",
+            "call_abc-1",
+            &"a".repeat(MAX_EVENT_ID),
+        ] {
+            assert!(valid_event_id(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "u1#x",
+            "u1?x",
+            "x/../u1",
+            "u1%2Fx",
+            "a b",
+            "ä",
+            &"a".repeat(MAX_EVENT_ID + 1),
+        ] {
+            assert!(!valid_event_id(bad), "{bad}");
+        }
+    }
+}

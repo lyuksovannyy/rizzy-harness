@@ -1590,6 +1590,11 @@ async fn approval(
         true => require(&m, &headers).await?,
         false => require_any(&m, &headers).await?,
     };
+    // An id outside the harness's id rule names no card (review N4): the
+    // same answer as an unknown session, before anything is relayed.
+    if !harness_core::valid_event_id(&approval_id) {
+        return Err(ApiError(StatusCode::NOT_FOUND, "unknown approval".into()));
+    }
     let row = acting_session(&m, &who, &id).await?;
     if b.decision.allows() {
         agentic_gate(&m, &who, &row).await?;

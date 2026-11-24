@@ -53,11 +53,11 @@ export const pageApi = {
   users: () => call<{ users: User[] }>("GET", "/api/users"),
   /** The answer carries the server-made temporary password, this once. */
   createUser: (b: { username: string; role: Role }) => call<User & { password: string }>("POST", "/api/users", b),
-  resetPassword: (id: string) => call<User & { password: string }>("POST", `/api/users/${id}/password`),
-  updateUser: (id: string, b: { role?: Role; disabled?: boolean }) => call<User>("PATCH", `/api/users/${id}`, b),
+  resetPassword: (id: string) => call<User & { password: string }>("POST", `/api/users/${encodeURIComponent(id)}/password`),
+  updateUser: (id: string, b: { role?: Role; disabled?: boolean }) => call<User>("PATCH", `/api/users/${encodeURIComponent(id)}`, b),
   /** An account's ceiling (N.10a part 2): server admins, never their own. */
-  setCeiling: (id: string, level: ExecLevel) => call<User>("PUT", `/api/users/${id}/exec-ceiling`, { level }),
-  deleteUser: (id: string) => call<{ ok: boolean }>("DELETE", `/api/users/${id}`),
+  setCeiling: (id: string, level: ExecLevel) => call<User>("PUT", `/api/users/${encodeURIComponent(id)}/exec-ceiling`, { level }),
+  deleteUser: (id: string) => call<{ ok: boolean }>("DELETE", `/api/users/${encodeURIComponent(id)}`),
   setupStatus: () => call<{ claimed: boolean }>("GET", "/api/setup"),
   setup: (claim_code: string, username: string, password: string) =>
     call<{ ok: boolean }>("POST", "/api/setup", { claim_code, username, password }),
@@ -67,56 +67,56 @@ export const pageApi = {
     call<{ nodes: RemoteNode[]; listener: { port: number; fingerprint: string } | null }>("GET", "/api/admin/nodes"),
   joinToken: () =>
     call<{ token: string; port: number; fingerprint: string; expires_in_s: number }>("POST", "/api/admin/nodes/join"),
-  revokeNode: (id: string) => call<{ ok: boolean }>("DELETE", `/api/admin/nodes/${id}`),
+  revokeNode: (id: string) => call<{ ok: boolean }>("DELETE", `/api/admin/nodes/${encodeURIComponent(id)}`),
   savings: () => call<TokenSavings>("GET", "/api/admin/savings"),
   saveSavings: (b: TokenSavings) => call<TokenSavings>("PUT", "/api/admin/savings", b),
   graphify: () => call<GraphifyStatus>("GET", "/api/admin/graphify"),
   selectVariant: (id: string, group: string, message_id: string) =>
-    call<{ ok: boolean }>("POST", `/api/sessions/${id}/variants`, { group, message_id }),
+    call<{ ok: boolean }>("POST", `/api/sessions/${encodeURIComponent(id)}/variants`, { group, message_id }),
   restoreTurn: (id: string, turn: string, force = false, rewind = false) =>
-    call<{ ok: boolean }>("POST", `/api/sessions/${id}/turns/${turn}/restore`, { force, rewind }),
+    call<{ ok: boolean }>("POST", `/api/sessions/${encodeURIComponent(id)}/turns/${encodeURIComponent(turn)}/restore`, { force, rewind }),
   /** Take the chat back to the person's message at `message_seq` (X.46); with `files` the folder goes back too. */
   rewind: (id: string, message_seq: number, files = false, force = false) =>
-    call<{ ok: boolean }>("POST", `/api/sessions/${id}/rewind`, { message_seq, files, force }),
+    call<{ ok: boolean }>("POST", `/api/sessions/${encodeURIComponent(id)}/rewind`, { message_seq, files, force }),
   /** Put a rewind back, while no message has been sent after it. */
-  undoRewind: (id: string, rewind_seq: number) => call<{ ok: boolean }>("POST", `/api/sessions/${id}/rewind/${rewind_seq}/undo`),
+  undoRewind: (id: string, rewind_seq: number) => call<{ ok: boolean }>("POST", `/api/sessions/${encodeURIComponent(id)}/rewind/${encodeURIComponent(rewind_seq)}/undo`),
   /** Paths of a chat's folder for the composer's `@` completion (T63). */
-  files: (id: string, q: string) => call<{ paths: string[] }>("GET", `/api/sessions/${id}/files?q=${encodeURIComponent(q)}`),
+  files: (id: string, q: string) => call<{ paths: string[] }>("GET", `/api/sessions/${encodeURIComponent(id)}/files?q=${encodeURIComponent(q)}`),
   /** What a turn changed (with `rewind`, it and every later turn), from its node. */
   turnDiff: (id: string, turn: string, rewind = false, signal?: AbortSignal) =>
-    call<TurnDiff>("GET", `/api/sessions/${id}/turns/${encodeURIComponent(turn)}/diff${rewind ? "?rewind=1" : ""}`, undefined, signal),
+    call<TurnDiff>("GET", `/api/sessions/${encodeURIComponent(id)}/turns/${encodeURIComponent(turn)}/diff${rewind ? "?rewind=1" : ""}`, undefined, signal),
   /** All of a chat's changes, from its oldest kept checkpoint to now (X.61). */
-  chatDiff: (id: string, signal?: AbortSignal) => call<TurnDiff>("GET", `/api/sessions/${id}/diff`, undefined, signal),
+  chatDiff: (id: string, signal?: AbortSignal) => call<TurnDiff>("GET", `/api/sessions/${encodeURIComponent(id)}/diff`, undefined, signal),
   /** The owner's new title for a chat (cleaned and capped by the server). */
-  renameSession: (id: string, title: string) => call<{ ok: boolean; title: string }>("PUT", `/api/sessions/${id}/title`, { title }),
+  renameSession: (id: string, title: string) => call<{ ok: boolean; title: string }>("PUT", `/api/sessions/${encodeURIComponent(id)}/title`, { title }),
   /** `media` also deletes the caller's Media items that came from the chat. */
   deleteSession: (id: string, opts: { media?: boolean } = {}) =>
-    call<{ ok: boolean }>("DELETE", `/api/sessions/${id}${opts.media ? "?media=1" : ""}`),
+    call<{ ok: boolean }>("DELETE", `/api/sessions/${encodeURIComponent(id)}${opts.media ? "?media=1" : ""}`),
   // Bounded: a pick that gets no answer frees the picker with a reason
   // (the server answers within its own timeouts; this is for a lost one).
   setAgent: (id: string, agent_id: string) =>
-    call("POST", `/api/sessions/${id}/agent`, { agent_id }, AbortSignal.timeout(30_000)).catch((e) => {
+    call("POST", `/api/sessions/${encodeURIComponent(id)}/agent`, { agent_id }, AbortSignal.timeout(30_000)).catch((e) => {
       throw e instanceof DOMException && e.name === "TimeoutError" ? new Error("The server did not answer the agent change; try again.") : e;
     }),
   /** The node clamps it and records it; the chat shows the result (T50). */
   setApprovalMode: (id: string, mode: ApprovalMode) =>
-    call<{ ok: boolean }>("POST", `/api/sessions/${id}/approval-mode`, { mode }),
+    call<{ ok: boolean }>("POST", `/api/sessions/${encodeURIComponent(id)}/approval-mode`, { mode }),
   /** The owner switches the chat's commands between the sandbox and the host shell while nothing of it runs (N.10b); the chat shows the mode its log records. */
-  setExecMode: (id: string, mode: ExecMode) => call<{ ok: boolean }>("POST", `/api/sessions/${id}/exec-mode`, { mode }),
+  setExecMode: (id: string, mode: ExecMode) => call<{ ok: boolean }>("POST", `/api/sessions/${encodeURIComponent(id)}/exec-mode`, { mode }),
   /** The node clamps it to 1..its limit and records it; the chat shows the result (X.14). */
   setStepLimit: (id: string, max_steps: number) =>
-    call<{ ok: boolean }>("POST", `/api/sessions/${id}/step-limit`, { max_steps }),
+    call<{ ok: boolean }>("POST", `/api/sessions/${encodeURIComponent(id)}/step-limit`, { max_steps }),
   /** A person's Retry of the failed last turn (X.21): the node runs its message again. */
   retryTurn: (id: string, turn: string) =>
-    call<{ ok: boolean }>("POST", `/api/sessions/${id}/turns/${encodeURIComponent(turn)}/retry`),
+    call<{ ok: boolean }>("POST", `/api/sessions/${encodeURIComponent(id)}/turns/${encodeURIComponent(turn)}/retry`),
   /** A person's fork of a chat at the end of a finished turn (C.2): the new chat's id. */
-  forkChat: (id: string, turn: string) => call<{ session_id: string }>("POST", `/api/sessions/${id}/fork`, { turn_id: turn }),
+  forkChat: (id: string, turn: string) => call<{ session_id: string }>("POST", `/api/sessions/${encodeURIComponent(id)}/fork`, { turn_id: turn }),
   /** Bookmark a message of the chat, or take the mark off (docs/pins.md); the chat's owner only. */
   pinMessage: (id: string, message_seq: number, pinned: boolean) =>
-    call<{ ok: boolean }>("POST", `/api/sessions/${id}/pins`, { message_seq, pinned }),
+    call<{ ok: boolean }>("POST", `/api/sessions/${encodeURIComponent(id)}/pins`, { message_seq, pinned }),
   /** A person's /compact (X.20): the node summarises the chat now and records the outcome in its log. */
   compact: (id: string, focus: string) =>
-    call<{ ok: boolean }>("POST", `/api/sessions/${id}/compact`, focus ? { focus } : {}),
+    call<{ ok: boolean }>("POST", `/api/sessions/${encodeURIComponent(id)}/compact`, focus ? { focus } : {}),
   saveAgentAvatar: (id: string, avatar: AgentAvatar) =>
     call<Agent>("PUT", `/api/admin/agents/${encodeURIComponent(id)}/avatar`, avatar),
   /** One agent with its instructions; the model line follows `scope` like `agents`. */
@@ -171,7 +171,7 @@ export const pageApi = {
   profileImages: () => call<ProfileImages>("GET", "/api/me/profile-images"),
   /** A picture's bytes (already made small in the browser): its new version. */
   setProfileImage: async (slot: "avatar" | "banner", file: Blob): Promise<ProfileImages> => {
-    const res = await reach(fetch(`/api/me/${slot}`, { method: "PUT", credentials: "same-origin", headers: keyed({ "content-type": file.type }), body: file }));
+    const res = await reach(fetch(`/api/me/${encodeURIComponent(slot)}`, { method: "PUT", credentials: "same-origin", headers: keyed({ "content-type": file.type }), body: file }));
     let data: unknown = null;
     try {
       data = await res.json();
@@ -182,22 +182,22 @@ export const pageApi = {
     if (!res.ok) throw httpError(res, data);
     return data as ProfileImages;
   },
-  removeProfileImage: (slot: "avatar" | "banner") => call<ProfileImages>("DELETE", `/api/me/${slot}`),
+  removeProfileImage: (slot: "avatar" | "banner") => call<ProfileImages>("DELETE", `/api/me/${encodeURIComponent(slot)}`),
   addMemory: (text: string, kind: FactKind = "fact") =>
     call<MemoryFact>("POST", "/api/memory", { text, kind }),
   updateMemory: (
     id: string,
     b: { text?: string; status?: "active" | "retired"; place?: "user" | "workspace"; workspace_id?: string },
-  ) => call<MemoryFact>("PATCH", `/api/memory/${id}`, b),
+  ) => call<MemoryFact>("PATCH", `/api/memory/${encodeURIComponent(id)}`, b),
   memoryCall: (sessionId: string, callId: string) =>
-    call<MemoryCallState>("GET", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}`),
+    call<MemoryCallState>("GET", `/api/sessions/${encodeURIComponent(sessionId)}/memory/${encodeURIComponent(callId)}`),
   keepMemoryCall: (sessionId: string, callId: string) =>
-    call<MemoryCallState>("POST", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}/keep`),
+    call<MemoryCallState>("POST", `/api/sessions/${encodeURIComponent(sessionId)}/memory/${encodeURIComponent(callId)}/keep`),
   dismissMemoryCall: (sessionId: string, callId: string) =>
-    call<MemoryCallState>("POST", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}/dismiss`),
+    call<MemoryCallState>("POST", `/api/sessions/${encodeURIComponent(sessionId)}/memory/${encodeURIComponent(callId)}/dismiss`),
   undoMemoryCall: (sessionId: string, callId: string) =>
-    call<MemoryCallState>("POST", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}/undo`),
-  deleteMemory: (id: string) => call<{ ok: boolean }>("DELETE", `/api/memory/${id}`),
+    call<MemoryCallState>("POST", `/api/sessions/${encodeURIComponent(sessionId)}/memory/${encodeURIComponent(callId)}/undo`),
+  deleteMemory: (id: string) => call<{ ok: boolean }>("DELETE", `/api/memory/${encodeURIComponent(id)}`),
   memoryCfg: () => call<MemoryCfg>("GET", "/api/admin/memory"),
   saveMemoryCfg: (b: {
     recall: MemoryCfg["recall"];
@@ -216,8 +216,8 @@ export const pageApi = {
   workspaceFacts: (id: string) => call<WorkspaceFacts>("GET", `${ws(id)}/facts`),
   addWorkspaceFact: (id: string, text: string) => call<MemoryFact>("POST", `${ws(id)}/facts`, { text }),
   updateWorkspaceFact: (id: string, fact: string, b: { text?: string; status?: "active" | "retired" }) =>
-    call<MemoryFact>("PATCH", `${ws(id)}/facts/${fact}`, b),
-  deleteWorkspaceFact: (id: string, fact: string) => call<{ ok: boolean }>("DELETE", `${ws(id)}/facts/${fact}`),
+    call<MemoryFact>("PATCH", `${ws(id)}/facts/${encodeURIComponent(fact)}`, b),
+  deleteWorkspaceFact: (id: string, fact: string) => call<{ ok: boolean }>("DELETE", `${ws(id)}/facts/${encodeURIComponent(fact)}`),
   setWorkspaceFactsSettings: (id: string, members_edit: boolean) =>
     call<{ members_edit: boolean }>("PUT", `${ws(id)}/facts/settings`, { members_edit }),
   setWorkspaceMemory: (id: string, use_memory: boolean) =>
@@ -242,12 +242,12 @@ export const pageApi = {
   /** Owner recovery: `owner` is the user id of an enabled member. */
   setWorkspaceOwner: (id: string, owner: string) => call<AdminWorkspace>("PATCH", adminWs(id), { owner }),
   adminDeleteWorkspace: (id: string) => call<{ ok: boolean }>("DELETE", adminWs(id)),
-  cancel: (id: string) => call("POST", `/api/sessions/${id}/cancel`),
+  cancel: (id: string) => call("POST", `/api/sessions/${encodeURIComponent(id)}/cancel`),
   /** `note` goes with a denial only (the server drops it with an allow). */
   approve: (id: string, approvalId: string, decision: Decision, note?: string) =>
-    call("POST", `/api/sessions/${id}/approvals/${approvalId}`, note ? { decision, note } : { decision }),
+    call("POST", `/api/sessions/${encodeURIComponent(id)}/approvals/${encodeURIComponent(approvalId)}`, note ? { decision, note } : { decision }),
   /** Where the chat's push goes, as the server knows it (PLAN.md T101): the page draws a push card's destination from this. */
-  pushTarget: (id: string) => call<{ host: string; full_name: string; login: string }>("GET", `/api/sessions/${id}/push-target`),
+  pushTarget: (id: string) => call<{ host: string; full_name: string; login: string }>("GET", `/api/sessions/${encodeURIComponent(id)}/push-target`),
   /** Remove a call allowed for the rest of the chat (T51). */
-  revokeAllow: (id: string, grantId: string) => call("DELETE", `/api/sessions/${id}/allows/${grantId}`),
+  revokeAllow: (id: string, grantId: string) => call("DELETE", `/api/sessions/${encodeURIComponent(id)}/allows/${encodeURIComponent(grantId)}`),
 };

@@ -16,7 +16,7 @@ const marked = new Set<string>();
 /** The finished run is seen by its owner (idempotent on the server). */
 export async function markRunSeen(routineId: string, runId: string): Promise<void> {
   if (marked.has(runId)) return;
-  await call<{ ok: boolean }>("POST", `/api/routines/${routineId}/runs/${runId}/seen`);
+  await call<{ ok: boolean }>("POST", `/api/routines/${encodeURIComponent(routineId)}/runs/${encodeURIComponent(runId)}/seen`);
   marked.add(runId);
 }
 

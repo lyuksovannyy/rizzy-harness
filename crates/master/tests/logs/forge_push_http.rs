@@ -696,3 +696,47 @@ async fn a_duplicate_after_the_click_is_refused_at_the_request() {
     let (_, token, error) = c.ask("r1").await;
     assert!(token.is_none(), "{error:?}");
 }
+
+// ---------------------------------------------- re-check: N4
+
+/// N4: a card with an id outside the node's id rule beside a real push
+/// card: the page sends that id encoded, the master answers 404 and
+/// records nothing for the push card; ids outside the rule are 404.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ids_outside_the_rule_are_404_and_release_nothing() {
+    let c = running().await;
+    c.started("cp", "push").await;
+    c.requested("u1", "cp", "push").await;
+    c.started("cb", "bash").await;
+    c.requested("u1#x", "cb", "bash").await;
+    for path_id in [
+        "u1%23x",
+        "u1%3Fx",
+        "x%2F..%2Fu1",
+        "u1%252Fx",
+        "a%20b",
+        &"a".repeat(500),
+    ] {
+        assert_eq!(
+            c.click(&c.alice, path_id, "allow").await,
+            StatusCode::NOT_FOUND,
+            "{path_id}"
+        );
+    }
+    assert!(
+        !c.t.master.push_click_pending(c.sid, "u1"),
+        "a bash card's click armed the push card"
+    );
+    let (_, token, _) = c.ask("u1").await;
+    assert!(token.is_none());
+}
+
+/// N4: a push card whose call id is outside the rule releases nothing,
+/// whoever clicks it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_push_card_with_a_call_id_outside_the_rule_gets_nothing() {
+    let c = running().await;
+    c.started("c#1", "push").await;
+    c.requested("v1", "c#1", "push").await;
+    assert!(!c.allowed_gets_token("v1").await);
+}

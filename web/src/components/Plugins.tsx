@@ -224,7 +224,7 @@ export default function Plugins(props: FeaturePageProps) {
                   onChanged={load}
                   onToggle={() => setOpen(open === key ? null : key)}
                   onSave={async (access, agents) => {
-                    await call("PUT", `${base(scope!)}/${i.kind}/${encodeURIComponent(i.name)}`, { access, agents: access === "assigned" ? agents : [] });
+                    await call("PUT", `${base(scope!)}/${encodeURIComponent(i.kind)}/${encodeURIComponent(i.name)}`, { access, agents: access === "assigned" ? agents : [] });
                     setOpen(null);
                     load();
                   }}

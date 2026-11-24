@@ -392,6 +392,13 @@ function idsOf(v: SessionView) {
   return s;
 }
 
+/** An approval id or call id as the harness and the providers make them:
+ * 1 to 128 of `[A-Za-z0-9_-]` (`harness_core::valid_event_id`, review N4).
+ * Anything else is drawn as an invalid card. */
+export function validId(id: unknown): boolean {
+  return typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id);
+}
+
 /** Mark invalid every card whose (call id, approval id) `hit` matches. */
 function invalidate(v: SessionView, hit: (call: string, approval: string) => boolean) {
   for (const it of v.items) {
@@ -838,7 +845,8 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       // As the Rust view: an approval id announced twice, or one for a call
       // announced twice, makes every card carrying it invalid (review N1).
       const ids = idsOf(v);
-      const dup = ids.approvals.has(p.approval_id) || ids.dupCalls.has(p.call_id);
+      const dup =
+        ids.approvals.has(p.approval_id) || ids.dupCalls.has(p.call_id) || !validId(p.approval_id) || !validId(p.call_id);
       ids.approvals.add(p.approval_id);
       if (dup) invalidate(v, (_, a) => a === p.approval_id);
       const t = lastTool(v, p.call_id);

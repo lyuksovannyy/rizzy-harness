@@ -22,7 +22,7 @@ export interface BgOutput {
 export const POLL_MS = 3000;
 
 export const readBgOutput = (session: string, bg: string, signal?: AbortSignal) =>
-  call<BgOutput>("GET", `/api/sessions/${session}/background/${encodeURIComponent(bg)}/output`, undefined, signal);
+  call<BgOutput>("GET", `/api/sessions/${encodeURIComponent(session)}/background/${encodeURIComponent(bg)}/output`, undefined, signal);
 
 /** `ms` as "12 s", "3 min 4 s", "1 h 5 min": coarse, for a row. */
 export function ranWords(ms: number): string {

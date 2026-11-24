@@ -190,7 +190,7 @@ export default function SidePanel(props: {
   const stop = async (ids: string[], all: boolean) => {
     set(ids, { state: "stopping", at: Date.now() });
     try {
-      await call("POST", all ? `/api/sessions/${sessionId}/background/stop` : `/api/sessions/${sessionId}/background/${ids[0]}/stop`);
+      await call("POST", all ? `/api/sessions/${encodeURIComponent(sessionId)}/background/stop` : `/api/sessions/${encodeURIComponent(sessionId)}/background/${encodeURIComponent(ids[0] ?? "")}/stop`);
     } catch (x) {
       set(ids, { state: "failed", error: x instanceof Error ? x.message : String(x) });
     }
@@ -198,7 +198,7 @@ export default function SidePanel(props: {
   const removeGrant = async (id: string) => {
     set([`grant:${id}`], { state: "stopping", at: Date.now() });
     try {
-      await call("DELETE", `/api/sessions/${sessionId}/allows/${id}`);
+      await call("DELETE", `/api/sessions/${encodeURIComponent(sessionId)}/allows/${encodeURIComponent(id)}`);
     } catch (x) {
       set([`grant:${id}`], { state: "failed", error: x instanceof Error ? x.message : String(x) });
     }
