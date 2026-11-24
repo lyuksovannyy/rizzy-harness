@@ -574,6 +574,9 @@ fn linked(links: &BTreeMap<String, String>, url: &str, other: &str) -> String {
     }
 }
 
+/// A converted route's answer per kind of caller.
+type Pinned = (&'static str, &'static str, &'static [(&'static str, u16)]);
+
 const BODY_CODES: &[u16] = &[400, 413, 415, 422];
 const CHANGE_FIRST: &str = "change your password first";
 const ADMINS_ONLY: &str = "admins only";
@@ -995,7 +998,7 @@ async fn the_layer_and_the_handlers_checks_agree() {
     // `require_bytes` for a made file (a chat that does not exist: 404).
     // A signed-in caller without the right now gets 403 before the body
     // (decision 2): PUT /api/admin/storage with an empty body.
-    let want: &[(&str, &str, &[(&str, u16)])] = &[
+    let want: &[Pinned] = &[
         (
             "GET",
             "/api/me/storage",
