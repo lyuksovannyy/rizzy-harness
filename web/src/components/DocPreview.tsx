@@ -13,7 +13,7 @@ import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "rea
 import { call } from "../api";
 import { type PBlock, type PCell, type PreviewAnswer, type PreviewTarget, type PRow, type PRun, openPreview, previewUrl, targetKey } from "../lib/docPreview";
 import { applyChanges, type Change, editRequest, losesFormatting, mentionOf, paragraphNumber, refusals, textOf, withMention } from "../lib/docPreviewEdit";
-import { discardQuestion, watch } from "../lib/unsavedGuard";
+import { askDiscard, watch } from "../lib/unsavedGuard";
 import { showHidden } from "../md/hidden";
 import type { UploadedAttachment } from "../types";
 import { LinkedA } from "./Linked";
@@ -306,11 +306,13 @@ export default function DocPreview(props: { target: PreviewTarget; onClose: () =
   /** Asked once before the changes are thrown away (close, another sheet). */
   const leave = (go: () => void) => {
     const n = Object.keys(mine.current).length;
-    if (n === 0 || window.confirm(discardQuestion(n))) {
+    const proceed = () => {
       setAll({});
       setOpen(null);
       go();
-    }
+    };
+    if (n === 0) proceed();
+    else void askDiscard(n).then((ok) => ok && proceed());
   };
 
   // Changes waiting: another file, another chat and a closed tab ask first.

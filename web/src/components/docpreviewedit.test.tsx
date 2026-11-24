@@ -279,29 +279,40 @@ test("another failure is one sentence; the changes stay and Save can be tried ag
   expect(button("Save a copy")!.disabled).toBe(false);
 });
 
-test("leaving with changes asks once; without changes it does not", async () => {
+const dlg = () => document.querySelector<HTMLDialogElement>("dialog.host-warning");
+const dlgButton = (label: string) => [...(dlg()?.querySelectorAll("button") ?? [])].find((b) => b.textContent === label)!;
+const answer = (label: string) => act(async () => dlgButton(label).click());
+
+test("leaving with changes asks once, in the app's dialog; without changes it does not", async () => {
   const onClose = vi.fn();
-  const sure = vi.fn(() => false);
-  window.confirm = sure;
+  const confirm = vi.fn();
+  window.confirm = confirm;
   await show(book, { session: "s1", fileId: "f2", name: "book.xlsx" }, composer(), onClose);
   // No changes: close and sheet tabs go straight.
   await act(async () => q<HTMLButtonElement>(".pv-tabs button:nth-child(2)").click());
-  expect(sure).not.toHaveBeenCalled();
+  expect(dlg()).toBeNull();
   call.mockImplementation(() => Promise.resolve(book));
   await act(async () => q<HTMLButtonElement>(".pv-tabs button:nth-child(1)").click());
   await flush();
   await change("Edit Cell B2", "9");
   const calls = call.mock.calls.length;
   await act(async () => q<HTMLButtonElement>(".pv-tabs button:nth-child(2)").click());
-  expect(sure).toHaveBeenCalledTimes(1);
+  expect(dlg()!.textContent).toContain("Discard 1 change that has not been saved?");
+  expect(document.activeElement).toBe(dlgButton("Keep editing"));
+  await answer("Keep editing");
+  expect(dlg()).toBeNull();
   expect(call.mock.calls.length).toBe(calls);
   expect(host.textContent).toContain("1 change");
   await act(async () => button("Close the preview")!.click());
-  expect(sure).toHaveBeenCalledTimes(2);
+  expect(dlg()).not.toBeNull();
+  // Escape is Keep editing.
+  await act(async () => void dlg()!.dispatchEvent(new Event("cancel", { cancelable: true })));
+  expect(dlg()).toBeNull();
   expect(onClose).not.toHaveBeenCalled();
-  sure.mockImplementation(() => true);
   await act(async () => button("Close the preview")!.click());
+  await answer("Discard changes");
   expect(onClose).toHaveBeenCalledTimes(1);
+  expect(confirm).not.toHaveBeenCalled();
 });
 
 test("a cell is a field with its text or formula; an empty cell of the grid can be filled; a cut cell cannot", async () => {
@@ -387,69 +398,72 @@ async function withChange() {
   await change("Edit Paragraph 2", "Edited");
 }
 
-test("Preview on another file with changes asks; no keeps the panel's file, yes opens the other", async () => {
-  const sure = vi.fn(() => false);
-  window.confirm = sure;
+test("Preview on another file with changes asks; Keep editing and Escape keep the panel's file, Discard opens the other", async () => {
   await withChange();
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  opener.focus();
   act(() => store.openPreview(other));
-  expect(sure).toHaveBeenCalledTimes(1);
-  expect(sure).toHaveBeenCalledWith("Discard 1 change that has not been saved?");
+  expect(dlg()!.textContent).toContain("Discard 1 change that has not been saved?");
+  expect(seen).toEqual(plainChat);
+  await answer("Keep editing");
   expect(seen).toEqual(plainChat);
   expect(host.textContent).toContain("1 change");
-  sure.mockImplementation(() => true);
+  expect(document.activeElement).toBe(opener);
   act(() => store.openPreview(other));
-  expect(sure).toHaveBeenCalledTimes(2);
+  await act(async () => void dlg()!.dispatchEvent(new Event("cancel", { cancelable: true })));
+  expect(seen).toEqual(plainChat);
+  act(() => store.openPreview(other));
+  await answer("Discard changes");
   expect(seen).toEqual(other);
+  opener.remove();
 });
 
 test("Preview on another file asks nothing without changes, after Save, or for the file already open", async () => {
-  const sure = vi.fn(() => false);
-  window.confirm = sure;
   store.openPreview(plainChat);
   await show(doc, plainChat);
   act(() => store.openPreview(other));
-  expect(sure).not.toHaveBeenCalled();
+  expect(dlg()).toBeNull();
   expect(seen).toEqual(other);
   // The same file, with changes: not a question.
   store.openPreview(plainChat);
   await withChange();
   act(() => store.openPreview({ ...plainChat }));
-  expect(sure).not.toHaveBeenCalled();
+  expect(dlg()).toBeNull();
   // After a successful Save there is nothing to lose.
   call.mockImplementation(() => Promise.resolve({ file: { attachment_id: "a1", name: "plan (edited).docx", mime: "x", kept: true }, results: [{ ok: true }] }));
   await act(async () => button("Save a copy")!.click());
   await flush();
   act(() => store.openPreview(other));
-  expect(sure).not.toHaveBeenCalled();
+  expect(dlg()).toBeNull();
   expect(seen).toEqual(other);
 });
 
-test("moving to another chat or page asks; no stays and keeps the changes, yes goes on", async () => {
-  const sure = vi.fn(() => false);
-  window.confirm = sure;
+test("moving to another chat or page holds the move until answered; Keep editing restores the address, Discard replays it", async () => {
   const seenByApp = vi.fn();
   window.addEventListener("hashchange", seenByApp);
   await withChange();
-  const change1 = (to: string) => {
+  const move = (to: string) => {
     const old = location.href;
     location.hash = to;
     act(() => void window.dispatchEvent(new HashChangeEvent("hashchange", { oldURL: old, newURL: location.href })));
   };
   const start = location.hash;
-  change1("#/s/other");
-  expect(sure).toHaveBeenCalledTimes(1);
+  move("#/s/other");
+  expect(dlg()).not.toBeNull();
+  expect(seenByApp).not.toHaveBeenCalled();
+  await answer("Keep editing");
   expect(seenByApp).not.toHaveBeenCalled();
   expect(location.hash).toBe(start);
   expect(host.textContent).toContain("1 change");
-  sure.mockImplementation(() => true);
-  change1("#/s/other");
-  expect(sure).toHaveBeenCalledTimes(2);
-  expect(seenByApp).toHaveBeenCalledTimes(1);
+  move("#/s/other");
+  await answer("Discard changes");
+  expect(seenByApp).toHaveBeenCalled();
   expect(location.hash).toBe("#/s/other");
-  // The changes are gone with the answer: the same question is not asked twice.
   expect(host.textContent).not.toContain("1 change");
-  change1("#/s/third");
-  expect(sure).toHaveBeenCalledTimes(2);
+  // The changes are gone with the answer: the same question is not asked twice.
+  move("#/s/third");
+  expect(dlg()).toBeNull();
   window.removeEventListener("hashchange", seenByApp);
 });
 
