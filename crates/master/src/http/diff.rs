@@ -12,13 +12,14 @@
 //! too old, 504 no answer in time. Never a 500 for any of those.
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use harness_protocol::TurnDiff;
 use serde::Deserialize;
 
-use super::{ApiError, ApiResult, require, visible_session};
+use super::caller::User;
+use super::{ApiError, ApiResult, visible_session};
 use crate::Master;
 use crate::diff::DiffError;
 
@@ -41,12 +42,11 @@ fn is_turn_id(s: &str) -> bool {
 }
 
 async fn turn_diff(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path((id, turn)): Path<(String, String)>,
     Query(q): Query<DiffQuery>,
 ) -> ApiResult<Json<TurnDiff>> {
-    let who = require(&m, &headers).await?;
     let row = visible_session(&m, &who, &id).await?;
     if !is_turn_id(&turn) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad turn id".into()));
