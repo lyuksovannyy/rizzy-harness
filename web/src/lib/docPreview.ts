@@ -66,14 +66,15 @@ export const gate: { ask: (() => Promise<boolean>) | null } = { ask: null };
 
 /** Open the file in the side panel; the control that asked gets focus back on close. */
 export function openPreview(t: PreviewTarget, from?: HTMLElement | null) {
-  if (current && gate.ask && targetKey(t) !== targetKey(current)) {
-    // Changes wait in the panel: ask first, open on a yes.
-    void gate.ask().then((ok) => ok && openPreview(t, from ?? opener));
-    return;
-  }
-  opener = from ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
-  current = t;
-  emit();
+  const opened = from ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  const apply = () => {
+    opener = opened;
+    current = t;
+    emit();
+  };
+  // Changes wait in the panel: ask first, open on a yes.
+  if (current && gate.ask && targetKey(t) !== targetKey(current)) void gate.ask().then((ok) => ok && apply());
+  else apply();
 }
 
 export function closePreview() {

@@ -439,32 +439,36 @@ test("Preview on another file asks nothing without changes, after Save, or for t
   expect(seen).toEqual(other);
 });
 
-test("moving to another chat or page holds the move until answered; Keep editing restores the address, Discard replays it", async () => {
-  const seenByApp = vi.fn();
-  window.addEventListener("hashchange", seenByApp);
+test("moving to another chat or page holds the move until answered; Keep editing restores the address, Discard puts it back", async () => {
+  // The router reads the address when `hashchange` comes, after `popstate`.
+  const routerSaw: string[] = [];
+  const router = () => routerSaw.push(location.hash);
+  window.addEventListener("hashchange", router);
   await withChange();
-  const move = (to: string) => {
-    const old = location.href;
+  const move = async (to: string) => {
     location.hash = to;
-    act(() => void window.dispatchEvent(new HashChangeEvent("hashchange", { oldURL: old, newURL: location.href })));
+    await act(async () => void window.dispatchEvent(new PopStateEvent("popstate")));
+    await act(async () => {});
+    router();
   };
   const start = location.hash;
-  move("#/s/other");
+  await move("#/s/other");
   expect(dlg()).not.toBeNull();
-  expect(seenByApp).not.toHaveBeenCalled();
-  await answer("Keep editing");
-  expect(seenByApp).not.toHaveBeenCalled();
   expect(location.hash).toBe(start);
+  await answer("Keep editing");
+  expect(location.hash).toBe(start);
+  expect(routerSaw.every((h) => h === start)).toBe(true);
   expect(host.textContent).toContain("1 change");
-  move("#/s/other");
+  await move("#/s/other");
+  routerSaw.length = 0;
   await answer("Discard changes");
-  expect(seenByApp).toHaveBeenCalled();
   expect(location.hash).toBe("#/s/other");
+  expect(routerSaw).toContain("#/s/other");
   expect(host.textContent).not.toContain("1 change");
   // The changes are gone with the answer: the same question is not asked twice.
-  move("#/s/third");
+  await move("#/s/third");
   expect(dlg()).toBeNull();
-  window.removeEventListener("hashchange", seenByApp);
+  window.removeEventListener("hashchange", router);
 });
 
 test("closing the tab is stopped by the browser only while there are changes", async () => {
@@ -484,4 +488,15 @@ test("closing the tab is stopped by the browser only while there are changes", a
   expect(fire()).toBe(true);
   act(() => root.render(<></>));
   expect(fire()).toBe(false);
+});
+
+test("a copy saved in a chat with a folder opens in the panel without a question or a loop", async () => {
+  store.openPreview(codingChat);
+  await show(doc, codingChat);
+  await change("Edit Paragraph 2", "Edited");
+  call.mockImplementation((method: unknown) => (method === "POST" ? Promise.resolve({ saved: "docs/plan (edited).docx", name: "plan (edited).docx" }) : Promise.resolve(doc)));
+  await act(async () => button("Save a copy")!.click());
+  await flush();
+  expect(dlg()).toBeNull();
+  expect(seen).toMatchObject({ session: "s2", path: "docs/plan (edited).docx" });
 });

@@ -1,8 +1,8 @@
 // What the open preview panel does so its unsaved changes are not lost without
 // a question (X.60): every way of leaving asks the app's own dialog, once —
 // closing the panel, another sheet, another file's Preview (`gate` in
-// docPreview.ts), another chat or page (the hash changing: every sidebar row,
-// link, New chat and the browser's back and forward end there). Closing or
+// docPreview.ts), another chat or page (every change of the address: sidebar row,
+// link, New chat, the browser's back and forward). Closing or
 // reloading the tab keeps the browser's own warning (a page cannot draw a
 // dialog there). Part of the panel's lazy chunk.
 import { gate } from "./docPreview";
@@ -79,29 +79,38 @@ export function watch(unsaved: () => number, discard: () => void): () => void {
     discard();
     return true;
   };
-  // Capture phase, so it runs before the router's own listener, which never
-  // hears of a change held here. Keep editing puts the address back
-  // (replaceState fires no event); Discard replays the change to the router.
-  const hash = (e: HashChangeEvent) => {
-    if (unsaved() === 0) return;
-    e.stopImmediatePropagation();
+  // Another chat or page is a change of the address (a link, the sidebar, New
+  // chat, back and forward). `popstate` comes before the router's `hashchange`
+  // and an address change cannot be vetoed, nor can our `hashchange` listener
+  // run before the router's (same target, registration order). So the address
+  // is put back inside `popstate`: the router then reads the old one and stays;
+  // Discard puts the new one back and replays `hashchange` to the router.
+  let settled = location.href;
+  const pop = (e: PopStateEvent) => {
+    const now = location.href;
+    if (now === settled) return;
+    if (unsaved() === 0) {
+      settled = now;
+      return;
+    }
+    const before = settled;
+    history.replaceState(e.state, "", before);
     void ask().then((ok) => {
-      if (ok) {
-        window.dispatchEvent(new HashChangeEvent("hashchange", { oldURL: e.oldURL, newURL: e.newURL }));
-      } else if (e.oldURL) {
-        history.replaceState(history.state, "", e.oldURL);
-      }
+      if (!ok) return;
+      settled = now;
+      history.replaceState(e.state, "", now);
+      window.dispatchEvent(new HashChangeEvent("hashchange", { oldURL: before, newURL: now }));
     });
   };
   const unload = (e: BeforeUnloadEvent) => {
     if (unsaved() > 0) e.preventDefault();
   };
   gate.ask = ask;
-  window.addEventListener("hashchange", hash, true);
+  window.addEventListener("popstate", pop);
   window.addEventListener("beforeunload", unload);
   return () => {
     if (gate.ask === ask) gate.ask = null;
-    window.removeEventListener("hashchange", hash, true);
+    window.removeEventListener("popstate", pop);
     window.removeEventListener("beforeunload", unload);
   };
 }
