@@ -14,16 +14,17 @@
 //! only). The master does not interpret it beyond its length.
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use harness_docs::edit::preview::Preview;
 use harness_protocol::MAX_PREVIEW_PATH_BYTES;
 use serde::Deserialize;
 
+use super::caller::User;
 use super::doc_preview::{Answer, MAX_ANSWER_BYTES, refusal};
 use super::files::away;
-use super::{ApiError, ApiResult, agentic_gate, require, visible_session};
+use super::{ApiError, ApiResult, agentic_gate, visible_session};
 use crate::Master;
 use crate::folder_preview::PreviewError;
 
@@ -56,12 +57,11 @@ pub(super) fn base_name(path: &str) -> String {
 }
 
 async fn preview(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<PreviewQuery>,
 ) -> ApiResult<Json<Answer>> {
-    let who = require(&m, &headers).await?;
     let row = visible_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     // Only a coding chat with a folder: a chat without one has the other
