@@ -219,6 +219,25 @@ pub(crate) fn head_label(top: &Path) -> Option<(Option<String>, Option<String>)>
     Some((Some(branch.to_string()), resolve(&git, name)))
 }
 
+/// The commit `refs/heads/<branch>` names in the repository whose top
+/// folder is `top` (canonical), by [`head_label`]'s rules (a real `.git`
+/// directory, no gitfile, link or `commondir`; the ref read as a loose file
+/// with no link followed, else from `packed-refs`). `branch` must already
+/// be a name the caller checked (`harness_core::forge::valid_branch`).
+/// `None` for anything else (X.27 step 4).
+pub(crate) fn branch_commit(top: &Path, branch: &str) -> Option<String> {
+    let git = top.join(".git");
+    if !std::fs::symlink_metadata(&git).ok()?.is_dir()
+        || git.join("commondir").exists()
+        || std::fs::symlink_metadata(git.join("gitdir")).is_ok()
+        || !plain(&git)
+        || !harness_core::forge::valid_branch(branch)
+    {
+        return None;
+    }
+    resolve(&git, &format!("refs/heads/{branch}"))
+}
+
 /// What `<top>/.git` (a real directory) says.
 fn read(top: &Path) -> Result<UserRepo, String> {
     let git = top.join(".git");

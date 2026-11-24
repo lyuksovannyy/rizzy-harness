@@ -61,11 +61,11 @@ pub const SIZE_EVERY: Duration = Duration::from_millis(500);
 /// The URL's scheme. Tests clone over plain HTTP from a fake server on
 /// 127.0.0.1; nothing a person sets changes it.
 const PROD_SCHEME: &str = "https";
-const SCHEME: &str = if cfg!(test) { "http" } else { PROD_SCHEME };
+pub(crate) const SCHEME: &str = if cfg!(test) { "http" } else { PROD_SCHEME };
 
 /// The most of git's error output kept, and passed on (in characters).
-const STDERR_READ: usize = 64 * 1024;
-const ERROR_MAX: usize = 300;
+pub(crate) const STDERR_READ: usize = 64 * 1024;
+pub(crate) const ERROR_MAX: usize = 300;
 
 /// The first git version with `http.proactiveAuth` (git 2.46.0).
 const PROACTIVE_SINCE: (u32, u32) = (2, 46);
@@ -113,7 +113,7 @@ pub fn valid_username(s: &str) -> bool {
 /// A token: 1 to [`harness_protocol::MAX_CLONE_TOKEN`] visible ASCII
 /// characters (no space, no line break: it cannot add a line to git's
 /// credential exchange).
-fn valid_token(t: &str) -> bool {
+pub(crate) fn valid_token(t: &str) -> bool {
     (1..=harness_protocol::MAX_CLONE_TOKEN).contains(&t.len())
         && t.bytes().all(|b| b.is_ascii_graphic())
 }
@@ -222,7 +222,7 @@ pub(crate) async fn clone(
 
 /// Whether this git sends the credential with its first request
 /// (`http.proactiveAuth`, git 2.46): asked once.
-async fn proactive_auth() -> bool {
+pub(crate) async fn proactive_auth() -> bool {
     #[cfg(test)]
     if OLD_GIT.with(|o| o.get()) {
         return false;
@@ -263,7 +263,7 @@ fn version_at_least(out: &str, min: (u32, u32)) -> bool {
 /// one whose descriptor 0 is the pipe `pipe_ino`, and reads one line, the
 /// token, from it. Every value it names is checked by the caller to be of
 /// `[A-Za-z0-9._:/-]` (none needs quoting inside `'…'`).
-fn helper(
+pub(crate) fn helper(
     scheme: &str,
     host: &str,
     path: &str,
@@ -338,7 +338,7 @@ fn clone_config(scheme: &str, helper: Option<&str>, proactive: bool) -> Vec<Stri
 
 /// The pipe that carries the token: written and closed here, its reading
 /// end for git's standard input, and its inode for the helper.
-fn token_pipe(token: &Secret<String>) -> Result<(std::os::fd::OwnedFd, u64), String> {
+pub(crate) fn token_pipe(token: &Secret<String>) -> Result<(std::os::fd::OwnedFd, u64), String> {
     let (r, w) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)
         .map_err(|e| format!("cannot make a pipe: {}", std::io::Error::from(e)))?;
     let mut line = Vec::with_capacity(token.expose().len() + 1);
@@ -382,10 +382,10 @@ pub(crate) fn use_test_home(p: Option<PathBuf>) {
 /// `XDG_CONFIG_HOME` and `CURL_HOME`; removed when dropped. With `HOME`
 /// unset libcurl would find the node user's home through the password
 /// database and read its `.netrc` (review of PR 163).
-struct EmptyHome(PathBuf);
+pub(crate) struct EmptyHome(pub(crate) PathBuf);
 
 impl EmptyHome {
-    fn new(staging: &Path) -> Result<Self, String> {
+    pub(crate) fn new(staging: &Path) -> Result<Self, String> {
         use std::os::unix::fs::DirBuilderExt;
         let mut b = [0u8; 8];
         getrandom::fill(&mut b).expect("OS randomness");
@@ -410,7 +410,7 @@ impl Drop for EmptyHome {
 
 /// What git's error output means when a private clone's credential never
 /// reached it (git asked for a user name or password, and nothing answered).
-fn credential_missing(stderr: &str) -> bool {
+pub(crate) fn credential_missing(stderr: &str) -> bool {
     [
         "could not read Username",
         "could not read Password",
@@ -599,11 +599,7 @@ async fn over(at: &Path, max: u64) -> bool {
 fn clean_error(stderr: &str, req: &CloneRequest) -> String {
     let mut s = stderr.to_string();
     if let (Some(u), Some(t)) = (&req.username, &req.token) {
-        use base64::Engine as _;
-        let basic = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{}", t.expose()));
-        s = s
-            .replace(t.expose().as_str(), "<redacted>")
-            .replace(&basic, "<redacted>");
+        s = without_token(&s, u, t);
     }
     let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = lines[lines.len().saturating_sub(3)..].join(" / ");
@@ -619,6 +615,27 @@ fn clean_error(stderr: &str, req: &CloneRequest) -> String {
     }
 }
 
+/// `s` without `token`, `login:token` or the base64 of that (padded,
+/// unpadded, URL-safe), each replaced by `<redacted>`.
+pub(crate) fn without_token(s: &str, login: &str, token: &Secret<String>) -> String {
+    use base64::Engine as _;
+    let t = token.expose().as_str();
+    if t.is_empty() {
+        return s.to_string();
+    }
+    let pair = format!("{login}:{t}");
+    let mut out = s.to_string();
+    for enc in [
+        base64::engine::general_purpose::STANDARD.encode(&pair),
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(&pair),
+        base64::engine::general_purpose::URL_SAFE.encode(&pair),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&pair),
+    ] {
+        out = out.replace(&enc, "<redacted>");
+    }
+    out.replace(&pair, "<redacted>").replace(t, "<redacted>")
+}
+
 #[cfg(test)]
 #[path = "forge_clone_tests.rs"]
-mod tests;
+pub(crate) mod tests;

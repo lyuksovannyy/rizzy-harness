@@ -184,6 +184,10 @@ pub(crate) struct Session {
     /// step 2): the approval card names a call's connector and the
     /// server's own name of the tool from them.
     connector_tools: Mutex<Vec<harness_core::connectors::ConnectorToolEntry>>,
+    /// Where the running turn may push (X.27 step 4, PLAN.md T101): the
+    /// master's target for this turn, kept only when this node and this
+    /// session allow a push in it (`push_for_turn`), with the turn's id.
+    pub(crate) push_now: Mutex<Option<(String, harness_core::forge::PushTarget)>>,
     /// An append of the running turn failed: the rest of its appends fail
     /// without being tried, so the turn ends (cleared when a turn starts).
     log_failed: AtomicBool,
@@ -619,6 +623,7 @@ impl Session {
             deny_notes: Mutex::new(HashMap::new()),
             grants: Mutex::new(HashMap::new()),
             connector_tools: Mutex::new(Vec::new()),
+            push_now: Mutex::new(None),
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
@@ -781,6 +786,7 @@ impl Session {
             deny_notes: Mutex::new(HashMap::new()),
             grants: Mutex::new(grants),
             connector_tools: Mutex::new(Vec::new()),
+            push_now: Mutex::new(None),
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
@@ -2120,6 +2126,9 @@ impl Session {
             a.connector_tools.clear();
             a
         });
+        // Nor is it a push target's turn (X.27 step 4).
+        let mut after = after;
+        after.push = None;
         while matches!(
             reason,
             TurnEndReason::Completed | TurnEndReason::Error | TurnEndReason::Limit
@@ -3698,7 +3707,7 @@ impl Session {
         history: Vec<RawEvent>,
         agent: Option<AgentSpec>,
         compare: Vec<String>,
-        extra: TurnExtra,
+        mut extra: TurnExtra,
         cancel: CancellationToken,
         by_stop: Arc<AtomicBool>,
     ) -> (TurnEndReason, Option<Usage>) {
@@ -3718,6 +3727,22 @@ impl Session {
             .as_ref()
             .map(|a| a.connector_tools.clone())
             .unwrap_or_default();
+        // Push (X.27 step 4): only with the master's target for this very
+        // turn and where this node and this session allow it; otherwise
+        // the tool is not offered at all.
+        let mut agent = agent;
+        let target = self.push_for_turn(&turn_id, extra.push.take());
+        if target.is_none()
+            && let Some(a) = agent.as_mut()
+            && !a
+                .deny_tools
+                .iter()
+                .any(|t| t == harness_core::forge::PUSH_TOOL)
+        {
+            a.deny_tools.push(harness_core::forge::PUSH_TOOL.into());
+        }
+        *self.push_now.lock().unwrap_or_else(|p| p.into_inner()) =
+            target.map(|t| (turn_id.clone(), t));
         let extra_cause_none = extra.cause.is_none();
         let mut extra = self
             .with_instructions(
@@ -6280,6 +6305,10 @@ impl TurnHost for Session {
             .flatten()
     }
 
+    fn push(&self) -> Option<Arc<dyn harness_core::forge::PushHost>> {
+        self.push_link()
+    }
+
     fn board(&self) -> Option<Arc<dyn harness_core::board::BoardSource>> {
         Some(Arc::new(crate::board::LinkBoard {
             node: self.node.clone(),
@@ -6926,6 +6955,8 @@ fn tool_reason(
         ("publish", _) => "`publish` uploads a copy of a file from this folder to Artifacts".into(),
         ("board_edit", _) => BOARD_EDIT_REASON.into(),
         (_, ToolRisk::Mutating) => format!("`{tool}` can change files or run programs"),
+        // The tool writes its own reason on its own card (`ask_external`).
+        (_, ToolRisk::External) => format!("`{tool}` acts as you on another service"),
         // `ChatOnly` is never asked about (`needs_approval`).
         (_, ToolRisk::ReadOnly | ToolRisk::ChatOnly) => {
             format!("approval mode requires asking for `{tool}`")
@@ -6978,6 +7009,9 @@ mod skills_menu;
 /// A person's Retry of the failed last turn (X.21); its own file.
 #[path = "session_peers.rs"]
 mod peers;
+
+#[path = "session_push.rs"]
+pub(crate) mod push;
 #[path = "session_retry.rs"]
 mod retry;
 

@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::policy::ProjectsPolicy;
 
-const CANARY: &str = "glpat-CANARYclone00000000000000001";
-const USER: &str = "ada";
+pub(crate) const CANARY: &str = "glpat-CANARYclone00000000000000001";
+pub(crate) const USER: &str = "ada";
 
-fn basic() -> String {
+pub(crate) fn basic() -> String {
     use base64::Engine as _;
     format!(
         "Basic {}",
@@ -26,46 +26,46 @@ fn basic() -> String {
 // ---------------------------------------------------------------- server
 
 #[derive(Clone, Debug)]
-struct Seen {
-    method: String,
-    path: String,
-    auth: Option<String>,
+pub(crate) struct Seen {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) auth: Option<String>,
     /// Every header line, as sent.
-    head: String,
+    pub(crate) head: String,
 }
 
 #[derive(Clone, Default)]
-struct Mode {
+pub(crate) struct Mode {
     /// 401 until the right Basic credential comes.
-    ask: bool,
+    pub(crate) ask: bool,
     /// Answer with this status and `Location: <to><path>`, on the first
     /// GET (`on_post` false) or on the POST.
-    redirect: Option<(u16, String, bool)>,
+    pub(crate) redirect: Option<(u16, String, bool)>,
     /// Read the request, then never answer.
-    stall: bool,
+    pub(crate) stall: bool,
     /// Send answers slowly: 64 KiB every 50 ms.
-    slow: bool,
+    pub(crate) slow: bool,
 }
 
-struct Server {
-    port: u16,
+pub(crate) struct Server {
+    pub(crate) port: u16,
     seen: Arc<Mutex<Vec<Seen>>>,
     /// Answers written to the end.
     finished: Arc<Mutex<usize>>,
 }
 
 impl Server {
-    fn host(&self) -> String {
+    pub(crate) fn host(&self) -> String {
         format!("127.0.0.1:{}", self.port)
     }
-    fn base(&self) -> String {
+    pub(crate) fn base(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
-    fn seen(&self) -> Vec<Seen> {
+    pub(crate) fn seen(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
     /// No request to this server carried the token in any form.
-    fn never_saw_the_token(&self) {
+    pub(crate) fn never_saw_the_token(&self) {
         for s in self.seen() {
             assert!(
                 !s.head.contains(CANARY) && !s.head.contains(&basic()[6..]),
@@ -79,7 +79,7 @@ impl Server {
 }
 
 /// A server for the bare repositories under `root`.
-fn server(root: &Path, mode: Mode) -> Server {
+pub(crate) fn server(root: &Path, mode: Mode) -> Server {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
@@ -176,6 +176,8 @@ fn answer(s: TcpStream, root: &Path, seen: &Mutex<Vec<Seen>>, mode: &Mode) -> st
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_PROJECT_ROOT", root)
         .env("GIT_HTTP_EXPORT_ALL", "1")
+        // Pushes (X.27 step 4) need an authenticated user; a clone ignores it.
+        .env("REMOTE_USER", USER)
         .env("PATH_INFO", path)
         .env("QUERY_STRING", query)
         .env("REQUEST_METHOD", &method)
@@ -236,7 +238,7 @@ fn answer(s: TcpStream, root: &Path, seen: &Mutex<Vec<Seen>>, mode: &Mode) -> st
 
 // ---------------------------------------------------------------- repos
 
-fn git_in(dir: &Path, args: &[&str]) -> String {
+pub(crate) fn git_in(dir: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -259,7 +261,7 @@ fn git_in(dir: &Path, args: &[&str]) -> String {
 
 /// A bare repository `root/<full>.git` on `main`, its one commit made by
 /// `fill` in a work folder.
-fn bare(root: &Path, full: &str, fill: impl FnOnce(&Path)) {
+pub(crate) fn bare(root: &Path, full: &str, fill: impl FnOnce(&Path)) {
     bare_with(root, full, fill, &[]);
 }
 
@@ -376,7 +378,7 @@ impl Rig {
 
 /// Every file under `dir` (not following links), with the token in any
 /// form.
-fn files_with_token(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn files_with_token(dir: &Path) -> Vec<PathBuf> {
     let b = basic();
     walkdir::WalkDir::new(dir)
         .follow_links(false)
@@ -636,7 +638,7 @@ fn all_pids() -> Vec<i32> {
 }
 
 /// Processes whose arguments contain `needle`.
-fn pids_with(needle: &str) -> Vec<i32> {
+pub(crate) fn pids_with(needle: &str) -> Vec<i32> {
     all_pids()
         .into_iter()
         .filter(|p| {
@@ -1218,7 +1220,7 @@ fn forge_policy_is_checked() {
 
 /// Logs of this test thread at TRACE.
 #[derive(Clone, Default)]
-struct Logs(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Logs(pub(crate) Arc<Mutex<Vec<u8>>>);
 
 impl Write for Logs {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {

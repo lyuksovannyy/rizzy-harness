@@ -842,6 +842,13 @@ pub struct ForgePolicy {
     /// `false`: this node clones nothing (it does not announce
     /// `forge-clone`, and refuses `project.clone`).
     pub clone: bool,
+    /// `false`: this node pushes nothing (it does not announce
+    /// `forge-push`, and the `push` tool is never offered). `true` (the
+    /// default, the session lead's choice of 2026-11-24, overridable by the
+    /// owner): a project cloned from a host in `hosts` may push one branch
+    /// back to that same repository, through the `push` tool only, with a
+    /// card every time (X.27 step 4, PLAN.md T101).
+    pub push: bool,
     /// Host names (lower-case DNS names or IPv4 addresses), each optionally
     /// with `:<port>`; exactly these, compared as written.
     pub hosts: Vec<String>,
@@ -854,6 +861,7 @@ impl Default for ForgePolicy {
     fn default() -> Self {
         Self {
             clone: true,
+            push: true,
             hosts: vec!["github.com".into(), "gitlab.com".into()],
         }
     }
@@ -868,6 +876,16 @@ impl ForgePolicy {
     /// Whether `host` is one of the entries, exactly.
     pub fn allows(&self, host: &str) -> bool {
         self.clone && self.hosts.iter().any(|h| h == host)
+    }
+
+    /// Whether this node pushes to anywhere.
+    pub fn pushes(&self) -> bool {
+        self.push && !self.hosts.is_empty()
+    }
+
+    /// Whether this node pushes to `host`: one of the entries, exactly.
+    pub fn allows_push(&self, host: &str) -> bool {
+        self.push && self.hosts.iter().any(|h| h == host)
     }
 
     fn validate(&self) -> Result<(), String> {
