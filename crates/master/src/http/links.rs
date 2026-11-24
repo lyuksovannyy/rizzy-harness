@@ -9,7 +9,8 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require};
+use super::caller::User;
+use super::{ApiError, ApiResult};
 use crate::{Master, auth};
 
 /// Merged into the API router by `http::router`.
@@ -27,11 +28,11 @@ struct MintBody {
 /// `{"links": {url: link}}`; a URL no link is made for is left out. Only
 /// for a browser login: the API token sends its header on every request.
 async fn mint(
+    User(who): User,
     State(m): State<Master>,
     headers: HeaderMap,
     Json(b): Json<MintBody>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     if who.user_id.is_none() {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -57,6 +58,8 @@ async fn mint(
 /// a login with its key or the API token as anywhere else, or else a live
 /// login's cookie with a link minted for it and this exact URL. A pending
 /// password change refuses either.
+// Unused once the byte routes take `ByteCaller`; deleted with `require*`.
+#[allow(dead_code)]
 pub(super) async fn require_bytes(
     m: &Master,
     headers: &HeaderMap,
