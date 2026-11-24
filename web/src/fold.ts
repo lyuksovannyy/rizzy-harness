@@ -378,6 +378,34 @@ const CLEARS_RETRY = new Set([
   "retry_given_up",
 ]);
 
+/** Every approval id and call id a view's log announced, and the call ids
+ * announced more than once (review N1): kept beside the view, not in it, as
+ * the Rust view keeps them out of its wire shape. */
+const seenIds = new WeakMap<SessionView, { approvals: Set<string>; calls: Set<string>; dupCalls: Set<string> }>();
+
+function idsOf(v: SessionView) {
+  let s = seenIds.get(v);
+  if (!s) {
+    s = { approvals: new Set(), calls: new Set(), dupCalls: new Set() };
+    seenIds.set(v, s);
+  }
+  return s;
+}
+
+/** An approval id or call id as the harness and the providers make them:
+ * 1 to 128 of `[A-Za-z0-9_-]` (`harness_core::valid_event_id`, review N4).
+ * Anything else is drawn as an invalid card. */
+export function validId(id: unknown): boolean {
+  return typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id);
+}
+
+/** Mark invalid every card whose (call id, approval id) `hit` matches. */
+function invalidate(v: SessionView, hit: (call: string, approval: string) => boolean) {
+  for (const it of v.items) {
+    if (it.type === "tool" && it.approval && hit(it.call_id, it.approval.approval_id)) it.approval.invalid = true;
+  }
+}
+
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
   for (let i = v.items.length - 1; i >= 0; i--) {
     const it = v.items[i]!;
@@ -771,7 +799,13 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       }
       break;
     }
-    case "tool_call_started":
+    case "tool_call_started": {
+      // As the Rust view: a call announced twice makes its cards invalid.
+      const ids = idsOf(v);
+      if (ids.calls.has(p.call_id)) {
+        ids.dupCalls.add(p.call_id);
+        invalidate(v, (c) => c === p.call_id);
+      } else ids.calls.add(p.call_id);
       pushItem(v, e.seq, {
         type: "tool",
         call_id: p.call_id,
@@ -783,6 +817,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
         approval: null,
       });
       break;
+    }
     case "tool_output_delta": {
       const t = lastTool(v, p.call_id);
       if (t) t.live_output += p.text;
@@ -807,6 +842,13 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
     }
     case "approval_requested": {
       v.pending_approvals.push(p.approval_id);
+      // As the Rust view: an approval id announced twice, or one for a call
+      // announced twice, makes every card carrying it invalid (review N1).
+      const ids = idsOf(v);
+      const dup =
+        ids.approvals.has(p.approval_id) || ids.dupCalls.has(p.call_id) || !validId(p.approval_id) || !validId(p.call_id);
+      ids.approvals.add(p.approval_id);
+      if (dup) invalidate(v, (_, a) => a === p.approval_id);
       const t = lastTool(v, p.call_id);
       if (t) {
         t.approval = { approval_id: p.approval_id, reason: p.reason, decision: null, by: null };
@@ -814,6 +856,9 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
         if (p.turn_allow === true) t.approval.turn_allow = true;
         if (p.chat_allow === true) t.approval.chat_allow = true;
         if (typeof p.preview === "string") t.approval.preview = p.preview;
+        if (dup) t.approval.invalid = true;
+        // As the Rust view: the approval's own tool only when it is not the call's.
+        if (typeof p.tool === "string" && p.tool !== t.tool) t.approval.tool = p.tool;
       }
       break;
     }

@@ -90,6 +90,9 @@ impl ApprovalMode {
             // read-only shell); what it does not is refused, never asked
             // ([`Self::refuses`], which every caller checks first).
             ApprovalMode::Plan => false,
+            // Acting as the person on another service (`push`): asked in
+            // every mode that runs it, Auto included (X.27 step 4).
+            _ if risk == ToolRisk::External => true,
             ApprovalMode::AskAll => risk != ToolRisk::ChatOnly,
             ApprovalMode::Ask | ApprovalMode::AcceptEdits => risk == ToolRisk::Mutating,
             ApprovalMode::Auto => false,
@@ -289,6 +292,12 @@ pub enum ToolRisk {
     /// mode asks about it, `ask_all` included. A node's `denied_tools`
     /// still refuses it.
     ChatOnly,
+    /// Acts as the person on another service with their own account (the
+    /// forge `push`, X.27 step 4, PLAN.md T101): a card every time in every
+    /// mode, Auto included; never covered by "for this turn" or "for this
+    /// chat"; plan mode refuses it. The tool asks for its card itself while
+    /// it runs, once it can show what it will do.
+    External,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -392,6 +401,16 @@ mod tests {
         assert!(!ApprovalMode::Ask.needs_approval(ToolRisk::ReadOnly));
         assert!(ApprovalMode::AskAll.needs_approval(ToolRisk::ReadOnly));
         assert!(!ApprovalMode::Auto.needs_approval(ToolRisk::Mutating));
+        // A push asks in every mode that runs it (X.27 step 4).
+        for m in [
+            ApprovalMode::Auto,
+            ApprovalMode::AcceptEdits,
+            ApprovalMode::Ask,
+            ApprovalMode::AskAll,
+        ] {
+            assert!(m.needs_approval(ToolRisk::External), "{m:?}");
+        }
+        assert!(ApprovalMode::Plan.refuses("push"));
     }
 
     /// Plan mode refuses what changes things by the shared list (but

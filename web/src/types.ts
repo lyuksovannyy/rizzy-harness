@@ -192,6 +192,14 @@ export interface ApprovalState {
   /** What the call would change (the rows a line edit replaces), plain text
    * made from the file; it may be hostile: draw it as text only. */
   preview?: string;
+  /** The tool the approval itself names, present only when it is not the
+   * call's tool (a node that labels one call's card as another's): such a
+   * card is drawn as invalid and only Deny is offered (review F2). */
+  tool?: string;
+  /** Its approval id or its call was announced more than once (a node that
+   * reuses an id to make one card stand for another): drawn as invalid,
+   * Deny only, whatever the tool (review N1). Present only when true. */
+  invalid?: true;
   decision: Decision | null;
   by: ResolvedBy | null;
   /** The person's note with a denial; absent otherwise. */
@@ -638,6 +646,8 @@ export interface AgentFeatures {
   office: boolean;
   /** The project's task board in project chats (`board`, `board_edit`); its own switch (PLAN.md T78). */
   board: boolean;
+  /** `push`: one branch of a cloned project back to its forge repository, a card every time (PLAN.md T101); its own switch. */
+  push?: boolean;
   web: boolean;
   read_files: boolean;
   edit_files: boolean;

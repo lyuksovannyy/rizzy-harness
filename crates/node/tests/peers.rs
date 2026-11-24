@@ -782,6 +782,7 @@ async fn a_later_agent_is_not_told_how_to_remember() {
             part(K::Board, "BOARD-CARDS"),
         ],
         unattended: false,
+        push: None,
     };
     let model = Scripted::new(vec![]);
     let mut n = N::start(model.clone()).await;

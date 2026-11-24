@@ -46,6 +46,7 @@ mod pricing;
 mod profile;
 mod projects;
 mod providers;
+mod push;
 mod retry;
 mod rewind;
 mod routines;
@@ -260,6 +261,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(folder_preview::routes())
         .merge(folder_file::routes())
         .merge(git_state::routes())
+        .merge(push::routes())
         .merge(skills_menu::routes())
         .merge(approval_mode::routes())
         .merge(exec_mode::routes())
@@ -1588,6 +1590,11 @@ async fn approval(
         true => require(&m, &headers).await?,
         false => require_any(&m, &headers).await?,
     };
+    // An id outside the harness's id rule names no card (review N4): the
+    // same answer as an unknown session, before anything is relayed.
+    if !harness_core::valid_event_id(&approval_id) {
+        return Err(ApiError(StatusCode::NOT_FOUND, "unknown approval".into()));
+    }
     let row = acting_session(&m, &who, &id).await?;
     if b.decision.allows() {
         agentic_gate(&m, &who, &row).await?;
@@ -1606,6 +1613,12 @@ async fn approval(
     }
     // With an allow a note means nothing: it is dropped, not refused.
     let note = b.note.filter(|_| !b.decision.allows());
+    // A push card's Allow by the chat's owner (X.27 step 4): recorded
+    // before it is relayed, since the node asks for the credential at once.
+    if b.decision.allows() {
+        m.note_push_click(who.user_id.as_deref(), &row, &approval_id)
+            .await;
+    }
     m.respond_approval(row.session_id, approval_id, b.decision, note)
         .await?;
     Ok(Json(json!({ "ok": true })))

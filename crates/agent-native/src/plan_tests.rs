@@ -252,6 +252,7 @@ const REGISTRY: &[(&str, ToolRisk, bool)] = &[
     ("web_search", ToolRisk::ReadOnly, false),
     ("web_fetch", ToolRisk::ReadOnly, false),
     ("graph_query", ToolRisk::ReadOnly, false),
+    ("push", ToolRisk::External, false),
 ];
 
 struct Run {
@@ -815,4 +816,51 @@ async fn plan_mode_lists_the_board_and_refuses_its_changes() {
     let (ok, out) = host.result("c1");
     assert!(!ok && out.contains("nothing was changed"), "{out}");
     assert_eq!(r.runs.load(Ordering::SeqCst), 1, "only the list ran");
+}
+
+/// `push` (X.27 step 4) asks for its own card while it runs, so the loop
+/// asks the host nothing for it in any mode, Auto included, and shows no
+/// card of its own; plan mode refuses it before it runs, and so does the
+/// node's `denied_tools`.
+#[tokio::test]
+async fn an_external_tool_is_asked_by_the_tool_never_by_the_loop() {
+    use ApprovalMode::*;
+    for mode in [Auto, AcceptEdits, Ask, AskAll] {
+        let host = Arc::new(Host::new(mode));
+        let r = run_as(
+            host.clone(),
+            spec("lead", &["push"], vec![]),
+            vec![vec![call("push", "p")]],
+            None,
+            Default::default(),
+        )
+        .await;
+        assert_eq!(r.runs.load(Ordering::SeqCst), 1, "{mode:?}");
+        assert!(host.asked.lock().unwrap().is_empty(), "{mode:?}");
+        assert_eq!(host.cards(), 0, "{mode:?}");
+    }
+    let host = Arc::new(Host::new(Plan));
+    let r = run_as(
+        host.clone(),
+        spec("lead", &["push"], vec![]),
+        vec![vec![call("push", "p")]],
+        None,
+        Default::default(),
+    )
+    .await;
+    assert_eq!(r.runs.load(Ordering::SeqCst), 0);
+    assert!(!host.result("p").0);
+    let host = Arc::new(Host::new(Auto));
+    host.denied.lock().unwrap().push("push".into());
+    let r = run_as(
+        host.clone(),
+        spec("lead", &["push"], vec![]),
+        vec![vec![call("push", "p")]],
+        None,
+        Default::default(),
+    )
+    .await;
+    assert_eq!(r.runs.load(Ordering::SeqCst), 0);
+    let (ok, out) = host.result("p");
+    assert!(!ok && out.contains("push"), "{out}");
 }

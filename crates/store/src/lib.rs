@@ -2335,6 +2335,72 @@ impl Store {
         Ok(Some((tool, v["input"].clone())))
     }
 
+    /// Approval `approval_id` of `sid` as its card is drawn, only when the
+    /// log names it once: exactly one `approval_requested` with that id,
+    /// and exactly one `tool_call_started` for its call (X.27 step 4, review
+    /// N1: a reused approval id or a retitled call could make one card
+    /// stand for another). Then the tool the approval names, the tool its
+    /// call names, and whether an `approval_resolved` for it is in the log.
+    /// `None` for anything else, a duplicate included.
+    pub fn approval_card(
+        &self,
+        sid: SessionId,
+        approval_id: &str,
+    ) -> Result<Option<(String, Option<String>, bool)>> {
+        // Ids outside the harness's id rule never name a card (review N4).
+        if !harness_core::valid_event_id(approval_id) {
+            return Ok(None);
+        }
+        let conn = self.lock();
+        let s = sid.to_string();
+        let mut asked: Vec<(String, String)> = Vec::new();
+        {
+            let mut st = conn.prepare_cached(
+                "SELECT json_extract(payload, '$.tool'), json_extract(payload, '$.call_id')
+                 FROM events
+                 WHERE session_id = ?1 AND kind = 'approval_requested'
+                   AND json_extract(payload, '$.approval_id') = ?2
+                 LIMIT 2",
+            )?;
+            let rows = st.query_map(params![s, approval_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for r in rows {
+                asked.push(r?);
+            }
+        }
+        let [(tool, call_id)] = asked.as_slice() else {
+            return Ok(None);
+        };
+        if !harness_core::valid_event_id(call_id) {
+            return Ok(None);
+        }
+        let mut calls: Vec<String> = Vec::new();
+        {
+            let mut st = conn.prepare_cached(
+                "SELECT json_extract(payload, '$.tool') FROM events
+                 WHERE session_id = ?1 AND kind = 'tool_call_started'
+                   AND json_extract(payload, '$.call_id') = ?2
+                 LIMIT 2",
+            )?;
+            let rows = st.query_map(params![s, call_id], |r| r.get::<_, String>(0))?;
+            for r in rows {
+                calls.push(r?);
+            }
+        }
+        let [call_tool] = calls.as_slice() else {
+            return Ok(None);
+        };
+        let resolved: bool = conn
+            .prepare_cached(
+                "SELECT EXISTS (SELECT 1 FROM events
+                 WHERE session_id = ?1 AND kind = 'approval_resolved'
+                   AND json_extract(payload, '$.approval_id') = ?2)",
+            )?
+            .query_row(params![s, approval_id], |r| r.get(0))?;
+        Ok(Some((tool.clone(), Some(call_tool.clone()), resolved)))
+    }
+
     /// The seq up to which `user` has seen chat `sid` (0 when never).
     pub fn seen_seq(&self, user: &str, sid: SessionId) -> Result<u64> {
         let conn = self.lock();

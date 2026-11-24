@@ -10,6 +10,7 @@ mod docs;
 mod environment;
 pub mod exec;
 mod forge_clone;
+mod forge_push;
 mod git;
 #[cfg(test)]
 #[path = "git_state_busy_tests.rs"]
@@ -161,6 +162,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::BoardResult { .. }
         | MasterToNode::SkillResult { .. }
         | MasterToNode::ConnectorResult { .. }
+        | MasterToNode::PushCredentialResult { .. }
         | MasterToNode::Diff { .. }
         | MasterToNode::BackgroundOutput { .. }
         | MasterToNode::Files { .. }
@@ -270,6 +272,13 @@ pub(crate) struct Inner {
     pub(crate) docs_pending: docs::Pending,
     /// `board` and `board_edit` calls waiting for the master (PLAN.md T78).
     pub(crate) boards: board::Pending,
+    /// Pushes waiting for their credential (X.27 step 4, PLAN.md T101).
+    pub(crate) pushes: session::push::Pending,
+    /// Room for the push being run: one at a time on the node.
+    pub(crate) push_slots: Arc<tokio::sync::Semaphore>,
+    /// Pushes reading the folder for their card at once (two; they hold no
+    /// push slot, so a card nobody answers blocks no other push).
+    pub(crate) push_previews: Arc<tokio::sync::Semaphore>,
     /// Loads of a stored skill waiting for their `skill.result`.
     pub(crate) stored_skills: stored_skills::Pending,
     /// Connector calls waiting for the master's answer (X.35 step 2).
@@ -718,6 +727,9 @@ impl NodeRuntime {
             attacheds: Default::default(),
             docs_pending: Default::default(),
             boards: Default::default(),
+            pushes: Default::default(),
+            push_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            push_previews: Arc::new(tokio::sync::Semaphore::new(2)),
             stored_skills: Default::default(),
             connectors: Default::default(),
             diffs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
@@ -1063,6 +1075,16 @@ impl NodeRuntime {
                         ));
                     }
                 }
+                // Pushes of a cloned project's branch (X.27 step 4, T101):
+                // only an agentic node whose node.toml pushes to some host
+                // and has a staging folder. Never the hosts.
+                if self.inner.cfg.profile == harness_core::event::Profile::Agentic
+                    && self.inner.cfg.policy.forge.pushes()
+                    && self.inner.cfg.policy.projects.staging.is_some()
+                    && !self.inner.cfg.policy.denies(harness_core::forge::PUSH_TOOL)
+                {
+                    capabilities.push(harness_protocol::CAP_FORGE_PUSH.into());
+                }
                 // A repository's MCP servers (X.36, T82): only with node.toml
                 // `[mcp] project_servers = "ask"`.
                 if self.inner.project_mcp.is_some() {
@@ -1170,6 +1192,13 @@ impl NodeRuntime {
                         answer,
                         error,
                     } => this.inner.boards.answer(&req_id, answer, error),
+                    // Likewise a push's credential (X.27 step 4).
+                    MasterToNode::PushCredentialResult {
+                        req_id,
+                        username,
+                        token,
+                        error,
+                    } => this.inner.pushes.answer(&req_id, username, token, error),
                     // Likewise a stored skill's body (X.34 step B).
                     MasterToNode::SkillResult {
                         req_id,
@@ -2266,14 +2295,15 @@ impl NodeRuntime {
                 self.audit("session.prompt", session_id).await;
                 // The master's context: this message's part, and the
                 // standing parts the loop keeps as sections (X.1).
-                let (context, standing) = match context {
-                    Some(c) => (c.turn, Some(c.standing)),
-                    None => (None, None),
+                let (context, standing, push) = match context {
+                    Some(c) => (c.turn, Some(c.standing), c.push),
+                    None => (None, None, None),
                 };
                 let extra = harness_core::backend::TurnExtra {
                     savings: savings.unwrap_or_default(),
                     context,
                     standing,
+                    push,
                     ..Default::default()
                 };
                 let input = session::Input {
@@ -2348,14 +2378,15 @@ impl NodeRuntime {
                 ..
             }) => {
                 self.audit("session.retry", session_id).await;
-                let (context, standing) = match context {
-                    Some(c) => (c.turn, Some(c.standing)),
-                    None => (None, None),
+                let (context, standing, push) = match context {
+                    Some(c) => (c.turn, Some(c.standing), c.push),
+                    None => (None, None, None),
                 };
                 let extra = harness_core::backend::TurnExtra {
                     savings: savings.unwrap_or_default(),
                     context,
                     standing,
+                    push,
                     ..Default::default()
                 };
                 match self.session(session_id) {
@@ -2561,6 +2592,15 @@ impl NodeRuntime {
                 error,
             } => {
                 self.inner.boards.answer(&req_id, answer, error);
+                Ok(())
+            }
+            MasterToNode::PushCredentialResult {
+                req_id,
+                username,
+                token,
+                error,
+            } => {
+                self.inner.pushes.answer(&req_id, username, token, error);
                 Ok(())
             }
             MasterToNode::SkillResult {

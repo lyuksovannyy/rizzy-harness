@@ -965,6 +965,32 @@ impl Sandbox {
         c
     }
 
+    /// [`Self::helper`] with the network open whatever this sandbox's
+    /// `network` says: for the node's own `git push` of a project (X.27
+    /// step 4, PLAN.md T101), which must reach the forge and nothing in
+    /// the file system but `rw` and the system folders.
+    pub fn helper_net(&self, rw: &[Grant], ro: &[Grant]) -> std::process::Command {
+        let mut c = self.own_program();
+        c.arg(SUBCOMMAND);
+        if self.best_effort {
+            c.arg("--best-effort");
+        }
+        for g in rw.iter().chain(&devices()) {
+            g.push_args(&mut c, "--rw");
+        }
+        let system: Vec<Grant> = SYSTEM_READ
+            .iter()
+            .map(Path::new)
+            .filter(|p| p.exists())
+            .map(Grant::system)
+            .collect();
+        for g in system.iter().chain(ro) {
+            g.push_args(&mut c, "--ro");
+        }
+        c.arg("--");
+        c
+    }
+
     /// Whether this sandbox only does what the kernel enforces
     /// (`best-effort`): on a kernel without Landlock it confines nothing.
     pub fn is_best_effort(&self) -> bool {

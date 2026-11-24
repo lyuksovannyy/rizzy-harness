@@ -370,6 +370,7 @@ fn features() -> harness_agents::Features {
         attached_files: false,
         office: false,
         board: false,
+        push: false,
         web: true,
         read_files: true,
         edit_files: false,
@@ -381,6 +382,53 @@ fn features() -> harness_agents::Features {
         as_agent: true,
         as_subagent: true,
     }
+}
+
+/// "Push to the repository" (X.27 step 4, PLAN.md T101) is its own switch:
+/// on for the built-in Software Developer and Senior Teamlead only; a
+/// custom agent gets `push` with the switch and not without; a file agent
+/// only by naming it, never through `tools: all`; a page agent saved
+/// before the switch has it off.
+#[test]
+fn pushing_is_its_own_switch_and_never_comes_with_all() {
+    for a in builtins() {
+        let want = a.id == "coder" || a.id == "teamlead";
+        assert_eq!(a.features.push, want, "{}", a.id);
+        assert_eq!(a.spec.allows_tool("push"), want, "{}", a.id);
+    }
+    let make = |push: bool| {
+        harness_agents::custom(
+            "r",
+            "R",
+            "",
+            "r",
+            harness_agents::Features {
+                push,
+                commands: true,
+                ..features()
+            },
+            vec![],
+        )
+        .unwrap()
+    };
+    assert!(make(true).spec.allows_tool("push"));
+    assert!(!make(false).spec.allows_tool("push"));
+    let all = parse("other", "---\nname: O\ntools: all\n---\nhi\n", false).unwrap();
+    assert!(!all.features.push && !all.spec.allows_tool("push"));
+    assert!(all.spec.allows_tool("bash"));
+    let named = parse(
+        "other",
+        "---\nname: O\ntools: [bash, push]\n---\nhi\n",
+        false,
+    )
+    .unwrap();
+    assert!(named.features.push && named.spec.allows_tool("push"));
+    let old: harness_agents::Features = serde_json::from_str(
+        r#"{"memory":true,"web":false,"read_files":true,"edit_files":false,"commands":true,
+        "delegate":false,"as_agent":true,"as_subagent":true}"#,
+    )
+    .unwrap();
+    assert!(!old.push);
 }
 
 /// "Create and edit documents" (PLAN.md T97) is one switch for the family:

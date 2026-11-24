@@ -919,6 +919,10 @@ fn agentic_tools(
     // And the project board tools (PLAN.md T78).
     tools.push(Arc::new(harness_tools::Board));
     tools.push(Arc::new(harness_tools::BoardEdit));
+    // A cloned project's branch back to its forge, with a card every time
+    // (X.27 step 4, PLAN.md T101): offered only in a turn the master named
+    // a target for, on a node whose node.toml pushes to that host.
+    tools.push(Arc::new(harness_tools::Push));
     tools
 }
 

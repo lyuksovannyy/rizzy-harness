@@ -232,6 +232,12 @@ const TODO_TOOL: &str = "todo";
 /// that works on files or runs commands; the server's stored skills, which
 /// are text, to any (X.34 step B).
 const SKILL_TOOL: &str = "skill";
+/// Pushing a cloned project's branch to its forge repository as the chat's
+/// owner (X.27 step 4, PLAN.md T101): its own switch, off when absent, on
+/// for the built-in Software Developer and Senior Teamlead (the session
+/// lead's choice of 2026-11-24, the owner may overrule); never brought by
+/// `tools: all`, only by naming it.
+const PUSH_TOOL: &str = harness_core::forge::PUSH_TOOL;
 
 /// Which set an agent belongs to (X.33): the server's (built-ins, files and
 /// agents made at the server's scope) or one workspace's own. Reported in
@@ -292,6 +298,11 @@ pub struct Features {
     /// switch, off when absent.
     #[serde(default)]
     pub board: bool,
+    /// `push`: one branch of a cloned project to the repository it came
+    /// from, as the chat's owner, with a card every time (X.27 step 4,
+    /// PLAN.md T101). Its own switch, off when absent.
+    #[serde(default)]
+    pub push: bool,
     /// `web_search` and `web_fetch`.
     pub web: bool,
     /// Read and search files.
@@ -354,6 +365,7 @@ impl Features {
                 &[PUBLISH_TOOL, TODO_TOOL][..],
             ),
             (self.skills, &[SKILL_TOOL][..]),
+            (self.push, &[PUSH_TOOL][..]),
         ];
         let mut tools: Vec<String> = groups
             .iter()
@@ -591,6 +603,8 @@ fn build(id: &str, mut fm: Frontmatter, body: &str, origin: Origin) -> Result<Ag
         attached_files: fm.tools.allows(ATTACHED_TOOL),
         office: any(OFFICE_TOOLS),
         board: fm.tools.allows(BOARD_TOOL),
+        // Named, never `all` (the spec's rule: `AgentSpec::allows_tool`).
+        push: matches!(&fm.tools, ToolSelection::List(l) if l.iter().any(|t| t == PUSH_TOOL)),
         web: any(WEB_TOOLS),
         read_files: any(READ_TOOLS),
         edit_files: any(EDIT_TOOLS),

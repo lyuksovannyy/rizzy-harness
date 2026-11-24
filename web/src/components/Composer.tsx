@@ -825,7 +825,7 @@ export function Composer(props: {
               <li key={x.key} className="chip image-chip">
                 {x.media_id ? (
                   <Suspense fallback={null}>
-                    <LinkedImg url={`/api/media/${x.media_id}/content`} alt="" />
+                    <LinkedImg url={`/api/media/${encodeURIComponent(x.media_id)}/content`} alt="" />
                   </Suspense>
                 ) : (
                   <Loader2 size={14} className="spin" />

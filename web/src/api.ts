@@ -165,9 +165,9 @@ export const api = {
       scoped(`/api/sessions${opts.routineRuns ? "?routine_runs=1" : ""}`, workspace ? { workspace } : null),
     ),
   /** One chat, in whichever workspace it is. */
-  session: (id: string) => call<SessionRow>("GET", `/api/sessions/${id}`),
+  session: (id: string) => call<SessionRow>("GET", `/api/sessions/${encodeURIComponent(id)}`),
   events: (id: string, after = 0) =>
-    call<{ events: RawEvent[] }>("GET", `/api/sessions/${id}/events?after=${after}`),
+    call<{ events: RawEvent[] }>("GET", `/api/sessions/${encodeURIComponent(id)}/events?after=${after}`),
   createSession: (b: {
     profile: Profile;
     cwd?: string;
@@ -183,7 +183,7 @@ export const api = {
     approval_mode?: ApprovalMode;
   }) => call<{ session_id: string }>("POST", "/api/sessions", b),
   attention: () => call<AttentionResponse>("GET", "/api/attention"),
-  markSeen: (id: string, seq: number) => call<{ ok: boolean }>("POST", `/api/sessions/${id}/seen`, { seq }),
+  markSeen: (id: string, seq: number) => call<{ ok: boolean }>("POST", `/api/sessions/${encodeURIComponent(id)}/seen`, { seq }),
   /** What the viewer may use in the workspace (the sidebar's areas). */
   features: (scope?: Scope | null) => call<Features>("GET", scoped("/api/features", scope)),
   transcribe: async (audio: Blob): Promise<string> => {
@@ -214,7 +214,7 @@ export const api = {
       /** Paths mentioned with `@path` (T63). */
       files?: string[];
     } = {},
-  ) => call("POST", `/api/sessions/${id}/prompt`, { text, ...opts }),
+  ) => call("POST", `/api/sessions/${encodeURIComponent(id)}/prompt`, { text, ...opts }),
   /** `to`: the chat it is for, or a coding chat to come (a file the model
    * cannot read is saved into that chat's folder, T94). */
   upload: async (file: File, to: { session?: string; folder?: boolean; agent?: string } = {}): Promise<UploadedAttachment> => {

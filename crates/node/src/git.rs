@@ -50,7 +50,7 @@ mod init;
 mod merge;
 mod state;
 mod upkeep;
-mod user_repo;
+pub(crate) mod user_repo;
 
 #[cfg(test)]
 pub(crate) use init::{FIRST_COMMIT, use_test_git};
@@ -197,6 +197,14 @@ impl Repo {
 /// no stdin. `program` is `git` except in tests.
 pub(crate) fn hardened(program: &Path) -> Command {
     let mut c = hardened_std(std::process::Command::new(program));
+    overrides(&mut c);
+    Command::from(c)
+}
+
+/// [`hardened`] on `base`: a git command, or the sandbox wrapper that will
+/// `exec` git (the push, X.27 step 4).
+pub(crate) fn hardened_on(base: std::process::Command) -> Command {
+    let mut c = hardened_std(base);
     overrides(&mut c);
     Command::from(c)
 }

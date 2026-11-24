@@ -20,5 +20,6 @@ mod connector_client;
 mod custom_connectors_http;
 mod doc_http;
 mod forge_clone_http;
+mod forge_push_http;
 mod login_binding_http;
 mod temp_passwords_http;
