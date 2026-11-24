@@ -257,39 +257,33 @@ impl Fake {
         self.made.lock().unwrap().len() == before
     }
 
-    /// Send `n` requests at once for `sid` and wait for every answer.
-    async fn ask_at_once(
-        &self,
-        sid: SessionId,
-        n: usize,
-        request: AttachedRequest,
-    ) -> Vec<Result<AttachedAnswer, String>> {
-        let ids: Vec<String> = (0..n).map(|_| harness_core::new_id()).collect();
-        for id in &ids {
-            self.tx
-                .send(NodeToMaster::Attached {
-                    req_id: id.clone(),
-                    session_id: sid,
-                    request: request.clone(),
-                })
-                .await
-                .unwrap();
-        }
-        let mut out = Vec::new();
-        for id in &ids {
-            for _ in 0..500 {
-                if let Some((a, e)) = self.answers.lock().unwrap().get(id) {
-                    out.push(match e {
-                        Some(e) => Err(e.clone()),
-                        None => Ok(a.clone().expect("an answer")),
-                    });
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+    /// Send one request for `sid` without waiting; its request id.
+    async fn fire(&self, sid: SessionId, request: AttachedRequest) -> String {
+        let id = harness_core::new_id();
+        self.tx
+            .send(NodeToMaster::Attached {
+                req_id: id.clone(),
+                session_id: sid,
+                request,
+            })
+            .await
+            .unwrap();
+        id
+    }
+
+    /// The answer to request `id`; the master's own work is bounded, so a
+    /// generous wait only ever ends a test that would fail anyway.
+    async fn answer_of(&self, id: &str) -> Result<AttachedAnswer, String> {
+        for _ in 0..1000 {
+            if let Some((a, e)) = self.answers.lock().unwrap().get(id) {
+                return match e {
+                    Some(e) => Err(e.clone()),
+                    None => Ok(a.clone().expect("an answer")),
+                };
             }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(out.len(), n, "every request is answered");
-        out
+        panic!("no answer for {id}");
     }
 
     /// Whether any answer came for a request that was sent.
@@ -1408,33 +1402,85 @@ async fn a_row_over_ten_mib_is_refused() {
 
 /// Fairness (S5): a chat has one call in flight, and a node has room for
 /// four; the rest are refused at once with their own sentences, and the
-/// answers that do come are right.
+/// answers that do come are right. The reads are held at a gate the test
+/// opens, so each limit is met with the calls provably in flight, not by
+/// luck of timing.
 #[tokio::test]
 async fn a_chat_and_a_node_cannot_flood_the_service() {
     let t = start().await;
     let [alex, _] = users(&t).await;
+    t.master.hold_attached_reads();
+
+    // One chat, four at once: the first holds the chat's place at the gate,
+    // the other three are refused at once, while it is still in flight.
     let (sid, id) = with_file(&t, &alex, "t1").await;
-    let got = t.chat.ask_at_once(sid, 4, ask(AttachedOp::Info, &id)).await;
-    assert!(got.iter().any(|r| r.is_ok()), "{got:?}");
+    let mut four = Vec::new();
+    for _ in 0..4 {
+        four.push(t.chat.fire(sid, ask(AttachedOp::Info, &id)).await);
+    }
+    // Which of the four takes the place is up to the scheduler; the other
+    // three are refused with the chat's sentence while it holds it.
+    let mut refused = Vec::new();
+    let mut waiting = None;
+    for _ in 0..1000 {
+        {
+            let got = t.chat.answers.lock().unwrap();
+            refused = four.iter().filter(|i| got.contains_key(*i)).collect();
+            waiting = four.iter().find(|i| !got.contains_key(*i));
+        }
+        if refused.len() == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(refused.len(), 3, "three of four are refused at once");
+    for r in &refused {
+        let e = t.chat.answer_of(r).await.unwrap_err();
+        assert!(e.contains("one file read at a time"), "{e}");
+    }
+    // The fourth is in flight, held at the gate, until the test opens it.
+    let first = waiting.expect("one call in flight");
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        got.iter().any(|r| r
-            .as_ref()
-            .is_err_and(|e| e.contains("one file read at a time"))),
-        "{got:?}"
+        t.chat.answers.lock().unwrap().get(first).is_none(),
+        "the call in flight is not answered while held"
     );
-    // Twelve at once from one node: four fit, the rest are the node's refusal.
-    let got = t
-        .chat
-        .ask_at_once(sid, 12, ask(AttachedOp::Info, &id))
-        .await;
-    let node_full = got
-        .iter()
-        .filter(|r| {
-            r.as_ref()
-                .is_err_and(|e| e.contains("too many file reads from this node"))
-        })
-        .count();
-    assert_eq!(node_full, 8, "{got:?}");
+    t.master.release_attached_reads();
+    let a = t.chat.answer_of(first).await.unwrap();
+    assert!(matches!(a, AttachedAnswer::Info { .. }), "{a:?}");
     // A moment later the chat reads again.
     assert!(t.chat.ask(sid, ask(AttachedOp::Info, &id)).await.is_ok());
+
+    // One node, twelve at once: four fit (each in its own chat, held at the
+    // gate), the other eight are the node's refusal, at once.
+    t.master.hold_attached_reads();
+    let mut chats = vec![(sid, id)];
+    for n in 0..3 {
+        chats.push(with_file(&t, &alex, &format!("n{n}")).await);
+    }
+    let mut held = Vec::new();
+    for (sid, id) in &chats {
+        held.push(t.chat.fire(*sid, ask(AttachedOp::Info, id)).await);
+    }
+    let mut refused = Vec::new();
+    for i in 0..8 {
+        let (sid, id) = &chats[i % chats.len()];
+        refused.push(t.chat.fire(*sid, ask(AttachedOp::Info, id)).await);
+    }
+    for r in &refused {
+        let e = t.chat.answer_of(r).await.unwrap_err();
+        assert!(e.contains("too many file reads from this node"), "{e}");
+    }
+    t.master.release_attached_reads();
+    for h in &held {
+        let a = t.chat.answer_of(h).await.unwrap();
+        assert!(matches!(a, AttachedAnswer::Info { .. }), "{a:?}");
+    }
+    // Room is back: the node takes a call again.
+    assert!(
+        t.chat
+            .ask(chats[0].0, ask(AttachedOp::Info, &chats[0].1))
+            .await
+            .is_ok()
+    );
 }

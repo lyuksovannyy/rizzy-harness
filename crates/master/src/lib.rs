@@ -991,6 +991,19 @@ impl Master {
             .store(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Tests: make every attached-file read wait, once it holds its chat's
+    /// place, until `release_attached_reads`.
+    #[doc(hidden)]
+    pub fn hold_attached_reads(&self) {
+        self.inner.attached.hold();
+    }
+
+    /// Tests: let the held attached-file reads, and later ones, go on.
+    #[doc(hidden)]
+    pub fn release_attached_reads(&self) {
+        self.inner.attached.release();
+    }
+
     /// Tests: cut the admin usage scan after `d` (a zero duration is the
     /// default limit, not none).
     #[doc(hidden)]
