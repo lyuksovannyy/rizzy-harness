@@ -34,6 +34,20 @@ describe("fold", () => {
     expect(v.unknown_events).toBe(0);
   });
 
+  it("keeps an approval's own tool only when it is not its call's (review F2)", () => {
+    const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
+    const v = fold([
+      ev(1, "turn_started", { turn_id: "t" }),
+      ev(2, "tool_call_started", { turn_id: "t", call_id: "c", tool: "bash", input: { command: "ls" } }),
+      ev(3, "approval_requested", { approval_id: "a", call_id: "c", tool: "push", input: {}, reason: "r" }),
+      ev(4, "tool_call_started", { turn_id: "t", call_id: "d", tool: "push", input: {} }),
+      ev(5, "approval_requested", { approval_id: "b", call_id: "d", tool: "push", input: {}, reason: "r" }),
+    ]);
+    const tools = v.items.filter((i) => i.type === "tool");
+    expect(tools[0]!.approval!.tool).toBe("push");
+    expect(tools[1]!.approval).not.toHaveProperty("tool");
+  });
+
   it("shows the file a doc_create call made on its result (T97)", () => {
     const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
     const made = { name: "plan.docx", size: 1234, sha256: "ab".repeat(32), file_id: "f1" };

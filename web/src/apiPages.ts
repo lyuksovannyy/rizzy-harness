@@ -246,6 +246,8 @@ export const pageApi = {
   /** `note` goes with a denial only (the server drops it with an allow). */
   approve: (id: string, approvalId: string, decision: Decision, note?: string) =>
     call("POST", `/api/sessions/${id}/approvals/${approvalId}`, note ? { decision, note } : { decision }),
+  /** Where the chat's push goes, as the server knows it (PLAN.md T101): the page draws a push card's destination from this. */
+  pushTarget: (id: string) => call<{ host: string; full_name: string; login: string }>("GET", `/api/sessions/${id}/push-target`),
   /** Remove a call allowed for the rest of the chat (T51). */
   revokeAllow: (id: string, grantId: string) => call("DELETE", `/api/sessions/${id}/allows/${grantId}`),
 };

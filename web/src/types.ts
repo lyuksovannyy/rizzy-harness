@@ -192,6 +192,10 @@ export interface ApprovalState {
   /** What the call would change (the rows a line edit replaces), plain text
    * made from the file; it may be hostile: draw it as text only. */
   preview?: string;
+  /** The tool the approval itself names, present only when it is not the
+   * call's tool (a node that labels one call's card as another's): such a
+   * card is drawn as invalid and only Deny is offered (review F2). */
+  tool?: string;
   decision: Decision | null;
   by: ResolvedBy | null;
   /** The person's note with a denial; absent otherwise. */

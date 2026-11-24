@@ -4449,8 +4449,8 @@ answered, nothing is pushed and the agent is told so. A refusal by the forge
 words; the tool cannot fetch or merge.
 
 How it works: the server hands your token to the chat's node only after you
-allowed that very card (it checks the click it passed on itself, once, within
-ten minutes), and only while you may still run the chat, the project's source
+allowed that very card (it checks the click it passed on itself, that the card
+and its call both are a push, once per card ever, within ten minutes), and only while you may still run the chat, the project's source
 and your connection are unchanged and the chat had fewer than 20 pushes in the
 last hour. The node never runs git in the folder's own repository (whose
 settings and hooks the agent can write): it links the folder's objects into a
@@ -4462,12 +4462,28 @@ push = false` turns it off, and only hosts in `[forge] hosts` are pushed to.
 Each push is an audit line on the node and on the server, never with the
 token. Details: `docs/forge-push.md`.
 
-**What is weaker in a host chat.** A host chat's shell is the node's own user:
-the agent can run its own `git push` with whatever credentials the machine has
-(ssh keys, a credential store, `gh`), which the push tool neither stops nor
-sees, and while the tool's git runs, a background command of that chat could
-read your connection's token from it. In a sandbox chat the agent's shell
-cannot read it.
+**What is weaker in a host chat, and on a shared node.** A host chat's shell
+is the node's own user: the agent can run its own `git push` with whatever
+credentials the machine has (ssh keys, a credential store, `gh`), which the
+push tool neither stops nor sees. And **any** host chat on a node, of anyone,
+runs as that user: while any push runs on the node (another person's push
+from a sandbox chat included), it can read that push's token, from the pipe
+git reads it from until git has taken it and from the memory of git's
+processes after that, and it can read the node's own key. So on a node that
+offers host mode to more than one person, pushes are only as private as
+those people trust each other: set `[forge] push = false` there, or offer no
+host mode on a shared node. A sandbox chat's shell cannot read the token, and
+the push's git may not write a core dump.
+
+**What the card shows, and from where.** The line "Pushes to
+`<host>/<owner>/<name>` as `<login>`" comes from the server (the project's
+recorded source and your connection), never from the node. The branch, the
+commit and its first line come from the folder; the first line is shown only
+when the commit's bytes match its id. A card that names one tool for a call of
+another, or a push card the server knows no target for, offers only Deny.
+A node that is compromised and runs your chat can get the token for one push
+you allow: that token reaches whatever its scope on the forge reaches, so give
+the connection only the scope you need.
 
 ## Custom connectors: a workspace's remote MCP servers
 

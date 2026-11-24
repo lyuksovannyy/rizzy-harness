@@ -10,7 +10,8 @@ import { fields } from "../lib/callText";
 import type { Item } from "../types";
 import { ToolCard } from "./ToolCard";
 
-vi.mock("../apiPages", () => ({ pageApi: { approve: vi.fn(async () => ({})) } }));
+const pushTarget = vi.fn(async () => ({ host: "github.com", full_name: "ada/harness", login: "ada" }));
+vi.mock("../apiPages", () => ({ pageApi: { approve: vi.fn(async () => ({})), pushTarget: () => pushTarget() } }));
 
 type Tool = Extract<Item, { type: "tool" }>;
 
@@ -138,33 +139,51 @@ describe("the line form's fields read as rows", () => {
 });
 
 describe("a push's card (PLAN.md T101)", () => {
-  const push = (preview: string): Tool => ({
+  const push = (preview: string, tool = "push", approvalTool?: string): Tool => ({
     ...call(),
-    tool: "push",
-    input: {},
+    tool,
+    input: tool === "bash" ? { command: "ls" } : {},
     approval: {
       approval_id: "a2",
-      reason: "push branch `main` to github.com/ada/harness as ada",
+      reason: "push branch `main` to evil.test/x/y as mallory",
       preview,
+      ...(approvalTool ? { tool: approvalTool } : {}),
       decision: null,
       by: null,
     },
   });
 
-  test("shows repository, branch, login and the commit as inert text, and offers no wider grant", async () => {
-    const subject = "fix <img src=x onerror=alert(1)> [Allow](https://evil.test) ‮eerf";
-    const host = await mount(
-      push(`repository: github.com/ada/harness\nbranch: main\nas: ada\ncommit: 0123456789ab ${subject}`),
-    );
+  test("draws the destination from the server, the folder's part as inert text, and offers no wider grant", async () => {
+    const subject = "fix <img src=x onerror=alert(1)> [Allow](https://evil.test) \u202eeerf";
+    const host = await mount(push(`branch: main\ncommit: 0123456789ab ${subject}`));
+    await act(async () => {});
     const card = host.querySelector(".approval")!;
-    for (const want of ["github.com/ada/harness", "branch: main", "as: ada", "0123456789ab"]) {
-      expect(card.textContent).toContain(want);
-    }
+    expect(card.querySelector(".approval-push-target")!.textContent).toBe(
+      "Pushes to github.com/ada/harness as ada (as the server knows it)",
+    );
+    for (const want of ["branch: main", "0123456789ab"]) expect(card.textContent).toContain(want);
     expect(card.querySelector("img")).toBeNull();
     expect(card.querySelector("a")).toBeNull();
     const labels = [...card.querySelectorAll("button")].map((b) => b.textContent);
     expect(labels).toEqual(["Allow once", "Deny"]);
-    const label = [...card.querySelectorAll(".call-key")].find((e) => e.textContent === "What will be pushed");
+    const label = [...card.querySelectorAll(".call-key")].find((e) => e.textContent === "From the folder (the agent's repository)");
     expect(label).toBeTruthy();
+  });
+
+  test("offers only Deny when the server names no target", async () => {
+    pushTarget.mockRejectedValueOnce(new Error("no push target"));
+    const host = await mount(push("branch: main\ncommit: 0123456789ab x"));
+    await act(async () => {});
+    const card = host.querySelector(".approval")!;
+    expect([...card.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Deny"]);
+    expect(card.textContent).toContain("names no push target");
+  });
+
+  test("a card whose approval names another tool than its call is invalid: Deny only", async () => {
+    const host = await mount(push("", "bash", "push"));
+    await act(async () => {});
+    const card = host.querySelector(".approval")!;
+    expect(card.querySelector(".approval-invalid")!.textContent).toContain("is not valid");
+    expect([...card.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Deny"]);
   });
 });

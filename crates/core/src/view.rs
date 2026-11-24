@@ -420,6 +420,11 @@ pub struct ApprovalState {
     /// What the call would change, for the person (`ApprovalRequested::preview`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// The tool the approval itself names, only when it is not its call's
+    /// tool (a node that labels one call's card as another's): the page
+    /// draws such a card as invalid, Deny only (X.27 step 4, review F2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
     pub decision: Option<Decision>,
     pub by: Option<ResolvedBy>,
     /// The person's note with a denial.
@@ -917,13 +922,15 @@ impl SessionView {
             }
             EventKind::ApprovalRequested(a) => {
                 self.pending_approvals.push(a.approval_id.clone());
-                if let Some(Item::Tool { approval, .. }) = self.tool_mut(&a.call_id) {
+                if let Some(Item::Tool { approval, tool, .. }) = self.tool_mut(&a.call_id) {
+                    let other = (a.tool != *tool).then(|| a.tool.clone());
                     *approval = Some(ApprovalState {
                         approval_id: a.approval_id,
                         reason: a.reason,
                         turn_allow: a.turn_allow,
                         chat_allow: a.chat_allow,
                         preview: a.preview,
+                        tool: other,
                         decision: None,
                         by: None,
                         note: None,
@@ -1358,6 +1365,44 @@ mod tests {
             kind,
             payload,
         }
+    }
+
+    /// X.27 step 4, review F2: an approval whose tool is not its call's
+    /// keeps its own tool, so the page can draw the card as invalid; one
+    /// that matches keeps none (the field is absent).
+    #[test]
+    fn an_approval_for_another_tool_than_its_call_is_marked() {
+        let sid = SessionId::new();
+        let raw: Vec<RawEvent> = [
+            ("turn_started", json!({"turn_id": "t"})),
+            ("tool_call_started", json!({"turn_id": "t", "call_id": "c", "tool": "bash", "input": {"command": "ls"}})),
+            ("approval_requested", json!({"approval_id": "a", "call_id": "c", "tool": "push", "input": {}, "reason": "r"})),
+            ("tool_call_started", json!({"turn_id": "t", "call_id": "d", "tool": "push", "input": {}})),
+            ("approval_requested", json!({"approval_id": "b", "call_id": "d", "tool": "push", "input": {}, "reason": "r"})),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (kind, payload))| RawEvent {
+            session_id: sid,
+            seq: i as u64 + 1,
+            ts_ms: 0,
+            kind: kind.into(),
+            payload,
+        })
+        .collect();
+        let v = SessionView::fold(&raw).unwrap();
+        let tools: Vec<_> = v
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Tool { approval, .. } => approval.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tools[0].tool.as_deref(), Some("push"));
+        assert_eq!(tools[1].tool, None);
+        let j = serde_json::to_value(&tools[1]).unwrap();
+        assert!(j.get("tool").is_none(), "{j}");
     }
 
     /// X.42: the `after` checkpoint's `head_moved` is the turn's; a turn

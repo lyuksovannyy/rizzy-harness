@@ -814,6 +814,8 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
         if (p.turn_allow === true) t.approval.turn_allow = true;
         if (p.chat_allow === true) t.approval.chat_allow = true;
         if (typeof p.preview === "string") t.approval.preview = p.preview;
+        // As the Rust view: the approval's own tool only when it is not the call's.
+        if (typeof p.tool === "string" && p.tool !== t.tool) t.approval.tool = p.tool;
       }
       break;
     }
