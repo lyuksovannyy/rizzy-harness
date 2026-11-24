@@ -9,6 +9,7 @@ pub mod attached;
 pub mod attachments;
 pub mod auth;
 pub mod avatars;
+pub mod bg_output;
 pub mod blobs;
 pub mod board;
 mod callbacks;
@@ -367,6 +368,8 @@ pub struct MasterInner {
     pulls: artifact_pull::Pulls,
     /// Turn diffs waiting for their node's answer (X.12).
     diffs: diff::Waiting,
+    /// Background command outputs waiting for their node's answer (X.62).
+    bg_outputs: bg_output::Waiting,
     /// `@` completions waiting for their node's answer (T63).
     files: files::Waiting,
     /// Folder-file previews waiting for their node's answer (X.59, T99).
@@ -764,6 +767,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::ConnectorResult { .. }
         // A read of two checkpoints: no event, no work.
         | MasterToNode::Diff { .. }
+        // A read of a command's output for the strip: no event.
+        | MasterToNode::BackgroundOutput { .. }
         // A listing of names for the composer: no event.
         | MasterToNode::Files { .. }
         // A file read for the page's panel: no event.
@@ -874,6 +879,7 @@ impl Master {
                 storage: OnceLock::new(),
                 pulls: Default::default(),
                 diffs: Default::default(),
+                bg_outputs: Default::default(),
                 files: Default::default(),
                 previews: Default::default(),
                 project_folders: Default::default(),
@@ -1534,6 +1540,7 @@ impl Master {
                 artifact_pull::node_down(&this, &nid);
                 diff::node_down(&this, &nid);
                 files::node_down(&this, &nid);
+                bg_output::node_down(&this, &nid);
                 folder_preview::node_down(&this, &nid);
                 project_folder::node_down(&this, &nid);
                 project_mcp::node_down(&this, &nid);
@@ -1757,6 +1764,19 @@ impl Master {
                 match (diff, error) {
                     (Some(d), None) => Ok(d),
                     (_, e) => Err(e.unwrap_or_else(|| "the node sent no changes".into())),
+                },
+            ),
+            NodeToMaster::BackgroundOutputResult {
+                req_id,
+                output,
+                error,
+            } => bg_output::on_answer(
+                self,
+                node_id,
+                req_id,
+                match (output, error) {
+                    (Some(o), None) => Ok(o),
+                    (_, e) => Err(e.unwrap_or_else(|| "the node sent no output".into())),
                 },
             ),
             NodeToMaster::FilesResult {

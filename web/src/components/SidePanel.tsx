@@ -19,6 +19,7 @@ import { useMedia } from "../bg/hooks";
 import { leftText, msLeft, reasonText } from "../lib/background";
 import { showHidden, shownName } from "../md/hidden";
 import type { ModelInfo, SessionView } from "../types";
+import CommandOutput from "./CommandOutput";
 import { type AgentRow, type CommandRow, type RowState, sideItems } from "./sideItems";
 import { SubagentActivity } from "./SubagentActivity";
 import "./sidePanel.css";
@@ -236,22 +237,30 @@ export default function SidePanel(props: {
           {showHidden(r.head)}
           {r.cut ? " …" : ""}
         </code>
-        <div className="side-row-foot">
-          <span className="muted small" role="status">
-            {c?.state === "failed" ? <span className="error-text">{showHidden(c.error)}</span> : words}
-          </span>
-          {!r.ended && (
-            <button
-              type="button"
-              className="danger small"
-              aria-label={`Stop ${r.bg_id}`}
-              disabled={away || busy(r.bg_id)}
-              onClick={() => void stop([r.bg_id], false)}
-            >
-              {stopping && !busy(r.bg_id) ? "Stop again" : "Stop"}
-            </button>
-          )}
-        </div>
+        <CommandOutput
+          sessionId={sessionId}
+          bg={r.bg_id}
+          ended={!!r.ended}
+          away={away}
+          status={
+            <span className="muted small" role="status">
+              {c?.state === "failed" ? <span className="error-text">{showHidden(c.error)}</span> : words}
+            </span>
+          }
+          stop={
+            !r.ended && (
+              <button
+                type="button"
+                className="danger small"
+                aria-label={`Stop ${r.bg_id}`}
+                disabled={away || busy(r.bg_id)}
+                onClick={() => void stop([r.bg_id], false)}
+              >
+                {stopping && !busy(r.bg_id) ? "Stop again" : "Stop"}
+              </button>
+            )
+          }
+        />
       </li>
     );
   };

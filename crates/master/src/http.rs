@@ -17,6 +17,7 @@ mod approval_mode;
 mod artifacts;
 mod attachments;
 mod background;
+mod bg_output;
 mod chat_allows;
 mod chat_diff;
 mod compact;
@@ -245,6 +246,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(media::routes())
         .merge(artifacts::routes())
         .merge(background::routes())
+        .merge(bg_output::routes())
         .merge(diff::routes())
         .merge(chat_diff::routes())
         .merge(files::routes())

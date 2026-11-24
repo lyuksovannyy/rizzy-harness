@@ -163,6 +163,80 @@ pub struct Started {
     pub ends_by_ms: i64,
 }
 
+/// The most of a command's output the strip shows (X.62): under the agent
+/// tool's own cap ([`crate::MAX_OUTPUT_CHARS`]) and the protocol's.
+pub const VIEW_BYTES: usize = 28_000;
+
+/// A command's output as the chat's strip asks for it ([`SessionBg::view`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputView {
+    pub running: bool,
+    /// How long it ran (so far, or in all).
+    pub ran_ms: u64,
+    /// Bytes it printed in all.
+    pub printed: u64,
+    /// The last of what the node holds, as plain text.
+    pub text: String,
+    /// `text` is not all it printed.
+    pub cut: bool,
+    /// The node still holds its output (it gives it up past its bounds).
+    pub kept: bool,
+}
+
+/// `s` as plain text: CSI and OSC sequences and other escapes removed, `\r\n`
+/// and a bare `\r` a line break (a progress bar's redraws become lines).
+pub fn plain_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '\u{1b}' => match it.next() {
+                // CSI: parameters, then one final byte 0x40..=0x7E.
+                Some('[') => {
+                    for n in it.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: up to BEL or ST (ESC \).
+                Some(']') => {
+                    while let Some(n) = it.next() {
+                        if n == '\u{7}' {
+                            break;
+                        }
+                        if n == '\u{1b}' {
+                            it.next_if_eq(&'\\');
+                            break;
+                        }
+                    }
+                }
+                // Any other escape: the one character after it.
+                _ => {}
+            },
+            '\r' => {
+                it.next_if_eq(&'\n');
+                out.push('\n');
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The last at most `n` bytes of `s`, from a character boundary, and
+/// whether anything was left out.
+fn last_bytes(s: &str, n: usize) -> (&str, bool) {
+    if s.len() <= n {
+        return (s, false);
+    }
+    let mut from = s.len() - n;
+    while !s.is_char_boundary(from) {
+        from += 1;
+    }
+    (&s[from..], true)
+}
+
 /// A command's output: the first [`HEAD_MAX`] bytes (or a quarter of the
 /// budget, if smaller), then the last bytes up to the rest of the budget.
 /// Everything between is counted and dropped. Scrubbed where it enters
@@ -1239,6 +1313,59 @@ impl SessionBg {
             ring.text_within(crate::MAX_OUTPUT_CHARS - 2000)
         ))
     }
+
+    /// What the chat's strip shows of one command (X.62): the last
+    /// [`VIEW_BYTES`] of what the ring holds, read from the very ring
+    /// `bash_output` reads (scrubbed where it entered, no second buffer),
+    /// as plain text: terminal escape sequences are removed and a bare
+    /// carriage return is a line break. Read-only; it ends nothing and
+    /// stops no timer. `Err` is a sentence for the person.
+    pub fn view(&self, id: &str) -> Result<OutputView, String> {
+        let mut t = self.lock();
+        Self::prune(&mut t, self.reg.now());
+        let Some(c) = t.cmds.values().find(|c| c.id == id) else {
+            return Err(format!(
+                "no background command {id} in this chat: the node forgets one {} minutes after                  it ended, or when it restarts",
+                KEPT_AFTER_END.as_secs() / 60
+            ));
+        };
+        if c.agent.is_some() {
+            return Err(format!(
+                "{id} is a background sub-agent: its work is in its own chat"
+            ));
+        }
+        let (running, ran_ms) = match &c.state {
+            State::Running { .. } => (true, c.started.elapsed().as_millis() as u64),
+            State::Ended { at, .. } => (
+                false,
+                at.saturating_duration_since(c.started).as_millis() as u64,
+            ),
+        };
+        let ring = c.ring.lock().unwrap_or_else(|p| p.into_inner());
+        if ring.is_dropped() {
+            return Ok(OutputView {
+                running,
+                ran_ms,
+                printed: ring.total(),
+                text: String::new(),
+                cut: true,
+                kept: false,
+            });
+        }
+        // Twice the size before the escapes go, so one cut in the middle of a
+        // sequence cannot leave a fragment of it in what is shown.
+        let (raw, cut) = ring.last(VIEW_BYTES * 2);
+        let text = plain_text(&raw);
+        let (text, trimmed) = last_bytes(&text, VIEW_BYTES);
+        Ok(OutputView {
+            running,
+            ran_ms,
+            printed: ring.total(),
+            text: text.to_string(),
+            cut: cut || trimmed,
+            kept: true,
+        })
+    }
 }
 
 /// The text of a stop whose guard reported `alive`. Without a namespace
@@ -2025,6 +2152,84 @@ mod tests {
         let slot = r.node.take();
         release_slot(slot, BackgroundConfirmed::Ended, std::future::pending());
         assert_eq!(reg.running(), 0);
+    }
+
+    /// X.62: what the strip shows is the ring's last bytes as plain text:
+    /// escapes gone, a redraw a line, never past `VIEW_BYTES`, never a
+    /// broken character, and the cut said.
+    #[test]
+    fn the_view_is_plain_bounded_text() {
+        let (bg, _rx) = table(Limits::default());
+        let num = ended(&bg, 0);
+        let id = format!("bg-{num}");
+        {
+            let t = bg.lock();
+            let mut r = t.cmds[&num].ring.lock().unwrap();
+            r.push("\u{1b}[31mred\u{1b}[0m \u{1b}]0;title\u{7}ok\r10%\r20%\r\nlast\n");
+        }
+        let v = bg.view(&id).unwrap();
+        assert_eq!(v.text, "red ok\n10%\n20%\nlast\n");
+        assert!(!v.running && v.kept && !v.cut);
+        // A flood: bounded, on a boundary, and said to be cut.
+        {
+            let t = bg.lock();
+            let mut r = t.cmds[&num].ring.lock().unwrap();
+            for _ in 0..40_000 {
+                r.push("é€😀\u{1b}[1m");
+            }
+        }
+        let v = bg.view(&id).unwrap();
+        assert!(v.text.len() <= VIEW_BYTES && v.cut && !v.text.contains('\u{1b}'));
+        assert!(!v.text.contains('\u{FFFD}'));
+        // No newline at all, and invalid-looking bytes are the ring's own
+        // lossy text: still bounded.
+        let one = bg.view(&id).unwrap();
+        assert!(one.text.len() <= VIEW_BYTES);
+    }
+
+    /// X.62: the strip's text is the ring's own, scrubbed where it entered;
+    /// a secret printed in two pieces is in neither answer.
+    #[test]
+    fn the_view_never_holds_a_secret() {
+        const S: &str = "sk-test-0123456789abcdef";
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let bg = Registry::new(Limits::default(), secrets(&[S])).session(1, tx);
+        let num = ended(&bg, 0);
+        {
+            let t = bg.lock();
+            let mut r = t.cmds[&num].ring.lock().unwrap();
+            r.push("key: sk-test-0123");
+            r.push("456789abcdef\n");
+            r.finish();
+        }
+        let v = bg.view(&format!("bg-{num}")).unwrap();
+        assert!(v.text.contains("[REDACTED]"), "{}", v.text);
+        assert!(
+            !v.text.contains("sk-test") && !v.text.contains("456789abcdef"),
+            "{}",
+            v.text
+        );
+    }
+
+    /// X.62: an id the chat does not have (another chat's, one forgotten, a
+    /// sub-agent's) is a sentence; nothing of any other table is read.
+    #[test]
+    fn the_view_refuses_what_this_chat_does_not_hold() {
+        let (a, _ra) = table(Limits::default());
+        let (b, _rb) = table(Limits::default());
+        let n = ended(&b, 10);
+        // Same number, another chat's table: a's own table has no such id.
+        let e = a.view(&format!("bg-{n}")).unwrap_err();
+        assert!(e.contains("no background command"), "{e}");
+        assert!(
+            a.view("bg-9")
+                .unwrap_err()
+                .contains("forgets one 30 minutes")
+        );
+        // A background sub-agent has no output to show.
+        let r = a.reserve_agent().unwrap();
+        let (_n, s, _stop) = a.adopt_agent(r, "look", "task", Duration::from_secs(60));
+        assert!(a.view(&s.bg_id).unwrap_err().contains("own chat"));
     }
 
     fn table(limits: Limits) -> (Arc<SessionBg>, mpsc::UnboundedReceiver<Ended>) {

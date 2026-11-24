@@ -156,6 +156,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::SkillResult { .. }
         | MasterToNode::ConnectorResult { .. }
         | MasterToNode::Diff { .. }
+        | MasterToNode::BackgroundOutput { .. }
         | MasterToNode::Files { .. }
         | MasterToNode::DocPreview { .. }
         | MasterToNode::DocPageEdit { .. }
@@ -991,6 +992,9 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_DIFF.into());
                 // ...and the whole chat's changes in one diff (X.61).
                 capabilities.push(harness_protocol::CAP_DIFF_ALL.into());
+                // The tail of a background command's output for the
+                // chat's strip (X.62).
+                capabilities.push(harness_protocol::CAP_BG_OUTPUT.into());
                 // `@` file mentions and their completion (T63).
                 capabilities.push(harness_protocol::CAP_FILES.into());
                 // A Word or Excel file of a folder for the page's panel
@@ -1155,6 +1159,14 @@ impl NodeRuntime {
                         rewind,
                         all,
                     } => this.diff(req_id, session_id, turn_id, rewind, all),
+                    // A background command's output for the strip (X.62): a
+                    // bounded read of the ring, never behind a command of
+                    // the session.
+                    MasterToNode::BackgroundOutput {
+                        req_id,
+                        session_id,
+                        bg_id,
+                    } => this.background_output(req_id, session_id, bg_id),
                     // The composer's completion (T63): a bounded walk of
                     // names, in a task of its own, nothing logged.
                     MasterToNode::Files {
@@ -1474,6 +1486,45 @@ impl NodeRuntime {
             };
             // In order, waiting for room: an answer is never dropped for a
             // full queue (the master's request would only time out).
+            inner.publish_wait(msg).await;
+        });
+    }
+
+    /// Answer `session.background_output` (X.62): one bounded read of the
+    /// ring `bash_output` reads, from a task of its own; never acked, no
+    /// event, nothing stored. Only the node's audit line (the session id,
+    /// never a command or its text). At most [`DIFF_AT_ONCE`] answers are
+    /// being sent at once.
+    fn background_output(&self, req_id: String, sid: SessionId, bg_id: String) {
+        self.audit_inline("session.background_output", sid);
+        let reply = |output, error| NodeToMaster::BackgroundOutputResult {
+            req_id: req_id.clone(),
+            output,
+            error,
+        };
+        let Ok(permit) = self.inner.file_lists.clone().try_acquire_owned() else {
+            return self.inner.publish(reply(
+                None,
+                Some("the node is answering other requests; try again".into()),
+            ));
+        };
+        let res = match self.inner.session(sid) {
+            Some(s) => s.background_output(&bg_id),
+            // Not loaded: the node restarted since, and a command ends with
+            // its node.
+            None => Err(
+                "this chat is not running on the node now (it restarted): its \
+                         background commands ended with it"
+                    .to_string(),
+            ),
+        };
+        let msg = match res {
+            Ok(o) => reply(Some(o), None),
+            Err(e) => reply(None, Some(e)),
+        };
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
             inner.publish_wait(msg).await;
         });
     }
@@ -2384,6 +2435,14 @@ impl NodeRuntime {
                 all,
             } => {
                 self.diff(req_id, session_id, turn_id, rewind, all);
+                Ok(())
+            }
+            MasterToNode::BackgroundOutput {
+                req_id,
+                session_id,
+                bg_id,
+            } => {
+                self.background_output(req_id, session_id, bg_id);
                 Ok(())
             }
             MasterToNode::Files {

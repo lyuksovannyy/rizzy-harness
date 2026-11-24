@@ -48,7 +48,7 @@ async fn stop_one(
 }
 
 /// `bg-<n>` as the node numbers them (at most nine digits).
-fn is_bg_id(s: &str) -> bool {
+pub(super) fn is_bg_id(s: &str) -> bool {
     s.strip_prefix("bg-")
         .is_some_and(|n| !n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit()))
 }

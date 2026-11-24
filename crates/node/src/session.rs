@@ -985,6 +985,32 @@ impl Session {
         }
     }
 
+    /// The tail of one background command's output for the chat's strip
+    /// (X.62): the ring `bash_output` reads, as plain text, never more than
+    /// the protocol's bound. The node's policy decides as for the agent's
+    /// own read: where `bash_output` is denied, so is this.
+    pub(crate) fn background_output(
+        &self,
+        bg_id: &str,
+    ) -> Result<harness_protocol::BackgroundOutput, String> {
+        if self.node.cfg.policy.denies("bash_output") || self.node.cfg.policy.denies("bash") {
+            return Err("this node does not allow reading a command's output".into());
+        }
+        let bg = self
+            .bg
+            .as_ref()
+            .ok_or("this chat has no background commands")?;
+        let v = bg.view(bg_id)?;
+        Ok(harness_protocol::BackgroundOutput {
+            running: v.running,
+            ran_ms: v.ran_ms,
+            printed: v.printed,
+            text: v.text,
+            cut: v.cut,
+            dropped: !v.kept,
+        })
+    }
+
     /// Stop one background command (`bg_id`) or all, for the master: the
     /// person's stop (step 2) or the revocation sweep. Not waited for.
     pub(crate) fn stop_background(
