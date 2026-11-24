@@ -16,7 +16,7 @@
 //! only). The master does not interpret it beyond its length.
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use harness_protocol::{
@@ -24,9 +24,10 @@ use harness_protocol::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::caller::User;
 use super::files::away;
 use super::folder_preview::{base_name, unknown};
-use super::{ApiError, ApiResult, agentic_gate, require, visible_session};
+use super::{ApiError, ApiResult, agentic_gate, visible_session};
 use crate::Master;
 use crate::folder_preview::PreviewError;
 
@@ -72,12 +73,11 @@ fn refusal(r: FileRefusal) -> ApiError {
 }
 
 async fn file(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<FileQuery>,
 ) -> ApiResult<Json<Answer>> {
-    let who = require(&m, &headers).await?;
     let row = visible_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     // Only a coding chat with a folder: a chat without one has no files; a
