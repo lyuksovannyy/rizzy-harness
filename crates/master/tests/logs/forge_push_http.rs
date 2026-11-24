@@ -35,16 +35,15 @@ pub(crate) struct Chat {
 /// Alice's connection, a project cloned with it on a node that pushes, and
 /// an agentic chat of hers in that project.
 pub(crate) async fn chat() -> Chat {
+    chat_on(&[CAP_FORGE_PUSH, CAP_FORGE_PR]).await
+}
+
+/// [`chat`] on a node that announces `forge` (besides projects and clone).
+async fn chat_on(forge: &[&str]) -> Chat {
     let t = start().await;
-    let (l, node) = fake(
-        "pusher",
-        &[
-            CAP_PROJECTS,
-            "forge-clone:600",
-            CAP_FORGE_PUSH,
-            CAP_FORGE_PR,
-        ],
-    );
+    let mut caps = vec![CAP_PROJECTS, "forge-clone:600"];
+    caps.extend_from_slice(forge);
+    let (l, node) = fake("pusher", &caps);
     t.master.add_link(l, false).await.unwrap();
     let (alice, alice_id) = member(&t, "alice").await;
     let conn = connect(&t, &alice, TOKEN_A).await;
@@ -1250,4 +1249,243 @@ async fn a_private_address_at_call_time_is_refused() {
         c.t.forge.pulls.lock().unwrap()
     );
     assert!(c.t.forge.pulls.lock().unwrap().is_empty());
+}
+
+// ------------------------------------- review of the pull request tool
+
+/// (R1) A request for the other tool spends no click: a push card asked as
+/// a pull request, and a pull request card asked as a push, are refused
+/// and the right tool's request still succeeds afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_for_the_wrong_tool_spends_no_click() {
+    let c = running().await;
+    c.started("cpu", "push").await;
+    c.requested("x1", "cpu", "push").await;
+    assert_eq!(c.click(&c.alice, "x1", "allow").await, StatusCode::OK);
+    let a = c.open_pr("x1").await;
+    assert!(
+        a.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not a `pull_request` card"),
+        "{a:?}"
+    );
+    assert_eq!(
+        c.ask("x1").await.1.as_deref(),
+        Some(TOKEN_A),
+        "the push card's click was spent by a pull request request"
+    );
+    c.pr_card("x2", "cx2", honest(), honest()).await;
+    assert_eq!(c.click(&c.alice, "x2", "allow").await, StatusCode::OK);
+    let (_, token, error) = c.ask("x2").await;
+    assert!(
+        token.is_none()
+            && error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not a `push` card"),
+        "{error:?}"
+    );
+    let a = c.open_pr("x2").await;
+    assert_eq!(
+        a.number,
+        Some(7),
+        "the pull request card's click was spent by a push request: {a:?}"
+    );
+}
+
+/// (R2) The master refuses a node that did not announce the tool's
+/// capability: a pull request from a node with `forge-push` only, a push
+/// credential for a node with `forge-pr` only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_that_did_not_announce_the_tool_gets_nothing() {
+    let c = chat_on(&[CAP_FORGE_PUSH]).await;
+    assert!(c.turn(Chat::owner()).await.is_some());
+    c.pr_card("p1", "cp1", honest(), honest()).await;
+    assert_eq!(c.click(&c.alice, "p1", "allow").await, StatusCode::OK);
+    let a = c.open_pr("p1").await;
+    assert!(
+        a.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("does not offer"),
+        "{a:?}"
+    );
+    assert!(c.t.forge.pulls.lock().unwrap().is_empty());
+    let c = chat_on(&[CAP_FORGE_PR]).await;
+    assert!(c.turn(Chat::owner()).await.is_some());
+    c.card("t1", "push", "q1").await;
+    assert_eq!(c.click(&c.alice, "q1", "allow").await, StatusCode::OK);
+    let (_, token, error) = c.ask("q1").await;
+    assert!(
+        token.is_none()
+            && error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("does not offer"),
+        "{error:?}"
+    );
+}
+
+/// (R2) Push's hour and pull requests' hour are counted apart: twenty
+/// pushes leave the five pull requests untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn push_and_pull_request_hours_are_counted_apart() {
+    let c = running().await;
+    for i in 0..harness_master::forge_push::PER_HOUR {
+        let a = format!("u{i}");
+        c.card("t1", "push", &a).await;
+        assert!(c.allowed_gets_token(&a).await, "push {i}");
+    }
+    let a = c.pr("after", honest()).await;
+    assert_eq!(a.number, Some(7), "{a:?}");
+}
+
+/// (R9) The target names pull requests only where the master offers them
+/// (the node announced `forge-pr` and the agent names the tool); for a node
+/// without it the field is not sent at all, so an older node, whose target
+/// takes no unknown field, reads it as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_target_says_whether_pull_requests_are_offered() {
+    let c = chat().await;
+    let t = c.turn(Chat::owner()).await.expect("a target");
+    assert!(t.pull_requests);
+    let c = chat_on(&[CAP_FORGE_PUSH]).await;
+    let t = c.turn(Chat::owner()).await.expect("a target");
+    assert!(!t.pull_requests);
+    let wire = serde_json::to_value(&t).unwrap();
+    assert_eq!(
+        wire,
+        json!({"host": "127.0.0.1", "full_name": "ada/secret",
+               "connection_id": t.connection_id, "login": "ada"})
+    );
+}
+
+/// (R5) The returned address on the source host but over plain http is not
+/// passed on: the number only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plain_http_address_is_not_passed_on() {
+    let c = running().await;
+    let mut input = honest();
+    input["title"] = json!("plain");
+    let a = c.pr("h1", input).await;
+    assert_eq!((a.number, a.url.as_deref()), (Some(6), None), "{a:?}");
+}
+
+// --------------------------- the other two forge shapes (review R8)
+
+/// A chat whose project's host entry is now of `kind`, its API at `prefix`
+/// on the stand-in (the project was cloned through the GitHub shape).
+async fn on_kind(kind: harness_master::forge::ForgeKind, prefix: &str) -> Chat {
+    let c = running().await;
+    let mut h = c.t.forge.host();
+    h.kind = kind;
+    h.api_base = format!("http://127.0.0.1:{}/{prefix}", c.t.forge.port());
+    c.t.master.set_forge_hosts(vec![h]);
+    c
+}
+
+/// GitLab: the merge request's path, query and JSON keys, the draft mark in
+/// the title, the default branch from the project, `iid` and `web_url`,
+/// and the 409 "already exists" answered by one lookup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gitlab_merge_request_has_gitlabs_shape() {
+    let c = on_kind(harness_master::forge::ForgeKind::Gitlab, "gl/api/v4").await;
+    let a = c.pr("g1", honest()).await;
+    assert_eq!(
+        (a.number, a.url.as_deref(), a.existed),
+        (
+            Some(5),
+            Some("https://127.0.0.1/ada/secret/-/merge_requests/5"),
+            false
+        ),
+        "{a:?}"
+    );
+    let a = c.pr("g2", json!({"head": "feat", "title": "t"})).await;
+    assert_eq!(a.number, Some(5), "{a:?}");
+    let mut e = honest();
+    e["title"] = json!("exists");
+    let a = c.pr("g3", e).await;
+    assert_eq!(
+        (a.number, a.url.as_deref(), a.existed),
+        (
+            Some(4),
+            Some("https://127.0.0.1/ada/secret/-/merge_requests/4"),
+            true
+        ),
+        "{a:?}"
+    );
+    let mr = "/gl/api/v4/projects/ada%2Fsecret/merge_requests";
+    assert_eq!(
+        c.t.forge.shaped.lock().unwrap().clone(),
+        vec![
+            json!({"method": "POST", "path": mr, "query": null, "body": {
+                "title": "Draft: Add x", "source_branch": "feat", "target_branch": "main",
+                "description": "What changed.\n\n- a"}}),
+            json!({"method": "GET", "path": "/gl/api/v4/projects/ada%2Fsecret",
+                   "query": null, "body": null}),
+            json!({"method": "POST", "path": mr, "query": null, "body": {
+                "title": "t", "source_branch": "feat", "target_branch": "main",
+                "description": ""}}),
+            json!({"method": "POST", "path": mr, "query": null, "body": {
+                "title": "Draft: exists", "source_branch": "feat", "target_branch": "main",
+                "description": "What changed.\n\n- a"}}),
+            json!({"method": "GET", "path": mr,
+                   "query": "source_branch=feat&target_branch=main&state=opened", "body": null}),
+        ]
+    );
+    assert_no_token_anywhere(&c.t);
+}
+
+/// Gitea and Forgejo: the pull request's path and JSON keys, the `WIP: `
+/// mark, the default branch from the repository, `number` and `html_url`;
+/// the 409 "already exists" (no lookup: the number is not in the text) and
+/// the 422 for no changes passed on as the forge's words.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gitea_or_forgejo_pull_request_has_their_shape() {
+    for kind in [
+        harness_master::forge::ForgeKind::Gitea,
+        harness_master::forge::ForgeKind::Forgejo,
+    ] {
+        let c = on_kind(kind, "gt/api/v1").await;
+        let a = c.pr("f1", honest()).await;
+        assert_eq!(
+            (a.number, a.url.as_deref(), a.existed),
+            (Some(9), Some("https://127.0.0.1/ada/secret/pulls/9"), false),
+            "{a:?}"
+        );
+        let a = c.pr("f2", json!({"head": "feat", "title": "t"})).await;
+        assert_eq!(a.number, Some(9), "{a:?}");
+        let mut e = honest();
+        e["title"] = json!("exists");
+        let a = c.pr("f3", e.clone()).await;
+        assert!(a.existed && a.error.is_none() && a.url.is_none(), "{a:?}");
+        e["title"] = json!("nochange");
+        let a = c.pr("f4", e).await;
+        assert!(
+            a.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("There are no changes between the head and the base"),
+            "{a:?}"
+        );
+        let pulls = "/gt/api/v1/repos/ada/secret/pulls";
+        let body = |title: &str, base: &str, text: &str| {
+            json!({"method": "POST", "path": pulls, "query": null, "body": {
+                "title": title, "head": "feat", "base": base, "body": text}})
+        };
+        assert_eq!(
+            c.t.forge.shaped.lock().unwrap().clone(),
+            vec![
+                body("WIP: Add x", "main", "What changed.\n\n- a"),
+                json!({"method": "GET", "path": "/gt/api/v1/repos/ada/secret",
+                       "query": null, "body": null}),
+                body("t", "main", ""),
+                body("WIP: exists", "main", "What changed.\n\n- a"),
+                body("WIP: nochange", "main", "What changed.\n\n- a"),
+            ],
+            "{kind:?}"
+        );
+        assert_no_token_anywhere(&c.t);
+    }
 }

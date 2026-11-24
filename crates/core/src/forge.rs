@@ -127,6 +127,14 @@ pub struct PushTarget {
     pub connection_id: String,
     /// That connection's forge account name, for the card.
     pub login: String,
+    /// The master opens pull requests for this turn (it offers the tool:
+    /// the node announced the `forge-pr` capability and the
+    /// agent names `pull_request`). Sent only when true, so an older node,
+    /// which takes no unknown field here, never sees it; absent (an older
+    /// master, which has no pull request service), the node does not offer
+    /// the tool and never sends a request that master would not know.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pull_requests: bool,
 }
 
 /// Where the node runs a session's `push` (its link to the master, its

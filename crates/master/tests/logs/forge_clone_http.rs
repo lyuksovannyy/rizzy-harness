@@ -50,6 +50,9 @@ pub(crate) struct Forge {
     pub(crate) pulls: Arc<Mutex<Vec<Value>>>,
     /// The query strings of the open-pull-request lookups.
     pub(crate) lookups: Arc<Mutex<Vec<String>>>,
+    /// Every request to the GitLab- and Gitea-shaped routes ([`shapes`]):
+    /// method, raw path, query and JSON body.
+    pub(crate) shaped: Arc<Mutex<Vec<Value>>>,
 }
 
 impl Forge {
@@ -61,6 +64,9 @@ impl Forge {
             .filter(|(p, _)| p.contains("/repos/"))
             .cloned()
             .collect()
+    }
+    pub(crate) fn port(&self) -> u16 {
+        self.addr.get().unwrap().port()
     }
     pub(crate) fn host(&self) -> ForgeHost {
         ForgeHost {
@@ -82,16 +88,18 @@ async fn forge(State(f): State<Forge>, req: Request) -> Response {
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     f.seen.lock().unwrap().push((path.clone(), auth.clone()));
+    if path.starts_with("/gl/") || path.starts_with("/gt/") {
+        return shapes(f, req).await;
+    }
     // The lookup of an open pull request (`existing`): GitHub's query.
     if !post && path.eq_ignore_ascii_case("/gh/repos/ada/secret/pulls") {
         let q = req.uri().query().unwrap_or_default().to_string();
         f.lookups.lock().unwrap().push(q.clone());
-        let port = f.addr.get().unwrap().port();
         if auth.as_deref() != Some(&format!("Bearer {TOKEN_A}")) {
             return (AxStatus::UNAUTHORIZED, "no").into_response();
         }
         return axum::Json(json!([{"number": 3,
-            "html_url": format!("http://127.0.0.1:{port}/ada/secret/pull/3")}]))
+            "html_url": "https://127.0.0.1/ada/secret/pull/3"}]))
         .into_response();
     }
     if post && path.eq_ignore_ascii_case("/gh/repos/ada/secret/pulls") {
@@ -104,7 +112,6 @@ async fn forge(State(f): State<Forge>, req: Request) -> Response {
         let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         f.pulls.lock().unwrap().push(body.clone());
         let title = body["title"].as_str().unwrap_or_default().to_string();
-        let port = f.addr.get().unwrap().port();
         return match title.as_str() {
             "exists" => (
                 AxStatus::UNPROCESSABLE_ENTITY,
@@ -129,6 +136,12 @@ async fn forge(State(f): State<Forge>, req: Request) -> Response {
                 axum::Json(json!({"number": 8, "html_url": "https://evil.example/ada/secret/pull/8"})),
             )
                 .into_response(),
+            // On the source host, but plain http.
+            "plain" => (
+                AxStatus::CREATED,
+                axum::Json(json!({"number": 6, "html_url": "http://127.0.0.1/ada/secret/pull/6"})),
+            )
+                .into_response(),
             "redirect" => (
                 AxStatus::TEMPORARY_REDIRECT,
                 [("location", "http://evil.example/steal")],
@@ -138,7 +151,7 @@ async fn forge(State(f): State<Forge>, req: Request) -> Response {
             _ => (
                 AxStatus::CREATED,
                 axum::Json(json!({"number": 7,
-                    "html_url": format!("http://127.0.0.1:{port}/ada/secret/pull/7")})),
+                    "html_url": "https://127.0.0.1/ada/secret/pull/7"})),
             )
                 .into_response(),
         };
@@ -172,6 +185,108 @@ async fn forge(State(f): State<Forge>, req: Request) -> Response {
         }
         "/gh/repos/ada/renamed" => repo("ada/other", true),
         "/gh/repos/ada/broken" => axum::Json(json!({"id": 5, "full_name": "../x"})).into_response(),
+        _ => (AxStatus::NOT_FOUND, "no").into_response(),
+    }
+}
+
+/// GitLab- and Gitea/Forgejo-shaped pull request routes (PLAN.md T102,
+/// review R8), under `/gl/api/v4` and `/gt/api/v1`, from the forges' public
+/// API documentation as the author knows it.
+///
+/// Sure of: GitLab `POST /projects/:id/merge_requests` (the id an encoded
+/// `owner%2Fname`) takes `source_branch`, `target_branch`, `title`,
+/// `description` and answers `iid` and `web_url`; its lookup
+/// `GET …/merge_requests?source_branch=&target_branch=&state=opened` answers
+/// a list of the same; `GET /projects/:id` answers `id`,
+/// `path_with_namespace`, `visibility`, `default_branch`; the token in
+/// `PRIVATE-TOKEN`; a draft marked by a `Draft: ` title. Gitea and Forgejo
+/// `POST /repos/{owner}/{repo}/pulls` take `head`, `base`, `title`, `body`
+/// and answer `number` and `html_url`; `GET /repos/{owner}/{repo}` answers
+/// `id`, `full_name`, `private`, `default_branch`; `Authorization: token …`;
+/// a `WIP: ` title marks a draft.
+///
+/// From memory (the exact words may differ): GitLab's duplicate is a 409
+/// whose `message` is a list ("Another open merge request already exists
+/// for this source branch: !N"); Gitea's duplicate is a 409 "pull request
+/// already exists for these targets [id: …, issue_id: …, …]" (internal ids,
+/// not the number) and its "no changes" a 422, both with a `url` beside the
+/// `message`.
+async fn shapes(f: Forge, req: Request) -> Response {
+    let method = req.method().to_string();
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().map(str::to_string);
+    let gl = path.starts_with("/gl/");
+    let auth = req
+        .headers()
+        .get(if gl { "private-token" } else { "authorization" })
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let bytes = axum::body::to_bytes(req.into_body(), 1 << 20)
+        .await
+        .unwrap_or_default();
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    f.shaped
+        .lock()
+        .unwrap()
+        .push(json!({"method": method, "path": path, "query": query, "body": body}));
+    let want = if gl {
+        TOKEN_A.to_string()
+    } else {
+        format!("token {TOKEN_A}")
+    };
+    if auth.as_deref() != Some(want.as_str()) {
+        return (AxStatus::UNAUTHORIZED, "no").into_response();
+    }
+    let title = body["title"].as_str().unwrap_or_default();
+    let mr = |n: u64| format!("https://127.0.0.1/ada/secret/-/merge_requests/{n}");
+    let json = |st: AxStatus, v: Value| (st, axum::Json(v)).into_response();
+    match (method.as_str(), path.as_str()) {
+        ("GET", "/gl/api/v4/projects/ada%2Fsecret") => json(
+            AxStatus::OK,
+            json!({"id": 77, "path_with_namespace": "ada/secret", "visibility": "private",
+                   "default_branch": "main"}),
+        ),
+        ("GET", "/gl/api/v4/projects/ada%2Fsecret/merge_requests") => json(
+            AxStatus::OK,
+            json!([{"id": 904, "iid": 4, "web_url": mr(4)}]),
+        ),
+        ("POST", "/gl/api/v4/projects/ada%2Fsecret/merge_requests") => {
+            if title.ends_with("exists") {
+                json(
+                    AxStatus::CONFLICT,
+                    json!({"message": [
+                        "Another open merge request already exists for this source branch: !4"]}),
+                )
+            } else {
+                json(
+                    AxStatus::CREATED,
+                    json!({"id": 905, "iid": 5, "web_url": mr(5)}),
+                )
+            }
+        }
+        ("GET", "/gt/api/v1/repos/ada/secret") => json(
+            AxStatus::OK,
+            json!({"id": 12, "full_name": "ada/secret", "private": true,
+                   "default_branch": "main"}),
+        ),
+        ("POST", "/gt/api/v1/repos/ada/secret/pulls") => match title {
+            t if t.ends_with("exists") => json(
+                AxStatus::CONFLICT,
+                json!({"message": "pull request already exists for these targets [id: 31, \
+                    issue_id: 52, head_repo_id: 12, base_repo_id: 12, head_branch: feat, \
+                    base_branch: main]", "url": "https://127.0.0.1/api/swagger"}),
+            ),
+            t if t.ends_with("nochange") => json(
+                AxStatus::UNPROCESSABLE_ENTITY,
+                json!({"message": "Invalid PullRequest: There are no changes between the \
+                    head and the base", "url": "https://127.0.0.1/api/swagger"}),
+            ),
+            _ => json(
+                AxStatus::CREATED,
+                json!({"id": 31, "number": 9,
+                       "html_url": "https://127.0.0.1/ada/secret/pulls/9"}),
+            ),
+        },
         _ => (AxStatus::NOT_FOUND, "no").into_response(),
     }
 }

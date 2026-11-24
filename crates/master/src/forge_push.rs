@@ -213,11 +213,14 @@ async fn decide(
         || row.parent_id.is_some()
         || row.incognito
         || row.profile.as_deref() == Some("chat")
-        || !((agent.allows_tool(PUSH_TOOL)
-            && m.node_has(&row.node_id, harness_protocol::CAP_FORGE_PUSH))
-            || (agent.allows_tool(harness_core::forge::PR_TOOL)
-                && m.node_has(&row.node_id, harness_protocol::CAP_FORGE_PR)))
     {
+        return None;
+    }
+    let push =
+        agent.allows_tool(PUSH_TOOL) && m.node_has(&row.node_id, harness_protocol::CAP_FORGE_PUSH);
+    let pull_requests = agent.allows_tool(harness_core::forge::PR_TOOL)
+        && m.node_has(&row.node_id, harness_protocol::CAP_FORGE_PR);
+    if !push && !pull_requests {
         return None;
     }
     let owner = row.owner_id.clone()?;
@@ -248,6 +251,7 @@ async fn decide(
             full_name,
             connection_id: found.connection_id,
             login: found.login,
+            pull_requests,
         },
         owner,
     ))
@@ -343,10 +347,11 @@ pub(crate) struct Released {
 /// The checks every master-released forge action passes before anything
 /// is opened or sent, for an approval of `tool` (`push`, `pull_request`):
 /// the requesting node runs the session (with `cap`); a top-level,
-/// non-temporary chat; one request of the chat at a time; an Allow the
-/// master relayed from the chat's owner for that approval id, once; the
-/// approval and its one call both naming `tool`, each id unique in the log
-/// and within the id rule; the chat's target and owner unchanged; the open
+/// non-temporary chat; one request of the chat at a time; the approval and
+/// its one call both naming `tool`, each id unique in the log and within
+/// the id rule (before the click is taken: a request for another tool
+/// spends none); an Allow the master relayed from the chat's owner for
+/// that approval id, once; the chat's target and owner unchanged; the open
 /// turn not a callback, `tool` not withheld, the agent with the switch
 /// (`switch`); no one else acted in the chat; the owner's account, level
 /// and membership as they are now; the project's source, the host and the
@@ -387,6 +392,20 @@ pub(crate) async fn release(
         return Err("another request of this chat is being answered".into());
     }
     let busy = Busy(m.clone(), sid);
+    // The card this tool's card as the page draws it (its call's tool),
+    // each id unique, and the call's input from this mirror: checked before
+    // the click is taken, so a request for another tool spends none
+    // (review R1).
+    let a = approval_id.to_string();
+    let call = m
+        .inner
+        .mirror
+        .call(move |s| s.approval_call(sid, &a))
+        .await
+        .ok()
+        .flatten()
+        .filter(|c| c.tool == tool && c.call_tool == tool)
+        .ok_or_else(|| format!("that card is not a `{tool}` card"))?;
     // The Allow the master relayed, once.
     if !st.take_click(sid, approval_id) {
         return Err(
@@ -399,18 +418,6 @@ pub(crate) async fn release(
         .get(&sid)
         .map(|(t, o, _)| (t.clone(), o.clone()))
         .ok_or("this chat's turn has no forge target")?;
-    // The card still this tool's card as the page draws it (its call's
-    // tool), each id unique, and the call's input from this mirror.
-    let a = approval_id.to_string();
-    let call = m
-        .inner
-        .mirror
-        .call(move |s| s.approval_call(sid, &a))
-        .await
-        .ok()
-        .flatten()
-        .filter(|c| c.tool == tool && c.call_tool == tool)
-        .ok_or_else(|| format!("that card is not a `{tool}` card"))?;
     if row.owner_id.as_deref() != Some(owner.as_str()) {
         return Err("the chat's owner changed".into());
     }

@@ -163,6 +163,7 @@ fn target(host: &str) -> PushTarget {
         full_name: "o/r".into(),
         connection_id: "conn1".into(),
         login: USER.into(),
+        pull_requests: true,
     }
 }
 
@@ -816,6 +817,36 @@ async fn forge_push_off_withholds_pull_requests_too() {
     m.agent = Some(spec());
     m.context = Some(Box::new(harness_core::backend::MasterContext {
         push: Some(target("github.com")),
+        ..Default::default()
+    }));
+    n.link.to_node.try_send(MasterToNode::Prompt(m)).unwrap();
+    n.ack().await;
+    let seen = n.until_end(sid, Answer::Allow, &r.folder).await;
+    assert!(seen.cards.is_empty(), "{seen:?}");
+    let (_, ok, out) = &seen.results[0];
+    assert!(!ok && out.contains("unknown tool"), "{out}");
+}
+
+/// (Review R9) A target that does not say the master opens pull requests
+/// (an older master's, which has no such service) offers no
+/// `pull_request`: the node never sends a request that master would not
+/// know. Push in that turn is unchanged.
+#[tokio::test]
+async fn a_target_without_pull_requests_offers_none() {
+    let r = rig();
+    let mut n = node(&r, r.policy(&["github.com".to_string()], true)).await;
+    let sid = n.create(&r.folder, false, false).await;
+    let mut m = PromptMsg::test(sid, PR_SCRIPT);
+    m.agent = Some(spec());
+    let old = PushTarget {
+        pull_requests: false,
+        ..target("github.com")
+    };
+    // As an older master writes it: no `pull_requests` key.
+    let wire = serde_json::to_value(&old).unwrap();
+    assert!(wire.get("pull_requests").is_none(), "{wire}");
+    m.context = Some(Box::new(harness_core::backend::MasterContext {
+        push: Some(serde_json::from_value(wire).unwrap()),
         ..Default::default()
     }));
     n.link.to_node.try_send(MasterToNode::Prompt(m)).unwrap();

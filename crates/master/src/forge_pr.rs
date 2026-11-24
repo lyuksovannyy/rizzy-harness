@@ -251,21 +251,37 @@ fn number_of(kind: ForgeKind, v: &serde_json::Value) -> Option<u64> {
     v.get(key).and_then(|n| n.as_u64())
 }
 
-/// Its web address: a http(s) URL of at most 512 bytes on the project's
-/// own source host, else none (the result then names the number only;
-/// nothing a forge writes is trusted to point elsewhere).
+/// The longest address passed on, in bytes: within [`ERROR_MAX`], so the
+/// cleaning of the answer never cuts it.
+const URL_MAX: usize = ERROR_MAX;
+
+/// Its web address, or none (the result then names the number only;
+/// nothing a forge writes is trusted to point elsewhere): https, no user
+/// name or password, on the project's own source host (as the URL parser
+/// writes it: lower case; a trailing dot is another name), on the default
+/// port or the port the host entry's `api_base` names on that same host (a
+/// self-hosted forge on `:3000` serves its pages there too; `[forge] hosts`
+/// names carry no port), at most [`URL_MAX`] bytes as written.
 fn url_of(h: &ForgeHost, v: &serde_json::Value) -> Option<String> {
     let key = if h.kind == ForgeKind::Gitlab {
         "web_url"
     } else {
         "html_url"
     };
-    let s = v.get(key)?.as_str()?;
-    let u = reqwest::Url::parse(s).ok()?;
-    (matches!(u.scheme(), "https" | "http")
-        && s.len() <= 512
-        && u.host_str() == Some(h.host.as_str()))
-    .then(|| u.to_string())
+    let u = reqwest::Url::parse(v.get(key)?.as_str()?).ok()?;
+    let port_ok = match u.port() {
+        None => true,
+        Some(p) => reqwest::Url::parse(&h.api_base)
+            .is_ok_and(|a| a.host_str() == Some(h.host.as_str()) && a.port() == Some(p)),
+    };
+    let out = u.to_string();
+    (u.scheme() == "https"
+        && u.username().is_empty()
+        && u.password().is_none()
+        && u.host_str() == Some(h.host.as_str())
+        && port_ok
+        && out.len() <= URL_MAX)
+        .then_some(out)
 }
 
 /// The longest title a forge takes where a draft is marked by the title
@@ -393,5 +409,72 @@ mod tests {
         assert!(draft_title(ForgeKind::Gitea, &long, false).is_ok());
         assert!(draft_title(ForgeKind::Github, &"t".repeat(256), true).is_ok());
         assert!(draft_title(ForgeKind::Gitlab, &"t".repeat(256), false).is_err());
+    }
+
+    /// (Review R5) The address passed on: https, the source host, the
+    /// default port or `api_base`'s on that host, no user info, at most
+    /// 300 bytes; anything else, the number alone.
+    #[test]
+    fn only_an_https_address_on_the_source_host_is_passed_on() {
+        let h = |api_base: &str| ForgeHost {
+            host: "git.example.com".into(),
+            kind: ForgeKind::Gitea,
+            api_base: api_base.into(),
+            api_host: None,
+            private_address: false,
+        };
+        let plain = h("https://git.example.com/api/v1");
+        let on3000 = h("https://git.example.com:3000/api/v1");
+        let of = |h: &ForgeHost, u: &str| url_of(h, &serde_json::json!({ "html_url": u }));
+        let ok = "https://git.example.com/o/r/pulls/1";
+        assert_eq!(of(&plain, ok).as_deref(), Some(ok));
+        assert_eq!(
+            of(&plain, "https://git.example.com:443/o/r/pulls/1").as_deref(),
+            Some(ok),
+            "the default port written out"
+        );
+        assert_eq!(
+            of(&plain, "https://GIT.Example.COM/o/r/pulls/1").as_deref(),
+            Some(ok),
+            "the same host in upper case, passed on as the parser writes it"
+        );
+        for bad in [
+            "http://git.example.com/o/r/pulls/1",
+            "https://git.example.com:8443/o/r/pulls/1",
+            "https://user@git.example.com/o/r/pulls/1",
+            "https://user:pw@git.example.com/o/r/pulls/1",
+            "https://git.example.com./o/r/pulls/1",
+            "https://git.example.com.evil.example/o/r/pulls/1",
+            "https://evil.example/git.example.com/o/r/pulls/1",
+            "javascript:alert(1)",
+            "/o/r/pulls/1",
+        ] {
+            assert_eq!(of(&plain, bad), None, "{bad}");
+        }
+        let long = format!("https://git.example.com/o/r/pulls/1?{}", "x".repeat(400));
+        assert_eq!(of(&plain, &long), None, "a 400-character address");
+        let fits = format!(
+            "https://git.example.com/{}",
+            "x".repeat(URL_MAX - "https://git.example.com/".len())
+        );
+        assert_eq!(of(&plain, &fits).as_deref(), Some(fits.as_str()));
+        // The port the host entry's API is on, on that same host.
+        let at3000 = "https://git.example.com:3000/o/r/pulls/1";
+        assert_eq!(of(&on3000, at3000).as_deref(), Some(at3000));
+        assert_eq!(
+            of(&on3000, "https://git.example.com:3001/o/r/pulls/1"),
+            None
+        );
+        assert_eq!(of(&plain, at3000), None);
+        // GitLab's key is `web_url`.
+        let gl = ForgeHost {
+            kind: ForgeKind::Gitlab,
+            ..h("https://git.example.com/api/v4")
+        };
+        assert_eq!(url_of(&gl, &serde_json::json!({ "html_url": ok })), None);
+        assert_eq!(
+            url_of(&gl, &serde_json::json!({ "web_url": ok })).as_deref(),
+            Some(ok)
+        );
     }
 }
