@@ -1,5 +1,5 @@
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -64,6 +64,7 @@ mod storage;
 mod usage;
 pub(crate) use usage::TIME_LIMIT as USAGE_TIME_LIMIT;
 mod users;
+mod voice;
 mod workspaces;
 
 pub fn router(master: Master) -> Router {
@@ -261,12 +262,6 @@ fn private_routes() -> Router<Master> {
                 .delete(agent_edits::delete_agent),
         )
         .route("/api/agent-summary", post(agent_edits::generate_summary))
-        .route(
-            "/api/transcribe",
-            post(transcribe).layer(axum::extract::DefaultBodyLimit::max(
-                crate::voice::MAX_AUDIO,
-            )),
-        )
         .route("/api/admin/memory", get(get_memory_cfg).put(put_memory_cfg))
         .route("/api/attention", get(attention))
         .route("/api/sessions", get(list_sessions).post(create_session))
@@ -325,6 +320,7 @@ fn private_routes() -> Router<Master> {
         .merge(account::routes())
         .merge(nodes::routes())
         .merge(server_settings::routes())
+        .merge(voice::routes())
 }
 
 pub(crate) struct ApiError(StatusCode, String);
@@ -1720,44 +1716,6 @@ async fn select_variant(
     m.select_variant(row.session_id, b.group, b.message_id)
         .await?;
     Ok(Json(json!({ "ok": true })))
-}
-
-async fn transcribe(
-    User(who): User,
-    State(m): State<Master>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> ApiResult<Json<serde_json::Value>> {
-    let t = m.transcriber().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "voice is not set up on this server".into(),
-        )
-    })?;
-    if body.is_empty() {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "no audio".into()));
-    }
-    // Held until the answer (or the dropped request) ends.
-    let _slot = m
-        .voice_usage()
-        .begin(
-            who.user_id.as_deref().unwrap_or(""),
-            body.len() as u64,
-            t.limits(),
-            harness_core::now_ms(),
-        )
-        .map_err(|e| ApiError(StatusCode::TOO_MANY_REQUESTS, e.to_string()))?;
-    let mime = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| v.starts_with("audio/"))
-        .unwrap_or("audio/webm")
-        .to_string();
-    let text = t
-        .transcribe(body.to_vec(), &mime)
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
-    Ok(Json(json!({ "text": text })))
 }
 
 /// Chats waiting for the caller (approvals, unanswered questions).
