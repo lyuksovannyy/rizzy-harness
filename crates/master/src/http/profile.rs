@@ -17,7 +17,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, put};
 use axum::{Json, Router};
@@ -25,8 +25,9 @@ use harness_store::blobs::NewBlob;
 use harness_store::profile_images::ProfileImageSet;
 use serde_json::{Value, json};
 
-use super::links::require_bytes;
-use super::{ApiError, ApiResult, require};
+use super::caller::{ByteCaller, User};
+use super::{ApiError, ApiResult};
+use crate::auth;
 use crate::prefs::{Personalisation, Prefs};
 use crate::{Master, storage};
 
@@ -100,11 +101,11 @@ pub fn check_image(slot: Slot, b: &[u8]) -> Result<(&'static str, &'static str, 
 
 pub(super) fn routes() -> Router<Master> {
     let image = |slot: Slot| {
-        put(move |m: State<Master>, h: HeaderMap, b: Bytes| upload(m, h, slot, b))
+        put(move |u: User, m: State<Master>, b: Bytes| upload(u, m, slot, b))
             // The cap and a little over, so an over-size body reads as
             // ours (413) rather than the framework's.
             .layer(DefaultBodyLimit::max(slot.max_bytes() + 1))
-            .delete(move |m: State<Master>, h: HeaderMap| remove(m, h, slot))
+            .delete(move |u: User, m: State<Master>| remove(u, m, slot))
     };
     Router::new()
         .route("/api/me/settings", get(get_settings).put(put_settings))
@@ -114,31 +115,33 @@ pub(super) fn routes() -> Router<Master> {
         .route("/api/me/banner", image(Slot::Banner))
         .route(
             "/api/users/{id}/avatar",
-            get(|m: State<Master>, h: HeaderMap, u: Uri, p: Path<String>| {
-                picture(m, h, u, p, Slot::Avatar)
-            }),
+            get(
+                |b: ByteCaller, m: State<Master>, h: HeaderMap, p: Path<String>| {
+                    picture(b, m, h, p, Slot::Avatar)
+                },
+            ),
         )
         .route(
             "/api/users/{id}/banner",
-            get(|m: State<Master>, h: HeaderMap, u: Uri, p: Path<String>| {
-                picture(m, h, u, p, Slot::Banner)
-            }),
+            get(
+                |b: ByteCaller, m: State<Master>, h: HeaderMap, p: Path<String>| {
+                    picture(b, m, h, p, Slot::Banner)
+                },
+            ),
         )
 }
 
-async fn get_settings(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<Prefs>> {
-    let who = require(&m, &headers).await?;
+async fn get_settings(User(who): User, State(m): State<Master>) -> ApiResult<Json<Prefs>> {
     Ok(Json(Prefs::load(&m, who.user_id.as_deref()).await))
 }
 
 /// Everything but Personalisation, which stays as stored (its own endpoint
 /// changes it).
 async fn put_settings(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Prefs>> {
-    let who = require(&m, &headers).await?;
     // The e-mail for commits changes only when the request carries the
     // field (`null` or empty clears it): a page loaded before it was set
     // and saving another setting must not wipe it.
@@ -173,11 +176,10 @@ async fn put_settings(
 /// applies from the person's next message (each turn's `context_sent`
 /// records what that turn was sent).
 async fn put_personalisation(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Json(b): Json<Personalisation>,
 ) -> ApiResult<Json<Prefs>> {
-    let who = require(&m, &headers).await?;
     b.validate()
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
     let _g = Prefs::write_lock().await;
@@ -194,8 +196,8 @@ async fn put_personalisation(
 }
 
 /// The caller's account; the API token has no profile.
-async fn account(m: &Master, headers: &HeaderMap) -> ApiResult<String> {
-    require(m, headers).await?.user_id.ok_or_else(|| {
+fn account(who: auth::Principal) -> ApiResult<String> {
+    who.user_id.ok_or_else(|| {
         ApiError(
             StatusCode::BAD_REQUEST,
             "the API token has no profile".into(),
@@ -222,8 +224,8 @@ pub(crate) async fn image_version(m: &Master, user: &str, slot: Slot) -> Option<
 }
 
 /// `{"avatar": version | null, "banner": version | null}` of the caller.
-async fn own_images(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let uid = account(&m, &headers).await?;
+async fn own_images(User(who): User, State(m): State<Master>) -> ApiResult<Json<Value>> {
+    let uid = account(who)?;
     Ok(Json(json!({
         "avatar": image_version(&m, &uid, Slot::Avatar).await,
         "banner": image_version(&m, &uid, Slot::Banner).await,
@@ -231,12 +233,12 @@ async fn own_images(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Js
 }
 
 async fn upload(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     slot: Slot,
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let uid = account(&m, &headers).await?;
+    let uid = account(who)?;
     if body.len() > slot.max_bytes() {
         return Err(ApiError(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -314,8 +316,8 @@ async fn forget(m: &Master, gone: Vec<String>) {
     storage::unlink(m, gone).await;
 }
 
-async fn remove(State(m): State<Master>, headers: HeaderMap, slot: Slot) -> ApiResult<Json<Value>> {
-    let uid = account(&m, &headers).await?;
+async fn remove(User(who): User, State(m): State<Master>, slot: Slot) -> ApiResult<Json<Value>> {
+    let uid = account(who)?;
     let owner = uid.clone();
     let gone = m
         .inner
@@ -327,13 +329,12 @@ async fn remove(State(m): State<Master>, headers: HeaderMap, slot: Slot) -> ApiR
 }
 
 async fn picture(
+    ByteCaller(who): ByteCaller,
     State(m): State<Master>,
     headers: HeaderMap,
-    uri: Uri,
     Path(id): Path<String>,
     slot: Slot,
 ) -> ApiResult<Response> {
-    let who = require_bytes(&m, &headers, &uri).await?;
     let gone = || ApiError(StatusCode::NOT_FOUND, "no such picture".into());
     let viewer = who.user_id.clone().ok_or_else(gone)?;
     let allowed = viewer == id
