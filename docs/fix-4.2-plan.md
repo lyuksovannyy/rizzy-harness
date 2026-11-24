@@ -183,3 +183,12 @@ Would not do: `governor`; an error enum; per-route routers to shrink `http.rs` b
 2. Keep `ApiError` as a tuple struct, with the remaining work being the scrubbed log and typed save errors. Recommendation: yes; skip the optional constructor clean-up.
 3. When to land the split, given how many branches touch `http.rs`. Recommendation: PRs 3 and 4 first; the two split PRs at a moment the lead picks when few branches are open, each merged the day it is opened.
 4. A generic `Waiting<A>` for the eight node round-trip tables: a separate task outside 4.2, or not at all. Recommendation: not now.
+
+## 8. Decisions
+
+The session lead decided on 2026-11-24, on the questions in section 7. They are deviations from the wording of the FIX_PLAN row, and the owner may overrule them.
+
+1. **No `governor`.** Its keyed store has no bound on keys, cannot give a slot back and cannot clear one key, so it cannot express the login rule. Our own `FailureMap` becomes the one keyed limiter (a later pull request).
+2. **`ApiError` stays a tuple struct.** 500s are already logged once with a request id and answered with a fixed sentence (task 3.6). The remaining error work is the scrubbed log and typed save errors (a later pull request), not a rewrite of 308 sites.
+3. **`http.rs` ends at about 500 lines.** It keeps the route table, the layers, `ApiError` and the shared session helpers. The route table is not split.
+4. **The eight node round-trip waiting tables are not merged now.**
