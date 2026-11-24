@@ -570,7 +570,11 @@ pub(super) async fn put_agent_avatar(
     cfg.agent_avatars.insert(id, avatar);
     apply(&m, &rt, cfg)?;
     // Server settings show the server's own chains.
-    Ok(Json(super::agent_json(&m, &m.resolver(None), agent)))
+    Ok(Json(super::agent_edits::agent_json(
+        &m,
+        &m.resolver(None),
+        agent,
+    )))
 }
 
 /// A listing for the picker: the listed models, then the provider's saved

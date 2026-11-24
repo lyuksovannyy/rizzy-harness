@@ -8,9 +8,10 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
 
+use super::agent_edits::{ScopeQuery, settings_scope};
 use super::caller::{Admin, User};
 use super::search::kinds_shown;
-use super::{ApiError, ApiResult, ScopeQuery, WorkspaceQuery, runtime, settings_scope};
+use super::{ApiError, ApiResult, WorkspaceQuery, runtime};
 use crate::Master;
 use crate::workspaces as ws;
 

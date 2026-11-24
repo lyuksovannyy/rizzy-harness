@@ -5,21 +5,34 @@
 
 use std::time::Duration;
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use harness_agent_native::{ChatMsg, ChatRequest, Provider};
 use harness_agents::Features;
 use harness_agents::edits::{Custom, Overlay};
 use serde::Deserialize;
 use serde_json::json;
 
+use super::agent_edits;
 use super::caller::User;
-use super::{ApiError, ApiResult, ScopeQuery, agent_json, runtime, settings_scope};
+use super::{ApiError, ApiResult, runtime};
 use crate::Master;
 use crate::agent_edits::{AgentEditError, Place};
-use crate::auth::Principal;
+use crate::auth::{self, Principal};
 use crate::workspaces::{self as ws, Perm};
+
+pub(super) fn routes() -> Router<Master> {
+    Router::new()
+        .route("/api/models", get(models))
+        .route("/api/agents", get(agents).post(create_agent))
+        .route(
+            "/api/agents/{id}",
+            get(get_agent).patch(update_agent).delete(delete_agent),
+        )
+        .route("/api/agent-summary", post(generate_summary))
+}
 
 /// Where a write goes and whether `who` may make it (PLAN.md T79): a write
 /// names its scope. `?scope=server` is the server's set, for the server's
@@ -454,6 +467,120 @@ fn tidy(reply: &str) -> String {
     let cut: String = line.chars().take(MAX_GENERATED - 1).collect();
     let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
     format!("{}…", cut.trim_end_matches([',', ';', ':']))
+}
+
+/// Which settings a read of models, agents or notices follows.
+#[derive(Deserialize)]
+pub(super) struct ScopeQuery {
+    /// A workspace the caller is a member of (users: defaults to the
+    /// active one; the API token: the server's without it).
+    #[serde(default)]
+    workspace: Option<String>,
+    /// `server`: the server's own values, without any workspace's.
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// The workspace whose settings apply, or `None` for the server's own.
+pub(super) async fn settings_scope(
+    m: &Master,
+    who: &auth::Principal,
+    q: &ScopeQuery,
+) -> ApiResult<Option<ws::Access>> {
+    match q.scope.as_deref() {
+        None => Ok(ws::scope(m, who, q.workspace.as_deref()).await?),
+        Some("server") if q.workspace.is_none() => Ok(None),
+        Some("server") => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "ask for a workspace or for the server scope, not both".into(),
+        )),
+        Some(_) => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "scope must be server".into(),
+        )),
+    }
+}
+
+async fn scoped_resolver(
+    m: &Master,
+    who: &auth::Principal,
+    q: &ScopeQuery,
+) -> ApiResult<crate::Resolver> {
+    Ok(match settings_scope(m, who, q).await? {
+        Some(a) => a.resolver(m).await,
+        None => m.resolver(None),
+    })
+}
+
+/// The listed models; `default` is the scope's default model.
+async fn models(
+    User(who): User,
+    State(m): State<Master>,
+    Query(q): Query<ScopeQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = scoped_resolver(&m, &who, &q).await?;
+    Ok(Json(json!({ "models": r.models() })))
+}
+
+/// An agent as the UI lists it in a scope: its definition, the model
+/// assigned to it there, the model it runs on and the fallbacks it has
+/// there (its own chain's, else the ones it inherits with the default),
+/// which of those are unavailable, and its avatar (server-wide).
+pub(super) fn agent_json(
+    m: &Master,
+    r: &crate::Resolver,
+    a: &harness_agents::Agent,
+) -> serde_json::Value {
+    let chain = r.agent_chain(&a.id);
+    let main = r.agent_main_model(a);
+    let fallbacks = r.agent_fallbacks(&a.id, main.as_deref());
+    let mut unavailable: Vec<String> = Vec::new();
+    for x in main.iter().chain(&fallbacks) {
+        if r.model_unavailable(x) && !unavailable.contains(x) {
+            unavailable.push(x.clone());
+        }
+    }
+    let mut v = json!(a);
+    v["default_model"] = json!(chain.map(|c| c.model));
+    v["main_model"] = json!(main);
+    v["fallbacks"] = json!(fallbacks);
+    v["unavailable"] = json!(unavailable);
+    v["avatar"] = json!(m.agent_avatar(&a.id));
+    v
+}
+
+async fn agents(
+    User(who): User,
+    State(m): State<Master>,
+    Query(q): Query<ScopeQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let scope = settings_scope(&m, &who, &q).await?;
+    let r = match &scope {
+        Some(a) => a.resolver(&m).await,
+        None => m.resolver(None),
+    };
+    let agents: Vec<serde_json::Value> = r
+        .agents()
+        .list()
+        .iter()
+        .map(|a| agent_json(&m, &r, a))
+        .collect();
+    Ok(Json(json!({
+        "agents": agents,
+        // The ordinary-mode default, as before.
+        "default": r.default_agent(),
+        // The default per mode, for the picker to preselect; null when
+        // the setting names an agent that cannot work there.
+        "defaults": {
+            "chat": r.default_for(harness_core::event::Profile::Chat).ok(),
+            "agentic": r.default_for(harness_core::event::Profile::Agentic).ok(),
+        },
+        // Whether the caller may make and change agents in this scope.
+        "may_edit": agent_edits::may_edit(&who, scope.as_ref()),
+        // For the workspace's editors: its own agents a server agent with
+        // the same id hides (PLAN.md T79), to delete or remake.
+        "hidden": agent_edits::hidden(&m, &who, scope.as_ref()).await,
+    })))
 }
 
 #[cfg(test)]
