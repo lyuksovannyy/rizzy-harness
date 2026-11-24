@@ -47,6 +47,7 @@ pub mod mention;
 mod outline;
 pub mod outputs;
 mod publish;
+pub mod push;
 pub mod sandbox;
 mod search;
 #[cfg(test)]
@@ -86,6 +87,7 @@ pub use office_edit::{DocEdit, DocView, SheetEdit};
 pub use outline::Outline;
 pub use outputs::{OutputStore, SessionOutputs, ToolOutput};
 pub use publish::Publish;
+pub use push::Push;
 pub use search::{Glob, Grep};
 pub use stream::OutputSink;
 
@@ -267,6 +269,9 @@ pub struct ToolCtx {
     /// Where `board` and `board_edit` send their requests: the session's
     /// link to the master (`TurnHost::board`); `None` where there is none.
     pub board: Option<Arc<dyn harness_core::board::BoardSource>>,
+    /// Where `push` runs (the session's node, X.27 step 4,
+    /// `TurnHost::push`); `None` where it is not offered.
+    pub push: Option<Arc<dyn harness_core::forge::PushHost>>,
     /// Where `skill` asks for a stored skill's body (X.34 step B): the
     /// session's link to the master (`TurnHost::stored_skills`); `None`
     /// where there is none.
@@ -367,6 +372,7 @@ impl ToolCtx {
             doc_helper: None,
             history: None,
             board: None,
+            push: None,
             stored_skills: None,
             read_offered: true,
             read_unasked: true,

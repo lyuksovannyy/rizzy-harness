@@ -6058,6 +6058,20 @@ impl NativeBackend {
             &harness_tools::approval::keyed(tool.name(), origin.as_deref()),
             &call.input,
         );
+        // A tool that acts as the person on another service (`push`, X.27
+        // step 4) asks for its own card while it runs, once it can show
+        // what it will do, every time: no "for this turn" grant, no card
+        // here. Plan mode refused it above; the node's `denied_tools` is
+        // checked by the node's approval path the tool goes through.
+        if tool.risk() == harness_core::policy::ToolRisk::External {
+            if host.tool_denied(tool.name()) {
+                return Err(Box::new(ToolOutcome {
+                    denied: true,
+                    ..ToolOutcome::err(node_denied(tool.name()))
+                }));
+            }
+            return Ok(tool.clone());
+        }
         if !allowed_this_turn.contains(&key) {
             // `bash` in the read-only shell is asked about as what it is,
             // a call that changes nothing (PLAN.md T70): unasked in `ask`
@@ -6196,6 +6210,7 @@ impl NativeBackend {
             doc_helper: host.doc_helper(),
             history: host.history(),
             board: host.board(),
+            push: host.push(),
             stored_skills: host.stored_skills(),
             read_offered: self.read_offered(ctx, host),
             // Only `refusal` reads it (`refusal_ctx`).
@@ -6363,6 +6378,8 @@ impl NativeBackend {
             // `doc_create`'s refusal reads whether the chat has a folder.
             docs: host.docs(),
             doc_helper: host.doc_helper(),
+            // `push`'s refusal reads whether the node offers it here.
+            push: host.push(),
             ..ToolCtx::new(ctx.cwd.clone())
         }
     }
