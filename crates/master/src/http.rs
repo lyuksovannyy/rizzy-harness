@@ -73,16 +73,6 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
     assemble(master, timeouts, private)
 }
 
-/// Tests only, with the `testing` feature (FIX_PLAN 4.1,
-/// `docs/auth-by-construction.md`): the router as it was before
-/// `caller::identify`, the same routes with no caller layer. It wrote the
-/// golden file of what `require*` answered; a handler converted to the
-/// extractors refuses everyone here. Goes with `require*`.
-#[cfg(feature = "testing")]
-pub fn router_before_identify(master: Master) -> Router {
-    assemble(master, crate::limits::Timeouts::default(), private_routes())
-}
-
 fn assemble(master: Master, timeouts: crate::limits::Timeouts, private: Router<Master>) -> Router {
     // `private` already carries its caller layer; `public()` must not.
     let api = private
@@ -415,35 +405,6 @@ impl From<WsError> for ApiError {
 }
 
 type ApiResult<T> = Result<T, ApiError>;
-
-/// Any logged-in principal, even one that must change its password first.
-async fn require_any(master: &Master, headers: &HeaderMap) -> ApiResult<auth::Principal> {
-    auth::authenticate(master, headers)
-        .await
-        .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "not logged in".into()))
-}
-
-/// A logged-in principal with no pending password change.
-async fn require(master: &Master, headers: &HeaderMap) -> ApiResult<auth::Principal> {
-    let who = require_any(master, headers).await?;
-    if who.must_change_password {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "change your password first".into(),
-        ));
-    }
-    Ok(who)
-}
-
-// Unused once every admin route takes `Admin`; deleted with `require*`.
-#[allow(dead_code)]
-async fn require_admin(master: &Master, headers: &HeaderMap) -> ApiResult<auth::Principal> {
-    let who = require(master, headers).await?;
-    if !who.is_admin() {
-        return Err(ApiError(StatusCode::FORBIDDEN, "admins only".into()));
-    }
-    Ok(who)
-}
 
 impl From<auth::AccountError> for ApiError {
     fn from(e: auth::AccountError) -> Self {

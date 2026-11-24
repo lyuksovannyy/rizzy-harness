@@ -1,24 +1,21 @@
 //! FIX_PLAN 4.1: what each kind of signed-in caller may do, walked over
 //! every route the route walk reads (`route_walk_http`), and the proof
 //! that the caller layer (`http::caller::identify`) decides as each
-//! handler's own `require*` did.
+//! handler's own `require*` did (the golden file, frozen).
 //!
 //! **What a route demands is read from the code, not from its URL.** Each
 //! registration's handler is resolved to its function (the same lexer as
 //! the route walk), and that function, with the functions of the same file
-//! it calls, is searched for the checks: `require_admin` or `Admin` makes
-//! it admin-only, `require_any` or `Caller` lets a login with a pending
-//! password change in, `require_bytes`, `ByteCaller` or `link_principal`
-//! take a link, `require_agent_editor` needs an admin for `?scope=server`.
-//! A handler whose function the test cannot find, or that has none of
-//! these checks, fails the test.
+//! it calls, is searched for the checks: a first argument `Admin` makes it
+//! admin-only, `Caller` lets a login with a pending password change in,
+//! `ByteCaller` takes a link, `User` is the plain login, and a call of
+//! `require_agent_editor` needs an admin for `?scope=server`. A handler
+//! whose function the test cannot find, or that has none of these checks,
+//! fails the test.
 //!
-//! **Known and pending (decision 2 of the design note):** a handler that
-//! still calls `require*` by hand after its body or query extractor answers
-//! a signed-in caller without the right (a member on an admin route, a
-//! login that must change its password) with 400, 413, 415 or 422 before
-//! the 403. Those handlers are found from their signatures, listed by the
-//! walk, and turn into 403 as they convert to the extractors.
+//! The class lists are written by hand and each is compared with what the
+//! code says; `the_written_lists_hold_over_http` asks the server for what
+//! the lists promise, without reading any handler.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -41,13 +38,13 @@ use crate::route_walk_http::{
 /// What a handler, with what it calls in its own file, checks.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Checks {
-    /// `require` or `User`.
+    /// Takes `User`.
     user: bool,
-    /// `require_admin` or `Admin`.
+    /// Takes `Admin`.
     admin: bool,
-    /// `require_any` or `Caller`.
+    /// Takes `Caller`.
     any: bool,
-    /// `require_bytes`, `ByteCaller` or `link_principal`.
+    /// Takes `ByteCaller`.
     bytes: bool,
     /// `require_agent_editor`.
     editor: bool,
@@ -171,7 +168,7 @@ const BODY_OR_QUERY: &[&str] = &[
     "Option",
 ];
 
-/// Calls `name(` that are not method calls (`a.require(..)` is not ours)
+/// Calls `name(` that are not method calls (`a.require(..)` is not a check)
 /// and lie on the function's straight-line path, so a dead check does not
 /// count. A lexer's reading of "straight-line": a call inside a block
 /// opened by `if`, `else`, `while`, `for`, `loop` or a closure (`|..|`)
@@ -282,8 +279,6 @@ fn imports_of(toks: &Toks) -> HashMap<String, Vec<String>> {
     out
 }
 
-const LEAVES: &[&str] = &["require", "require_any", "require_admin", "require_bytes"];
-
 struct Code {
     files: HashMap<PathBuf, HashMap<String, FnDef>>,
     imports: HashMap<PathBuf, HashMap<String, Vec<String>>>,
@@ -339,12 +334,10 @@ impl Code {
         let has = |t: &str| types.iter().any(|x| x == t);
         let called = calls(&def.body);
         let mut c = Checks {
-            user: has("User") || called.contains("require"),
-            admin: has("Admin") || called.contains("require_admin"),
-            any: has("Caller") || called.contains("require_any"),
-            bytes: has("ByteCaller")
-                || called.contains("require_bytes")
-                || called.contains("link_principal"),
+            user: has("User"),
+            admin: has("Admin"),
+            any: has("Caller"),
+            bytes: has("ByteCaller"),
             editor: called.contains("require_agent_editor"),
             converted: ["Caller", "User", "Admin", "ByteCaller"]
                 .iter()
@@ -356,9 +349,7 @@ impl Code {
         // check for it.
         let local: Vec<(PathBuf, String)> = called
             .into_iter()
-            // The checks themselves are leaves: `require_admin` calls
-            // `require`, which calls `require_any`.
-            .filter(|n| n != name && !LEAVES.contains(&n.as_str()))
+            .filter(|n| n != name)
             .filter_map(|n| {
                 if self.files[file].contains_key(&n) {
                     Some((file.to_path_buf(), n))
@@ -418,19 +409,36 @@ fn handlers_are_read_from_the_code() {
     );
     // A dead check does not count.
     let live = |src: &str| calls(&lex(src));
-    assert!(live("{ require_admin(m, h)?; }").contains("require_admin"));
+    assert!(live("{ require_agent_editor(m, h)?; }").contains("require_agent_editor"));
     assert!(
-        live("{ let w = match a { X => require_admin(m, h), _ => y }; }").contains("require_admin")
+        live("{ let w = match a { X => require_agent_editor(m, h), _ => y }; }")
+            .contains("require_agent_editor")
     );
     for dead in [
-        "{ if false { require_admin(m, h)?; } }",
-        "{ if x { a } else { require_admin(m, h)?; } }",
-        "{ let f = |m| { require_admin(m, h) }; }",
-        "{ return ok(); require_admin(m, h)?; }",
-        "{ for x in y { require_admin(m, h)?; } }",
+        "{ if false { require_agent_editor(m, h)?; } }",
+        "{ if x { a } else { require_agent_editor(m, h)?; } }",
+        "{ let f = |m| { require_agent_editor(m, h) }; }",
+        "{ return ok(); require_agent_editor(m, h)?; }",
+        "{ for x in y { require_agent_editor(m, h)?; } }",
     ] {
-        assert!(!live(dead).contains("require_admin"), "{dead}");
+        assert!(!live(dead).contains("require_agent_editor"), "{dead}");
     }
+    // A throwaway handler that takes none of the extractors checks nothing
+    // (`classify` reports such a route as "the handler checks no caller"),
+    // while one that takes an extractor first is read for it.
+    let src = "async fn open(State(m): State<Master>) -> ApiResult<Json<Value>> { Ok(Json(json!({}))) }\n\
+               async fn shut(Admin(who): Admin, State(m): State<Master>) -> ApiResult<()> { Ok(()) }\n\
+               async fn by_hand(State(m): State<Master>, headers: HeaderMap) -> ApiResult<()> { auth::authenticate(&m, &headers).await; Ok(()) }";
+    let file = PathBuf::from("synthetic.rs");
+    let mut code = Code {
+        files: HashMap::from([(file.clone(), fns_of(&lex(src)))]),
+        imports: HashMap::new(),
+        memo: HashMap::new(),
+    };
+    let mut read = |name: &str| code.checks(&file, name, &mut BTreeSet::new());
+    assert!(!read("open").any_check());
+    assert!(!read("by_hand").any_check());
+    assert!(read("shut").admin && read("shut").any_check());
     let t = read_table(&src_dir()).unwrap_or_else(|p| panic!("{p:?}"));
     let (c, problems) = classify(&t);
     assert!(problems.is_empty(), "\n{}\n", problems.join("\n"));
@@ -792,12 +800,12 @@ fn pairs(t: &Table) -> Vec<(String, String)> {
 /// reserve for admins is a finding.
 const ADMIN_LOOKING_BUT_OPEN: &[(&str, &str, &str)] = &[];
 
-/// Every route the code reserves for server admins (`require_admin`,
-/// `Admin`, or `require_agent_editor`'s `?scope=server`), as read today.
+/// Every route the code reserves for server admins (`Admin`, or
+/// `require_agent_editor`'s `?scope=server`), as read today.
 /// A route that loses its admin check when its handler converts, or a new
 /// admin route, fails until this list is changed on purpose.
 /// Every route that lets in a login whose password must still change
-/// (`require_any` or `Caller`), as read today.
+/// (`Caller`), as read today.
 const ANY_LOGIN: &[(&str, &str)] = &[
     ("DELETE", "/api/sessions/{id}/allows/{grant}"),
     ("GET", "/api/me"),
@@ -810,8 +818,7 @@ const ANY_LOGIN: &[(&str, &str)] = &[
     ("POST", "/api/sessions/{id}/step-limit"),
 ];
 
-/// Every route that takes a link (`require_bytes`, `ByteCaller` or
-/// `link_principal`), as read today.
+/// Every route that takes a link (`ByteCaller`), as read today.
 const BYTE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/artifacts/{id}/latest/download"),
     ("GET", "/api/artifacts/{id}/versions/{vid}/download"),
@@ -1206,27 +1213,9 @@ async fn golden_walk(rig: &Rig, people: &People, t: &Table) -> Vec<String> {
     out
 }
 
-/// Write the golden file from the router without the caller layer. Only
-/// on purpose: `HARNESS_WRITE_GOLDEN=1 cargo test -p harness-master
-/// --features testing --test it write_the_auth_golden`, and only on code
-/// whose handlers all still call `require*` (see the design note: once
-/// handlers convert, this router refuses them, and the file is frozen).
-#[cfg(feature = "testing")]
-#[tokio::test]
-async fn write_the_auth_golden() {
-    if std::env::var("HARNESS_WRITE_GOLDEN").as_deref() != Ok("1") {
-        return;
-    }
-    let t = read_table(&src_dir()).unwrap_or_else(|p| panic!("{p:?}"));
-    let (rig, people) = start(harness_master::router_before_identify).await;
-    let lines = golden_walk(&rig, &people, &t).await;
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDEN);
-    let head = "# What require* answered before the caller layer (FIX_PLAN 4.1). One line per request:\n# kind, method, path, body, status, error. Written by write_the_auth_golden; never edit by hand.\n";
-    std::fs::write(&path, format!("{head}{}\n", lines.join("\n"))).unwrap();
-}
-
 /// The caller layer answers every request of the golden walk as `require*`
-/// did, except the two written classes of difference, matched by rule:
+/// did (`auth_golden.txt`, written once from the router before the layer
+/// and frozen: it cannot be regenerated, see `docs/auth-by-construction.md`), except the two written classes of difference, matched by rule:
 /// a caller who is nobody gets 401 where a body error came first, and
 /// (decision 2) a member or a login that must change its password gets the
 /// 403 "admins only" or "change your password first" where a body error
