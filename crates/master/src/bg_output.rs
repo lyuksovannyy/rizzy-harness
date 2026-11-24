@@ -27,7 +27,14 @@ const PER_USER: usize = 4;
 /// The longest refusal of a node passed on, in characters.
 const MAX_ERROR: usize = 300;
 
-type Answer = Result<BackgroundOutput, String>;
+/// What the node answered: the output, its words, or "busy" (try again).
+pub type Answer = Result<BackgroundOutput, Refusal>;
+
+#[derive(Debug)]
+pub enum Refusal {
+    Busy,
+    Words(String),
+}
 
 /// Requests waiting for their node's answer, by request id.
 #[derive(Default)]
@@ -116,7 +123,8 @@ pub async fn output(
     }
     match tokio::time::timeout(WAIT, rx).await {
         Ok(Ok(Ok(o))) => Ok(o),
-        Ok(Ok(Err(e))) => Err(BgOutputError::Refused(e)),
+        Ok(Ok(Err(Refusal::Busy))) => Err(BgOutputError::Busy),
+        Ok(Ok(Err(Refusal::Words(e)))) => Err(BgOutputError::Refused(e)),
         Ok(Err(_)) => Err(BgOutputError::Away(node)),
         Err(_) => Err(BgOutputError::Timeout),
     }
@@ -159,7 +167,10 @@ pub fn on_answer(m: &Master, node_id: &str, req_id: String, answer: Answer) {
                     o.cut |= cut;
                     o
                 })
-                .map_err(|e| e.chars().take(MAX_ERROR).collect()),
+                .map_err(|e| match e {
+                    Refusal::Busy => Refusal::Busy,
+                    Refusal::Words(e) => Refusal::Words(e.chars().take(MAX_ERROR).collect()),
+                }),
         );
     }
 }

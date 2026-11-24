@@ -1770,13 +1770,17 @@ impl Master {
                 req_id,
                 output,
                 error,
+                busy,
             } => bg_output::on_answer(
                 self,
                 node_id,
                 req_id,
                 match (output, error) {
+                    _ if busy => Err(bg_output::Refusal::Busy),
                     (Some(o), None) => Ok(o),
-                    (_, e) => Err(e.unwrap_or_else(|| "the node sent no output".into())),
+                    (_, e) => Err(bg_output::Refusal::Words(
+                        e.unwrap_or_else(|| "the node sent no output".into()),
+                    )),
                 },
             ),
             NodeToMaster::FilesResult {

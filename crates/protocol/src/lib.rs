@@ -1177,6 +1177,10 @@ pub enum NodeToMaster {
         output: Option<BackgroundOutput>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// The node had no place for it just now: try again (a transient
+        /// answer, unlike an `error`, which is final).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        busy: bool,
     },
     /// The answer to `session.files` (pull only): at most
     /// [`MAX_FILES_RESULT`] paths relative to the chat's folder (a folder
@@ -2864,6 +2868,7 @@ mod tests {
                 ..Default::default()
             }),
             error: None,
+            busy: false,
         };
         let v = serde_json::to_value(&ans).unwrap();
         assert_eq!(v["type"], "session.background_output_result");
@@ -2873,6 +2878,19 @@ mod tests {
             "{v}"
         );
         assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), ans);
+        // Busy is its own flag, absent when false, never an error text.
+        let busy = NodeToMaster::BackgroundOutputResult {
+            req_id: "r".into(),
+            output: None,
+            error: None,
+            busy: true,
+        };
+        let v = serde_json::to_value(&busy).unwrap();
+        assert_eq!(
+            v,
+            json!({"type": "session.background_output_result", "req_id": "r", "busy": true})
+        );
+        assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), busy);
     }
 
     /// X.59: the wire shape of the folder preview pair.

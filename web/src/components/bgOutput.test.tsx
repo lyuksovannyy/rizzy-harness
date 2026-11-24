@@ -123,6 +123,23 @@ describe("a command's output row", () => {
     expect(reads()).toBe(before + 1);
   });
 
+  test("flips of tab visibility while a look is in flight never start a second loop", async () => {
+    call.mockImplementation(() => new Promise((r) => setTimeout(() => r(out()), 2000)));
+    await mount(row());
+    await click(toggle());
+    const vis = vi.spyOn(document, "visibilityState", "get");
+    for (let i = 0; i < 4; i++) {
+      vis.mockReturnValue("hidden");
+      await act(async () => void document.dispatchEvent(new Event("visibilitychange")));
+      vis.mockReturnValue("visible");
+      await act(async () => void document.dispatchEvent(new Event("visibilitychange")));
+      await tick(500);
+    }
+    await tick(30_000);
+    // One loop: a look of 2 s and a wait of 3 s is about 7 in 32 s.
+    expect(reads()).toBeLessThanOrEqual(9);
+  });
+
   test("while the node is away nothing is asked and it says so", async () => {
     await mount(row({ away: true }));
     await click(toggle());
@@ -139,11 +156,12 @@ describe("a command's output row", () => {
     await tick(30_000);
     expect(reads()).toBe(1);
     call.mockReset();
-    call.mockImplementation(() => Promise.reject(new FakeHttpError(503, "the server is already waiting")));
+    call.mockImplementation(() => Promise.reject(new FakeHttpError(503, "the node is busy with other outputs")));
     await click(toggle());
     await click(toggle());
-    await tick(3000);
-    expect(reads()).toBe(2);
+    await tick(9000);
+    expect(reads()).toBeGreaterThanOrEqual(3);
+    expect(host.textContent).toContain("busy");
   });
 
   test("an empty answer is a sentence, not a crash", async () => {

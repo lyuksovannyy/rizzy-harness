@@ -52,20 +52,27 @@ export default function CommandOutput(props: {
         setLook({ error: x instanceof Error ? x.message : String(x) });
       }
     };
-    const next = () => {
+    // One loop: a look in flight is never joined by another.
+    let inflight = false;
+    const schedule = () => {
       // Once more after the end shows in the log, then no more.
       const over = settled.current || (ended && last !== undefined && !last.running);
       if (over || ac.signal.aborted) return;
+      clearTimeout(timer);
       timer = setTimeout(tick, POLL_MS);
     };
     const tick = async () => {
-      if (document.visibilityState === "hidden") return next();
+      timer = undefined;
+      if (ac.signal.aborted) return;
+      if (document.visibilityState === "hidden") return schedule();
+      inflight = true;
       await once();
-      next();
+      inflight = false;
+      schedule();
     };
-    // Back to a visible tab: look at once.
+    // Back to a visible tab: only bring the waiting look forward.
     const visible = () => {
-      if (document.visibilityState === "visible" && !settled.current && !ac.signal.aborted) {
+      if (document.visibilityState === "visible" && !settled.current && !ac.signal.aborted && !inflight && timer !== undefined) {
         clearTimeout(timer);
         void tick();
       }

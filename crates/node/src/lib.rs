@@ -269,6 +269,9 @@ pub(crate) struct Inner {
     diffs: Arc<tokio::sync::Semaphore>,
     /// Room for `@` completions being walked (T63), as many as diffs.
     file_lists: Arc<tokio::sync::Semaphore>,
+    /// Room for background-output answers (X.62), apart from `@`
+    /// completion's: an open row cannot refuse a file list, nor the reverse.
+    bg_outputs: Arc<tokio::sync::Semaphore>,
     /// Room for one page preview at a time (X.59, T99): the helper has two
     /// places, and a person's previews take at most one, so they cannot
     /// starve the agent's own `doc_view`.
@@ -703,6 +706,7 @@ impl NodeRuntime {
             connectors: Default::default(),
             diffs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             file_lists: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
+            bg_outputs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             previews: Arc::new(tokio::sync::Semaphore::new(1)),
             projects_made: Default::default(),
             project_slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1492,21 +1496,26 @@ impl NodeRuntime {
 
     /// Answer `session.background_output` (X.62): one bounded read of the
     /// ring `bash_output` reads, from a task of its own; never acked, no
-    /// event, nothing stored. Only the node's audit line (the session id,
-    /// never a command or its text). At most [`DIFF_AT_ONCE`] answers are
-    /// being sent at once.
+    /// event, nothing stored, and no audit line: it is the owner reading
+    /// their own chat's output, as reading its events is not audited either
+    /// (a row polls every 3 s: an audit row each would be 29,000 a day).
+    /// At most [`DIFF_AT_ONCE`] are answered at once, in places of its own
+    /// (not `@` completion's); past them the answer is `busy`, which is
+    /// not final.
     fn background_output(&self, req_id: String, sid: SessionId, bg_id: String) {
-        self.audit_inline("session.background_output", sid);
         let reply = |output, error| NodeToMaster::BackgroundOutputResult {
             req_id: req_id.clone(),
             output,
             error,
+            busy: false,
         };
-        let Ok(permit) = self.inner.file_lists.clone().try_acquire_owned() else {
-            return self.inner.publish(reply(
-                None,
-                Some("the node is answering other requests; try again".into()),
-            ));
+        let Ok(permit) = self.inner.bg_outputs.clone().try_acquire_owned() else {
+            return self.inner.publish(NodeToMaster::BackgroundOutputResult {
+                req_id,
+                output: None,
+                error: None,
+                busy: true,
+            });
         };
         let res = match self.inner.session(sid) {
             Some(s) => s.background_output(&bg_id),
@@ -1527,6 +1536,13 @@ impl NodeRuntime {
             let _permit = permit;
             inner.publish_wait(msg).await;
         });
+    }
+
+    /// The two request places `@` completion and a background output read
+    /// each have (for the test that they are not the same).
+    #[doc(hidden)]
+    pub fn request_places(&self) -> (Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>) {
+        (self.inner.bg_outputs.clone(), self.inner.file_lists.clone())
     }
 
     /// Answer `session.files` (T63) from a task of its own; never acked:

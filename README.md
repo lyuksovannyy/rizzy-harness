@@ -3285,13 +3285,20 @@ command runs the row looks again every 3 seconds (a closed row, a hidden tab
 or an away node asks nothing); once it ended, it looks once. It reads the
 same output the agent's `bash_output` reads (nothing is copied or stored
 anywhere else): the last 28,000 bytes of what the node holds, with "earlier
-output not shown" when there is more. Terminal colour codes and other escape sequences are removed,
-a bare carriage return (a progress bar's redraw) becomes a new line, and any
+output not shown" when there is more. Terminal colour codes and other escape sequences are removed (a string
+that is never closed hides at most up to the next line or 4 KB), a bare
+carriage return (a progress bar's redraw) becomes a new line, and any
 other control or hidden character is shown as its code (`<U+0007>`); markup
 in the output stays characters, and nothing in it becomes a link. A secret
-the node knows is already replaced in it, exactly as in the chat's events (a
-node with short secrets configured holds back up to the last 30 bytes of a
-running command's output until more arrives). The node forgets an ended
+the node knows is replaced in it: the text is scrubbed once as the output
+enters the node's ring, and again after the escapes are removed, so a key
+that a colour code splits in two (as `grep --color=always` leaves) is not
+shown whole. Not covered: the node's own copy of that output (what the
+agent's `bash_output` reads, and the chat's "ended" line) still holds such a
+colour-split key unscrubbed; and the half of a key before an escape that
+hides the rest of its line is shown. A node with short secrets configured
+holds back up to the last 30 bytes of a running command's output until more
+arrives. The node forgets an ended
 command's output 30 minutes after the end, and when it restarts; the row then
 says so. A sub-agent of the background has no output here (its work is in its
 own chat). Only the chat's owner can read it (anyone else, admins included,

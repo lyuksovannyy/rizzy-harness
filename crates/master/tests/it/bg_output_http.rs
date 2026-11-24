@@ -144,6 +144,16 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
                         MasterToNode::BackgroundOutput { req_id, bg_id, session_id }
                             if !HELD.lock().unwrap().contains(session_id) =>
                         {
+                            if bg_id == "bg-3" {
+                                // The node has no place for it just now.
+                                let _ = tx.try_send(NodeToMaster::BackgroundOutputResult {
+                                    req_id: req_id.clone(),
+                                    output: None,
+                                    error: None,
+                                    busy: true,
+                                });
+                                continue;
+                            }
                             let (output, error) = match bg_id.as_str() {
                                 "bg-1" => (Some(out("listening on :3000\n")), None),
                                 "bg-2" => (Some(out(&"x".repeat(MAX_BG_OUTPUT_BYTES * 3))), None),
@@ -153,6 +163,7 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
                                 req_id: req_id.clone(),
                                 output,
                                 error,
+                                busy: false,
                             });
                         }
                         _ => {}
@@ -399,6 +410,17 @@ async fn an_answer_past_the_bound_is_cut_and_says_so() {
     assert_eq!(v["cut"], true);
 }
 
+/// The node's "no place just now" is a 503 (which the page tries again), not
+/// the 409 of its final words.
+#[tokio::test]
+async fn a_busy_node_is_a_503_the_page_retries() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "local", None).await;
+    let (st, v) = req(&t, Method::GET, &url(sid, "bg-3"), None, &t.alex).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("busy"), "{v}");
+}
+
 /// Abuse case 6 and the old node: sentences with a status that says whose
 /// they are, never a 500.
 #[tokio::test]
@@ -426,6 +448,7 @@ fn answer(req_id: &str, text: &str) -> NodeToMaster {
         req_id: req_id.into(),
         output: Some(out(text)),
         error: None,
+        busy: false,
     }
 }
 
@@ -471,7 +494,7 @@ async fn places_are_bounded_per_account_and_only_the_asked_node_answers_once() {
     assert_eq!(t.local.asks().len(), 4);
     let (st, v) = req_busy(&t, sid).await;
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
-    assert!(v["error"].as_str().unwrap().contains("waiting"), "{v}");
+    assert!(v["error"].as_str().unwrap().contains("busy"), "{v}");
     assert_eq!(t.local.asks().len(), 4, "the refused one reached the node");
     // Foreign and unknown answers do not end a request.
     t.old.say.send(answer(&req, "forged-by-old")).unwrap();

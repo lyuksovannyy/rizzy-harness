@@ -61,7 +61,7 @@ async fn output(
             ),
             BgOutputError::Busy => ApiError(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "the server is already waiting for several outputs (yours or others'); try again \
+                "the server or the node is busy with other outputs (yours or others'); try again \
                  in a moment"
                     .into(),
             ),

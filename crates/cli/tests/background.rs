@@ -3919,6 +3919,7 @@ async fn read_out(
                 req_id,
                 output,
                 error,
+                ..
             } if req_id == req => {
                 return match (output, error) {
                     (Some(o), None) => Ok(o),
@@ -4073,5 +4074,37 @@ async fn hostile_output_is_one_bounded_plain_answer_for_the_strip() {
         .await;
     // The first line, read while it was still in the ring's head, was plain
     // too: the head is not cut by the flood and the markup is only text.
+    n.rt.delete(n.sid).await.unwrap();
+}
+
+/// X.62 review: a key with a colour code in its middle (what `grep
+/// --color=always` leaves) is not whole in the ring, so the ring's scrubber
+/// cannot match it; the strip removes the escape and so would show it whole
+/// unless it scrubs again. It does. (The ring itself, `bash_output` and the
+/// end's tail still hold such a key: not this change's.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_split_by_a_colour_code_is_not_shown_by_the_strip() {
+    use harness_protocol::{MasterToNode, StopBackgroundBy};
+    const SECRET: &str = "sk-test-0123456789abcdef0123456789abcdef";
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let mut n = node_with(f, sb, vec![SECRET.into()]).await;
+    let sid = n.sid;
+    let cmd = "printf 'key sk-test-0123456789\\033[1;31mabcdef0123456789abcdef\\033[0m\\nafter\\n'; sleep 30";
+    n.turn(json!([bg(cmd, 60)])).await;
+    let o = out_until(&mut n, sid, "bg-1", |o| o.text.contains("after")).await;
+    assert!(
+        !o.text.contains("abcdef0123456789abcdef") && !o.text.contains(SECRET),
+        "the key is shown whole: {o:?}"
+    );
+    assert!(o.text.contains("[REDACTED]"), "{o:?}");
+    n.send(MasterToNode::StopBackground {
+        req_id: "stop".into(),
+        session_id: sid,
+        bg_id: None,
+        by: StopBackgroundBy::User,
+    });
+    n.until(|k| matches!(k, EventKind::BackgroundEnded(_)))
+        .await;
     n.rt.delete(n.sid).await.unwrap();
 }
