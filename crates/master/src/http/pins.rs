@@ -13,13 +13,14 @@
 //! this route: a pin is a person's click, never automatic.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require};
+use super::caller::User;
+use super::{ApiError, ApiResult};
 use crate::{CommandError, Master};
 
 pub(super) fn routes() -> Router<Master> {
@@ -36,12 +37,11 @@ struct Body {
 }
 
 async fn pin(
+    User(who): User,
     State(m): State<Master>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<Body>,
 ) -> ApiResult<Json<Value>> {
-    let who = require(&m, &headers).await?;
     let row = super::rewind::owned(&m, &who, &id).await?;
     if !m.node_has(&row.node_id, harness_protocol::CAP_PIN) {
         return Err(CommandError::Rejected(
