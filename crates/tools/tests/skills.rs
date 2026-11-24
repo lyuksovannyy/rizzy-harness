@@ -1250,3 +1250,87 @@ fn the_menu_is_bounded_and_reads_the_flag_line_by_line() {
     assert_eq!(menu.len(), 1);
     assert_eq!(menu[0].0, "stored");
 }
+
+/// Review L1: a `user-invocable` value that is no boolean is as if the key
+/// were absent: it must not make the typed YAML read fail and fall back to
+/// the line reader, which reads a quoted description differently. The
+/// model's catalogue text is byte-identical with and without the key.
+#[test]
+fn an_odd_user_invocable_value_changes_nothing_the_model_reads() {
+    let render = |extra: &str| {
+        let t = tree();
+        put(
+            &t.home.join("deploy/SKILL.md"),
+            format!(
+                "---\nname: deploy\ndescription: \"Deploy \\\"prod\\\" safely\"\n{extra}---\nbody\n"
+            ),
+        );
+        let c = skills::discover(&roots(&t, &t.repo), &[]).catalogue;
+        (skills::render(&c, skills::CAP).unwrap(), skills::menu(&c))
+    };
+    let (plain, menu_plain) = render("");
+    assert!(plain.contains("Deploy \"prod\" safely"), "{plain}");
+    for odd in [
+        "user-invocable: maybe\n",
+        "user-invocable: [1]\n",
+        "user-invocable: 7\n",
+    ] {
+        let (text, menu) = render(odd);
+        assert_eq!(text, plain, "{odd}");
+        assert_eq!(menu, menu_plain, "{odd}: an odd value is as if absent");
+    }
+    // A real boolean still hides it from the menu only.
+    let (text, menu) = render("user-invocable: false\n");
+    assert_eq!(text, plain);
+    assert!(menu.is_empty());
+}
+
+/// Review L5: the menu lists a name only when `/name` as typed invokes
+/// exactly that name (a trailing `.`, `:` or `,` is trimmed by the parser),
+/// so every listed name round-trips through the `/name` rule to itself.
+#[test]
+fn every_listed_name_round_trips_through_the_slash_rule() {
+    let t = tree();
+    for n in ["v1.", "x:", "y,", "ok", "a.b", "c-d_e", "v2"] {
+        put(
+            &t.home.join(format!("{n}/SKILL.md")),
+            skill_md(n, "Does it.", "b"),
+        );
+    }
+    let c = skills::discover(&roots(&t, &t.repo), &[]).catalogue;
+    let menu = skills::menu(&c);
+    let listed: Vec<&str> = menu.iter().map(|(n, _)| n.as_str()).collect();
+    for gone in ["v1.", "x:", "y,"] {
+        assert!(!listed.contains(&gone), "{gone} listed: {listed:?}");
+    }
+    assert!(
+        listed.contains(&"ok") && listed.contains(&"a.b"),
+        "{listed:?}"
+    );
+    for n in &listed {
+        assert_eq!(
+            skills::invoked(&format!("/{n} please"), &c).as_deref(),
+            Some(*n),
+            "{n}"
+        );
+        assert_eq!(skills::invoked(&format!("/{n}"), &c).as_deref(), Some(*n));
+    }
+}
+
+/// Review (untested guard): a repository skill hidden with
+/// `user-invocable: false` that a stored skill of the same name replaces is
+/// listed: the stored skill is always invocable.
+#[test]
+fn a_stored_skill_that_replaces_a_hidden_one_is_listed() {
+    let t = tree();
+    put(
+        &t.repo.join(".agents/skills/shared/SKILL.md"),
+        "---\nname: shared\ndescription: Repo copy\nuser-invocable: false\n---\nb",
+    );
+    let mut c = skills::discover(&roots(&t, &t.repo), &[]).catalogue;
+    assert!(skills::menu(&c).is_empty());
+    let problems = skills::merge_stored(&mut c, &[entry("shared", "Stored copy")], &[]);
+    assert!(!problems.is_empty(), "the repository skill gave way");
+    let menu = skills::menu(&c);
+    assert_eq!(menu, [("shared".to_string(), "Stored copy".to_string())]);
+}

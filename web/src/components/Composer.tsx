@@ -32,7 +32,8 @@ const ExecChoice = lazy(() => import("./ExecChoice"));
 const ApprovalModePick = lazy(() => import("./ApprovalModePick"));
 // The chat's step limit (X.14), beside the approval mode: same chats.
 const StepLimitPick = lazy(() => import("./StepLimitPick"));
-const SlashMenu = lazy(() => import("./SlashMenu"));
+// A chunk that fails to load leaves no menu, never a broken screen: the box keeps working.
+const SlashMenu = lazy(() => import("./SlashMenu").catch(() => ({ default: () => null })));
 const ExecSwitch = lazy(() => import("./ExecSwitch"));
 // Where a new agentic chat works (X.26): the Project button and its popup.
 const ProjectPicker = lazy(() => import("./ProjectPicker"));

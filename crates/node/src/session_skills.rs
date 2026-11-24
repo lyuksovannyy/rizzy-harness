@@ -17,6 +17,26 @@ use harness_tools::skills;
 use super::Session;
 use crate::instructions::{self as ins, Bounded};
 
+/// `f` on a blocking thread, waited for at most `limit`, holding `permit`
+/// until `f` itself ends: the node's two places bound the work, not the
+/// wait, so a slow folder that outlives the bound keeps its place and a
+/// stream of asks cannot pile up blocked threads.
+pub(crate) async fn bounded_holding<T: Send + 'static>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    f: impl FnOnce() -> T + Send + 'static,
+    limit: std::time::Duration,
+) -> Bounded<T> {
+    ins::bounded(
+        move || {
+            let _held = permit;
+            f()
+        },
+        &tokio_util::sync::CancellationToken::new(),
+        limit,
+    )
+    .await
+}
+
 impl Session {
     /// Whether `agent` (none: the node's default) may use the `skill` tool
     /// in this chat: its own tool list, node.toml's `denied_tools`, and a
@@ -69,7 +89,11 @@ impl Session {
     /// without the `skill` tool, a node that denies it, a folder no longer
     /// allowed, a discovery that did not finish in time. A plain chat (no
     /// folder) lists the master's stored skills only, as its turns do.
-    pub(crate) async fn skills_menu(&self, agent: &AgentSpec) -> Vec<MenuSkill> {
+    pub(crate) async fn skills_menu(
+        &self,
+        agent: &AgentSpec,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Vec<MenuSkill> {
         let policy = &self.node.cfg.policy;
         let agent = Some(agent);
         if !self.skill_on(agent) {
@@ -96,9 +120,9 @@ impl Session {
             let roots = self.skill_roots(agent, &dir, &granted);
             if !roots.is_empty() {
                 let protected = policy.protected_dirs.clone();
-                match ins::bounded(
+                match bounded_holding(
+                    permit,
                     move || skills::discover(&roots, &protected),
-                    &tokio_util::sync::CancellationToken::new(),
                     ins::READ_TIMEOUT,
                 )
                 .await
@@ -114,5 +138,43 @@ impl Session {
             .into_iter()
             .map(|(name, description)| MenuSkill { name, description })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// A discover that outlives the wait still holds its place, and the
+    /// place comes back when the work ends, not when the wait does.
+    #[tokio::test]
+    async fn a_timed_out_read_keeps_its_place_until_it_ends() {
+        let places = Arc::new(tokio::sync::Semaphore::new(2));
+        let permit = places.clone().try_acquire_owned().unwrap();
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let r = bounded_holding(
+            permit,
+            move || {
+                let _ = wait.recv();
+            },
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(matches!(r, Bounded::TimedOut));
+        assert_eq!(
+            places.available_permits(),
+            1,
+            "still held after the timeout"
+        );
+        go.send(()).unwrap();
+        for _ in 0..200 {
+            if places.available_permits() == 2 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the place never came back");
     }
 }

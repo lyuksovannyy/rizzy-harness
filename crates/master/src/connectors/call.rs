@@ -241,7 +241,9 @@ pub fn strip(msg: &mut MasterToNode) {
         | MasterToNode::Prompt(PromptMsg { agent, .. })
         | MasterToNode::Callback(CallbackMsg { agent, .. })
         | MasterToNode::Retry(RetryMsg { agent, .. }) => agent.as_mut(),
-        MasterToNode::SetAgent { agent, .. } => Some(agent),
+        MasterToNode::SetAgent { agent, .. } | MasterToNode::SkillsMenu { agent, .. } => {
+            Some(agent)
+        }
         _ => None,
     };
     if let Some(spec) = spec {

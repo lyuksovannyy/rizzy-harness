@@ -84,9 +84,10 @@ const put = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true
     const all = await names();
     check(JSON.stringify(all) === JSON.stringify(['/compact', '/deploy', '/ship']), 'entries: ' + all);
     check((await p.getAttribute('.slash-menu', 'role')) === 'listbox', 'not a listbox');
-    check((await p.getAttribute('.slash-menu li.active', 'aria-selected')) === 'true', 'no active option');
+    // Nothing is highlighted on opening: Enter stays what it was.
+    check((await p.$('.slash-menu li.active')) === null && (await p.$('.slash-menu [aria-selected=true]')) === null, 'a row is highlighted on open');
     const said = await p.textContent('.slash-menu + [role=status]');
-    check(/^\/compact \[focus\], .*, 1 of 3$/.test(said), 'announcement: ' + said);
+    check(said === '3 entries. Tab to complete, arrows to choose.', 'announcement: ' + said);
     // Repository text is text.
     check((await p.$('.slash-menu img')) === null, 'markup in a description became an element');
     check((await p.textContent('.slash-menu')).includes('<img src=x onerror=alert(1)>'), 'the description is shown as text');
@@ -98,7 +99,10 @@ const put = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true
     check(JSON.stringify(filtered) === JSON.stringify(['/ship']), 'filtered: ' + filtered);
     await p.keyboard.press('Backspace');
     await p.keyboard.press('ArrowDown');
+    await p.keyboard.press('ArrowDown');
     check((await p.textContent('.slash-menu li.active b')) === '/deploy', 'Down');
+    const said2 = await p.textContent('.slash-menu + [role=status]');
+    check(/^\/deploy, .*, 2 of 3$/.test(said2), 'announcement after Down: ' + said2);
     const userBefore = (await p.$$('.msg.user')).length;
     await p.keyboard.press('Enter');
     check((await p.inputValue('.composer textarea')) === '/deploy ', 'completed: ' + await p.inputValue('.composer textarea'));
@@ -114,6 +118,21 @@ const put = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true
     await p.waitForFunction((n) => document.querySelectorAll('.msg.user').length === n + 1, userBefore);
     await p.waitForSelector('.msg.assistant:not(.streaming)');
     check((await p.$$eval('.msg.user', (l) => l.at(-1).textContent)).includes('/deploy to staging'), 'the sent message');
+
+    // 4b. Enter with nothing highlighted is the Enter it always was: `/hip` (inside `/ship`) is sent
+    // as the text `/hip`; Tab completes the first entry.
+    const usersB = (await p.$$('.msg.user')).length;
+    await p.fill('.composer textarea', '/sh');
+    await p.waitForSelector('.slash-menu li');
+    check((await p.$('.slash-menu li.active')) === null, 'a row is highlighted for /sh');
+    await p.keyboard.press('Tab');
+    check((await p.inputValue('.composer textarea')) === '/ship ', 'Tab: ' + await p.inputValue('.composer textarea'));
+    await p.fill('.composer textarea', '/hip');
+    await p.waitForSelector('.slash-menu li');
+    await p.keyboard.press('Enter');
+    await p.waitForFunction((n) => document.querySelectorAll('.msg.user').length === n + 1, usersB);
+    check((await p.$$eval('.msg.user .bubble', (l) => l.at(-1).textContent)).trim() === '/hip', 'Enter completed a contains-match instead of sending');
+    await p.waitForSelector('.msg.assistant:not(.streaming)');
 
     // 5. A path opens nothing; a later slash opens nothing; Escape keeps the text.
     await p.fill('.composer textarea', '/usr/bin');

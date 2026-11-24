@@ -4038,20 +4038,24 @@ way (a manual one not at all), and the menu below does not list it.
 a menu opens above the box: the built-in commands (today `/compact`, with its
 `[focus]` hint) and the skills this chat can ask for, each with its
 description (at most 200 characters; text only, never a link or markup).
-Typing narrows it, names that start with what you typed first. Up and Down
-move, Enter or Tab complete the word to `/name ` and leave the caret after
-it, Escape closes the menu and keeps your text, and a click on an entry
-completes it too. Choosing only edits the text: nothing is sent, run or read
-until you send the message. A name typed in full (`/compact`) and Enter is
-sent as before, and Shift+Enter, a path such as `/usr/bin`, a `/` later in the
-text and an input-method composition do not open or use it. The skills are
+Typing narrows it, names that start with what you typed first. Nothing is
+highlighted when it opens: Tab completes the first entry to `/name ` and
+leaves the caret after it; Up and Down highlight an entry, and Enter completes
+an entry you highlighted that way (Tab then completes that one). With nothing
+highlighted Enter does what it always did: it sends your text as typed (a
+typed `/act` is sent as `/act`, never turned into `/compact`), or runs
+`/compact` typed in full. Escape closes the menu and keeps your text, and a
+click on an entry completes it too. Choosing only edits the text: nothing is
+sent, run or read until you send the message. Shift+Enter, a path such as
+`/usr/bin`, a `/` later in the text and an input-method composition do not
+open or use it. The skills are
 the ones the agent would be offered at the start of its next message: the
 same folders, the same limits (150), the agent's own Skills switch, the
 workspace's Plugins rule, `repository = false` and `denied_tools` in
 `node.toml`; a chat whose agent has no Skills switch, or a node that is away
 or older than the server, lists the built-in commands alone. A skill with
-`user-invocable: false` in its front matter is left out of the menu (the
-agent still sees it); a `disable-model-invocation` skill is listed, since
+`user-invocable: false` in its front matter is left out of the menu only: the
+agent still sees the skill and a typed `/name` still asks for it, as before; a `disable-model-invocation` skill is listed, since
 you may ask for it. The menu reads the list from the chat's node once when
 it first opens and keeps it for 30 seconds (never polled), and only in a
 chat: the new-chat box has no menu, because there is nothing there yet to

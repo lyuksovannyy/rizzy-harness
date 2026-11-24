@@ -142,7 +142,11 @@ describe("in a chat's composer", () => {
     expect(call).toHaveBeenCalledTimes(1);
     expect(call.mock.calls[0]!.slice(0, 2)).toEqual(["GET", "/api/sessions/s1/skills-menu"]);
     expect(host.querySelector(".slash-menu li")?.getAttribute("role")).toBe("option");
-    expect(host.querySelector('.slash-menu [aria-selected="true"]')?.textContent).toContain("/compact");
+    // Nothing is highlighted on opening: Enter stays what it was.
+    expect(host.querySelector('.slash-menu [aria-selected="true"]')).toBeNull();
+    expect(host.querySelector(".slash-menu li.active")).toBeNull();
+    expect(host.querySelector('[role="status"].sr-only')?.textContent).toBe("4 entries. Tab to complete, arrows to choose.");
+    await key(ta, "ArrowDown");
     expect(host.querySelector('[role="status"].sr-only')?.textContent).toBe(`/compact [focus], ${BUILTINS[0]!.description}, 1 of 4`);
     // Typing on does not ask again; neither does a second opening soon after.
     await type(ta, "/d");
@@ -164,6 +168,9 @@ describe("in a chat's composer", () => {
   test("Down and Enter complete to /name and a space, caret after, nothing sent", async () => {
     const ta = await mount();
     await type(ta, "/");
+    expect(active()).toBeUndefined();
+    await key(ta, "ArrowDown");
+    expect(active()).toBe("/compact");
     await key(ta, "ArrowDown");
     expect(active()).toBe("/deploy");
     await key(ta, "ArrowUp");
@@ -183,6 +190,37 @@ describe("in a chat's composer", () => {
     await type(ta, "/deploy staging");
     await key(ta, "Enter");
     expect(sent).toEqual(["/deploy staging"]);
+  });
+
+  test("Enter completes nothing the person did not move to: `/act` is the text `/act`, never `/compact`", async () => {
+    const ta = await mount();
+    // `act` is inside `compact`: a contains-match, listed after prefix matches, never taken by Enter.
+    await type(ta, "/act");
+    expect(names()).toEqual(["/compact"]);
+    await key(ta, "Enter");
+    expect(sent).toEqual(["/act"]);
+    expect(compacted).toEqual([]);
+    // `/dep` + Enter sends `/dep` as before; Tab completes the first entry.
+    await type(ta, "/dep");
+    await key(ta, "Enter");
+    expect(sent).toEqual(["/act", "/dep"]);
+    await type(ta, "/dep");
+    await key(ta, "Tab");
+    expect(ta.value).toBe("/deploy ");
+    expect(sent.length).toBe(2);
+    // A skill hidden or missing from the list is never turned into another: `/test` is not `/pytest`.
+    call.mockResolvedValue({ skills: [{ name: "pytest", description: "Run tests" }] });
+    forgetSkills();
+    await type(ta, "/test");
+    expect(names()).toEqual(["/pytest"]);
+    await key(ta, "Enter");
+    expect(sent.at(-1)).toBe("/test");
+    // Tab on a second try takes the highlighted entry after a move.
+    await type(ta, "/");
+    await key(ta, "ArrowUp");
+    expect(active()).toBe("/pytest");
+    await key(ta, "Tab");
+    expect(ta.value).toBe("/pytest ");
   });
 
   test("Tab completes too; the mouse completes; Escape closes and keeps the text", async () => {

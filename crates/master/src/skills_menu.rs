@@ -23,9 +23,11 @@ use crate::{Master, lock};
 /// How long a request waits for its node: over the node's own bound on the
 /// work (5 s), under the route's limit (`limits.rs`).
 const WAIT: Duration = Duration::from_secs(12);
-/// Requests waiting at once, all nodes together, and per account.
+/// Requests waiting at once, all nodes together.
 const MAX_WAITING: usize = 32;
-const PER_USER: usize = 2;
+/// One place per account: the node answers two at a time, so one account
+/// cannot hold both while a slow repository is read.
+const PER_USER: usize = 1;
 
 enum Answer {
     Skills(Vec<MenuSkill>),
@@ -123,14 +125,14 @@ pub async fn ask(
             },
         );
     }
-    let sent = m.send_raw(
-        &node,
-        MasterToNode::SkillsMenu {
-            req_id: req_id.clone(),
-            session_id: sid,
-            agent,
-        },
+    let msg = outgoing(
+        req_id.clone(),
+        sid,
+        agent,
+        m.node_has(&node, harness_protocol::CAP_PLUGIN_ACCESS),
+        m.node_has(&node, harness_protocol::CAP_STORED_SKILLS),
     );
+    let sent = m.send_raw(&node, msg);
     if !sent {
         lock(&m.inner.skills_menus.0).remove(&req_id);
         return Err(MenuError::Away);
@@ -152,6 +154,38 @@ pub async fn ask(
         Ok(Err(_)) => Err(MenuError::Timeout),
         Err(_) => Err(MenuError::Unknown),
     }
+}
+
+/// The request as it goes on the link: a slim spec holding only what the
+/// node needs for the menu (its tools and deny lists, which tell whether it
+/// works on files and may use `skill`, and the stored skills), with the
+/// same send-time filters a prompt passes (`send_command_noted`): a node
+/// that does not read the Plugins deny lists gets the tool withheld, one
+/// that does not take stored skills gets none, and no node gets a
+/// connector's tools, a system prompt or sub-agents.
+fn outgoing(
+    req_id: String,
+    session_id: harness_core::SessionId,
+    mut agent: harness_core::agent::AgentSpec,
+    plugin_access: bool,
+    stored: bool,
+) -> MasterToNode {
+    agent.system_prompt.clear();
+    agent.delegates.clear();
+    agent.connector_tools.clear();
+    agent.caps = None;
+    let mut msg = MasterToNode::SkillsMenu {
+        req_id,
+        session_id,
+        agent,
+    };
+    if !plugin_access {
+        crate::plugins::fail_closed(&mut msg);
+    }
+    if !stored {
+        crate::stored_skills::strip(&mut msg);
+    }
+    msg
 }
 
 /// What a node sent, held to the shape the menu shows: a name that is a
@@ -269,5 +303,55 @@ mod tests {
             MAX_MENU_DESCRIPTION_CHARS
         );
         assert!(out.iter().all(|s| s.name != "compact" && s.name != "a b"));
+    }
+
+    fn spec() -> harness_core::agent::AgentSpec {
+        let mut a: harness_core::agent::AgentSpec = serde_json::from_value(serde_json::json!({
+            "agent_id": "a", "name": "A", "system_prompt": "long prompt", "tools": "all", "prompt_hash": "h"
+        }))
+        .unwrap();
+        a.stored_skills = vec![harness_core::skills::StoredSkillEntry {
+            name: "from-server".into(),
+            description: "d".into(),
+            scope: harness_core::skills::StoredScope::Server,
+        }];
+        a.deny_skills = vec!["x".into()];
+        a.connector_tools = vec![harness_core::connectors::ConnectorToolEntry {
+            connector: "c".into(),
+            name: "mcp__c__t".into(),
+            tool: "t".into(),
+            description: "d".into(),
+            schema: "{}".into(),
+        }];
+        a.delegates = vec![a.clone()];
+        a
+    }
+
+    fn agent_of(m: MasterToNode) -> harness_core::agent::AgentSpec {
+        match m {
+            MasterToNode::SkillsMenu { agent, .. } => agent,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The menu request passes the send-time filters a prompt passes: a node
+    /// that does not take stored skills gets none of their names, a node
+    /// that does not read the deny lists gets the tool withheld, and the
+    /// spec is slim for every node.
+    #[test]
+    fn the_request_is_slim_and_filtered_like_a_prompt() {
+        let sid = harness_core::SessionId::new();
+        let a = agent_of(outgoing("r".into(), sid, spec(), true, false));
+        assert!(a.stored_skills.is_empty(), "{:?}", a.stored_skills);
+        let a = agent_of(outgoing("r".into(), sid, spec(), true, true));
+        assert_eq!(a.stored_skills.len(), 1);
+        assert!(a.system_prompt.is_empty() && a.delegates.is_empty());
+        assert!(a.connector_tools.is_empty());
+        let a = agent_of(outgoing("r".into(), sid, spec(), false, true));
+        assert!(
+            a.deny_tools.iter().any(|t| t == "skill"),
+            "{:?}",
+            a.deny_tools
+        );
     }
 }

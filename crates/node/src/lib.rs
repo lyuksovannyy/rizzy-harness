@@ -24,6 +24,9 @@ mod project_mcp;
 pub mod projects;
 mod recall;
 mod session;
+#[cfg(test)]
+#[path = "skills_menu_busy_tests.rs"]
+mod skills_menu_busy_tests;
 mod stored_skills;
 #[cfg(test)]
 mod test_script;
@@ -1751,9 +1754,9 @@ impl NodeRuntime {
         };
         let inner = self.inner.clone();
         tokio::spawn(async move {
-            let _permit = permit;
+            // The place is held by the work (`bounded_holding`), not the wait.
             let mut skills = match inner.session(sid) {
-                Some(s) => s.skills_menu(&agent).await,
+                Some(s) => s.skills_menu(&agent, permit).await,
                 None => Vec::new(),
             };
             skills.truncate(harness_protocol::MAX_MENU_SKILLS);

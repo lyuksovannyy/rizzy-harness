@@ -548,15 +548,15 @@ async fn only_the_asked_node_answers_once() {
     assert!(at.elapsed() < Duration::from_secs(10), "{:?}", at.elapsed());
 }
 
-/// One account has two waiting places: a slow node cannot be asked past them,
-/// and the third is refused at once, not sent.
+/// One account has one waiting place (the node answers two at a time, so one
+/// account cannot hold both): the second request is refused at once, not sent.
 #[tokio::test]
-async fn one_account_has_two_waiting_places() {
+async fn one_account_has_one_waiting_place() {
     let t = start().await;
     let sid = chat(&t, &t.alex, "local", None).await;
     HELD.lock().unwrap().push(sid);
     let mut held = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..1 {
         let (base, alex) = (t.base.clone(), t.alex.clone());
         held.push(tokio::spawn(async move {
             reqwest::Client::new()
@@ -572,15 +572,15 @@ async fn one_account_has_two_waiting_places() {
         }));
     }
     for _ in 0..400 {
-        if t.local.asks().len() >= 2 {
+        if !t.local.asks().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(t.local.asks().len(), 2);
+    assert_eq!(t.local.asks().len(), 1);
     let (st, v) = req(&t, Method::GET, &url(sid), None, &t.alex).await;
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
-    assert_eq!(t.local.asks().len(), 2, "the third was not sent");
+    assert_eq!(t.local.asks().len(), 1, "the second was not sent");
     t.local.leave.send(()).unwrap();
     for h in held {
         assert_eq!(h.await.unwrap(), json!({"skills": []}));
@@ -596,7 +596,7 @@ async fn an_aborted_request_keeps_its_place_until_the_node_answers() {
     let sid = chat(&t, &t.alex, "local", None).await;
     HELD.lock().unwrap().push(sid);
     let mut held = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..1 {
         let (base, alex) = (t.base.clone(), t.alex.clone());
         held.push(tokio::spawn(async move {
             reqwest::Client::new()
@@ -608,12 +608,12 @@ async fn an_aborted_request_keeps_its_place_until_the_node_answers() {
         }));
     }
     for _ in 0..400 {
-        if t.local.asks().len() >= 2 {
+        if !t.local.asks().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(t.local.asks().len(), 2);
+    assert_eq!(t.local.asks().len(), 1);
     for h in &held {
         h.abort();
     }
@@ -623,7 +623,11 @@ async fn an_aborted_request_keeps_its_place_until_the_node_answers() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let (st, v) = req(&t, Method::GET, &url(sid), None, &t.alex).await;
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
-    assert_eq!(t.local.asks().len(), 2, "no third request reached the node");
+    assert_eq!(
+        t.local.asks().len(),
+        1,
+        "no second request reached the node"
+    );
     // The node answers the first: its place is free again.
     let first = t.local.seen_req(0);
     t.local.say.send(answer(&first, "late")).unwrap();
