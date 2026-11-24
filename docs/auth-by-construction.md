@@ -134,7 +134,7 @@ Its findings, each closed in this pull request:
 - The layer read the store for every private GET with a cookie and no key (`cookie_user` ran before the link's MAC): `link_principal` now checks the link first, and `a_link_is_checked_before_the_store_is_read` counts the store reads (it failed with 4 reads before the change, 0 after).
 - "The connection is closed after the 401" was true only for a body not yet buffered: reworded above and in T2, with the no-desync test.
 - `router_before_identify` was `pub` in shipped builds: now behind the `testing` feature.
-- Mutations A (the layer takes a cookie alone as a link) and C (a link on every method) were each caught by one test: `the_layer_takes_a_link_only_to_read` (a unit test of the layer's own verdict, seen by a handler that does not check again) is the second catch for both, and the golden file's member-cookie-alone kind is a third for A.
+- Mutations A (the layer takes a cookie alone as a link) and C (a link on every method) were each caught by one test: `the_layer_takes_a_link_only_to_read` (a unit test of the layer's own verdict, seen by a handler that does not check again) is the second catch for both; for A the golden test (a member's cookie alone on the made-file download: 404 where it was 401) and the store-read test fail too.
   No walk over the real routes can catch C, since every handler on a linkable URL that writes checks again; that is the defence in depth, and the unit test is the catch.
 
 ## Rules for the conversion pull requests
