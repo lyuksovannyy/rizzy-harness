@@ -210,8 +210,11 @@ fn skip_string(it: &mut std::iter::Peekable<std::str::Chars<'_>>, bel_ends: bool
 
 /// `s` as plain text: CSI, OSC, DCS, APC, PM and SOS sequences and other
 /// escapes removed, `\r\n` and a bare `\r` a line break (a progress bar's
-/// redraws become lines). Removing an escape can join the two halves of a
-/// secret it split: scrub the result again ([`SessionBg::view`] does).
+/// redraws become lines). The pipe reader already removed them
+/// ([`crate::filter::AnsiStripper`]), so a ring holds none; this is the
+/// second line for a window that begins inside one, and removing an escape
+/// can join the two halves of a secret it split: scrub the result again
+/// ([`SessionBg::view`] does).
 pub fn plain_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();

@@ -3293,10 +3293,11 @@ in the output stays characters, and nothing in it becomes a link. A secret
 the node knows is replaced in it: the text is scrubbed once as the output
 enters the node's ring, and again after the escapes are removed, so a key
 that a colour code splits in two (as `grep --color=always` leaves) is not
-shown whole. Not covered: the node's own copy of that output (what the
-agent's `bash_output` reads, and the chat's "ended" line) still holds such a
-colour-split key unscrubbed; and the half of a key before an escape that
-hides the rest of its line is shown. A node with short secrets configured
+shown whole. The node removes these escape sequences from every command's
+output as it reads it, so the agent's `bash_output`, the chat's "ended" line
+and a foreground command's result hold no colour codes either, and such a
+key is replaced there too. Not covered: the half of a key before an escape
+that hides the rest of its line is shown. A node with short secrets configured
 holds back up to the last 30 bytes of a running command's output until more
 arrives. The node forgets an ended
 command's output 30 minutes after the end, and when it restarts; the row then

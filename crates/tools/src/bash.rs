@@ -114,6 +114,15 @@ async fn pump<R: AsyncRead + Unpin>(
 ) {
     let mut chunk = [0u8; 8192];
     let mut pending = Vec::new();
+    // Where the command's output enters: terminal escape sequences come out
+    // here, before anything keeps, scrubs or shows it. A command that
+    // colours its match (`grep --color=always`) puts one inside a secret,
+    // which the scrubber, matching exact bytes, would not find; stripped
+    // here, nothing downstream (the result, the kept full output, the live
+    // pieces, a background ring, an end's tail) holds one. One stripper per
+    // stream: an escape split across two reads is removed whole, and the
+    // other stream's text is never inside it.
+    let mut strip = crate::filter::AnsiStripper::new();
     loop {
         match r.read(&mut chunk).await {
             Ok(0) | Err(_) => break,
@@ -123,7 +132,7 @@ async fn pump<R: AsyncRead + Unpin>(
                     p.fetch_add(n as u64, std::sync::atomic::Ordering::SeqCst);
                 }
                 pending.extend_from_slice(&chunk[..n]);
-                let s = drain_utf8(&mut pending);
+                let s = strip.push(&drain_utf8(&mut pending));
                 if !s.is_empty() && tx.send((stream, s)).await.is_err() {
                     break;
                 }
@@ -132,7 +141,7 @@ async fn pump<R: AsyncRead + Unpin>(
     }
     if !pending.is_empty() {
         let _ = tx
-            .send((stream, String::from_utf8_lossy(&pending).into_owned()))
+            .send((stream, strip.push(&String::from_utf8_lossy(&pending))))
             .await;
     }
 }
