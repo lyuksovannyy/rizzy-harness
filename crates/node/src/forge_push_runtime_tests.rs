@@ -112,6 +112,7 @@ struct Node {
 async fn node(r: &Rig, policy: NodePolicy) -> Node {
     let mut tools = harness_tools::builtin();
     tools.push(Arc::new(harness_tools::Push));
+    tools.push(Arc::new(harness_tools::PullRequest));
     let cfg = crate::NodeConfig {
         node_id: "n".into(),
         hostname: "test".into(),
@@ -151,7 +152,7 @@ async fn node(r: &Rig, policy: NodePolicy) -> Node {
 fn spec() -> harness_core::agent::AgentSpec {
     serde_json::from_value(serde_json::json!({
         "agent_id": "coder", "name": "Coder", "system_prompt": "", "prompt_hash": "h",
-        "tools": ["push", "read"]
+        "tools": ["push", "pull_request", "read"]
     }))
     .unwrap()
 }
@@ -680,4 +681,121 @@ fn spec_as(id: &str) -> harness_core::agent::AgentSpec {
         "tools": ["push", "read"]
     }))
     .unwrap()
+}
+
+// ------------------------------------------------ pull requests (T102)
+
+const PR_SCRIPT: &str = r#"script: [{"tool": "pull_request", "input": {"head": "feat", "title": "Add x", "body": "What changed", "draft": true}}]"#;
+
+/// The tool shows a card with the call's own input in Auto mode, offers no
+/// wider grant, and after the Allow asks the master with the card's
+/// approval id and nothing else; the master's answer is the result.
+/// Denied: nothing is asked.
+#[tokio::test]
+async fn a_pull_request_shows_its_card_and_asks_the_master_by_approval_only() {
+    let r = rig();
+    let mut n = node(&r, r.policy(&["github.com".to_string()], true)).await;
+    assert!(
+        n.caps.iter().any(|c| c == harness_protocol::CAP_FORGE_PR),
+        "{:?}",
+        n.caps
+    );
+    for allow in [true, false] {
+        let sid = n.create(&r.folder, false, false).await;
+        let mut m = PromptMsg::test(sid, PR_SCRIPT);
+        m.agent = Some(spec());
+        m.context = Some(Box::new(harness_core::backend::MasterContext {
+            push: Some(target("github.com")),
+            ..Default::default()
+        }));
+        n.link.to_node.try_send(MasterToNode::Prompt(m)).unwrap();
+        n.ack().await;
+        let (mut cards, mut asked, mut results) = (Vec::new(), Vec::new(), Vec::new());
+        loop {
+            match n.next().await {
+                NodeToMaster::PullRequest {
+                    req_id,
+                    session_id,
+                    approval_id,
+                } => {
+                    assert_eq!(session_id, sid);
+                    asked.push(approval_id);
+                    n.link
+                        .to_node
+                        .try_send(MasterToNode::PullRequestResult {
+                            req_id,
+                            number: Some(7),
+                            url: Some("https://github.com/o/r/pull/7".into()),
+                            existed: false,
+                            error: None,
+                        })
+                        .unwrap();
+                }
+                NodeToMaster::Event { event } if event.session_id == sid => match event.typed() {
+                    Ok(EventKind::ApprovalRequested(a)) => {
+                        assert_eq!(a.tool, "pull_request");
+                        assert!(!a.turn_allow && !a.chat_allow);
+                        assert_eq!(a.input["title"], "Add x");
+                        cards.push(a.approval_id.clone());
+                        n.link
+                            .to_node
+                            .try_send(MasterToNode::ApprovalRespond {
+                                req_id: "x".into(),
+                                session_id: sid,
+                                approval_id: a.approval_id.clone(),
+                                decision: if allow {
+                                    Decision::Allow
+                                } else {
+                                    Decision::Deny
+                                },
+                                note: None,
+                            })
+                            .unwrap();
+                    }
+                    Ok(EventKind::ToolCallFinished(f)) => results.push((f.ok, f.output)),
+                    Ok(EventKind::TurnEnded(_)) => break,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        assert_eq!(cards.len(), 1);
+        if allow {
+            assert_eq!(asked, cards, "the request names the card's approval");
+            let (ok, out) = &results[0];
+            assert!(
+                *ok && out.contains("#7") && out.contains("| https://github.com/o/r/pull/7"),
+                "{out}"
+            );
+        } else {
+            assert!(asked.is_empty());
+            assert!(!results[0].0);
+        }
+    }
+}
+
+/// A node whose node.toml denies the tool announces nothing for it and
+/// never offers it; a turn without a target never offers it either.
+#[tokio::test]
+async fn a_pull_request_is_not_offered_where_denied_or_without_a_target() {
+    let r = rig();
+    let mut p = r.policy(&["github.com".to_string()], true);
+    p.denied_tools = vec!["pull_request".into()];
+    let mut n = node(&r, p).await;
+    assert!(!n.caps.iter().any(|c| c == harness_protocol::CAP_FORGE_PR));
+    for target_given in [true, false] {
+        let sid = n.create(&r.folder, false, false).await;
+        let mut m = PromptMsg::test(sid, PR_SCRIPT);
+        m.agent = Some(spec());
+        m.context = Some(Box::new(harness_core::backend::MasterContext {
+            push: target_given.then(|| target("github.com")),
+            ..Default::default()
+        }));
+        n.link.to_node.try_send(MasterToNode::Prompt(m)).unwrap();
+        n.ack().await;
+        let seen = n.until_end(sid, Answer::Allow, &r.folder).await;
+        assert!(seen.cards.is_empty(), "{seen:?}");
+        let (_, ok, out) = &seen.results[0];
+        assert!(!ok && out.contains("unknown tool"), "{out}");
+    }
 }

@@ -97,17 +97,186 @@ impl harness_core::forge::PushHost for LinkPush {
     ) -> Result<String, String> {
         run(&self.0, call_id, input, cancel).await
     }
+
+    async fn open_pull_request(
+        &self,
+        call_id: &str,
+        input: &Value,
+        cancel: CancellationToken,
+    ) -> Result<String, String> {
+        run_pr(&self.0, call_id, input, cancel).await
+    }
+}
+
+/// How long a pull request waits for the master (two forge calls at most,
+/// each bounded there).
+pub const PR_WAIT: Duration = Duration::from_secs(60);
+
+/// What the master answered a `forge.pull_request`.
+pub(crate) struct PrAnswer {
+    pub number: Option<u64>,
+    pub url: Option<String>,
+    pub existed: bool,
+}
+
+type PrReply = oneshot::Sender<Result<PrAnswer, String>>;
+
+/// Pull requests waiting for their `forge.pull_request_result`.
+#[derive(Default)]
+pub(crate) struct PrPending(std::sync::Mutex<std::collections::HashMap<String, PrReply>>);
+
+impl PrPending {
+    pub(crate) fn answer(
+        &self,
+        req_id: &str,
+        number: Option<u64>,
+        url: Option<String>,
+        existed: bool,
+        error: Option<String>,
+    ) {
+        let tx = self
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(req_id);
+        if let Some(tx) = tx {
+            let _ = tx.send(match error {
+                Some(e) => Err(e),
+                None => Ok(PrAnswer {
+                    number,
+                    url,
+                    existed,
+                }),
+            });
+        }
+    }
+}
+
+/// One `pull_request` call of session `s`: the card with the call's own
+/// input (the page draws the same event the master reads), then, after a
+/// person's Allow, one request to the master naming only the approval.
+pub(crate) async fn run_pr(
+    s: &Arc<Session>,
+    call_id: &str,
+    input: &Value,
+    cancel: CancellationToken,
+) -> Result<String, String> {
+    use harness_core::forge::{PR_TOOL, parse_pr};
+    let Some(target) = s.push_target_now() else {
+        return Err(harness_tools::pull_request::NOT_HERE.into());
+    };
+    if s.node.cfg.policy.denies(PR_TOOL) {
+        return Err("this node does not open pull requests (denied_tools)".into());
+    }
+    let pr = parse_pr(input)?;
+    let reason = format!(
+        "open a pull request in {}/{} as {}",
+        target.host, target.full_name, target.login
+    );
+    // No preview of the node's own: the page draws the call's input itself
+    // (head, base, title, body, draft), the very event the master reads.
+    let _ = pr;
+    let approval_id = s
+        .ask_external(call_id, PR_TOOL, input, reason, String::new())
+        .await?;
+    if cancel.is_cancelled() {
+        return Err("cancelled; nothing was opened".into());
+    }
+    if s.push_target_now().as_ref() != Some(&target) {
+        return Err("the turn that asked has ended; nothing was opened".into());
+    }
+    let node = &s.node;
+    if node.outbox().is_none() {
+        return Err("this node is not connected to the server; nothing was opened".into());
+    }
+    let req_id = harness_core::new_id();
+    let (tx, rx) = oneshot::channel();
+    {
+        let mut p = node.prs.0.lock().unwrap_or_else(|p| p.into_inner());
+        if p.len() >= MAX_PENDING {
+            return Err("too many requests are waiting for the server; try again".into());
+        }
+        p.insert(req_id.clone(), tx);
+    }
+    struct Gone<'a>(&'a PrPending, String);
+    impl Drop for Gone<'_> {
+        fn drop(&mut self) {
+            self.0
+                .0
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&self.1);
+        }
+    }
+    let _gone = Gone(&node.prs, req_id.clone());
+    let send = node.publish_wait(NodeToMaster::PullRequest {
+        req_id,
+        session_id: s.id,
+        approval_id,
+    });
+    let asked = async {
+        send.await;
+        rx.await
+    };
+    let answer = match tokio::time::timeout(PR_WAIT, asked).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => Err("the server did not answer".into()),
+        Err(_) => Err(format!(
+            "the server did not answer within {} seconds; the pull request may or may not \
+             have been opened",
+            PR_WAIT.as_secs()
+        )),
+    };
+    let detail = |ok: bool| {
+        serde_json::json!({
+            "session_id": s.id, "host": target.host, "full_name": target.full_name,
+            "head": pr.head, "ok": ok,
+        })
+    };
+    match answer {
+        Ok(a) => {
+            node.audit_log
+                .record("forge.pull_request", detail(true).to_string());
+            let what = match (a.number, a.existed) {
+                (Some(n), true) => {
+                    format!("a pull request for these branches is already open: #{n}")
+                }
+                (None, true) => "a pull request for these branches is already open".to_string(),
+                (Some(n), false) => format!("opened pull request #{n}"),
+                (None, false) => "opened the pull request".to_string(),
+            };
+            let mut out = format!(
+                "[harness] {what} in {}/{} as {}",
+                target.host, target.full_name, target.login
+            );
+            if let Some(u) = a.url {
+                out.push_str("\n[harness] its address:\n");
+                out.push_str(OUTPUT_QUOTE);
+                out.push_str(&quoted_line(&u));
+            }
+            Ok(out)
+        }
+        Err(e) => {
+            node.audit_log
+                .record("forge.pull_request", detail(false).to_string());
+            Err(said("the pull request was not opened", &e))
+        }
+    }
 }
 
 impl Session {
-    /// The master's `target` for turn `turn_id`, kept only where this
-    /// node and this session allow a push in it.
-    pub(super) fn push_for_turn(
+    /// The master's `target` for turn `turn_id`, kept where this node and
+    /// this session allow `push` or `pull_request` in it, and the forge
+    /// tools not allowed in it (withheld from the turn's agent).
+    pub(super) fn forge_for_turn(
         &self,
         turn_id: &str,
         target: Option<PushTarget>,
-    ) -> Option<PushTarget> {
-        let target = target?;
+    ) -> (Option<PushTarget>, Vec<&'static str>) {
+        let all = harness_core::forge::FORGE_TOOLS.to_vec();
+        let Some(target) = target else {
+            return (None, all);
+        };
         let callback = self
             .turn
             .lock()
@@ -115,18 +284,27 @@ impl Session {
             .as_ref()
             .is_some_and(|t| t.turn_id == turn_id && t.callback);
         let policy = &self.node.cfg.policy;
-        let ok = self.profile == harness_core::event::Profile::Agentic
+        let chat = self.profile == harness_core::event::Profile::Agentic
             && self.parent_session.is_none()
             && !self.no_callbacks
             && !self.incognito
             && !callback
-            && policy.projects.staging.is_some()
-            && policy.forge.allows_push(&target.host)
             && crate::policy::valid_forge_host(&target.host)
             && crate::forge_clone::valid_full_name(&target.full_name)
-            && crate::forge_clone::valid_username(&target.login)
+            && crate::forge_clone::valid_username(&target.login);
+        let push = chat
+            && policy.projects.staging.is_some()
+            && policy.forge.allows_push(&target.host)
             && !policy.denies(PUSH_TOOL);
-        ok.then_some(target)
+        let pr = chat && !policy.denies(harness_core::forge::PR_TOOL);
+        let mut refused = Vec::new();
+        if !push {
+            refused.push(PUSH_TOOL);
+        }
+        if !pr {
+            refused.push(harness_core::forge::PR_TOOL);
+        }
+        ((push || pr).then_some(target), refused)
     }
 
     /// The running turn's target, if this very turn has one.
