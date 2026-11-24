@@ -26,6 +26,7 @@ pub mod folder_preview;
 pub mod forge;
 pub mod forge_repos;
 mod forks;
+pub mod git_state;
 mod handoff;
 mod http;
 pub mod levels;
@@ -368,6 +369,8 @@ pub struct MasterInner {
     pulls: artifact_pull::Pulls,
     /// Turn diffs waiting for their node's answer (X.12).
     diffs: diff::Waiting,
+    /// Git-state requests waiting for their node's answer (X.64).
+    git_states: git_state::Waiting,
     /// Background command outputs waiting for their node's answer (X.62).
     bg_outputs: bg_output::Waiting,
     /// `@` completions waiting for their node's answer (T63).
@@ -774,6 +777,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         // A file read for the page's panel: no event.
         | MasterToNode::DocPreview { .. }
         | MasterToNode::FolderFile { .. }
+        // The folder's git branch for the header: no event.
+        | MasterToNode::GitState { .. }
         // A person's text changes to a file of the folder: no event.
         | MasterToNode::DocPageEdit { .. }
         // A new project's folder: no session at all.
@@ -880,6 +885,7 @@ impl Master {
                 storage: OnceLock::new(),
                 pulls: Default::default(),
                 diffs: Default::default(),
+                git_states: Default::default(),
                 bg_outputs: Default::default(),
                 files: Default::default(),
                 previews: Default::default(),
@@ -1540,6 +1546,7 @@ impl Master {
                 // Its transfers stop; their versions wait for the next hello.
                 artifact_pull::node_down(&this, &nid);
                 diff::node_down(&this, &nid);
+                git_state::node_down(&this, &nid);
                 files::node_down(&this, &nid);
                 bg_output::node_down(&this, &nid);
                 folder_preview::node_down(&this, &nid);
@@ -1767,6 +1774,11 @@ impl Master {
                     (_, e) => Err(e.unwrap_or_else(|| "the node sent no changes".into())),
                 },
             ),
+            NodeToMaster::GitStateResult {
+                req_id,
+                state,
+                busy,
+            } => git_state::on_answer(self, node_id, req_id, state, busy),
             NodeToMaster::BackgroundOutputResult {
                 req_id,
                 output,

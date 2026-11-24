@@ -183,6 +183,16 @@ pub(crate) struct HeadPoint {
 /// cleaning), the ref is read like [`head_of`] reads it. `None` for
 /// anything else, including an unborn branch.
 pub(crate) fn head_at(top: &Path) -> Option<HeadPoint> {
+    match head_label(top)? {
+        (branch, Some(commit)) => Some(HeadPoint { branch, commit }),
+        _ => None,
+    }
+}
+
+/// [`head_at`] for a label (X.64): the branch (`None` when detached) and the
+/// commit, which is `None` for a branch with no commit yet (a repository
+/// just made), by the same rules and the same refusals.
+pub(crate) fn head_label(top: &Path) -> Option<(Option<String>, Option<String>)> {
     let git = top.join(".git");
     if !std::fs::symlink_metadata(&git).ok()?.is_dir()
         || git.join("commondir").exists()
@@ -194,10 +204,7 @@ pub(crate) fn head_at(top: &Path) -> Option<HeadPoint> {
     let text = read_small(&git.join("HEAD"), HEAD_AT_MAX)?;
     let text = text.trim_end_matches('\n');
     if let Some(commit) = object_id(text) {
-        return Some(HeadPoint {
-            branch: None,
-            commit,
-        });
+        return Some((None, Some(commit)));
     }
     let name = text.strip_prefix("ref: ")?.trim();
     let branch = name.strip_prefix("refs/heads/")?;
@@ -209,10 +216,7 @@ pub(crate) fn head_at(top: &Path) -> Option<HeadPoint> {
     if !ok {
         return None;
     }
-    Some(HeadPoint {
-        branch: Some(branch.to_string()),
-        commit: resolve(&git, name)?,
-    })
+    Some((Some(branch.to_string()), resolve(&git, name)))
 }
 
 /// What `<top>/.git` (a real directory) says.

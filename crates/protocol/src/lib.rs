@@ -142,6 +142,43 @@ pub const CAP_FOLDER_FILE: &str = "folder-file";
 /// frame limit with room to spare.
 pub const MAX_FOLDER_FILE_TEXT_BYTES: usize = 256 * 1024;
 
+/// The node capability that announces `session.git_state` (ADOPTION_PLAN
+/// X.64, PLAN.md T19): the git branch of a chat's folder and how many files
+/// differ from the last commit, for the chat's header. The master sends it
+/// only to nodes whose hello listed it; for an older one the page shows
+/// nothing.
+pub const CAP_GIT_STATE: &str = "git-state";
+
+/// The longest branch name a `session.git_state_result` carries, in bytes
+/// (the node cuts at this; the master cuts what a node sends beyond it).
+pub const MAX_GIT_BRANCH_BYTES: usize = 200;
+
+/// The most changed files a `session.git_state_result` counts: more is "999+"
+/// on the page, which is why the number is capped and not exact.
+pub const MAX_GIT_CHANGED: u32 = 1000;
+
+/// What a node read of a chat's folder's git repository (X.64): where HEAD
+/// points and how many files differ. Every field is text or a number the
+/// node derived; the branch name is the repository's own (whoever controls
+/// the repository wrote it), cleaned of control and bidirectional
+/// characters and cut at [`MAX_GIT_BRANCH_BYTES`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitState {
+    /// The branch HEAD names. Absent when HEAD is detached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The first seven hex digits of the commit HEAD names. Absent for a
+    /// branch with no commit yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Files that differ from that commit: changed tracked files, plus
+    /// untracked ones that no ignore rule hides (a folder holding only such
+    /// files counts once). Absent when the node could not tell (no checkpoint
+    /// store, a timeout), which is not "none". At most [`MAX_GIT_CHANGED`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed: Option<u32>,
+}
+
 /// The node capability that announces `session.doc_page_edit` (ADOPTION_PLAN
 /// X.60, PLAN.md T100): a person's text changes to a Word or Excel file of
 /// the chat's folder, made into a new file beside it by the node. Announced
@@ -1267,6 +1304,19 @@ pub enum NodeToMaster {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         refusal: Option<FileRefusal>,
     },
+    /// The answer to `session.git_state` (pull only): the state, or none for
+    /// a folder that is no repository the node reads (also: `read` denied in
+    /// node.toml, a sub-agent's own folder), or `busy` (X.64).
+    #[serde(rename = "session.git_state_result")]
+    GitStateResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<GitState>,
+        /// The node is answering another such request; ask again later. The
+        /// page keeps what it shows.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        busy: bool,
+    },
     /// The answer to `session.doc_page_edit` (pull only): the path of the new
     /// file relative to the chat's folder and one result per change, or why
     /// nothing was made.
@@ -2046,6 +2096,17 @@ pub enum MasterToNode {
         session_id: SessionId,
         path: String,
     },
+    /// The git branch and the count of changed files of the chat's folder
+    /// (X.64): answered by one `session.git_state_result`, never by an ack,
+    /// handled outside the node's command loop, appends no event. It names
+    /// nothing but the session: the node reads the repository from the
+    /// folder it has pinned for that session. Only to nodes with
+    /// [`CAP_GIT_STATE`].
+    #[serde(rename = "session.git_state")]
+    GitState {
+        req_id: String,
+        session_id: SessionId,
+    },
     /// A person's text changes to a Word or Excel file of the chat's folder
     /// (X.60, T100): the node reads the file as `session.doc_preview` does,
     /// runs the changes through its confined helper and writes the result as
@@ -2155,6 +2216,7 @@ impl MasterToNode {
             | MasterToNode::Files { .. }
             | MasterToNode::DocPreview { .. }
             | MasterToNode::FolderFile { .. }
+            | MasterToNode::GitState { .. }
             | MasterToNode::DocPageEdit { .. }
             | MasterToNode::ProjectCreate { .. }
             | MasterToNode::ProjectClone { .. }
@@ -3100,6 +3162,55 @@ mod tests {
             serde_json::from_value::<NodeToMaster>(newer).unwrap(),
             NodeToMaster::FolderFileResult {
                 refusal: Some(FileRefusal::Unknown),
+                ..
+            }
+        ));
+    }
+
+    /// X.64: the wire shape of the git state pair.
+    #[test]
+    fn git_state_wire_shape() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let ask = MasterToNode::GitState {
+            req_id: "r".into(),
+            session_id: sid,
+        };
+        let v = serde_json::to_value(&ask).unwrap();
+        assert_eq!(v["type"], "session.git_state");
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), ask);
+        assert_eq!(ask.req_id(), None, "never acked");
+        let state = GitState {
+            branch: Some("main".into()),
+            commit: Some("abcdef0".into()),
+            changed: Some(3),
+        };
+        let ans = NodeToMaster::GitStateResult {
+            req_id: "r".into(),
+            state: Some(state),
+            busy: false,
+        };
+        let v = serde_json::to_value(&ans).unwrap();
+        assert_eq!(v["type"], "session.git_state_result");
+        assert_eq!(v["state"]["changed"], 3);
+        assert!(v.get("busy").is_none(), "{v}");
+        assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), ans);
+        // Detached, nothing counted: only what is known is on the wire.
+        let bare = GitState {
+            branch: None,
+            commit: Some("abcdef0".into()),
+            changed: None,
+        };
+        let v = serde_json::to_value(&bare).unwrap();
+        assert_eq!(v, json!({"commit": "abcdef0"}));
+        let busy: NodeToMaster = serde_json::from_value(
+            json!({"type": "session.git_state_result", "req_id": "r", "busy": true}),
+        )
+        .unwrap();
+        assert!(matches!(
+            busy,
+            NodeToMaster::GitStateResult {
+                state: None,
+                busy: true,
                 ..
             }
         ));

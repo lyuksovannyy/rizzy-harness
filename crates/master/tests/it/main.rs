@@ -49,6 +49,7 @@ mod folder_file_http;
 mod folder_page_edit_http;
 mod folder_preview_http;
 mod fork_http;
+mod git_state_http;
 mod handoff_http;
 mod hardening_http;
 mod hostile_node;
