@@ -329,6 +329,7 @@ impl From<crate::model_cache::ListingError> for ApiError {
         let code = match &e {
             ListingError::Failed(_) => StatusCode::BAD_GATEWAY,
             ListingError::Server(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ListingError::Busy(_) => StatusCode::SERVICE_UNAVAILABLE,
         };
         ApiError(code, e.to_string())
     }

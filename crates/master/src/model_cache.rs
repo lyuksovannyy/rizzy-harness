@@ -30,7 +30,19 @@ pub enum ListingError {
     /// text from the client).
     #[error("{0}")]
     Server(String),
+    /// The configuration is being written (see [`ConfigBusy`]): nothing is
+    /// wrong, try again later.
+    #[error("{0}")]
+    Busy(String),
 }
+
+/// The config edit lock stayed taken for the whole wait.
+#[derive(Debug, thiserror::Error)]
+#[error("the configuration is being written; the model listing was not recorded")]
+pub struct ConfigBusy;
+
+/// How long recording a listing waits for the config edit lock.
+pub const LISTING_LOCK_WAIT: Duration = Duration::from_secs(60);
 
 /// One provider's listing as it was fetched.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +112,13 @@ impl Master {
         let Some(rt) = self.provider_runtime() else {
             return Ok(l);
         };
-        let edits = rt.lock_edits().await;
+        // A write that never finishes holds the lock for good: the refresh
+        // loop must not wait on it for good too, silently. Skip this round
+        // with one line; the next round tries again.
+        let wait = *crate::lock(&self.inner.listing_lock_wait);
+        let Ok(edits) = tokio::time::timeout(wait, rt.lock_edits()).await else {
+            return Err(ConfigBusy.into());
+        };
         let mut cfg = rt.config();
         let Some(p) = cfg
             .providers
@@ -163,7 +181,13 @@ impl Master {
         .map_err(ListingError::Failed)?;
         self.record_listing(id, p.kind, &p.base_url, models)
             .await
-            .map_err(|e| ListingError::Server(format!("{e:#}")))
+            .map_err(|e| {
+                if e.is::<ConfigBusy>() {
+                    ListingError::Busy(e.to_string())
+                } else {
+                    ListingError::Server(format!("{e:#}"))
+                }
+            })
     }
 
     /// Fetch every real provider's listing when the cached one is older
@@ -198,6 +222,13 @@ impl Master {
                                 models = l.models.len(),
                                 "model listing refreshed"
                             ),
+                            // One line, and the next round tries again (a
+                            // failed fetch waits for `every`, a busy
+                            // configuration does not).
+                            Err(e @ ListingError::Busy(_)) => {
+                                tried.remove(&p.id);
+                                tracing::warn!(provider = %p.id, "{e}");
+                            }
                             Err(e) => {
                                 tracing::warn!(provider = %p.id, "model listing refresh failed: {e}")
                             }

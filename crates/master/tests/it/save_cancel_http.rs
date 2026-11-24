@@ -137,18 +137,28 @@ fn mkfifo(p: &Path) {
 }
 
 /// Let the held-up writer go: read what it writes. Returns what it wrote.
-fn release(tmp: &Path) -> std::thread::JoinHandle<String> {
+///
+/// Opening a pipe for reading blocks until a writer opens it, so this runs
+/// in a thread and hands the text over a channel: [`settle`] waits for it
+/// with a bound, and a cut request that never reached its write fails the
+/// test with a sentence instead of hanging it.
+fn release(tmp: &Path) -> std::sync::mpsc::Receiver<String> {
     let p = tmp.to_path_buf();
-    std::thread::spawn(move || std::fs::read_to_string(p).unwrap())
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::fs::read_to_string(p).unwrap_or_default());
+    });
+    rx
 }
 
 /// After the writer was released: wait for every save section to end, let
 /// the writer's rename happen, and put the text it wrote where the pipe
 /// (renamed onto `config.toml`) is.
-async fn settle(t: &T, wrote: std::thread::JoinHandle<String>) {
-    let text = tokio::task::spawn_blocking(move || wrote.join().unwrap())
+async fn settle(t: &T, wrote: std::sync::mpsc::Receiver<String>) {
+    let text = tokio::task::spawn_blocking(move || wrote.recv_timeout(Duration::from_secs(30)))
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the cut request never reached its write of config.toml.tmp (nothing opened the pipe for writing)");
     // The section drops the lock when it ends, after the rename: taking the
     // lock is the signal. The bound is only there so a hang fails the test.
     let ended = tokio::time::timeout(Duration::from_secs(30), t.rt.lock_edits()).await;

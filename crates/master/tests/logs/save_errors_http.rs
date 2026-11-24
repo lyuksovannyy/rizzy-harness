@@ -470,3 +470,93 @@ async fn a_missing_named_secret_is_named_without_the_path() {
         json!({"error": "provider \"fake\": secret \"provider-fake\" not found in secrets.toml"})
     );
 }
+
+/// Review round: a write that never finishes holds the edit lock for good,
+/// and the background refresh loop must not wait on it for good, silently.
+/// It waits a bounded time, skips the round with one log line, and tries
+/// again on the next round. The write is held up on a named pipe.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_listing_loop_skips_a_round_while_the_config_is_being_written() {
+    use harness_master::model_cache::ListingError;
+    let t = start("save-errors-busy-", Config::default()).await;
+    t.master
+        .set_outbound(harness_master::outbound::Outbound::new([
+            "127.0.0.1".to_string()
+        ]));
+    let fake = fake_lister().await;
+    let (st, _, v) = send(
+        &t,
+        Method::PUT,
+        "/api/admin/providers/busyfake",
+        Some(&provider_at(&fake)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    t.master
+        .set_listing_lock_wait(std::time::Duration::from_millis(300));
+
+    // A save that blocks inside its write of config.toml.tmp.
+    let tmp = t.dir.path().join("config.toml.tmp");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&tmp)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (base, admin) = (t.base.clone(), t.admin.clone());
+    let save = tokio::spawn(async move {
+        reqwest::Client::new()
+            .put(format!("{base}/api/admin/storage"))
+            .login(&admin)
+            .header("origin", &base)
+            .json(&json!({"max_file_mb": 5, "account_quota_mb": 0, "server_quota_mb": 100, "min_free_mb": 0}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+    });
+    // Wait (bounded only to fail a hang) until the section holds the lock.
+    let rt = t.master.provider_runtime().unwrap();
+    let began = std::time::Instant::now();
+    while tokio::time::timeout(std::time::Duration::from_millis(50), rt.lock_edits())
+        .await
+        .is_ok()
+    {
+        assert!(
+            began.elapsed().as_secs() < 30,
+            "the save never took the lock"
+        );
+    }
+
+    // The attempt returns within its bound with the busy answer.
+    let at = std::time::Instant::now();
+    let r = t.master.refresh_listing("busyfake").await;
+    assert!(matches!(r, Err(ListingError::Busy(_))), "{r:?}");
+    assert!(at.elapsed().as_secs() < 20, "{:?}", at.elapsed());
+
+    // The loop's own round logs one line and does not wait for good.
+    t.master
+        .start_model_refresh(std::time::Duration::from_secs(24 * 3600));
+    let needle = "the model listing was not recorded";
+    let lines = || {
+        let buf = logs().lock().unwrap().clone();
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .filter(|l| l.contains(needle) && l.contains("busyfake"))
+            .count()
+    };
+    let began = std::time::Instant::now();
+    while lines() == 0 {
+        assert!(began.elapsed().as_secs() < 30, "the loop logged nothing");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(lines(), 1);
+
+    // Let the write end.
+    let p = tmp.clone();
+    let reader = std::thread::spawn(move || std::fs::read_to_string(p));
+    assert_eq!(save.await.unwrap(), StatusCode::OK);
+    let _ = tokio::task::spawn_blocking(move || reader.join()).await;
+}
