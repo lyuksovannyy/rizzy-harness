@@ -32,8 +32,8 @@ use tokio::sync::mpsc;
 
 /// Alice's token (forge account 42, login "ada") and Bob's (43). Made up;
 /// searched for everywhere at the end.
-const TOKEN_A: &str = "ghp_CANARYclonealice00000000000000000001";
-const TOKEN_B: &str = "ghp_CANARYclonebob0000000000000000000002";
+pub(crate) const TOKEN_A: &str = "ghp_CANARYclonealice00000000000000000001";
+pub(crate) const TOKEN_B: &str = "ghp_CANARYclonebob0000000000000000000002";
 
 use crate::capture::logs;
 
@@ -122,12 +122,15 @@ async fn fake_forge() -> Forge {
 // ------------------------------------------------------------ the nodes
 
 #[derive(Clone)]
-struct Node {
-    seen: Arc<Mutex<Vec<MasterToNode>>>,
+pub(crate) struct Node {
+    pub(crate) seen: Arc<Mutex<Vec<MasterToNode>>>,
     /// Requests for a project named `Hold…`, not answered until
     /// [`Node::answer`].
     held: Arc<Mutex<Vec<String>>>,
-    tx: mpsc::Sender<NodeToMaster>,
+    pub(crate) tx: mpsc::Sender<NodeToMaster>,
+    /// Each session's last seq (the node mirrors a `session_created` for
+    /// every chat it is asked to create).
+    pub(crate) seqs: Arc<Mutex<std::collections::HashMap<harness_core::SessionId, u64>>>,
 }
 
 /// What a `project.clone` carried, the token opened for the test.
@@ -218,13 +221,13 @@ fn leak_text(username: Option<&str>, token: Option<&str>, late: bool) -> String 
     )
 }
 
-fn folder_of(node: &str, name: &str) -> String {
+pub(crate) fn folder_of(node: &str, name: &str) -> String {
     format!("/home/{node}/rizzy-projects/{}-ab1c", name.to_lowercase())
 }
 
 /// An agentic node `id` announcing `caps`; it answers `project.create`
 /// and `project.clone` with [`folder_of`].
-fn fake(id: &str, caps: &[&str]) -> (NodeLink, Node) {
+pub(crate) fn fake(id: &str, caps: &[&str]) -> (NodeLink, Node) {
     let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
     let (tx, from_node) = mpsc::channel::<NodeToMaster>(1024);
     let mut capabilities = vec![
@@ -246,11 +249,37 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Node) {
         seen: Arc::default(),
         held: Arc::default(),
         tx: tx.clone(),
+        seqs: Arc::default(),
     };
-    let (keep, held, node) = (n.seen.clone(), n.held.clone(), id.to_string());
+    let (keep, held, node, seqs) = (
+        n.seen.clone(),
+        n.held.clone(),
+        id.to_string(),
+        n.seqs.clone(),
+    );
     tokio::spawn(async move {
         while let Some(msg) = commands.recv().await {
             keep.lock().unwrap().push(msg.clone());
+            if let MasterToNode::Create {
+                session_id,
+                title,
+                cwd,
+                ..
+            } = &msg
+            {
+                seqs.lock().unwrap().insert(*session_id, 1);
+                let payload = json!({"title": title, "cwd": cwd, "model": "m",
+                    "backend": "native", "node_id": node, "profile": "agentic",
+                    "approval_mode": "auto", "exec_mode": "sandbox"});
+                let event = harness_core::RawEvent {
+                    session_id: *session_id,
+                    seq: 1,
+                    ts_ms: 1,
+                    kind: "session_created".into(),
+                    payload,
+                };
+                let _ = tx.try_send(NodeToMaster::Event { event });
+            }
             match &msg {
                 // A node whose refusal echoes the credential it was sent,
                 // in its own spelling and as an HTTP Basic header, around
@@ -302,18 +331,18 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Node) {
 
 // ------------------------------------------------------------ the rig
 
-struct T {
-    base: String,
-    master: Master,
+pub(crate) struct T {
+    pub(crate) base: String,
+    pub(crate) master: Master,
     forge: Forge,
-    remote: Node,
+    pub(crate) remote: Node,
     old: Node,
-    dir: tempfile::TempDir,
-    alex: String,
-    answers: Arc<Mutex<String>>,
+    pub(crate) dir: tempfile::TempDir,
+    pub(crate) alex: String,
+    pub(crate) answers: Arc<Mutex<String>>,
 }
 
-async fn start() -> T {
+pub(crate) async fn start() -> T {
     logs();
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -363,7 +392,7 @@ async fn start() -> T {
     }
 }
 
-async fn req(
+pub(crate) async fn req(
     t: &T,
     method: Method,
     path: &str,
@@ -389,7 +418,7 @@ async fn req(
 }
 
 /// A member with the sandbox level, logged in: (cookie, user id).
-async fn member(t: &T, name: &str) -> (String, String) {
+pub(crate) async fn member(t: &T, name: &str) -> (String, String) {
     let (st, v) = req(
         t,
         Method::POST,
@@ -431,7 +460,7 @@ async fn member(t: &T, name: &str) -> (String, String) {
     (c, id)
 }
 
-async fn connect(t: &T, c: &str, token: &str) -> String {
+pub(crate) async fn connect(t: &T, c: &str, token: &str) -> String {
     let (st, v) = req(
         t,
         Method::POST,
@@ -444,7 +473,7 @@ async fn connect(t: &T, c: &str, token: &str) -> String {
     v["id"].as_str().unwrap().to_string()
 }
 
-fn clone_body(conn: &str, full: &str, node: &str) -> Value {
+pub(crate) fn clone_body(conn: &str, full: &str, node: &str) -> Value {
     json!({"name": "Harness", "folder_on": node, "connection_id": conn, "full_name": full})
 }
 
@@ -465,7 +494,7 @@ async fn pending(t: &T, who: &str, ws: Option<&str>) -> Vec<Value> {
 }
 
 /// Wait until project `id` exists for `who`; its detail.
-async fn ready(t: &T, who: &str, id: &str) -> Value {
+pub(crate) async fn ready(t: &T, who: &str, id: &str) -> Value {
     for _ in 0..200 {
         let (st, v) = req(t, Method::GET, &format!("/api/projects/{id}"), None, who).await;
         if st == StatusCode::OK {
@@ -505,7 +534,7 @@ async fn held(n: &Node, want: usize) {
 
 /// A team workspace of Alex's with Alice (admin) and Bob (member), both
 /// at the sandbox level there.
-async fn team(t: &T, alice: &str, bob: &str) -> String {
+pub(crate) async fn team(t: &T, alice: &str, bob: &str) -> String {
     let (st, v) = req(
         t,
         Method::POST,
@@ -580,7 +609,7 @@ fn assert_absent(t: &T, needles: &[String]) {
 /// No token in the master's data directory (its database holds the
 /// sealed row, which is ciphertext), its logs at TRACE, any HTTP answer
 /// or its audit lines.
-fn assert_no_token_anywhere(t: &T) {
+pub(crate) fn assert_no_token_anywhere(t: &T) {
     let mut files = String::new();
     for e in walk(t.dir.path()) {
         if let Ok(b) = std::fs::read(&e) {

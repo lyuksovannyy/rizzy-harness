@@ -3,7 +3,7 @@ name: Software Developer
 description: Software engineer that reads, changes and tests code in the workspace.
 aliases: [dev]
 category: IT
-tools: [bash, bash_output, bash_stop, tool_output, read, write, edit, grep, glob, outline, graph_query, publish, todo, skill, web_search, web_fetch, remember, mcp, board, board_edit]
+tools: [bash, bash_output, bash_stop, tool_output, read, write, edit, grep, glob, outline, graph_query, publish, todo, skill, web_search, web_fetch, remember, mcp, board, board_edit, push]
 ui: rich
 memory: false
 delegates: [scout, researcher, reviewer]

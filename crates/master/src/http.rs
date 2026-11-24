@@ -1606,6 +1606,12 @@ async fn approval(
     }
     // With an allow a note means nothing: it is dropped, not refused.
     let note = b.note.filter(|_| !b.decision.allows());
+    // A push card's Allow by the chat's owner (X.27 step 4): recorded
+    // before it is relayed, since the node asks for the credential at once.
+    if b.decision.allows() {
+        m.note_push_click(who.user_id.as_deref(), &row, &approval_id)
+            .await;
+    }
     m.respond_approval(row.session_id, approval_id, b.decision, note)
         .await?;
     Ok(Json(json!({ "ok": true })))

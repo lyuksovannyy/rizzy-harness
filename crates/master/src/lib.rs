@@ -24,6 +24,7 @@ mod favicon;
 pub mod files;
 pub mod folder_preview;
 pub mod forge;
+pub mod forge_push;
 pub mod forge_repos;
 mod forks;
 pub mod git_state;
@@ -359,6 +360,9 @@ pub struct MasterInner {
     /// The board tools' counts per turn, calls per node and recent request
     /// ids (PLAN.md T78).
     board: board::Grants,
+    /// Push targets per chat, the Allows of push cards the master relayed,
+    /// and the limits (X.27 step 4, PLAN.md T101).
+    pub(crate) pushes: forge_push::State,
     /// Stored skills' loads per turn and per node (PLAN.md T81).
     stored_skills: stored_skills::Grants,
     /// The routine scheduler, once `start_routines` ran.
@@ -771,6 +775,9 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::SkillResult { .. }
         // A connector call's text for the node's own call: nothing is run.
         | MasterToNode::ConnectorResult { .. }
+        // The credential for the node's own push, which the master checked
+        // against the owner's Allow it relayed (`forge_push`).
+        | MasterToNode::PushCredentialResult { .. }
         // A read of two checkpoints: no event, no work.
         | MasterToNode::Diff { .. }
         // A read of a command's output for the strip: no event.
@@ -885,6 +892,7 @@ impl Master {
                 attached: Default::default(),
                 made: made::grants(),
                 board: Default::default(),
+                pushes: Default::default(),
                 stored_skills: Default::default(),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
@@ -1747,6 +1755,11 @@ impl Master {
                 tool,
                 arguments,
             } => connectors::call::handle(self, node_id, req_id, session_id, tool, arguments),
+            NodeToMaster::PushCredential {
+                req_id,
+                session_id,
+                approval_id,
+            } => forge_push::handle(self, node_id, req_id, session_id, approval_id),
             NodeToMaster::ConnectorCancel { req_id } => {
                 connectors::call::cancel(self, node_id, &req_id)
             }
@@ -2897,6 +2910,25 @@ impl Master {
         let may_connect = !untrusted && !resume && owners;
         let offered = self.offer_connectors(&row, may_connect, &mut agent).await;
         turn_context.extend(offered.lines.iter().cloned());
+        // Push (X.27 step 4, PLAN.md T101): only in a project chat's own
+        // turn its owner sent signed in, with the owner's connection for
+        // the project's source host; none for every other turn, which
+        // also forgets an earlier turn's target.
+        let push = forge_push::offer(
+            self,
+            &row,
+            forge_push::Sender {
+                by_owner,
+                routine: routine_run.is_some(),
+                untrusted,
+                resume,
+                foreign,
+                several: !compare.is_empty() || !peer_specs.is_empty(),
+            },
+            project.as_ref(),
+            &agent,
+        )
+        .await;
         // The owner's facts, whole while they fit, each with its id
         // (`memory::turn_block`).
         let mut noted = Vec::new();
@@ -2984,6 +3016,7 @@ impl Master {
                     turn: None,
                     standing,
                     unattended: true,
+                    push: None,
                 })),
                 owner: None,
                 identity: None,
@@ -3002,6 +3035,7 @@ impl Master {
             turn: (!turn_context.is_empty()).then(|| turn_context.join("\n\n")),
             standing,
             unattended: false,
+            push,
         }));
         let mut msg = match retry {
             Some(turn_id) => MasterToNode::Retry(RetryMsg {

@@ -2335,6 +2335,24 @@ impl Store {
         Ok(Some((tool, v["input"].clone())))
     }
 
+    /// The tool of approval `approval_id` of `sid`, from its
+    /// `approval_requested`; `None` when the mirror has no such approval
+    /// (X.27 step 4: the master hands out a push credential only for an
+    /// Allow of a `push` card it relayed).
+    pub fn approval_tool(&self, sid: SessionId, approval_id: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        let tool: Option<String> = conn
+            .prepare_cached(
+                "SELECT json_extract(payload, '$.tool') FROM events
+                 WHERE session_id = ?1 AND kind = 'approval_requested'
+                   AND json_extract(payload, '$.approval_id') = ?2
+                 ORDER BY seq DESC LIMIT 1",
+            )?
+            .query_row(params![sid.to_string(), approval_id], |r| r.get(0))
+            .optional()?;
+        Ok(tool)
+    }
+
     /// The seq up to which `user` has seen chat `sid` (0 when never).
     pub fn seen_seq(&self, user: &str, sid: SessionId) -> Result<u64> {
         let conn = self.lock();
