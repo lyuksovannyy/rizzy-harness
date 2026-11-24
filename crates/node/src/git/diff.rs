@@ -584,6 +584,7 @@ async fn turn_diff_inner(
         nested: Names::of(&nested).shown.iter().map(|n| scrub(n)).collect(),
         others_wrote: vec![],
         others_may: vec![],
+        since_pruned: false,
     })
 }
 

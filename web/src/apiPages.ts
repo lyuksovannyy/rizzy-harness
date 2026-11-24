@@ -85,6 +85,8 @@ export const pageApi = {
   /** What a turn changed (with `rewind`, it and every later turn), from its node. */
   turnDiff: (id: string, turn: string, rewind = false, signal?: AbortSignal) =>
     call<TurnDiff>("GET", `/api/sessions/${id}/turns/${encodeURIComponent(turn)}/diff${rewind ? "?rewind=1" : ""}`, undefined, signal),
+  /** All of a chat's changes, from its oldest kept checkpoint to now (X.61). */
+  chatDiff: (id: string, signal?: AbortSignal) => call<TurnDiff>("GET", `/api/sessions/${id}/diff`, undefined, signal),
   /** The owner's new title for a chat (cleaned and capped by the server). */
   renameSession: (id: string, title: string) => call<{ ok: boolean; title: string }>("PUT", `/api/sessions/${id}/title`, { title }),
   /** `media` also deletes the caller's Media items that came from the chat. */

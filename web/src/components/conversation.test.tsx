@@ -30,6 +30,7 @@ vi.mock("../apiPages", () => ({
     deleteSession: vi.fn(() => Promise.resolve({ ok: true })),
     approve: vi.fn(),
     turnDiff: vi.fn(() => Promise.resolve({ files: [] })),
+    chatDiff: vi.fn(() => Promise.resolve({ files: [] })),
     restoreTurn: vi.fn(() => Promise.resolve({ ok: true })),
     retryTurn: vi.fn(() => Promise.resolve({ ok: true })),
     setAgent: vi.fn(),
@@ -737,6 +738,55 @@ describe("a turn's changes (X.12)", () => {
     await act(async () => close.click());
     expect(host.querySelector(".diff-panel")).toBeNull();
     expect(document.activeElement).toBe(open);
+  });
+});
+
+describe("all of a chat's changes (X.61)", () => {
+  const changed = { t1: { before: "a", after: "b", files: ["a.txt"], restored: false } };
+  const button = () => host.querySelector<HTMLButtonElement>("button[aria-label='All changes']");
+
+  test("the header's button opens the panel for the whole chat, and closing gives focus back", async () => {
+    await show([{ type: "turn_end", turn_id: "t1", reason: "completed" }], sessionRow(), "agentic", changed);
+    const open = button()!;
+    expect(open).not.toBeNull();
+    open.focus();
+    await act(async () => open.click());
+    await until(() => host.querySelector(".diff-panel"));
+    expect(api.chatDiff).toHaveBeenCalledWith(SID, expect.anything());
+    expect(host.querySelector(".diff-title")!.textContent).toContain("All changes in this chat");
+    expect(host.querySelector(".diff-tools")!.textContent).toBe("");
+    await act(async () => host.querySelector<HTMLButtonElement>("button[aria-label='Close the changes']")!.click());
+    expect(host.querySelector(".diff-panel")).toBeNull();
+    expect(document.activeElement).toBe(open);
+  });
+
+  test("no button before a turn changed files, and none in a chat without a folder", async () => {
+    await show([{ type: "turn_end", turn_id: "t1", reason: "completed" }], sessionRow(), "agentic", {});
+    expect(button()).toBeNull();
+    await show([{ type: "turn_end", turn_id: "t1", reason: "completed" }], sessionRow(), "chat", changed);
+    expect(button()).toBeNull();
+  });
+
+  test("the button has its words beside the icon, and a temporary coding chat has it too", async () => {
+    current = { ...view([{ type: "turn_end", turn_id: "t1", reason: "completed" }], "agentic"), checkpoints: changed };
+    current.meta = { ...current.meta, incognito: true } as SessionView["meta"];
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow({ incognito: true })} nodes={[]} agents={[]} models={[]} />));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    const open = button()!;
+    expect(open.textContent).toBe("All changes");
+    await act(async () => open.click());
+    await until(() => host.querySelector(".diff-panel"));
+    expect(api.chatDiff).toHaveBeenCalled();
+  });
+
+  test("a turn's own changes and the whole chat's replace each other", async () => {
+    await show([{ type: "turn_end", turn_id: "t1", reason: "completed" }], sessionRow(), "agentic", changed);
+    await act(async () => button()!.click());
+    await until(() => host.querySelector(".diff-panel"));
+    const row = [...host.querySelectorAll("button")].find((b) => b.textContent === "Show changes")!;
+    await act(async () => row.click());
+    await until(() => host.querySelector(".diff-title")?.textContent?.includes("this turn"));
+    expect(host.querySelectorAll(".diff-panel")).toHaveLength(1);
   });
 });
 

@@ -11,10 +11,12 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { TurnDiff } from "../types";
 
 const turnDiff = vi.fn((..._a: unknown[]) => Promise.resolve(sample()) as Promise<TurnDiff>);
+const chatDiff = vi.fn((..._a: unknown[]) => Promise.resolve(sample()) as Promise<TurnDiff>);
 const restoreTurn = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 vi.mock("../apiPages", () => ({
   pageApi: {
     turnDiff: (...a: unknown[]) => turnDiff(...a),
+    chatDiff: (...a: unknown[]) => chatDiff(...a),
     restoreTurn: (...a: unknown[]) => restoreTurn(...a),
   },
 }));
@@ -62,6 +64,7 @@ beforeEach(() => {
   document.body.appendChild(host);
   root = createRoot(host);
   turnDiff.mockClear();
+  chatDiff.mockClear();
   restoreTurn.mockClear();
 });
 afterEach(() => {
@@ -233,4 +236,63 @@ test("another chat's files are named before Undo, hidden characters as codes (T5
 test("no note when no other chat worked here", async () => {
   await render();
   expect(host.textContent).not.toContain("Another chat");
+});
+
+// All of a chat's changes (X.61): the same panel, asked for the whole chat.
+test("the whole chat's changes: asked once for the chat, titled by range, no turn actions", async () => {
+  await render({ all: true, turnId: "", canUndo: false });
+  expect(chatDiff).toHaveBeenCalledWith("s1", expect.anything());
+  expect(turnDiff).not.toHaveBeenCalled();
+  expect(host.querySelector(".diff-title")!.textContent).toContain("All changes in this chat");
+  expect(host.querySelector("aside")!.getAttribute("aria-label")).toBe("All changes in this chat");
+  // Nothing that acts on one turn: no undo, no rewind, no later-turns switch.
+  expect(host.textContent).not.toContain("Undo file changes");
+  expect(host.textContent).not.toContain("Rewind files");
+  expect(host.querySelector("input[type=checkbox]")).toBeNull();
+  // The files are the same rows as a turn's.
+  expect(host.textContent).toContain("7 files (1 renamed)");
+  expect(host.querySelectorAll(".diff-file").length).toBeGreaterThan(0);
+});
+
+test("the whole chat's range says what it holds, and where it starts when older checkpoints were pruned", async () => {
+  await render({ all: true, turnId: "", canUndo: false });
+  expect(host.querySelector("[role=note]")!.textContent).toContain(
+    "Everything that changed in this chat's folder since it started, including changes made by hand or by other chats that share the folder.",
+  );
+  chatDiff.mockImplementationOnce(() => Promise.resolve({ ...sample(), since_pruned: true }));
+  await render({ all: true, turnId: "", canUndo: false, sessionId: "s2" });
+  expect(host.querySelector(".diff-title")!.textContent).toContain("Changes since the oldest turn still kept");
+  expect(host.querySelector("[role=note]")!.textContent).toContain("since the oldest turn still kept, including changes made by hand");
+});
+
+test("the whole chat is read again when the running turn ends", async () => {
+  await render({ all: true, turnId: "", canUndo: false, running: true });
+  expect(chatDiff).toHaveBeenCalledTimes(1);
+  const props = { sessionId: "s1", turnId: "", all: true, rewind: false, laterChanges: false, canUndo: false, onRewind: vi.fn(), onClose: vi.fn() };
+  await act(async () => root.render(<DiffPanel {...props} running={true} />));
+  expect(chatDiff).toHaveBeenCalledTimes(1);
+  await act(async () => root.render(<DiffPanel {...props} running={false} />));
+  await act(async () => {});
+  expect(chatDiff).toHaveBeenCalledTimes(2);
+  // A turn's own panel is not read again by a run ending.
+  turnDiff.mockClear();
+  await act(async () => root.render(<DiffPanel {...props} all={false} turnId="t1" running={true} />));
+  await act(async () => root.render(<DiffPanel {...props} all={false} turnId="t1" running={false} />));
+  expect(turnDiff).toHaveBeenCalledTimes(1);
+});
+
+test("a whole chat with no file change says so; a running turn is named", async () => {
+  chatDiff.mockImplementationOnce(() => Promise.resolve({ files: [] }));
+  await render({ all: true, turnId: "", canUndo: false, running: true });
+  expect(host.textContent).toContain("No file changes in this chat.");
+  expect(host.textContent).toContain("A turn is running: its changes show here once it ends.");
+});
+
+test("the whole chat's refusal is text with a way to try again", async () => {
+  chatDiff.mockImplementationOnce(() => Promise.reject(new Error("this chat's node is older than this server; update the node")));
+  await render({ all: true, turnId: "", canUndo: false });
+  expect(host.querySelector("[role=alert]")!.textContent).toContain("older than this server");
+  const again = [...host.querySelectorAll("button")].find((b) => b.textContent === "Try again")!;
+  await act(async () => again.click());
+  expect(chatDiff).toHaveBeenCalledTimes(2);
 });

@@ -56,33 +56,40 @@ async fn turn_diff(
     let user = who.user_id.clone().unwrap_or_else(|| "(api token)".into());
     match crate::diff::turn_diff(&m, &user, row.session_id, turn, rewind).await {
         Ok(d) => Ok(Json(*d)),
-        Err(e) => Err(match e {
-            DiffError::Away(_) => ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!(
-                    "the node {node} that holds this chat's folder is away, so its changes \
-                     cannot be shown now; they can once it is back"
-                ),
+        Err(e) => Err(error(
+            &node,
+            e,
+            "this chat's node is older than this server and cannot show a turn's changes; \
+             update the node",
+        )),
+    }
+}
+
+/// The words and status of a refused diff, for the turn's route and the
+/// whole chat's (`chat_diff.rs`); `too_old` is the sentence for a node
+/// without the capability.
+pub(super) fn error(node: &str, e: DiffError, too_old: &str) -> ApiError {
+    match e {
+        DiffError::Away(_) => ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "the node {node} that holds this chat's folder is away, so its changes \
+                 cannot be shown now; they can once it is back"
             ),
-            DiffError::TooOld => ApiError(
-                StatusCode::CONFLICT,
-                "this chat's node is older than this server and cannot show a turn's changes; \
-                 update the node"
-                    .into(),
-            ),
-            DiffError::Busy => ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the server is already waiting for several changes (yours or others'); try again in \
-                 a moment"
-                    .into(),
-            ),
-            DiffError::Timeout => ApiError(
-                StatusCode::GATEWAY_TIMEOUT,
-                "the node did not send the changes in time".into(),
-            ),
-            DiffError::Refused(why) => ApiError(StatusCode::CONFLICT, why),
-            DiffError::Unknown => ApiError(StatusCode::NOT_FOUND, "unknown session".into()),
-        }),
+        ),
+        DiffError::TooOld => ApiError(StatusCode::CONFLICT, too_old.into()),
+        DiffError::Busy => ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the server is already waiting for several changes (yours or others'); try again in \
+             a moment"
+                .into(),
+        ),
+        DiffError::Timeout => ApiError(
+            StatusCode::GATEWAY_TIMEOUT,
+            "the node did not send the changes in time".into(),
+        ),
+        DiffError::Refused(why) => ApiError(StatusCode::CONFLICT, why),
+        DiffError::Unknown => ApiError(StatusCode::NOT_FOUND, "unknown session".into()),
     }
 }
 

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use harness_core::SessionId;
-use harness_protocol::{CAP_DIFF, MasterToNode, TurnDiff};
+use harness_protocol::{CAP_DIFF, CAP_DIFF_ALL, MasterToNode, TurnDiff};
 use tokio::sync::oneshot;
 
 use crate::{Master, lock};
@@ -88,11 +88,29 @@ pub async fn turn_diff(
     turn_id: String,
     rewind: bool,
 ) -> Result<Box<TurnDiff>, DiffError> {
+    ask(m, user, sid, turn_id, rewind, false).await
+}
+
+/// Everything `sid` changed (X.61): the same request, the same waiting
+/// places and bounds, with `all` set; only to a node that announced
+/// `CAP_DIFF_ALL`.
+pub async fn chat_diff(m: &Master, user: &str, sid: SessionId) -> Result<Box<TurnDiff>, DiffError> {
+    ask(m, user, sid, String::new(), false, true).await
+}
+
+async fn ask(
+    m: &Master,
+    user: &str,
+    sid: SessionId,
+    turn_id: String,
+    rewind: bool,
+    all: bool,
+) -> Result<Box<TurnDiff>, DiffError> {
     let node = m.owner(sid).await?;
     if !m.is_connected(&node) {
         return Err(DiffError::Away(node));
     }
-    if !m.node_has(&node, CAP_DIFF) {
+    if !m.node_has(&node, if all { CAP_DIFF_ALL } else { CAP_DIFF }) {
         return Err(DiffError::TooOld);
     }
     let req_id = harness_core::new_id();
@@ -119,6 +137,7 @@ pub async fn turn_diff(
             session_id: sid,
             turn_id,
             rewind,
+            all,
         },
     );
     if !sent {

@@ -223,6 +223,7 @@ impl Rig {
             session_id: sid,
             turn_id: turn.into(),
             rewind: false,
+            all: false,
         });
         loop {
             match self.recv().await {

@@ -221,6 +221,9 @@ function FileBlock({ f, index }: { f: DiffFile; index: number }) {
 export default function DiffPanel(props: {
   sessionId: string;
   turnId: string;
+  /** All of the chat's changes (X.61): `turnId` is not used, and the panel
+   * has no undo, no rewind and no later-turns switch. */
+  all?: boolean;
   /** Show this turn and every later one (what a rewind undoes). */
   rewind: boolean;
   /** Later turns changed files too: offer the wider view. */
@@ -236,7 +239,7 @@ export default function DiffPanel(props: {
   onRewind: (rewind: boolean) => void;
   onClose: () => void;
 }) {
-  const { sessionId, turnId, rewind } = props;
+  const { sessionId, turnId, rewind, all = false } = props;
   const [diff, setDiff] = useState<TurnDiff | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [tries, setTries] = useState(0);
@@ -247,14 +250,21 @@ export default function DiffPanel(props: {
     const ac = new AbortController();
     setDiff(null);
     setErr(null);
-    pageApi
-      .turnDiff(sessionId, turnId, rewind, ac.signal)
+    (all ? pageApi.chatDiff(sessionId, ac.signal) : pageApi.turnDiff(sessionId, turnId, rewind, ac.signal))
       .then(setDiff)
       .catch((x: unknown) => {
         if (!ac.signal.aborted) setErr(x instanceof Error ? x.message : String(x));
       });
     return () => ac.abort();
-  }, [sessionId, turnId, rewind, tries]);
+  }, [sessionId, turnId, rewind, all, tries]);
+
+  // The range holds no running turn: when it ends, read the range again, so
+  // "its changes show here once it ends" is true.
+  const wasRunning = useRef(props.running);
+  useEffect(() => {
+    if (all && wasRunning.current && !props.running) setTries((n) => n + 1);
+    wasRunning.current = props.running;
+  }, [all, props.running]);
 
   // Focus moves into the panel when it opens; Escape inside it closes it.
   useEffect(() => {
@@ -282,14 +292,14 @@ export default function DiffPanel(props: {
   return (
     <aside
       className="diff-panel"
-      aria-label={rewind ? "Changes of this turn and the later ones" : "Changes of this turn"}
+      aria-label={all ? "All changes in this chat" : rewind ? "Changes of this turn and the later ones" : "Changes of this turn"}
       onKeyDown={(e) => {
         if (e.key === "Escape") props.onClose();
       }}
     >
       <div className="diff-head">
         <h2 className="diff-title small" tabIndex={-1} ref={head}>
-          {rewind ? "Changes since before this turn" : "Changes in this turn"}
+          {all ? (diff?.since_pruned ? "Changes since the oldest turn still kept" : "All changes in this chat") : rewind ? "Changes since before this turn" : "Changes in this turn"}
           {diff && (
             <span className="muted">
               {" "}
@@ -317,6 +327,17 @@ export default function DiffPanel(props: {
         {undo.err && <span className="error-text">{showHidden(undo.err)}</span>}
       </div>
       <div className="diff-body">
+        {all && (
+          <p className="muted small" role="note">
+            Everything that changed in this chat's folder since {diff?.since_pruned ? "the oldest turn still kept" : "it started"}, including changes made by hand or by
+            other chats that share the folder.
+          </p>
+        )}
+        {all && props.running && (
+          <p className="muted small" role="note">
+            A turn is running: its changes show here once it ends.
+          </p>
+        )}
         {props.headMove && <HeadNote moved={props.headMove} />}
         {!!props.laterMoves?.length && <LaterNotes moves={props.laterMoves} />}
         {!diff && !err && (
@@ -332,7 +353,7 @@ export default function DiffPanel(props: {
             </button>
           </div>
         )}
-        {diff && files.length === 0 && !diff.more_files && <p className="muted small">No file changes.</p>}
+        {diff && files.length === 0 && !diff.more_files && <p className="muted small">{all ? "No file changes in this chat." : "No file changes."}</p>}
         {diff && (diff.cut || !!diff.more_files) && (
           <p className="diff-cut small" role="note">
             ⟨Cut: not every change is shown here

@@ -18,6 +18,7 @@ mod artifacts;
 mod attachments;
 mod background;
 mod chat_allows;
+mod chat_diff;
 mod compact;
 mod connection_repos;
 mod connections;
@@ -245,6 +246,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(artifacts::routes())
         .merge(background::routes())
         .merge(diff::routes())
+        .merge(chat_diff::routes())
         .merge(files::routes())
         .merge(made_files::routes())
         .merge(doc_preview::routes())
