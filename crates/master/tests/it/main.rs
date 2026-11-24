@@ -45,6 +45,7 @@ mod exec_mode_http;
 mod exec_switch_http;
 mod favicon_http;
 mod files_http;
+mod folder_file_http;
 mod folder_page_edit_http;
 mod folder_preview_http;
 mod fork_http;

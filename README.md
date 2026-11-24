@@ -1660,6 +1660,23 @@ chat shows the file as a chip with its name and size.
   editing tools, one at a time per account, so a machine without Linux 6.7 or
   newer and Landlock cannot preview. Only you can preview your chat's files
   (the server's API token can, as it can download them).
+- **Reading a file of the folder.** In a coding chat, an **Open** control on a
+  changed file of the diff ("Show changes" and "All changes"; not on a deleted
+  file), on a finished `read`, `write` or `edit` card, and on a made file's chip
+  opens that file's text beside the chat, read-only: its path, size, line
+  count and when it was read, with line numbers, highlighted as the chat's code
+  blocks are (files of up to 20,000 characters), and a **Reload** control (it
+  does not follow changes by itself). Opening one replaces the diff or the
+  Word and Excel preview in the panel (a Word or Excel name opens its Preview
+  instead). The node reads it, by the rules the preview has: a file outside the
+  folder, inside `.git`, behind a link that leads out or in a place the node
+  protects says "unknown file"; a node that denies `read` says so; a file that
+  is not text (a NUL byte in its first 8,000) says it is not shown. At most
+  256 KiB are shown; a longer file says how much, and invalid bytes are shown as
+  �. Keys the node knows are replaced by `[REDACTED]` as in the chat's log.
+  Markup, escape sequences and direction characters in a file are only text:
+  hidden and control characters show as codes. Only you can open your chat's
+  files, and a temporary chat shows none.
 - **Changing text and saving a copy.** In the same panel, click a paragraph,
   heading or list item of a Word file, or a cell of an Excel sheet (an empty
   cell of the shown grid too), and it becomes a text field with its text (a

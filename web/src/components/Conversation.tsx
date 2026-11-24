@@ -89,6 +89,7 @@ const SidePanel = lazy(() => import("./SidePanel"));
 const DiffPanel = lazy(() => import("./DiffPanel"));
 // A Word or Excel file of the chat, read as text and structure (T99).
 const DocPreview = lazy(() => import("./DocPreview"));
+const FolderFile = lazy(() => import("./FolderFile"));
 // Export as Markdown, loaded on its first click.
 const ExportChat = lazy(() => import("./ExportChat"));
 // Loaded on the chat's first task list (the agent's `todo` tool).
@@ -1512,7 +1513,11 @@ export default function Conversation(props: {
           })()}
         {previewHere && (
           <Suspense fallback={null}>
-            <DocPreview key={targetKey(previewHere)} target={previewHere} onClose={closePreview} composer={box} />
+            {previewHere.text ? (
+              <FolderFile key={targetKey(previewHere)} target={previewHere} onClose={closePreview} />
+            ) : (
+              <DocPreview key={targetKey(previewHere)} target={previewHere} onClose={closePreview} composer={box} />
+            )}
           </Suspense>
         )}
         {sideFor.current === sessionId && (

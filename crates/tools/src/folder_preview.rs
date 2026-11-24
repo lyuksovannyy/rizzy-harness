@@ -53,14 +53,13 @@ pub(crate) fn office_name(name: &str) -> bool {
     })
 }
 
-/// A path of the chat's folder as text, opened for a person's request (the
-/// preview, a page edit): resolved as the `read` tool resolves it (the pinned
-/// folder, links followed and judged, protected places), never outside the
-/// folder whatever `allow_outside_workspace` says, never inside `.git`, only
-/// a regular file opened without blocking, at most [`MAX_OUTPUT_BYTES`]. Every
-/// way of not reaching it is the one [`Refusal::NotFound`]. `ctx` is a read
-/// context of the session.
-pub(crate) async fn open_source(ctx: &ToolCtx, path: &str) -> Result<Vec<u8>, Refusal> {
+/// Where a path of the chat's folder really is, for a person's request (the
+/// preview, a page edit, the file view): resolved as the `read` tool resolves
+/// it (the pinned folder, links followed and judged, protected places), never
+/// outside the folder whatever `allow_outside_workspace` says, never inside
+/// `.git`. Every way of not reaching it is the one [`Refusal::NotFound`].
+/// `ctx` is a read context of the session.
+pub(crate) fn locate(ctx: &ToolCtx, path: &str) -> Result<std::path::PathBuf, Refusal> {
     if ctx.allow_outside_workspace
         || path.is_empty()
         || path.len() > MAX_PATH_BYTES
@@ -78,6 +77,14 @@ pub(crate) async fn open_source(ctx: &ToolCtx, path: &str) -> Result<Vec<u8>, Re
     }) {
         return Err(Refusal::NotFound);
     }
+    Ok(real)
+}
+
+/// A path of the chat's folder as text, opened for a person's request (the
+/// preview, a page edit): found by [`locate`], only a regular file opened
+/// without blocking, at most [`MAX_OUTPUT_BYTES`].
+pub(crate) async fn open_source(ctx: &ToolCtx, path: &str) -> Result<Vec<u8>, Refusal> {
+    let real = locate(ctx, path)?;
     // Existence is told before the name's kind, so a name that is not an
     // office file's says nothing about a path that is not there.
     tokio::task::spawn_blocking(move || -> Result<Vec<u8>, Refusal> {

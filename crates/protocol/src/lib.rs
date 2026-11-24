@@ -129,6 +129,19 @@ pub const CAP_DOC_PREVIEW: &str = "doc-preview";
 /// The longest path a `session.doc_preview` may carry, in bytes.
 pub const MAX_PREVIEW_PATH_BYTES: usize = 1024;
 
+/// The node capability that announces `session.folder_file` (ADOPTION_PLAN
+/// X.63, PLAN.md T99): a text file of a chat's folder read by the node for
+/// the page's side panel, read-only. The master sends it only to nodes whose
+/// hello listed it; an older one is told to update.
+pub const CAP_FOLDER_FILE: &str = "folder-file";
+
+/// The most text of a file a `session.folder_file_result` carries, in bytes.
+/// 256 KiB is some six thousand lines of code: the longest source file a
+/// person reads in a panel, and small enough that even a file of control
+/// characters (six bytes each once written as JSON) stays under the link's
+/// frame limit with room to spare.
+pub const MAX_FOLDER_FILE_TEXT_BYTES: usize = 256 * 1024;
+
 /// The node capability that announces `session.doc_page_edit` (ADOPTION_PLAN
 /// X.60, PLAN.md T100): a person's text changes to a Word or Excel file of
 /// the chat's folder, made into a new file beside it by the node. Announced
@@ -180,6 +193,40 @@ pub struct ChangeResult {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<ChangeFailure>,
+}
+
+/// A text file of a chat's folder as the node read it for the page's panel
+/// (X.63): the text (scrubbed of the node's secrets as an event's text is,
+/// cut at [`MAX_FOLDER_FILE_TEXT_BYTES`]), the file's size now, and whether
+/// the text is the whole of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderFileText {
+    pub text: String,
+    /// The file's size in bytes when it was read.
+    pub size: u64,
+    /// The file is longer than the text shown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    /// Bytes that are not UTF-8 were shown as U+FFFD.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lossy: bool,
+}
+
+/// Why a node shows no text of a file: one word each, never text from the
+/// file or the folder. `not_found` is the one answer for every way of not
+/// reaching the path (see [`PreviewRefusal`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileRefusal {
+    NotFound,
+    /// The file is not text (a NUL byte in its first block).
+    Binary,
+    /// node.toml denies the `read` tool: the node shows no file.
+    Denied,
+    Busy,
+    /// A word a newer node has and this master does not.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Why a node shows no preview: one word each, never text from the file or
@@ -1204,6 +1251,16 @@ pub enum NodeToMaster {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         refusal: Option<PreviewRefusal>,
     },
+    /// The answer to `session.folder_file` (pull only): the text or why there
+    /// is none (X.63).
+    #[serde(rename = "session.folder_file_result")]
+    FolderFileResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<FolderFileText>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refusal: Option<FileRefusal>,
+    },
     /// The answer to `session.doc_page_edit` (pull only): the path of the new
     /// file relative to the chat's folder and one result per change, or why
     /// nothing was made.
@@ -1971,6 +2028,18 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sheet: Option<u32>,
     },
+    /// Read a text file of the chat's folder for the page's side panel
+    /// (X.63, T99): answered by one `session.folder_file_result`, never by
+    /// an ack, handled outside the node's command loop, appends no event.
+    /// `path` is text for the node to resolve under its own read rules (it
+    /// widens nothing, and never leaves the folder). Only to nodes with
+    /// [`CAP_FOLDER_FILE`].
+    #[serde(rename = "session.folder_file")]
+    FolderFile {
+        req_id: String,
+        session_id: SessionId,
+        path: String,
+    },
     /// A person's text changes to a Word or Excel file of the chat's folder
     /// (X.60, T100): the node reads the file as `session.doc_preview` does,
     /// runs the changes through its confined helper and writes the result as
@@ -2079,6 +2148,7 @@ impl MasterToNode {
             | MasterToNode::BackgroundOutput { .. }
             | MasterToNode::Files { .. }
             | MasterToNode::DocPreview { .. }
+            | MasterToNode::FolderFile { .. }
             | MasterToNode::DocPageEdit { .. }
             | MasterToNode::ProjectCreate { .. }
             | MasterToNode::ProjectClone { .. }
@@ -2953,6 +3023,65 @@ mod tests {
         }
         // The message is never acked.
         assert_eq!(ask.req_id(), None);
+    }
+
+    /// X.63: the wire shape of the folder file pair.
+    #[test]
+    fn folder_file_wire_shape() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let ask = MasterToNode::FolderFile {
+            req_id: "r".into(),
+            session_id: sid,
+            path: "src/main.rs".into(),
+        };
+        let v = serde_json::to_value(&ask).unwrap();
+        assert_eq!(v["type"], "session.folder_file");
+        assert_eq!(v["path"], "src/main.rs");
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), ask);
+        assert_eq!(ask.req_id(), None, "never acked");
+        let whole = NodeToMaster::FolderFileResult {
+            req_id: "r".into(),
+            file: Some(FolderFileText {
+                text: "fn main() {}\n".into(),
+                size: 13,
+                truncated: false,
+                lossy: false,
+            }),
+            refusal: None,
+        };
+        let v = serde_json::to_value(&whole).unwrap();
+        assert_eq!(v["type"], "session.folder_file_result");
+        // The flags that are false and the refusal are omitted.
+        assert!(
+            v["file"].get("truncated").is_none() && v.get("refusal").is_none(),
+            "{v}"
+        );
+        assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), whole);
+        for (r, word) in [
+            (FileRefusal::NotFound, "not_found"),
+            (FileRefusal::Binary, "binary"),
+            (FileRefusal::Denied, "denied"),
+            (FileRefusal::Busy, "busy"),
+        ] {
+            let no = NodeToMaster::FolderFileResult {
+                req_id: "r".into(),
+                file: None,
+                refusal: Some(r),
+            };
+            let v = serde_json::to_value(&no).unwrap();
+            assert_eq!(v["refusal"], word);
+            assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), no);
+        }
+        // A word a newer node has is `unknown`, not a broken message.
+        let newer =
+            json!({"type": "session.folder_file_result", "req_id": "r", "refusal": "quota"});
+        assert!(matches!(
+            serde_json::from_value::<NodeToMaster>(newer).unwrap(),
+            NodeToMaster::FolderFileResult {
+                refusal: Some(FileRefusal::Unknown),
+                ..
+            }
+        ));
     }
 
     /// X.60: the wire shape of the page edit pair, and a refusal word this

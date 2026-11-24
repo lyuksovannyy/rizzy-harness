@@ -11,11 +11,14 @@ import { ApprovalChoice, Held, useShown } from "./ApprovalChoice";
 import { CallInput, useOpenFields } from "./CallInput";
 import { MadeChip, PublishCard, SaveAsArtifact } from "./ChatArtifacts";
 import { ChildAnswer, ChildModel } from "./DelegateResult";
+import { FileButton } from "./FileButton";
 import { MemoryNotice } from "./MemoryNotice";
 
 type Tool = Extract<Item, { type: "tool" }>;
 /** Cards that show a file (or ran a command that made one): "Save as artifact" sits on them. */
 const SAVEABLE = new Set(["write", "edit", "read", "bash"]);
+/** Cards whose input names one file of the folder: "Open" sits on them. */
+const FILE_TOOLS = new Set(["write", "edit", "read"]);
 type Status = "waiting" | "ok" | "failed" | "denied" | "running";
 
 function statusOf(item: Tool): Status {
@@ -251,6 +254,12 @@ export function ToolCard({
         </div>
       )}
       {status === "ok" && item.result?.made && <MadeChip sessionId={sessionId} made={item.result.made} />}
+      {/* The path the call was made with, as a control that opens the file beside the chat. */}
+      {status === "ok" && FILE_TOOLS.has(item.tool) && typeof item.input?.path === "string" && (
+        <div className="tool-open">
+          <FileButton sessionId={sessionId} path={item.input.path} cwd={cwd} />
+        </div>
+      )}
       {child && item.result && <ChildAnswer output={item.result.output} agent={shownName(asText(item.input?.agent))} />}
       {pending &&
         item.approval &&

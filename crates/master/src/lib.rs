@@ -773,6 +773,7 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Files { .. }
         // A file read for the page's panel: no event.
         | MasterToNode::DocPreview { .. }
+        | MasterToNode::FolderFile { .. }
         // A person's text changes to a file of the folder: no event.
         | MasterToNode::DocPageEdit { .. }
         // A new project's folder: no session at all.
@@ -1808,6 +1809,20 @@ impl Master {
                     (Some(p), None) => Ok(p),
                     (_, Some(r)) => Err(r),
                     (None, None) => Err(harness_protocol::PreviewRefusal::NotAvailable),
+                },
+            ),
+            NodeToMaster::FolderFileResult {
+                req_id,
+                file,
+                refusal,
+            } => folder_preview::on_file_answer(
+                self,
+                node_id,
+                req_id,
+                match (file, refusal) {
+                    (Some(f), None) => Ok(f),
+                    (_, Some(r)) => Err(r),
+                    (None, None) => Err(harness_protocol::FileRefusal::Unknown),
                 },
             ),
             NodeToMaster::DocPageEditResult {

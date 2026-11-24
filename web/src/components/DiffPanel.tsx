@@ -24,6 +24,7 @@ import { marks, type Seg } from "../lib/callText";
 import { codeOf, SHOWN_SRC } from "../md/hiddenChars";
 import { showHidden } from "../md/hidden";
 import type { DiffFile, DiffHunk, HeadMoved, TurnDiff } from "../types";
+import { FileButton } from "./FileButton";
 import { HeadNote, LaterNotes } from "./HeadNote";
 import "./diffPanel.css";
 
@@ -171,7 +172,7 @@ function FileLines({ f, limit }: { f: DiffFile; limit: number }) {
   );
 }
 
-function FileBlock({ f, index }: { f: DiffFile; index: number }) {
+function FileBlock({ f, index, sessionId }: { f: DiffFile; index: number; sessionId: string }) {
   const s = own(STATUS, f.status) ?? STATUS.modified;
   const why = noLines(f);
   const [open, setOpen] = useState(index < OPEN_FILES);
@@ -193,6 +194,8 @@ function FileBlock({ f, index }: { f: DiffFile; index: number }) {
           <Marked text={f.path} />
           {(f.new_mode ?? f.old_mode) === "120000" && <span className="muted"> (link)</span>}
         </span>
+        {/* The file as it is now, beside the chat; a deleted file is not there. */}
+        {f.status !== "deleted" && <FileButton sessionId={sessionId} path={f.path} />}
         <span className="diff-counts">
           {f.added > 0 && <span className="diff-plus">+{f.added}</span>} {f.removed > 0 && <span className="diff-minus">−{f.removed}</span>}
         </span>
@@ -411,7 +414,7 @@ export default function DiffPanel(props: {
           </nav>
         )}
         {files.map((f, i) => (
-          <FileBlock key={i} f={f} index={i} />
+          <FileBlock key={i} f={f} index={i} sessionId={sessionId} />
         ))}
       </div>
     </aside>

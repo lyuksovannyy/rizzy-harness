@@ -10,10 +10,13 @@ import { useSyncExternalStore } from "react";
  * names (the server keeps a copy); of a chat with a folder, its path in the
  * folder (the node reads it). Exactly one of the two.
  */
-export type PreviewTarget = { session: string; name: string; /** A sentence the panel opens with (a copy was just saved). */ note?: string } & ({ fileId: string; path?: undefined } | { path: string; fileId?: undefined });
+export type PreviewTarget = { session: string; name: string; /** A sentence the panel opens with (a copy was just saved). */ note?: string } & (
+  | { fileId: string; path?: undefined; text?: undefined }
+  | { path: string; fileId?: undefined; /** The file's text in the file viewer (components/FolderFile.tsx), not a Word or Excel preview. */ text?: true }
+);
 
 /** What tells one target from another (the panel restarts on a change). */
-export const targetKey = (t: PreviewTarget) => `${t.session}:${t.fileId ?? `path:${t.path}`}`;
+export const targetKey = (t: PreviewTarget) => `${t.session}:${t.fileId ?? `${t.text ? "text" : "path"}:${t.path}`}`;
 
 /** The route that answers for a target, `sheet` being the place among the visible sheets. */
 export function previewUrl(t: PreviewTarget, sheet?: number): string {

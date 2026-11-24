@@ -13,6 +13,7 @@ pub mod connector;
 pub mod contain;
 pub mod doc_helper;
 pub mod folder_edit;
+pub mod folder_file;
 pub mod folder_preview;
 pub mod guard;
 mod office;

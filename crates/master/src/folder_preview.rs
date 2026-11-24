@@ -7,8 +7,8 @@
 //! confined helper. It keeps nothing and writes no path to a log. The owner
 //! check is the caller's (`http/folder_preview.rs`).
 //!
-//! A person's text changes to such a file (X.60, T100) wait the same way,
-//! in the same map (so one account's preview and edit share its one place),
+//! A person's text changes to such a file (X.60, T100), and the view of a text
+//! file (X.63), wait the same way, in the same map (so one account's preview and edit share its one place),
 //! each answer taken only by the kind of request that is waiting for it.
 
 use std::collections::HashMap;
@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use harness_core::SessionId;
 use harness_protocol::{
-    CAP_DOC_PAGE_EDIT, CAP_DOC_PREVIEW, ChangeResult, MasterToNode, PageChange, PreviewRefusal,
+    CAP_DOC_PAGE_EDIT, CAP_DOC_PREVIEW, CAP_FOLDER_FILE, ChangeResult, FileRefusal, FolderFileText,
+    MasterToNode, PageChange, PreviewRefusal,
 };
 use serde_json::Value;
 use tokio::sync::oneshot;
@@ -26,6 +27,9 @@ use crate::{Master, lock};
 /// How long a request waits for its node: the helper's queue (10 s) and run
 /// (20 s) bounds and the file's read.
 const WAIT: Duration = Duration::from_secs(40);
+/// A text file's read has no helper to queue for: the node answers at once or
+/// not at all.
+const WAIT_FILE: Duration = Duration::from_secs(10);
 /// Requests waiting at once, all nodes together, and per account: one
 /// person's previews run one at a time, so they cannot fill the node's
 /// helper places that the agent's own tool calls use.
@@ -40,6 +44,7 @@ pub enum Got {
         saved: Option<String>,
         results: Vec<ChangeResult>,
     },
+    File(Result<FolderFileText, FileRefusal>),
 }
 
 type Answer = Result<Got, PreviewRefusal>;
@@ -49,6 +54,7 @@ type Answer = Result<Got, PreviewRefusal>;
 enum Kind {
     Preview,
     Edit,
+    File,
 }
 
 /// What a page edit got: the new file's path (none when a change was
@@ -78,6 +84,8 @@ pub enum PreviewError {
     Busy,
     Timeout,
     Refused(PreviewRefusal),
+    /// A text file's refusal (X.63).
+    File(FileRefusal),
     Unknown,
 }
 
@@ -125,9 +133,9 @@ pub async fn ask(
         path,
         sheet,
     };
-    match wait(m, user, node, req_id, Kind::Preview, msg).await? {
+    match wait(m, user, node, req_id, Kind::Preview, WAIT, msg).await? {
         Got::Preview(v) => Ok(v),
-        Got::Edit { .. } => Err(PreviewError::Unknown),
+        _ => Err(PreviewError::Unknown),
     }
 }
 
@@ -151,9 +159,32 @@ pub async fn ask_edit(
         sheet,
         changes,
     };
-    match wait(m, user, node, req_id, Kind::Edit, msg).await? {
+    match wait(m, user, node, req_id, Kind::Edit, WAIT, msg).await? {
         Got::Edit { saved, results } => Ok(Edited { saved, results }),
-        Got::Preview(_) => Err(PreviewError::Unknown),
+        _ => Err(PreviewError::Unknown),
+    }
+}
+
+/// The text of `path` in `sid`'s folder (X.63), read by the node that owns
+/// the chat; `user` is who asks.
+pub async fn ask_file(
+    m: &Master,
+    user: &str,
+    sid: SessionId,
+    path: String,
+) -> Result<FolderFileText, PreviewError> {
+    let node = m.owner(sid).await?;
+    check_node(m, &node, CAP_FOLDER_FILE)?;
+    let req_id = harness_core::new_id();
+    let msg = MasterToNode::FolderFile {
+        req_id: req_id.clone(),
+        session_id: sid,
+        path,
+    };
+    match wait(m, user, node, req_id, Kind::File, WAIT_FILE, msg).await? {
+        Got::File(Ok(f)) => Ok(f),
+        Got::File(Err(r)) => Err(PreviewError::File(r)),
+        _ => Err(PreviewError::Unknown),
     }
 }
 
@@ -173,6 +204,7 @@ async fn wait(
     node: String,
     req_id: String,
     kind: Kind,
+    bound: Duration,
     msg: MasterToNode,
 ) -> Result<Got, PreviewError> {
     let (tx, rx) = oneshot::channel();
@@ -195,7 +227,7 @@ async fn wait(
     if !m.send_raw(&node, msg) {
         return Err(PreviewError::Away(node));
     }
-    match tokio::time::timeout(WAIT, rx).await {
+    match tokio::time::timeout(bound, rx).await {
         Ok(Ok(Ok(p))) => Ok(p),
         Ok(Ok(Err(r))) => Err(PreviewError::Refused(r)),
         Ok(Err(_)) => Err(PreviewError::Away(node)),
@@ -208,6 +240,16 @@ async fn wait(
 /// route's to check (it parses the value once).
 pub fn on_answer(m: &Master, node_id: &str, req_id: String, answer: Result<Value, PreviewRefusal>) {
     deliver(m, node_id, req_id, Kind::Preview, answer.map(Got::Preview));
+}
+
+/// A `session.folder_file_result` from `node_id`, likewise.
+pub fn on_file_answer(
+    m: &Master,
+    node_id: &str,
+    req_id: String,
+    answer: Result<FolderFileText, FileRefusal>,
+) {
+    deliver(m, node_id, req_id, Kind::File, Ok(Got::File(answer)));
 }
 
 /// A `session.doc_page_edit_result` from `node_id`, likewise.

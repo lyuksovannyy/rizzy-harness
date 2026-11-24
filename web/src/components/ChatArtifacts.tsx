@@ -12,6 +12,8 @@ import { artifactHash } from "../lib/routes";
 import type { Live } from "../live";
 import type { Item, MadeFile, StagedArtifact } from "../types";
 import { LinkedA } from "./Linked";
+import { previewable } from "../lib/docPreview";
+import { FileButton } from "./FileButton";
 import { PreviewButton } from "./PreviewButton";
 
 const POLL_MS = 1500;
@@ -228,6 +230,8 @@ export function MadeChip({ sessionId, made }: { sessionId: string; made: MadeFil
       )}
       {/* The server's copy (a chat without a folder) or the file's path in the folder (the node reads it) opens in the side panel. */}
       <PreviewButton sessionId={sessionId} fileId={madeId(made.file_id)} path={made.path} name={made.name} />
+      {/* Any other file of the folder opens as text beside the chat. */}
+      {made.path && !previewable(made.name) && <FileButton sessionId={sessionId} path={made.path} />}
     </div>
   );
 }

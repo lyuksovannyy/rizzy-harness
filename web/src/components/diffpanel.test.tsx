@@ -296,3 +296,16 @@ test("the whole chat's refusal is text with a way to try again", async () => {
   await act(async () => again.click());
   expect(chatDiff).toHaveBeenCalledTimes(2);
 });
+
+test("each changed file that still exists has an Open control; a deleted one has none", async () => {
+  turnDiff.mockResolvedValueOnce({
+    files: [
+      { path: "src/a.rs", status: "modified", content: "text", added: 1, removed: 0 },
+      { path: "gone.rs", status: "deleted", content: "text", added: 0, removed: 1 },
+      { path: "new.rs", old_path: "old.rs", status: "renamed", content: "text", added: 0, removed: 0 },
+    ],
+  } as TurnDiff);
+  await render();
+  const labels = [...host.querySelectorAll("summary button")].map((b) => b.getAttribute("aria-label"));
+  expect(labels).toEqual(["Open a.rs", "Open new.rs"]);
+});
