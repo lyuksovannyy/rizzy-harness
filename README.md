@@ -2277,7 +2277,7 @@ dir = "~/rizzy-projects"             # where "New project" makes folders (see "P
 
 [forge]
 clone = true                         # clone repositories into new project folders (see "Cloning a repository"); false: never
-push = true                          # let the push tool push a cloned project's branch back to its repository (see "Pushing to the repository"); false: never
+push = true                          # let the push tool push a cloned project's branch back to its repository, and the pull_request tool open pull requests there (see "Pushing to the repository", "Opening a pull request"); false: neither
 hosts = ["github.com", "gitlab.com"] # the only hosts this node clones from, exactly as written: a lower-case name or IPv4 address, ":<port>" only where you add one
 
 [web]                                # a REMOTE node's web tools for Agentic chats; off unless you say so. On the server's own node a table here only takes away (see "Web tools in Agentic chats")
@@ -4500,10 +4500,16 @@ with how many characters you have not expanded). The server, not the node,
 opens it, with your connection: from exactly the request the card showed
 (it reads that request from its own copy of the chat), once per card, at
 most five per chat in an hour. The answer is the pull request's number and
-address (shown as text), the forge's own words when it refuses (no commits
-between the branches, a missing scope), or that one is already open. The
-token never goes to the node for this. `denied_tools = ["pull_request"]` in
-node.toml turns it off on a node. Details: `docs/forge-pr.md`.
+address (shown as plain text in the tool's result, never made a link; an
+address on another host than the project's source is left out and only the
+number given), the forge's own words when it refuses (no commits between the
+branches, a missing scope), or that one is already open (with its number and
+address, from one lookup on GitHub and GitLab). A draft is GitHub's own
+flag, and on GitLab, Gitea and Forgejo a `Draft: ` or `WIP: ` title prefix
+(not added twice; a title that would then pass 255 characters is refused).
+The token never goes to the node for this. On a node, `[forge] push = false`
+turns it off together with pushing, and `denied_tools = ["pull_request"]`
+turns off only this tool. Details: `docs/forge-pr.md`.
 
 ## Custom connectors: a workspace's remote MCP servers
 

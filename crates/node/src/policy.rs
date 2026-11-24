@@ -847,7 +847,9 @@ pub struct ForgePolicy {
     /// default, the session lead's choice of 2026-11-24, overridable by the
     /// owner): a project cloned from a host in `hosts` may push one branch
     /// back to that same repository, through the `push` tool only, with a
-    /// card every time (X.27 step 4, PLAN.md T101).
+    /// card every time (X.27 step 4, PLAN.md T101). `false` also withholds
+    /// the `pull_request` tool (PLAN.md T102): the node sends nothing to a
+    /// forge on an agent's behalf.
     pub push: bool,
     /// Host names (lower-case DNS names or IPv4 addresses), each optionally
     /// with `:<port>`; exactly these, compared as written.

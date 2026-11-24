@@ -44,10 +44,12 @@ type Call = (String, Option<String>);
 
 #[derive(Clone, Default)]
 pub(crate) struct Forge {
-    seen: Arc<Mutex<Vec<Call>>>,
+    pub(crate) seen: Arc<Mutex<Vec<Call>>>,
     addr: Arc<OnceLock<SocketAddr>>,
     /// The JSON bodies of the pull requests asked for (PLAN.md T102).
     pub(crate) pulls: Arc<Mutex<Vec<Value>>>,
+    /// The query strings of the open-pull-request lookups.
+    pub(crate) lookups: Arc<Mutex<Vec<String>>>,
 }
 
 impl Forge {
@@ -60,7 +62,7 @@ impl Forge {
             .cloned()
             .collect()
     }
-    fn host(&self) -> ForgeHost {
+    pub(crate) fn host(&self) -> ForgeHost {
         ForgeHost {
             host: "127.0.0.1".into(),
             kind: ForgeKind::Github,
@@ -80,6 +82,18 @@ async fn forge(State(f): State<Forge>, req: Request) -> Response {
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     f.seen.lock().unwrap().push((path.clone(), auth.clone()));
+    // The lookup of an open pull request (`existing`): GitHub's query.
+    if !post && path.eq_ignore_ascii_case("/gh/repos/ada/secret/pulls") {
+        let q = req.uri().query().unwrap_or_default().to_string();
+        f.lookups.lock().unwrap().push(q.clone());
+        let port = f.addr.get().unwrap().port();
+        if auth.as_deref() != Some(&format!("Bearer {TOKEN_A}")) {
+            return (AxStatus::UNAUTHORIZED, "no").into_response();
+        }
+        return axum::Json(json!([{"number": 3,
+            "html_url": format!("http://127.0.0.1:{port}/ada/secret/pull/3")}]))
+        .into_response();
+    }
     if post && path.eq_ignore_ascii_case("/gh/repos/ada/secret/pulls") {
         if auth.as_deref() != Some(&format!("Bearer {TOKEN_A}")) {
             return (AxStatus::UNAUTHORIZED, "no").into_response();
@@ -110,6 +124,11 @@ async fn forge(State(f): State<Forge>, req: Request) -> Response {
                 (AxStatus::CREATED, axum::Json(json!({"number": 1}))).into_response()
             }
             "big" => (AxStatus::CREATED, "x".repeat(5 * 1024 * 1024)).into_response(),
+            "elsewhere" => (
+                AxStatus::CREATED,
+                axum::Json(json!({"number": 8, "html_url": "https://evil.example/ada/secret/pull/8"})),
+            )
+                .into_response(),
             "redirect" => (
                 AxStatus::TEMPORARY_REDIRECT,
                 [("location", "http://evil.example/steal")],

@@ -165,8 +165,8 @@ pub(crate) async fn run_pr(
     let Some(target) = s.push_target_now() else {
         return Err(harness_tools::pull_request::NOT_HERE.into());
     };
-    if s.node.cfg.policy.denies(PR_TOOL) {
-        return Err("this node does not open pull requests (denied_tools)".into());
+    if s.node.cfg.policy.denies(PR_TOOL) || !s.node.cfg.policy.forge.push {
+        return Err("this node does not open pull requests ([forge] push, denied_tools)".into());
     }
     let pr = parse_pr(input)?;
     let reason = format!(
@@ -296,7 +296,10 @@ impl Session {
             && policy.projects.staging.is_some()
             && policy.forge.allows_push(&target.host)
             && !policy.denies(PUSH_TOOL);
-        let pr = chat && !policy.denies(harness_core::forge::PR_TOOL);
+        // `[forge] push = false` is the operator's "this node sends nothing
+        // to a forge": it withholds pull requests too (the session lead's
+        // decision of 2026-11-24), though the master makes that call.
+        let pr = chat && policy.forge.push && !policy.denies(harness_core::forge::PR_TOOL);
         let mut refused = Vec::new();
         if !push {
             refused.push(PUSH_TOOL);

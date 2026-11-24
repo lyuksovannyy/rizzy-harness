@@ -1092,6 +1092,7 @@ impl NodeRuntime {
                 // Pull requests the master opens (PLAN.md T102): only an
                 // agentic node whose node.toml does not deny the tool.
                 if self.inner.cfg.profile == harness_core::event::Profile::Agentic
+                    && self.inner.cfg.policy.forge.push
                     && !self.inner.cfg.policy.denies(harness_core::forge::PR_TOOL)
                 {
                     capabilities.push(harness_protocol::CAP_FORGE_PR.into());

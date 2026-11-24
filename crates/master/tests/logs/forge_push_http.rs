@@ -19,7 +19,8 @@ use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
 use super::forge_clone_http::{
-    T, TOKEN_A, assert_no_token_anywhere, clone_body, connect, fake, member, ready, req, start,
+    T, TOKEN_A, TOKEN_B, assert_no_token_anywhere, clone_body, connect, fake, member, ready, req,
+    start, team,
 };
 
 pub(crate) struct Chat {
@@ -945,6 +946,22 @@ async fn the_forges_answers_are_bounded_and_clean() {
     input["title"] = json!("exists");
     let a = c.pr("e1", input.clone()).await;
     assert!(a.existed && a.error.is_none(), "{a:?}");
+    // One lookup found the open one: its number and address.
+    assert_eq!(a.number, Some(3), "{a:?}");
+    assert!(
+        a.url
+            .as_deref()
+            .is_some_and(|u| u.ends_with("/ada/secret/pull/3")),
+        "{a:?}"
+    );
+    assert_eq!(
+        c.t.forge.lookups.lock().unwrap().clone(),
+        vec!["head=ada%3Afeat&base=main&state=open".to_string()]
+    );
+    // An address on another host than the project's source: the number only.
+    input["title"] = json!("elsewhere");
+    let a = c.pr("e0", input.clone()).await;
+    assert_eq!((a.number, a.url.as_deref()), (Some(8), None), "{a:?}");
     input["title"] = json!("hostile");
     let a = c.pr("e2", input.clone()).await;
     let e = a.error.unwrap();
@@ -956,6 +973,15 @@ async fn the_forges_answers_are_bounded_and_clean() {
         e.contains("No commits between") && e.chars().count() <= 400,
         "{e}"
     );
+    assert_no_token_anywhere(&c.t);
+}
+
+/// A 5 MB answer, a redirect elsewhere and a slow forge: errors, nothing
+/// secret anywhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_forges_failures_are_errors() {
+    let c = running().await;
+    let mut input = honest();
     for (t, want) in [
         ("big", "too large"),
         ("redirect", "HTTP 307"),
@@ -992,4 +1018,236 @@ async fn the_sixth_in_an_hour_is_refused() {
 async fn an_api_token_turn_offers_no_pull_request() {
     let c = chat().await;
     assert!(c.turn(PromptOpts::default()).await.is_none());
+}
+
+// ------------------------------------------- pull requests: who and when
+
+/// Alice's project in a team workspace with Bob, and Bob's own agentic chat
+/// in it; Alice has a connection, Bob none yet.
+async fn bobs_chat() -> Chat {
+    let t = start().await;
+    let (l, node) = fake(
+        "pusher",
+        &[
+            CAP_PROJECTS,
+            "forge-clone:600",
+            CAP_FORGE_PUSH,
+            CAP_FORGE_PR,
+        ],
+    );
+    t.master.add_link(l, false).await.unwrap();
+    let (alice, alice_id) = member(&t, "alice").await;
+    let (bob, bob_id) = member(&t, "bob").await;
+    let ws = team(&t, &alice_id, &bob_id).await;
+    let conn = connect(&t, &alice, TOKEN_A).await;
+    let mut body = clone_body(&conn, "ada/secret", "pusher");
+    body["workspace_id"] = json!(ws);
+    let (st, v) = req(&t, Method::POST, "/api/projects", Some(body), &alice).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let pid = v["project_id"].as_str().unwrap().to_string();
+    ready(&t, &alice, &pid).await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/sessions",
+        Some(
+            json!({"profile": "agentic", "project_id": pid, "exec_mode": "sandbox",
+                    "workspace_id": ws}),
+        ),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let sid: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    for _ in 0..200 {
+        if t.master.inner_mirror().session(sid).unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    Chat {
+        t,
+        alice: bob,
+        alice_id: bob_id,
+        sid,
+        node,
+    }
+}
+
+/// Another member's chat in the same project uses that member's own
+/// connection or none, never the project owner's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_members_chat_uses_their_own_connection_or_none() {
+    let c = bobs_chat().await;
+    assert!(
+        c.turn(Chat::owner()).await.is_none(),
+        "no connection of Bob's: no target"
+    );
+    connect(&c.t, &c.alice, TOKEN_B).await;
+    let target = c.turn(Chat::owner()).await.expect("Bob's own connection");
+    assert_eq!(target.login, "bob-gh");
+    let a = c.pr("b1", honest()).await;
+    assert!(
+        a.error.is_some(),
+        "the stand-in takes only Alice's token: {a:?}"
+    );
+    let seen = c.t.forge.seen.lock().unwrap().clone();
+    let pulls: Vec<_> = seen.iter().filter(|(p, _)| p.ends_with("/pulls")).collect();
+    assert!(!pulls.is_empty());
+    for (_, auth) in pulls {
+        assert_eq!(auth.as_deref(), Some(format!("Bearer {TOKEN_B}").as_str()));
+    }
+    assert!(c.t.forge.pulls.lock().unwrap().is_empty());
+}
+
+/// An admin cannot answer the owner's card (the chat is private): no click
+/// is recorded and nothing is opened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_admins_answer_opens_nothing() {
+    let c = running().await;
+    c.pr_card("a1", "ca1", honest(), honest()).await;
+    let st = c.click(&c.t.alex, "a1", "allow").await;
+    assert_ne!(st, StatusCode::OK);
+    assert!(!c.t.master.push_click_pending(c.sid, "a1"));
+    assert!(c.open_pr("a1").await.error.is_some());
+    assert!(c.t.forge.pulls.lock().unwrap().is_empty());
+}
+
+/// A sub-agent's session, a routine's run, a forked chat and a node that
+/// does not offer the tool: nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sub_agents_routines_forks_and_old_nodes_get_no_pull_request() {
+    // A routine's run names no target.
+    let c = chat().await;
+    assert!(
+        c.turn(PromptOpts {
+            by_owner: true,
+            routine_run: Some("run-1".into()),
+            ..Default::default()
+        })
+        .await
+        .is_none()
+    );
+    // A forked chat.
+    let c = chat().await;
+    let db = rusqlite::Connection::open(c.t.dir.path().join("master.db")).unwrap();
+    db.execute(
+        "INSERT INTO session_forks (session_id, parent_id, through_seq, created_ms)
+         VALUES (?1, ?2, 1, 1)",
+        rusqlite::params![c.sid.to_string(), SessionId::new().to_string()],
+    )
+    .unwrap();
+    assert!(c.turn(Chat::owner()).await.is_none());
+    // A sub-agent's session asking.
+    let c = running().await;
+    let kid = SessionId::new();
+    c.node
+        .tx
+        .send(NodeToMaster::Event {
+            event: harness_core::RawEvent {
+                session_id: kid,
+                seq: 1,
+                ts_ms: 1,
+                kind: "session_created".into(),
+                payload: json!({"title": "@coder", "cwd": "/", "model": "m", "backend": "native",
+                    "node_id": "pusher", "profile": "agentic", "approval_mode": "auto",
+                    "exec_mode": "sandbox", "parent_session": c.sid}),
+            },
+        })
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        if c.t.master.inner_mirror().session(kid).unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let kc = Chat {
+        t: c.t,
+        alice: c.alice,
+        alice_id: c.alice_id,
+        sid: kid,
+        node: c.node,
+    };
+    let a = kc.open_pr("k1").await;
+    assert!(
+        a.error
+            .unwrap()
+            .contains("only for a project chat's own turn")
+    );
+    // An old node: no `forge-pr` (nor `forge-push`): no target.
+    let t = start().await;
+    let (l, node) = fake("old", &[CAP_PROJECTS, "forge-clone:600"]);
+    t.master.add_link(l, false).await.unwrap();
+    let (alice, alice_id) = member(&t, "alice").await;
+    let conn = connect(&t, &alice, TOKEN_A).await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/projects",
+        Some(clone_body(&conn, "ada/secret", "old")),
+        &alice,
+    )
+    .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let pid = v["project_id"].as_str().unwrap().to_string();
+    ready(&t, &alice, &pid).await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"profile": "agentic", "project_id": pid, "exec_mode": "sandbox"})),
+        &alice,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let sid: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    for _ in 0..200 {
+        if t.master.inner_mirror().session(sid).unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let old = Chat {
+        t,
+        alice,
+        alice_id,
+        sid,
+        node,
+    };
+    assert!(old.turn(Chat::owner()).await.is_none());
+}
+
+/// Two requests of one chat at once: the second is refused and the click
+/// stays for the first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_pull_requests_of_one_chat_at_once() {
+    let c = running().await;
+    c.pr_card("w1", "cw1", honest(), honest()).await;
+    assert_eq!(c.click(&c.alice, "w1", "allow").await, StatusCode::OK);
+    let held =
+        c.t.master
+            .hold_push_request(c.sid)
+            .expect("the chat's place");
+    let a = c.open_pr("w1").await;
+    assert!(a.error.unwrap().contains("being answered"));
+    drop(held);
+    assert_eq!(c.open_pr("w1").await.number, Some(7));
+}
+
+/// The forge host resolving to a private address at call time (its entry
+/// no longer allowing one): refused, nothing sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_private_address_at_call_time_is_refused() {
+    let c = running().await;
+    let mut h = c.t.forge.host();
+    h.private_address = false;
+    c.t.master.set_forge_hosts(vec![h]);
+    let a = c.pr("v1", honest()).await;
+    assert!(
+        a.error.unwrap().contains("private address"),
+        "{:?}",
+        c.t.forge.pulls.lock().unwrap()
+    );
+    assert!(c.t.forge.pulls.lock().unwrap().is_empty());
 }

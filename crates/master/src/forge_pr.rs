@@ -173,18 +173,16 @@ async fn open(
     let base = base_of(m, h, token, full_name, pr).await?;
     let mut url = crate::forge_repos::repo_url(h, full_name)
         .ok_or("the repository name is not one this server takes")?;
+    let title = draft_title(h.kind, &pr.title, pr.draft)?;
     let body = match h.kind {
         ForgeKind::Github => serde_json::json!({
-            "title": pr.title, "head": pr.head, "base": base, "body": pr.body, "draft": pr.draft,
+            "title": title, "head": pr.head, "base": base, "body": pr.body, "draft": pr.draft,
         }),
         ForgeKind::Gitea | ForgeKind::Forgejo => serde_json::json!({
-            // Gitea and Forgejo mark a draft by its title.
-            "title": if pr.draft { format!("WIP: {}", pr.title) } else { pr.title.clone() },
-            "head": pr.head, "base": base, "body": pr.body,
+            "title": title, "head": pr.head, "base": base, "body": pr.body,
         }),
         ForgeKind::Gitlab => serde_json::json!({
-            "title": if pr.draft { format!("Draft: {}", pr.title) } else { pr.title.clone() },
-            "source_branch": pr.head, "target_branch": base, "description": pr.body,
+            "title": title, "source_branch": pr.head, "target_branch": base, "description": pr.body,
         }),
     };
     url.path_segments_mut()
@@ -215,12 +213,16 @@ async fn open(
         let v = v.ok_or("the forge's answer is not JSON")?;
         return Ok(Opened {
             number: number_of(h.kind, &v),
-            url: url_of(h.kind, &v),
+            url: url_of(h, &v),
             existed: false,
         });
     }
     let said = v.as_ref().map(message_of).unwrap_or_default();
     if matches!(status, 409 | 422) && said.to_ascii_lowercase().contains("already exist") {
+        // The open one, with one bounded lookup where the forge has one.
+        if let Some(found) = existing(&c, h, token, full_name, &pr.head, &base).await {
+            return Ok(found);
+        }
         return Ok(Opened {
             number: said
                 .split('!')
@@ -249,16 +251,125 @@ fn number_of(kind: ForgeKind, v: &serde_json::Value) -> Option<u64> {
     v.get(key).and_then(|n| n.as_u64())
 }
 
-/// Its web address: a http(s) URL of at most 512 bytes, else none.
-fn url_of(kind: ForgeKind, v: &serde_json::Value) -> Option<String> {
-    let key = if kind == ForgeKind::Gitlab {
+/// Its web address: a http(s) URL of at most 512 bytes on the project's
+/// own source host, else none (the result then names the number only;
+/// nothing a forge writes is trusted to point elsewhere).
+fn url_of(h: &ForgeHost, v: &serde_json::Value) -> Option<String> {
+    let key = if h.kind == ForgeKind::Gitlab {
         "web_url"
     } else {
         "html_url"
     };
     let s = v.get(key)?.as_str()?;
     let u = reqwest::Url::parse(s).ok()?;
-    (matches!(u.scheme(), "https" | "http") && s.len() <= 512).then(|| u.to_string())
+    (matches!(u.scheme(), "https" | "http")
+        && s.len() <= 512
+        && u.host_str() == Some(h.host.as_str()))
+    .then(|| u.to_string())
+}
+
+/// The longest title a forge takes where a draft is marked by the title
+/// (GitLab, Gitea, Forgejo: 255 characters).
+const PREFIXED_TITLE_MAX: usize = 255;
+
+/// The title sent: GitHub has a `draft` field; GitLab marks a draft by a
+/// `Draft: ` prefix and Gitea and Forgejo by `WIP: `, added once (not when
+/// the title already has one) and refused rather than cut when the title
+/// would then pass the forge's limit.
+fn draft_title(kind: ForgeKind, title: &str, draft: bool) -> Result<String, String> {
+    let prefix = match kind {
+        ForgeKind::Github => return Ok(title.to_string()),
+        ForgeKind::Gitlab => "Draft: ",
+        ForgeKind::Gitea | ForgeKind::Forgejo => "WIP: ",
+    };
+    let lower = title.to_ascii_lowercase();
+    let marked = ["draft:", "[draft]", "(draft)", "wip:", "[wip]"]
+        .iter()
+        .any(|p| lower.starts_with(p));
+    let out = if draft && !marked {
+        format!("{prefix}{title}")
+    } else {
+        title.to_string()
+    };
+    if out.chars().count() > PREFIXED_TITLE_MAX {
+        return Err(format!(
+            "the title is too long for this forge (at most {PREFIXED_TITLE_MAX} characters, the \
+             draft mark `{}` included); nothing was opened",
+            prefix.trim()
+        ));
+    }
+    Ok(out)
+}
+
+/// The open pull request for `head` into `base`, by one bounded GET where
+/// the forge has such a query (GitHub; GitLab); none for Gitea and Forgejo.
+async fn existing(
+    c: &reqwest::Client,
+    h: &ForgeHost,
+    token: &harness_core::Secret<String>,
+    full_name: &str,
+    head: &str,
+    base: &str,
+) -> Option<Opened> {
+    let mut url = crate::forge_repos::repo_url(h, full_name)?;
+    match h.kind {
+        ForgeKind::Github => {
+            let owner = full_name.split('/').next()?;
+            url.path_segments_mut().ok()?.push("pulls");
+            url.query_pairs_mut()
+                .append_pair("head", &format!("{owner}:{head}"))
+                .append_pair("base", base)
+                .append_pair("state", "open");
+        }
+        ForgeKind::Gitlab => {
+            url.path_segments_mut().ok()?.push("merge_requests");
+            url.query_pairs_mut()
+                .append_pair("source_branch", head)
+                .append_pair("target_branch", base)
+                .append_pair("state", "opened");
+        }
+        ForgeKind::Gitea | ForgeKind::Forgejo => return None,
+    }
+    let headers = crate::forge::auth_headers(h.kind, token).ok()?;
+    let (_, body) = crate::forge::get_url(c, h, url, headers, MAX_ANSWER)
+        .await
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&body).ok()?;
+    let first = v.as_array()?.first()?;
+    Some(Opened {
+        number: number_of(h.kind, first),
+        url: url_of(h, first),
+        existed: true,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_draft_mark_is_added_once_and_never_passes_the_limit() {
+        assert_eq!(draft_title(ForgeKind::Github, "t", true).unwrap(), "t");
+        assert_eq!(
+            draft_title(ForgeKind::Gitlab, "t", true).unwrap(),
+            "Draft: t"
+        );
+        assert_eq!(
+            draft_title(ForgeKind::Gitlab, "Draft: t", true).unwrap(),
+            "Draft: t"
+        );
+        assert_eq!(draft_title(ForgeKind::Gitea, "t", true).unwrap(), "WIP: t");
+        assert_eq!(
+            draft_title(ForgeKind::Forgejo, "WIP: t", true).unwrap(),
+            "WIP: t"
+        );
+        assert_eq!(draft_title(ForgeKind::Gitlab, "t", false).unwrap(), "t");
+        let long = "t".repeat(250);
+        assert!(draft_title(ForgeKind::Gitlab, &long, true).is_err());
+        assert!(draft_title(ForgeKind::Gitea, &long, false).is_ok());
+        assert!(draft_title(ForgeKind::Github, &"t".repeat(256), true).is_ok());
+        assert!(draft_title(ForgeKind::Gitlab, &"t".repeat(256), false).is_err());
+    }
 }
 
 /// The forge's words for a refusal: `message` (a string, or GitLab's list)

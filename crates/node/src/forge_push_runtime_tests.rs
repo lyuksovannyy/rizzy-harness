@@ -799,3 +799,29 @@ async fn a_pull_request_is_not_offered_where_denied_or_without_a_target() {
         assert!(!ok && out.contains("unknown tool"), "{out}");
     }
 }
+
+/// `[forge] push = false` withholds pull requests too (the node sends
+/// nothing to a forge on an agent's behalf): no capability, not offered.
+#[tokio::test]
+async fn forge_push_off_withholds_pull_requests_too() {
+    let r = rig();
+    let mut n = node(&r, r.policy(&["github.com".to_string()], false)).await;
+    assert!(
+        !n.caps.iter().any(|c| c == harness_protocol::CAP_FORGE_PR),
+        "{:?}",
+        n.caps
+    );
+    let sid = n.create(&r.folder, false, false).await;
+    let mut m = PromptMsg::test(sid, PR_SCRIPT);
+    m.agent = Some(spec());
+    m.context = Some(Box::new(harness_core::backend::MasterContext {
+        push: Some(target("github.com")),
+        ..Default::default()
+    }));
+    n.link.to_node.try_send(MasterToNode::Prompt(m)).unwrap();
+    n.ack().await;
+    let seen = n.until_end(sid, Answer::Allow, &r.folder).await;
+    assert!(seen.cards.is_empty(), "{seen:?}");
+    let (_, ok, out) = &seen.results[0];
+    assert!(!ok && out.contains("unknown tool"), "{out}");
+}
