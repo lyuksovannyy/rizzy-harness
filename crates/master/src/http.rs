@@ -455,13 +455,6 @@ fn runtime(m: &Master) -> ApiResult<std::sync::Arc<crate::providers::ProviderRun
     })
 }
 
-#[derive(Deserialize)]
-struct WorkspaceQuery {
-    /// Users: defaults to the active workspace. The API token: no filter.
-    #[serde(default)]
-    workspace: Option<String>,
-}
-
 /// A query flag: `1` or `true` (links and the web app send `=1`).
 fn query_flag<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     match String::deserialize(d)?.as_str() {

@@ -6,12 +6,13 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
+use serde::Deserialize;
 use serde_json::json;
 
 use super::agent_edits::{ScopeQuery, settings_scope};
 use super::caller::{Admin, User};
 use super::search::kinds_shown;
-use super::{ApiError, ApiResult, WorkspaceQuery, runtime};
+use super::{ApiError, ApiResult, runtime};
 use crate::Master;
 use crate::workspaces as ws;
 
@@ -97,4 +98,11 @@ async fn get_graphify(_: Admin, State(m): State<Master>) -> ApiResult<Json<serde
             "graphify = true    # add to node.toml, then restart the node",
         ],
     })))
+}
+
+#[derive(Deserialize)]
+struct WorkspaceQuery {
+    /// Users: defaults to the active workspace. The API token: no filter.
+    #[serde(default)]
+    workspace: Option<String>,
 }
