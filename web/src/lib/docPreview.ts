@@ -61,11 +61,20 @@ let opener: HTMLElement | null = null;
 const listeners = new Set<() => void>();
 const emit = () => listeners.forEach((l) => l());
 
+/** The open panel's question before it is replaced (lib/unsavedGuard.ts sets it while it has unsaved changes). */
+export const gate: { ask: (() => Promise<boolean>) | null } = { ask: null };
+
 /** Open the file in the side panel; the control that asked gets focus back on close. */
 export function openPreview(t: PreviewTarget, from?: HTMLElement | null) {
-  opener = from ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
-  current = t;
-  emit();
+  const opened = from ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  const apply = () => {
+    opener = opened;
+    current = t;
+    emit();
+  };
+  // Changes wait in the panel: ask first, open on a yes.
+  if (current && gate.ask && targetKey(t) !== targetKey(current)) void gate.ask().then((ok) => ok && apply());
+  else apply();
 }
 
 export function closePreview() {

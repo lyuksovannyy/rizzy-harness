@@ -199,10 +199,54 @@ const SHEET = JSON.stringify([{ tool: 'sheet_create', input: { path: 'budget', s
     await p.keyboard.press('Enter');
     check(!(await p.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)), 'no horizontal scroll at 375 px while editing');
     await p.screenshot({ path: `${S}/doc-click-edit-3-plain-phone.png` });
-    p.once('dialog', (d) => d.accept());
-    await p.keyboard.press('Escape');
-    await p.waitForSelector('aside.doc-preview', { state: 'detached' });
     await p.setViewportSize({ width: 1440, height: 900 });
+    // Unsaved changes: every way of leaving asks in the app's own dialog.
+    const ask = 'dialog.host-warning:has-text("Discard 1 change that has not been saved?")';
+    const dialogDrawn = async (what) => {
+      await p.waitForSelector(ask);
+      const r = await p.evaluate(() => { const b = document.querySelector('dialog.host-warning').getBoundingClientRect(); return b.width > 200 && b.height > 80 && b.left >= 0 && b.right <= window.innerWidth; });
+      check(r, `the dialog box is drawn on screen (${what})`);
+    };
+    const kept = async (what, shot) => {
+      await dialogDrawn(what);
+      check(await p.evaluate(() => document.activeElement?.textContent === 'Keep editing'), `Keep editing has the focus (${what})`);
+      // The dialog fades in: let the animation end before looking.
+      if (shot) await p.waitForTimeout(600);
+      if (shot) await p.screenshot({ path: `${S}/${shot}.png` });
+      await p.click(`${ask} button:text-is("Keep editing")`);
+      await p.waitForSelector(ask, { state: 'detached' });
+      check((await p.locator('aside.doc-preview').count()) === 1, `the panel is still there (${what})`);
+      check((await p.locator('.doc-preview .pv-body').textContent()).includes('Phone') && (await p.locator('.doc-preview .pv-changed').count()) === 1, `the change is kept (${what})`);
+    };
+    await p.click('button[aria-label="Close the preview"]');
+    await kept('close');
+    await p.locator('.artifact-card:has-text("budget.xlsx") button:has-text("Preview")').click();
+    await kept('another file');
+    const here = p.url();
+    await p.click('aside.sidebar a:has-text("Agents")');
+    await kept('sidebar click', 'doc-click-edit-6-unsaved-dialog');
+    check(p.url() === here, 'the address is unchanged after a sidebar click: ' + p.url());
+    await p.click('aside.sidebar a:has-text("New chat")');
+    await kept('New chat');
+    check(p.url() === here, 'the address is unchanged after New chat: ' + p.url());
+    await p.evaluate(() => { location.hash = '#/plugins'; });
+    await kept('hash assigned');
+    check(p.url() === here, 'the address is unchanged after an assigned hash: ' + p.url());
+    // Back, past the entries the questions above left (each Keep editing on a
+    // push leaves the chat's address as one more entry): to the page before the chat.
+    await p.evaluate(() => history.go(-4));
+    await kept('back');
+    check(p.url() === here, 'the address is unchanged after back: ' + p.url());
+    // Discard on a sidebar click: navigated, no second question.
+    await p.click('aside.sidebar a:has-text("Agents")');
+    await dialogDrawn('discard');
+    await p.click(`${ask} button:text-is("Discard changes")`);
+    await p.waitForFunction(() => location.hash === '#/agents' && !document.querySelector('aside.doc-preview'));
+    check((await p.locator('dialog.host-warning').count()) === 0, 'no second question after Discard');
+    await p.waitForSelector('aside.sidebar [aria-current="page"]:has-text("Agents")');
+    await p.evaluate((u) => { location.href = u; }, here);
+    await p.waitForSelector('.artifact-card:has-text("budget.xlsx")');
+    check((await p.locator('dialog.host-warning').count()) === 0, 'no question with nothing unsaved');
     // A workbook: three cells, one a formula.
     await p.locator('.artifact-card:has-text("budget.xlsx") button:has-text("Preview")').click();
     await p.waitForSelector('.doc-preview table.pv-grid');
