@@ -4,5 +4,6 @@
 disallowed-methods = [
     { path = "rusqlite::Connection::trace_v2", reason = "statements carry bound values (hashes, tokens) and must never be logged; tests only, with an #[expect]" },
     { path = "rusqlite::trace::StmtRef::expanded_sql", reason = "the expanded text holds bound values (hashes, tokens)" },
+    { path = "rusqlite::Statement::expanded_sql", reason = "the expanded text holds bound values (hashes, tokens)" },
     { path = "rusqlite::trace::log", reason = "writes into SQLite's error log; not for this program" },
 ]

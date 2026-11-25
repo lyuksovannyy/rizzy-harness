@@ -1153,6 +1153,135 @@ fn a_stored_id_in_another_spelling_is_skipped_and_the_list_goes_on() {
     }
 }
 
+/// The canonical-id predicate accepts exactly `SessionId::to_string()`.
+#[test]
+fn the_canonical_id_predicate_accepts_only_the_canonical_spelling() {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    let sql = format!("SELECT {}", canonical_id("?1"));
+    let ok = |v: rusqlite::types::Value| -> bool {
+        c.query_row(&sql, [v], |r| r.get::<_, Option<bool>>(0))
+            .unwrap()
+            .unwrap_or(false)
+    };
+    use rusqlite::types::Value::{Blob, Integer, Null, Text};
+    for _ in 0..1_000 {
+        assert!(ok(Text(SessionId::new().to_string())));
+    }
+    let id = SessionId::new();
+    let text = id.to_string();
+    for bad in [
+        Text(text.to_uppercase()),
+        Text(format!("{{{text}}}")),
+        Text(text.replace('-', "")),
+        Text(format!("urn:uuid:{text}")),
+        Text(text[..35].to_string()),
+        Text(format!("{text}0")),
+        Text(format!("{text}\n")),
+        Text(format!(" {text}")),
+        Text(text.replacen('-', "g", 1)),
+        Text(String::new()),
+        Null,
+        Integer(1),
+        Blob(text.clone().into_bytes()),
+        Blob(id.0.as_bytes().to_vec()),
+    ] {
+        assert!(!ok(bad.clone()), "{bad:?}");
+    }
+}
+
+/// Odd-id rows are filtered in SQL: 5,000 of them between two good stretches
+/// cost nothing extra, the page is one statement and both pages are right.
+#[test]
+fn many_odd_ids_cost_one_statement() {
+    let s = Store::open_in_memory().unwrap();
+    user(&s, "a");
+    let oldest = plain(&s, "a", 1);
+    for k in 0..5_000 {
+        odd(&s, Some("a"), 10 + k);
+    }
+    let newest: Vec<SessionId> = (0..50).map(|k| plain(&s, "a", 10_000 + k)).collect();
+    let q = by_limit(Owner::User("a"), 50);
+    let (n, r) = statements(&s, || s.sessions_page(&q));
+    let (p1, next) = r.unwrap();
+    assert_eq!(n, 1);
+    let mut want = newest.clone();
+    want.reverse();
+    assert_eq!(ids(&p1), want);
+    let (n, r) = statements(&s, || s.sessions_page(&PageQuery { after: next, ..q }));
+    let (p2, next) = r.unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(ids(&p2), vec![oldest]);
+    assert_eq!(next, None);
+}
+
+/// A NULL or BLOB id (a TEXT PRIMARY KEY on a rowid table takes both)
+/// does not fail the list.
+#[test]
+fn a_null_or_blob_id_does_not_fail_the_list() {
+    let s = Store::open_in_memory().unwrap();
+    user(&s, "a");
+    let good = plain(&s, "a", 1);
+    exec(
+        &s,
+        "INSERT INTO sessions (session_id, node_id, created_ms, updated_ms, head_seq, owner_id)
+         VALUES (NULL, 'n', 0, 5, 0, 'a'), (x'00ff', 'n', 0, 6, 0, 'a'), (?1, 'n', 0, 7, 0, 'a')",
+        params![SessionId::new().0.as_bytes().to_vec()],
+    );
+    for owner in [Owner::User("a"), Owner::Everyone] {
+        assert_eq!(
+            walk_bounded(&s, by_limit(owner, 1), 5),
+            vec![good],
+            "{owner:?}"
+        );
+    }
+}
+
+/// A child with an odd id is not returned and its subtree is not walked;
+/// the good child is, with no error.
+#[test]
+fn an_odd_child_is_left_out_with_its_subtree() {
+    let s = Store::open_in_memory().unwrap();
+    user(&s, "a");
+    let p = plain(&s, "a", 1);
+    let good = child(&s, "a", p, 2);
+    let upper = SessionId::new().to_string().to_uppercase();
+    for (id, t) in [("garbage".to_string(), 3), (upper.clone(), 4)] {
+        exec(
+            &s,
+            "INSERT INTO sessions (session_id, node_id, created_ms, updated_ms, head_seq, owner_id, parent_id)
+             VALUES (?1, 'n', 0, ?2, 0, 'a', ?3)",
+            params![id, t, p.to_string()],
+        );
+    }
+    // Below the odd children: never reached.
+    for (parent, t) in [("garbage".to_string(), 5), (upper, 6)] {
+        exec(
+            &s,
+            "INSERT INTO sessions (session_id, node_id, created_ms, updated_ms, head_seq, owner_id, parent_id)
+             VALUES (?1, 'n', 0, ?2, 0, 'a', ?3)",
+            params![SessionId::new().to_string(), t, parent],
+        );
+    }
+    // One level down, in the recursive step: an odd grandchild under the
+    // good child, and a good chat below it, never reached either.
+    let odd_grand = SessionId::new().to_string().to_uppercase();
+    exec(
+        &s,
+        "INSERT INTO sessions (session_id, node_id, created_ms, updated_ms, head_seq, owner_id, parent_id)
+         VALUES (?1, 'n', 0, 7, 0, 'a', ?2)",
+        params![odd_grand, good.to_string()],
+    );
+    exec(
+        &s,
+        "INSERT INTO sessions (session_id, node_id, created_ms, updated_ms, head_seq, owner_id, parent_id)
+         VALUES (?1, 'n', 0, 8, 0, 'a', ?2)",
+        params![SessionId::new().to_string(), odd_grand],
+    );
+    let d = s.children_of(Owner::User("a"), &[p]).unwrap();
+    assert_eq!(ids(&d.rows), vec![good]);
+    assert!(!d.truncated);
+}
+
 /// A last page that is exactly full has no next cursor.
 #[test]
 fn an_exact_multiple_has_no_next_page() {

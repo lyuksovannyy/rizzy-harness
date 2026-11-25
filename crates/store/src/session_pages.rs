@@ -133,8 +133,23 @@ fn owner_term(owner: Owner<'_>) -> &'static str {
     }
 }
 
+/// `col` is stored as text in exactly `SessionId::to_string()`'s
+/// spelling (lower-case hex, hyphenated, 36 characters). Every writer
+/// stores that; a row that fails this (another spelling, NULL, a BLOB,
+/// garbage) is corrupt data, and the chat list leaves it out in SQL: the
+/// keyset compares stored text, so another spelling as a cursor would page
+/// in a loop, and a value that is not text cannot be read as an id at all.
+/// A residual filter: it does not change which index a query uses.
+fn canonical_id(col: &str) -> String {
+    const HEX: &str = "[0-9a-f]";
+    let group = |n: usize| HEX.repeat(n);
+    let pattern = [group(8), group(4), group(4), group(4), group(12)].join("-");
+    format!("(typeof({col}) = 'text' AND {col} GLOB '{pattern}')")
+}
+
 fn page_sql(owner: Owner<'_>, after: bool) -> String {
     let owner = owner_term(owner);
+    let canonical = canonical_id("s.session_id");
     // SQLite seeks `sessions_owner` to `updated_ms <= ?2` from this OR
     // (the plan test checks it); the id breaks ties.
     let after = if after {
@@ -144,7 +159,7 @@ fn page_sql(owner: Owner<'_>, after: bool) -> String {
     };
     format!(
         "SELECT {SESSION_COLS}, {EFFECTIVE_WS} FROM sessions s {WS_JOINS}
-         WHERE {owner} AND {after}
+         WHERE {owner} AND {after} AND {canonical}
            AND (?4 IS NULL OR {EFFECTIVE_WS} = ?4)
            AND (?5 = 0 OR (s.parent_id IS NULL AND s.incognito = 0))
            AND (?6 = 0 OR NOT EXISTS (
@@ -189,14 +204,16 @@ pub const MAX_WALK: usize = MAX_DEPTH * (MAX_DESCENDANTS + 1);
 /// walk.
 fn children_sql(owner: Owner<'_>) -> String {
     let owner = owner_term(owner);
+    let canonical = canonical_id("s.session_id");
     format!(
         "WITH RECURSIVE tree(id, depth) AS (
              SELECT s.session_id, 1 FROM sessions s INDEXED BY sessions_parent
               WHERE s.parent_id IN (SELECT value FROM json_each(?2)) AND {owner}
+                AND {canonical}
              UNION ALL
              SELECT s.session_id, t.depth + 1 FROM tree t
                JOIN sessions s INDEXED BY sessions_parent ON s.parent_id = t.id
-              WHERE t.depth < {MAX_DEPTH} AND {owner}
+              WHERE t.depth < {MAX_DEPTH} AND {owner} AND {canonical}
              LIMIT ?3)
          SELECT {SESSION_COLS}, {EFFECTIVE_WS} FROM sessions s {WS_JOINS}
           WHERE s.session_id IN (SELECT id FROM tree)
@@ -263,6 +280,19 @@ fn id_list(ids: &[SessionId]) -> Result<String> {
     Ok(serde_json::to_string(&ids)?)
 }
 
+/// A row that passed `canonical_id`, with its id parsed. Failing here is a
+/// bug in the predicate, not data: the error gives the length only, never
+/// the stored value.
+fn listed((text, mut row): (String, SessionRow)) -> Result<SessionRow> {
+    row.session_id = text.parse().map_err(|_| {
+        StoreError::Corrupt(format!(
+            "a chat id of {} bytes passed the canonical check but is not a session id",
+            text.len()
+        ))
+    })?;
+    Ok(row)
+}
+
 fn sid(text: String) -> Result<SessionId> {
     text.parse()
         .map_err(|_| StoreError::Corrupt(format!("session id {text}")))
@@ -278,65 +308,26 @@ impl Store {
     /// be passed over in this walk (its time went up past the cursor; the
     /// next read from the top lists it). No other chat is repeated or lost.
     ///
-    /// A chat whose stored id is not exactly `SessionId::to_string()` (no
-    /// writer stores another spelling, so it is corrupt data) is skipped
-    /// with a warning naming its id: it is never returned and never a
-    /// cursor, since the keyset compares stored text and another spelling
-    /// would page in a loop. The walk pages on the stored text itself, so
-    /// it always moves forward; a call reads each row at most once, so the
-    /// rows it may skip are bounded by the owner's chats (every chat for
-    /// [`Owner::Everyone`]), the same bound as a sparse workspace.
+    /// A chat whose stored id is not in canonical form is left out in SQL
+    /// (see `canonical_id`); `rizzy-harness doctor` is to report such rows.
     pub fn sessions_page(&self, q: &PageQuery<'_>) -> Result<(Vec<SessionRow>, Option<Cursor>)> {
         let limit = q.limit.clamp(1, MAX_PAGE);
-        // One more than asked: whether there is a next page.
-        let want = limit + 1;
         let conn = self.lock();
-        let mut out: Vec<SessionRow> = Vec::with_capacity(want);
-        // Where the walk stands, as stored: (updated_ms, stored id text).
-        let mut at: Option<(i64, String)> =
-            q.after.map(|c| (c.updated_ms, c.session_id.to_string()));
-        loop {
-            let batch = want - out.len();
-            let mut stmt = conn.prepare_cached(&page_sql(q.owner, at.is_some()))?;
-            let rows = stmt.query_map(
-                params![
-                    q.owner.bind(),
-                    at.as_ref().map(|a| a.0),
-                    at.as_ref().map(|a| a.1.as_str()),
-                    q.workspace,
-                    q.top_level,
-                    q.hide_seen_runs,
-                    batch as i64,
-                ],
-                Self::session_from_row,
-            )?;
-            let mut read = 0;
-            for r in rows {
-                let (text, mut row) = r?;
-                read += 1;
-                match text.parse::<SessionId>() {
-                    Ok(id) if id.to_string() == text => {
-                        row.session_id = id;
-                        at = Some((row.updated_ms, text));
-                        out.push(row);
-                    }
-                    Ok(id) => {
-                        tracing::warn!(session = %id, "chat list: skipped a chat whose stored id is not in canonical form");
-                        at = Some((row.updated_ms, text));
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            bytes = text.len(),
-                            "chat list: skipped a chat whose stored id is not a session id"
-                        );
-                        at = Some((row.updated_ms, text));
-                    }
-                }
-            }
-            if read < batch || out.len() == want {
-                break;
-            }
-        }
+        let mut stmt = conn.prepare_cached(&page_sql(q.owner, q.after.is_some()))?;
+        let rows = stmt.query_map(
+            params![
+                q.owner.bind(),
+                q.after.map(|c| c.updated_ms),
+                q.after.map(|c| c.session_id.to_string()),
+                q.workspace,
+                q.top_level,
+                q.hide_seen_runs,
+                // One more than asked: whether there is a next page.
+                (limit + 1) as i64,
+            ],
+            Self::session_from_row,
+        )?;
+        let mut out = rows.map(|r| listed(r?)).collect::<Result<Vec<_>>>()?;
         let next = if out.len() > limit {
             out.truncate(limit);
             out.last().map(Cursor::of)
@@ -348,7 +339,8 @@ impl Store {
 
     /// Every sub-agent chat of `owner` below `parents`, at any depth up to
     /// [`MAX_DEPTH`], newest first; a chain stops at a chat that is not
-    /// `owner`'s.
+    /// `owner`'s. A child whose stored id is not in canonical form (see
+    /// `canonical_id`) is not returned and its subtree is not walked.
     ///
     /// Deliberately unlike today's list, a child is returned whatever its
     /// own effective workspace: it is shown nested under its parent, so it
@@ -373,9 +365,7 @@ impl Store {
             ],
             Self::session_from_row,
         )?;
-        let mut rows = rows
-            .map(|r| Self::finish_session(r?))
-            .collect::<Result<Vec<_>>>()?;
+        let mut rows = rows.map(|r| listed(r?)).collect::<Result<Vec<_>>>()?;
         let truncated = rows.len() > MAX_DESCENDANTS;
         rows.truncate(MAX_DESCENDANTS);
         Ok(Descendants { rows, truncated })

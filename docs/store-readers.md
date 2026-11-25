@@ -255,9 +255,13 @@ The owner is the caller (`who.user_id`); the API token (no user) gets every chat
   Migration 7 adds the partial index `sessions_parent ON sessions(parent_id) WHERE parent_id IS NOT NULL`, and the query names it (`INDEXED BY`): with an owner term SQLite still picks `sessions_owner` over a new index, and `INDEXED BY` makes an unusable index an error instead of a silent walk.
   With it (direct children only, before the review): 0.03 ms for a page's children, p99 append wait behind page, annotations and children 0.22 ms; the recursive form is measured in slice 1 below.
 
-- **Odd stored ids:** a chat whose stored id is not exactly `SessionId::to_string()` (no writer stores another spelling, so it is corrupt data) is skipped with a `tracing` warning naming its id (titles and content never), never returned and never used as a cursor, and the list goes on.
-  The keyset compares stored text, so another spelling as a cursor would page in a loop; the page walks on the stored text itself and keeps reading until the page is full or the list ends, each row at most once per call (so the rows skipped per call are bounded by the owner's chats, every chat for the API token, the same bound as a sparse workspace).
-  Slice 1 first refused the whole list with an error; the review showed that one bad row then broke the owner's list for good, with no way out through the API.
+- **Odd stored ids:** a chat whose stored id is not text in exactly `SessionId::to_string()`'s spelling (another spelling, NULL or a BLOB, which a `TEXT PRIMARY KEY` on a rowid table accepts, or garbage) is corrupt data: no writer stores one.
+  The page query and both steps of the descendants walk leave such rows out in SQL, with one shared predicate (`typeof(id) = 'text' AND id GLOB` lower-case hex in 8-4-4-4-12; a residual filter, so the indexes used are unchanged): such a row is never returned, never a cursor (the keyset compares stored text, so another spelling would page in a loop), and a child with an odd id is not returned and its subtree is not walked.
+  The page stays one statement however many such rows there are (tested with 5,000 between two pages).
+  Rows the predicate hides are to be reported by `rizzy-harness doctor` (queued, not in this slice).
+  Per-request logging was rejected: every `sessions_changed` nudge (each turn start and end) refetches the list, so a warning per hidden row per request repeats the same lines for as long as the row exists, and a loop that skips rows one by one in Rust held the store lock for one statement per row (5,001 statements, 483 ms in a debug build, in review).
+  Slice 1 first refused the whole list with an error, then skipped in Rust; both were replaced by the filter.
+  Its cost is per row read, so it shows only where a query reads many rows (release bench, before and after): the API token's every-owner page 13 to 24 ms, a workspace page that walks all of the owner's 10,000 chats 10.2 to 12.5 ms, the worst descendants walk 26 to 33 ms; a normal page 0.10 to 0.12 ms, page with every annotation 0.30 to 0.33 ms.
 
 ### Live updates
 
