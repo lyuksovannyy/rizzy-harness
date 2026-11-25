@@ -115,8 +115,15 @@ pub struct PageQuery<'a> {
     /// Only what the sidebar shows: no sub-agent chats, no incognito ones.
     pub top_level: bool,
     /// Leave out a routine run's chat once its run is over, seen and not
-    /// continued (what the master's `routines::annotate` drops today).
+    /// continued: a run chat stays listed while its run is going or
+    /// waiting, while its result is unseen, and once the owner continued it.
     pub hide_seen_runs: bool,
+    /// Only the chats whose effective project is this one (linked to it,
+    /// and in the project's workspace: what the master's
+    /// `projects::effective` says). The caller checks that it may see the
+    /// project; the owner term is unchanged, so a project never widens
+    /// whose chats are listed.
+    pub project: Option<&'a str>,
     /// Start after this row; `None`: from the newest.
     pub after: Option<Cursor>,
     /// Clamped to `1..=MAX_PAGE`.
@@ -151,8 +158,22 @@ fn canonical_id(col: &str) -> String {
     )
 }
 
-fn page_sql(owner: Owner<'_>, after: bool) -> String {
-    let owner = owner_term(owner);
+fn page_sql(owner: Owner<'_>, after: bool, project: bool) -> String {
+    // A project's page is driven by the project's links, the owner a filter
+    // only (`+`): as a plain term SQLite walks the owner's chats through
+    // `sessions_owner` and checks each against the links, which for a
+    // project holding few of them reads all of them (see the bench).
+    let (owner, link_owner) = if project {
+        (
+            owner_filter(owner),
+            match owner {
+                Owner::User(_) => "o.owner_id = ?1",
+                Owner::Everyone => "?1 IS NULL",
+            },
+        )
+    } else {
+        (owner_term(owner), "")
+    };
     let canonical = canonical_id("s.session_id");
     // SQLite seeks `sessions_owner` to `updated_ms <= ?2` from this OR
     // (the plan test checks it); the id breaks ties.
@@ -161,10 +182,28 @@ fn page_sql(owner: Owner<'_>, after: bool) -> String {
     } else {
         "?2 IS NULL AND ?3 IS NULL"
     };
+    // A project's chats: its links (`session_projects_project`), while the
+    // project is in the chat's effective workspace (a chat that moved
+    // workspace keeps an inert link). A separate text, not `?8 IS NULL OR`,
+    // so that the links can drive the query (the plan test checks it). The
+    // owner is checked inside the links' subquery too, so another member's
+    // chat in a shared project costs one key lookup and nothing more (a
+    // team project of 40,000 others' chats: 9 ms instead of 21, bench).
+    let project = if project {
+        format!(
+            "s.session_id IN (SELECT sp.session_id FROM session_projects sp
+                 JOIN sessions o ON o.session_id = sp.session_id
+                 WHERE sp.project_id = ?8 AND {link_owner})
+           AND {EFFECTIVE_WS} = (SELECT p.workspace_id FROM projects p WHERE p.project_id = ?8)"
+        )
+    } else {
+        "?8 IS NULL".to_string()
+    };
     format!(
         "SELECT {SESSION_COLS}, {EFFECTIVE_WS} FROM sessions s {WS_JOINS}
          WHERE {owner} AND {after} AND {canonical}
            AND (?4 IS NULL OR {EFFECTIVE_WS} = ?4)
+           AND {project}
            AND (?5 = 0 OR (s.parent_id IS NULL AND s.incognito = 0))
            AND (?6 = 0 OR NOT EXISTS (
                  SELECT 1 FROM routine_runs r JOIN routines o ON o.routine_id = r.routine_id
@@ -318,7 +357,8 @@ impl Store {
     pub fn sessions_page(&self, q: &PageQuery<'_>) -> Result<(Vec<SessionRow>, Option<Cursor>)> {
         let limit = q.limit.clamp(1, MAX_PAGE);
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(&page_sql(q.owner, q.after.is_some()))?;
+        let mut stmt =
+            conn.prepare_cached(&page_sql(q.owner, q.after.is_some(), q.project.is_some()))?;
         let rows = stmt.query_map(
             params![
                 q.owner.bind(),
@@ -329,6 +369,7 @@ impl Store {
                 q.hide_seen_runs,
                 // One more than asked: whether there is a next page.
                 (limit + 1) as i64,
+                q.project,
             ],
             Self::session_from_row,
         )?;
