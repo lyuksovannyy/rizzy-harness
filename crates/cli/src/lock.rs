@@ -50,11 +50,51 @@ pub fn take(dir: &Path, role: &str) -> anyhow::Result<DirLock> {
     take_with(dir, role, |f| f.try_lock())
 }
 
+/// Take the lock for `role` only if it is free (`backup`): `None` when a
+/// process holds it, or when the file system has no locks (then nobody can
+/// tell whether a server runs, and the caller must act as if one did).
+pub fn try_take(dir: &Path, role: &str) -> anyhow::Result<Option<DirLock>> {
+    match attempt(dir, role, |f| f.try_lock())? {
+        Attempt::Held(l) => Ok(Some(l)),
+        Attempt::Busy(_) => Ok(None),
+        Attempt::Unsupported(..) => Ok(None),
+    }
+}
+
+/// What one attempt came to.
+enum Attempt {
+    Held(DirLock),
+    /// Another process holds it: the refusal, in words.
+    Busy(String),
+    /// No file locks here: the file, open, unlocked, and why.
+    Unsupported(DirLock, std::io::Error),
+}
+
 fn take_with(
     dir: &Path,
     role: &str,
-    mut try_lock: impl FnMut(&File) -> Result<(), TryLockError>,
+    try_lock: impl FnMut(&File) -> Result<(), TryLockError>,
 ) -> anyhow::Result<DirLock> {
+    let path = dir.join(NAME);
+    match attempt(dir, role, try_lock)? {
+        Attempt::Held(l) => Ok(l),
+        Attempt::Busy(why) => bail!("{why}"),
+        Attempt::Unsupported(l, e) => {
+            tracing::warn!(
+                "{}: this file system does not support file locks ({e}); starting without the \
+                 lock, so nothing stops a second process on this data directory: start only one",
+                path.display()
+            );
+            Ok(l)
+        }
+    }
+}
+
+fn attempt(
+    dir: &Path,
+    role: &str,
+    mut try_lock: impl FnMut(&File) -> Result<(), TryLockError>,
+) -> anyhow::Result<Attempt> {
     let path = dir.join(NAME);
     // Not truncated before the lock is ours (the holder's hint is in it);
     // never through a link (the directory is this user's own and 0700, so
@@ -80,20 +120,20 @@ fn take_with(
                 let mut text = String::new();
                 let _ = file.read_to_string(&mut text);
                 if let Some(z) = exited_holder(&text) {
-                    bail!(
+                    return Ok(Attempt::Busy(format!(
                         "{} is in use by {z}: it has exited and waits for a read on a file \
                          system that does not answer (a network or FUSE mount); it goes, and \
                          the directory is free, once that read returns or the mount is forced \
                          off (`umount -f` or `fusermount -u -z`)",
                         dir.display(),
-                    );
+                    )));
                 }
-                bail!(
+                return Ok(Attempt::Busy(format!(
                     "{} is in use by {}: one data directory serves one process; stop that \
                      one first, or give this one its own --data-dir",
                     dir.display(),
                     holder(&text)
-                );
+                )));
             }
             Err(TryLockError::Error(e)) if unsupported(&e) => break Taken::Unsupported(e),
             Err(TryLockError::Error(e)) => {
@@ -101,20 +141,17 @@ fn take_with(
             }
         }
     };
-    if let Taken::Unsupported(e) = &taken {
-        tracing::warn!(
-            "{}: this file system does not support file locks ({e}); starting without the \
-             lock, so nothing stops a second process on this data directory: start only one",
-            path.display()
-        );
-    }
     // The hint for a second start and `doctor`; a failure here changes
     // nothing about the lock.
     let _ = file
         .set_len(0)
         .and_then(|()| file.rewind())
         .and_then(|()| writeln!(file, "{} {}", std::process::id(), role.replace(' ', "-")));
-    Ok(DirLock { _file: file })
+    let l = DirLock { _file: file };
+    Ok(match taken {
+        Taken::Held => Attempt::Held(l),
+        Taken::Unsupported(e) => Attempt::Unsupported(l, e),
+    })
 }
 
 /// `ENOLCK`, `EOPNOTSUPP`, `ENOSYS`: the file system has no locks (some
@@ -137,6 +174,8 @@ fn holder(text: &str) -> String {
         Some("serve") => "serve",
         Some("node-run") => "node run",
         Some("node-join") => "node join",
+        Some("backup") => "backup",
+        Some("restore") => "restore",
         _ => "another process",
     };
     match pid {

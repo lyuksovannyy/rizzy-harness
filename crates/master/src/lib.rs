@@ -97,7 +97,7 @@ const DELETE_AT_ONCE: usize = 8;
 /// How long a create's intended owner is kept for a chat that comes
 /// late (Gate 3 review P-6; fix review 6 N-2): far past `ACK_TIMEOUT`,
 /// short enough that a create the node never makes leaves no row for good.
-pub const CREATE_INTENT_TTL_MS: i64 = 60 * 60 * 1000;
+pub const CREATE_INTENT_TTL_MS: i64 = harness_store::mirror_keys::CREATE_INTENT_TTL_MS;
 /// How many sessions of a hello one store read covers.
 const HELLO_BATCH: usize = 256;
 /// What a remote node's `ack.error` may put into a log line or an API
@@ -599,7 +599,7 @@ fn clean_label(s: &str, max: usize) -> String {
 }
 
 fn auto_model_key(sid: SessionId) -> String {
-    format!("session-model-auto:{sid}")
+    harness_store::mirror_keys::auto_model_key(sid)
 }
 
 /// Withhold `remember` from an agent and from every sub-agent it may hand
@@ -808,21 +808,9 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
     }
 }
 
-/// The kv keys of creates' intended owners (Gate 3 review P-6).
-const CREATE_INTENT_PREFIX: &str = "create-intent:";
-
-fn create_intent_key(sid: SessionId) -> String {
-    format!("{CREATE_INTENT_PREFIX}{sid}")
-}
-
-/// Whether a stored intent is older than [`CREATE_INTENT_TTL_MS`] (one
-/// that cannot be read counts as old).
-fn intent_expired(v: &str, now: i64) -> bool {
-    serde_json::from_str::<serde_json::Value>(v)
-        .ok()
-        .and_then(|v| v["at"].as_i64())
-        .is_none_or(|at| now - at > CREATE_INTENT_TTL_MS)
-}
+// The kv keys of creates' intended owners (Gate 3 review P-6) and their
+// expiry: shared with a backup's copy step (`harness_store::backup`).
+use harness_store::mirror_keys::{CREATE_INTENT_PREFIX, create_intent_key, intent_expired};
 
 /// Removes a command's pending-ack entry when its `send_command` ends in
 /// any way (an ack already took it out: removing again is a no-op).
@@ -2462,11 +2450,6 @@ impl Master {
                     s.kv_set(&key, "1")?;
                 }
                 let mut dropped = None;
-                // A hostile or odd node may ack before the chat exists; then
-                // the intent stays and the chat is claimed when it lands.
-                if s.session(sid)?.is_some() {
-                    s.kv_delete(&create_intent_key(sid))?;
-                }
                 if owner.is_some() || workspace.is_some() {
                     // The claim drops a parent of another owner (L-1).
                     let named = s.session(sid)?.and_then(|r| r.parent_id);
@@ -2483,6 +2466,14 @@ impl Master {
                     Some(p) => s.link_new_session(sid, &p)?,
                     None => false,
                 };
+                // Only after the stamp (these are separate statements): a
+                // backup's copy taken in between still finds the intent and
+                // stamps the chat from it (docs/backup-restore.md). A hostile
+                // or odd node may ack before the chat exists; then the
+                // intent stays and the chat is claimed when it lands.
+                if s.session(sid)?.is_some() {
+                    s.kv_delete(&create_intent_key(sid))?;
+                }
                 Ok::<_, harness_store::StoreError>((linked, dropped))
             })
             .await?;
@@ -3705,9 +3696,7 @@ impl Master {
             .call(move |s| {
                 // Read first: the row is gone after, and only its owner is
                 // told (T58).
-                let owner = s.session(sid)?.and_then(|r| r.owner_id);
-                s.delete_session(sid, true)?;
-                s.kv_delete(&auto_model_key(sid))?;
+                let owner = s.forget_session(sid)?;
                 s.checkpoint()?;
                 Ok::<_, harness_store::StoreError>(owner)
             })

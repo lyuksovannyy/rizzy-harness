@@ -696,6 +696,10 @@ pub async fn hourly(m: &Master) {
             gone.extend(released);
             if !gone.is_empty() {
                 s.checkpoint()?;
+            } else {
+                // A truncate an earlier delete could not make (a backup or
+                // another reader had the file open then).
+                s.retry_truncate()?;
             }
             Ok::<_, harness_store::StoreError>((gone, s.known_blob_ids()?))
         })

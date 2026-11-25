@@ -12,6 +12,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 // Each feature keeps its tables in its own file; their types are reached by
 // module path (`routines::RoutineMark`), so no `pub use` lines are added.
 pub mod artifacts;
+pub mod backup;
 pub mod blobs;
 pub mod chat_uploads;
 pub mod connections;
@@ -19,6 +20,7 @@ pub mod custom_connectors;
 mod handoff;
 pub mod media;
 pub mod migrate;
+pub mod mirror_keys;
 pub mod plugin_access;
 pub mod profile_images;
 pub mod project_clones;
@@ -350,7 +352,17 @@ pub struct NodeRow {
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
+    /// A WAL truncate [`Store::checkpoint`] could not make (another
+    /// program held a read open): [`Store::retry_truncate`] makes it.
+    truncate_pending: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// Beside a database while a WAL truncate is pending (`doctor` reports
+/// it): `<db>-truncate-pending`.
+pub const TRUNCATE_PENDING: &str = "-truncate-pending";
+
+/// How long a store connection waits for another one's lock.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -795,7 +807,7 @@ impl Store {
     pub fn open(path: &Path, durability: Durability) -> Result<Self> {
         let mut conn = Connection::open(path)?;
         // Wait for another connection's write (a migration too), not fail.
-        conn.pragma_update(None, "busy_timeout", 5000)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         // Before anything else writes: a newer build's file is refused as is.
         migrate::migrate_checked(&mut conn, &path.display().to_string(), &DB_SCHEMA)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -804,7 +816,16 @@ impl Store {
             Durability::Normal => "NORMAL",
         };
         conn.pragma_update(None, "synchronous", sync)?;
-        Self::init(conn)
+        let s = Self::init(conn)?;
+        // A truncate an earlier process could not make before it stopped:
+        // pending again, so the periodic retry makes it and drops the mark.
+        let mut mark = path.as_os_str().to_owned();
+        mark.push(TRUNCATE_PENDING);
+        if std::fs::symlink_metadata(&mark).is_ok() {
+            s.truncate_pending
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(s)
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -821,6 +842,7 @@ impl Store {
         conn.pragma_update(None, "secure_delete", "ON")?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            truncate_pending: Arc::default(),
         })
     }
 
@@ -2001,11 +2023,81 @@ impl Store {
     }
 
     /// Fold the WAL back into the database file and truncate it, so deleted
-    /// rows do not survive in the log file either.
-    pub fn checkpoint(&self) -> Result<()> {
+    /// rows do not survive in the log file either. Returns whether the
+    /// truncate was made.
+    ///
+    /// It never waits for a reader: another program with a read open on the
+    /// file (a backup, the sqlite3 shell) keeps the WAL from being reset,
+    /// and waiting for it here would hold this store's only connection, and
+    /// so every call on it, for the whole busy timeout, and then leave the
+    /// WAL as it was anyway. Instead what can be folded is folded, the
+    /// missed truncate is logged and remembered, and the next checkpoint or
+    /// [`Store::retry_truncate`] (the hourly sweep) makes it.
+    pub fn checkpoint(&self) -> Result<bool> {
         let conn = self.lock();
-        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
-        Ok(())
+        conn.busy_timeout(std::time::Duration::ZERO)?;
+        let busy = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            r.get::<_, i64>(0)
+        });
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        let done = busy? == 0;
+        let was = self
+            .truncate_pending
+            .swap(!done, std::sync::atomic::Ordering::SeqCst);
+        // Beside the file, for `doctor` (another process) to report.
+        let mark = conn
+            .path()
+            .filter(|p| !p.is_empty())
+            .map(|p| format!("{p}{TRUNCATE_PENDING}"));
+        if !done && !was {
+            tracing::warn!(
+                db = conn.path().unwrap_or_default(),
+                "the database's write-ahead log could not be truncated now: another program \
+                 holds a read open on it (a backup or the sqlite3 shell); deleted rows stay in \
+                 that log until a checkpoint truncates it: the next delete or the retry every \
+                 minute (master.db: hourly) tries again"
+            );
+            if let Some(m) = &mark {
+                let _ = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(m);
+            }
+        }
+        // Also one an earlier process left.
+        if done && let Some(m) = &mark {
+            let _ = std::fs::remove_file(m);
+        }
+        Ok(done)
+    }
+
+    /// Forget a chat in the master's mirror as the master's delete does:
+    /// its rows (with a tombstone, so its node's events are refused) and
+    /// the per-chat marks in `kv` (the auto-model mark, a callback note).
+    /// Returns the chat's owner. `memory.db` facts that name the chat as
+    /// their source are not the mirror's and stay, as with a live delete.
+    pub fn forget_session(&self, sid: SessionId) -> Result<Option<String>> {
+        let owner = self.session(sid)?.and_then(|r| r.owner_id);
+        self.delete_session(sid, true)?;
+        self.kv_delete(&mirror_keys::auto_model_key(sid))?;
+        self.kv_delete(&mirror_keys::callback_attention_key(sid))?;
+        Ok(owner)
+    }
+
+    /// A truncate [`Store::checkpoint`] could not make, still not made.
+    pub fn truncate_pending(&self) -> bool {
+        self.truncate_pending
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Make a truncate [`Store::checkpoint`] missed, if one is pending;
+    /// whether nothing is pending now.
+    pub fn retry_truncate(&self) -> Result<bool> {
+        if !self.truncate_pending() {
+            return Ok(true);
+        }
+        self.checkpoint()
     }
 
     pub fn head_seq(&self, sid: SessionId) -> Result<u64> {

@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod backup;
 mod listen;
 mod lock;
 mod net;
@@ -82,6 +83,27 @@ enum Cmd {
     ClaimCode,
     /// Check the environment.
     Doctor,
+    /// Back up the data directory into a new or empty folder (the server
+    /// may be running). The folder holds every account, chat, file and
+    /// secret, unencrypted: keep it as you keep the data directory.
+    Backup {
+        /// The folder to write (new, or empty); with --verify, the backup
+        /// to check.
+        dir: PathBuf,
+        /// Check an existing backup against its manifest instead (nothing
+        /// is written).
+        #[arg(long)]
+        verify: bool,
+    },
+    /// Restore a backup into a new or empty data directory (--data-dir).
+    Restore {
+        /// The backup folder `backup` wrote.
+        dir: PathBuf,
+        /// Restore every routine paused (for a trial copy beside the
+        /// original).
+        #[arg(long)]
+        pause_routines: bool,
+    },
     /// Node commands.
     Node {
         #[command(subcommand)]
@@ -210,13 +232,31 @@ fn check_schemas(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn data_dir(cli: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    let d = match cli {
+fn data_dir_path(cli: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    Ok(match cli {
         Some(d) => d.clone(),
         None => dirs::data_local_dir()
             .context("no data directory; pass --data-dir")?
             .join(BRAND),
-    };
+    })
+}
+
+/// The data directory a backup reads: it must exist (a backup never makes
+/// an empty one), as this user's.
+fn existing_data_dir(cli: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    let d = data_dir_path(cli)?;
+    let m = std::fs::metadata(&d)
+        .with_context(|| format!("{}: no data directory there (pass --data-dir)", d.display()))?;
+    if !m.is_dir() {
+        bail!("{} is not a folder", d.display());
+    }
+    harness_master::secrets::check_data_dir(&d)?;
+    d.canonicalize()
+        .with_context(|| format!("resolving {}", d.display()))
+}
+
+fn data_dir(cli: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    let d = data_dir_path(cli)?;
     // Made 0700 from the start (never visible to others under the umask
     // for a moment); its parents as usual. An existing one must be this
     // user's, and is made 0700; a chmod that fails stops the start (Gate 3
@@ -1218,6 +1258,23 @@ async fn doctor(dir: &Path) -> anyhow::Result<()> {
         }
     };
     check("data dir", Ok(dir.display().to_string()));
+    if std::fs::symlink_metadata(dir.join(backup::RESTORING)).is_ok() {
+        // Nothing else is checked: some checks make folders in the data
+        // directory, and a half-restored one is not touched.
+        check("restore", Err(backup::restoring_advice(dir)));
+        bail!("doctor found problems");
+    }
+    for db in ["master.db", "chat.db", "node.db"] {
+        let mark = dir.join(format!("{db}{}", harness_store::TRUNCATE_PENDING));
+        if std::fs::symlink_metadata(&mark).is_ok() {
+            println!(
+                "warn  {db}: a WAL truncate is pending (another program had the file open for \
+                 reading when rows were deleted); the running server retries it (master.db \
+                 hourly, chat.db and node.db every minute); a server that stopped since folded its \
+                 log away as it closed the file, and this note goes at its next checkpoint"
+            );
+        }
+    }
     match lock::status(dir) {
         Ok(lock::Status::Unsupported(m)) => println!("warn  data dir lock: {m}"),
         Ok(lock::Status::Free(m) | lock::Status::Held(m)) => check("data dir lock", Ok(m)),
@@ -1601,7 +1658,31 @@ fn main() -> anyhow::Result<()> {
     let loaded = load_dotenv()?;
     init_tracing();
     let cli = Cli::parse();
-    let dir = data_dir(&cli.data_dir)?;
+    // Checking a backup reads no data directory (it may run elsewhere).
+    if let Cmd::Backup {
+        dir: b,
+        verify: true,
+    } = &cli.cmd
+    {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        if let Err(e) = backup::verify(b, &cancel) {
+            eprintln!("Error: {e:?}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+    let dir = match &cli.cmd {
+        Cmd::Backup { .. } => existing_data_dir(&cli.data_dir)?,
+        _ => data_dir(&cli.data_dir)?,
+    };
+    // An interrupted restore (FIX_PLAN 4.4): every command that reads or
+    // writes a data directory refuses it before touching anything (serve,
+    // node join and run, token, claim-code, graphify, backup, restore);
+    // `doctor` reports it. The helpers above (sandbox-exec, pdf-text,
+    // doc-text, doc-edit) never get here and use no data directory.
+    if !matches!(cli.cmd, Cmd::Doctor) {
+        backup::refuse_restoring(&dir)?;
+    }
     // One process per data directory (A.20), before anything else touches
     // it. Held here, outside the runtime, and never dropped: the process
     // exits with it held and the kernel releases it only once the process
@@ -1613,10 +1694,12 @@ fn main() -> anyhow::Result<()> {
         Cmd::Node {
             cmd: NodeCmd::Join { .. },
         } => Some("node join"),
+        Cmd::Restore { .. } => Some("restore"),
         _ => None,
     };
     let _lock = role.map(|r| lock::take(&dir, r)).transpose()?;
-    if role.is_some() {
+
+    if role.is_some() && role != Some("restore") {
         check_schemas(&dir)?;
     }
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -1778,6 +1861,22 @@ async fn async_main(cli: Cli, dir: PathBuf, dotenv_names: Vec<String>) -> anyhow
             ),
         },
         Cmd::Doctor => doctor(&dir).await,
+        Cmd::Backup { dir: dest, .. } => {
+            let given = dest.clone();
+            let done = backup::run_stoppable(move |c| backup::backup(&dir, &dest, c)).await?;
+            backup::print_backup(&given, &done);
+            Ok(())
+        }
+        Cmd::Restore {
+            dir: from,
+            pause_routines,
+        } => {
+            let to = dir.clone();
+            let r = backup::run_stoppable(move |c| backup::restore(&to, &from, pause_routines, c))
+                .await?;
+            backup::print_restore(&dir, &r);
+            Ok(())
+        }
         Cmd::SandboxExec { .. } => bail!(
             "{} must be the first argument",
             harness_tools::sandbox::SUBCOMMAND
