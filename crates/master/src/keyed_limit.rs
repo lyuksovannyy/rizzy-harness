@@ -290,4 +290,82 @@ mod tests {
         assert!(!inner.map.contains_key("c"));
         assert!(inner.map.contains_key("a") && inner.map.contains_key("d"));
     }
+
+    /// Fill `victim` to its limit of 3 at time 0.
+    fn lock(m: &FailureMap, victim: &str) {
+        for _ in 0..3 {
+            m.try_reserve(victim, 0).unwrap().failed();
+        }
+        assert!(m.check(victim, 1).is_err());
+    }
+
+    #[test]
+    fn a_flood_below_the_bound_neither_frees_a_locked_key_nor_locks_another() {
+        let m = FailureMap::new(100, 3, W);
+        lock(&m, "victim");
+        for i in 0..99 {
+            m.try_reserve(&format!("flood{i}"), 10 + i)
+                .unwrap()
+                .failed();
+        }
+        assert_eq!(m.len(), 100);
+        assert!(m.check("victim", 200).is_err(), "still locked");
+        assert!(
+            m.check("bystander", 200).is_ok(),
+            "an uninvolved key is free"
+        );
+        assert!(
+            m.try_reserve("flood0", 200).is_ok(),
+            "the flood keys are at 1 of 3"
+        );
+    }
+
+    #[test]
+    fn a_flood_past_the_bound_pushes_out_the_oldest_key_and_nothing_else() {
+        // The rule's price, pinned so that a change is a decision: a flood of
+        // `capacity` new keys inside one window evicts the key whose latest
+        // slot is oldest, a locked one included (PLAN.md T12).
+        let m = FailureMap::new(100, 3, W);
+        lock(&m, "victim");
+        for i in 0..100 {
+            m.try_reserve(&format!("flood{i}"), 10 + i)
+                .unwrap()
+                .failed();
+        }
+        assert_eq!(m.len(), 100, "never over the bound");
+        assert!(m.check("victim", 200).is_ok(), "the oldest key went");
+        // Newer keys keep their counts: the flood does not lock anyone out.
+        assert!(m.check("bystander", 200).is_ok());
+        assert!(m.try_reserve("flood99", 200).is_ok());
+    }
+
+    #[test]
+    fn only_the_key_cleared_by_a_success_is_forgotten() {
+        let m = FailureMap::new(10, 3, W);
+        lock(&m, "a");
+        m.try_reserve("b", 1).unwrap().failed();
+        m.try_reserve("b", 2).unwrap().succeeded();
+        assert!(m.check("a", 3).is_err());
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn a_release_takes_back_its_own_slot_whatever_the_timestamps() {
+        let m = FailureMap::new(10, 3, W);
+        m.try_reserve("k", 0).unwrap().failed();
+        // Two attempts in the same millisecond: dropping one leaves the
+        // other counted, in either order of settling.
+        let (a, b) = (
+            m.try_reserve("k", 5).unwrap(),
+            m.try_reserve("k", 5).unwrap(),
+        );
+        drop(b);
+        a.failed();
+        m.try_reserve("k", 6).unwrap().failed();
+        assert!(m.try_reserve("k", 7).is_err(), "three counted: 0, 5, 6");
+        // An id that is not (or no longer) in the key removes nothing.
+        m.release("k", 9_999);
+        assert!(m.try_reserve("k", 8).is_err());
+        assert_eq!(m.retry_ms(&m.lock().map["k"], 8), W - 8);
+    }
 }

@@ -91,15 +91,13 @@ pub struct Auth {
     hasher: Hasher,
     /// Caller (user id, or `api-token`) -> recent failed lookups by
     /// username (adding a workspace member).
-    lookups: Failures,
+    lookups: Arc<crate::keyed_limit::FailureMap>,
     /// Signs the links the browser fetches by itself; a new key per process.
     links: links::Signer,
     /// Store reads made to check a link's login (tests: a link that does
     /// not verify, or a request with none, never reaches the store).
     link_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
-
-type Failures = Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<i64>>>>;
 
 /// Failed logins allowed per username within `THROTTLE_WINDOW_MS`.
 pub const THROTTLE_MAX_FAILURES: usize = 5;
@@ -490,7 +488,11 @@ impl Auth {
                 THROTTLE_WINDOW_MS,
             )),
             hasher: Hasher::default(),
-            lookups: Arc::default(),
+            lookups: Arc::new(crate::keyed_limit::FailureMap::new(
+                FAILURE_MAP_CAPACITY,
+                LOOKUP_MAX_FAILURES,
+                THROTTLE_WINDOW_MS,
+            )),
             links: links::Signer::new(),
             link_reads: Arc::default(),
         }
@@ -516,6 +518,12 @@ impl Auth {
     /// The process's password hasher (4 at once).
     pub fn hasher(&self) -> &Hasher {
         &self.hasher
+    }
+
+    /// Callers with failed lookups in the window (tests, diagnostics).
+    #[doc(hidden)]
+    pub fn lookup_throttle_len(&self) -> usize {
+        self.lookups.len()
     }
 
     /// Usernames with failures in the window (tests, diagnostics).
@@ -588,31 +596,19 @@ impl Auth {
         }
     }
 
-    /// Take one of `caller`'s username lookups, or `false` when they have
-    /// used up their failures. Checking and counting happen under one lock,
-    /// so a burst of parallel adds cannot all pass before the first failure
-    /// is recorded: the taken slot counts as a failure until
-    /// `release_lookup` gives it back.
-    pub fn try_reserve_lookup(&self, caller: &str, now_ms: i64) -> bool {
-        let mut map = self.lookups.lock().unwrap_or_else(|p| p.into_inner());
-        let list = map.entry(caller.to_string()).or_default();
-        list.retain(|t| now_ms - *t < THROTTLE_WINDOW_MS);
-        if list.len() >= LOOKUP_MAX_FAILURES {
-            return false;
-        }
-        list.push(now_ms);
-        true
-    }
-
-    /// Give back the slot `try_reserve_lookup` took at `now_ms`: the
-    /// username existed, or the store could not tell.
-    pub fn release_lookup(&self, caller: &str, now_ms: i64) {
-        let mut map = self.lookups.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(list) = map.get_mut(caller)
-            && let Some(i) = list.iter().position(|t| *t == now_ms)
-        {
-            list.swap_remove(i);
-        }
+    /// Take one of `caller`'s username lookups, or `Err(ms to wait)` when
+    /// they have used up their failures. Checking and counting happen under
+    /// one lock, so a burst of parallel adds cannot all pass before the first
+    /// failure is recorded: the slot counts as a failure until the
+    /// reservation is settled. Call `failed()` when the username did not
+    /// exist; drop it (never `succeeded()`, which would forget the caller's
+    /// other failures) when it existed or the store could not tell.
+    pub fn reserve_lookup<'a>(
+        &'a self,
+        caller: &'a str,
+        now_ms: i64,
+    ) -> Result<crate::keyed_limit::Reservation<'a>, i64> {
+        self.lookups.try_reserve(caller, now_ms)
     }
 
     /// Enable first-run claiming with this code.
@@ -1179,18 +1175,47 @@ mod tests {
         assert!(f.is_empty(), "a success clears the name");
         // Username lookups count per caller, separately from logins.
         for i in 0..LOOKUP_MAX_FAILURES as i64 {
-            assert!(a.try_reserve_lookup("u1", i));
+            a.reserve_lookup("u1", i).unwrap().failed();
         }
-        assert!(!a.try_reserve_lookup("u1", 20));
+        assert!(a.reserve_lookup("u1", 20).is_err());
         assert!(f.check("u1", 20).is_ok());
-        assert!(a.try_reserve_lookup("u2", 20));
-        // A slot given back (the username existed) is free again.
-        a.release_lookup("u1", 3);
-        assert!(a.try_reserve_lookup("u1", 21));
-        assert!(!a.try_reserve_lookup("u1", 22));
-        a.release_lookup("u1", 99);
-        assert!(!a.try_reserve_lookup("u1", 23), "only taken slots go back");
-        assert!(a.try_reserve_lookup("u1", THROTTLE_WINDOW_MS + 30));
+        a.reserve_lookup("u2", 20).unwrap().failed();
+        // A slot given back (the username existed) is free again, and only
+        // that one: the earlier failures stay.
+        a.lookups.clear("u1");
+        for i in 0..LOOKUP_MAX_FAILURES as i64 - 1 {
+            a.reserve_lookup("u1", i).unwrap().failed();
+        }
+        let pending = a.reserve_lookup("u1", 21).unwrap();
+        assert!(a.reserve_lookup("u1", 22).is_err(), "pending counts");
+        drop(pending);
+        a.reserve_lookup("u1", 23).unwrap().failed();
+        assert!(a.reserve_lookup("u1", 24).is_err());
+        assert!(a.reserve_lookup("u1", THROTTLE_WINDOW_MS + 30).is_ok());
+    }
+
+    #[test]
+    fn the_lookup_map_keeps_a_bounded_number_of_callers() {
+        let a = Auth::new(Secret::new("t".into()), vec![], false);
+        for i in 0..(FAILURE_MAP_CAPACITY as i64 + 4_000) {
+            a.reserve_lookup(&format!("user-{i}"), i).unwrap().failed();
+        }
+        assert!(
+            a.lookup_throttle_len() <= FAILURE_MAP_CAPACITY,
+            "{} callers held",
+            a.lookup_throttle_len()
+        );
+    }
+
+    #[test]
+    fn a_caller_with_nothing_left_in_the_window_leaves_no_entry() {
+        let a = Auth::new(Secret::new("t".into()), vec![], false);
+        drop(a.reserve_lookup("u1", 0).unwrap());
+        assert_eq!(
+            a.lookup_throttle_len(),
+            0,
+            "a given-back slot leaves no key"
+        );
     }
 
     #[test]
