@@ -109,7 +109,7 @@ let root: Root;
 let mounted = false;
 beforeEach(() => {
   lives.length = 0;
-  stubs.sessions.mockReset().mockResolvedValue({ sessions: [] });
+  stubs.sessions.mockReset().mockResolvedValue({ sessions: [], children: [], next: null });
   stubs.workspaces.mockReset().mockResolvedValue(list(personal, acme));
   stubs.attention.mockReset().mockReturnValue(new Promise(() => {}));
   stubs.agents.mockReset().mockReturnValue(new Promise(() => {}));

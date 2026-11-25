@@ -189,6 +189,9 @@ fn page_sql(owner: Owner<'_>, after: bool, project: bool) -> String {
     // owner is checked inside the links' subquery too, so another member's
     // chat in a shared project costs one key lookup and nothing more (a
     // team project of 40,000 others' chats: 9 ms instead of 21, bench).
+    // Only speed depends on that inner check: the outer owner filter alone
+    // keeps every other owner's chat out, so no result changes without it
+    // (`the_owner_check_inside_the_links_saves_work` counts the work).
     let project = if project {
         format!(
             "s.session_id IN (SELECT sp.session_id FROM session_projects sp

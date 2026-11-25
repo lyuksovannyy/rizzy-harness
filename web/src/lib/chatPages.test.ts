@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import type { SessionRow } from "../types";
-import { appendPage, applyRefetch, coalesce, combine, groupRows, type List, refetchLimit } from "./chatPages";
+import { appendPage, applyRefetch, coalesce, combine, type List, refetchLimit } from "./chatPages";
 
 const row = (n: number, more: Partial<SessionRow> = {}): SessionRow => ({
   session_id: `00000000-0000-7000-8000-${String(n).padStart(12, "0")}`,
@@ -86,14 +86,6 @@ describe("chat pages", () => {
     const l = applyRefetch(loaded, { sessions: [top, ...span(99, 50)], children: [kid2], next: "new" });
     expect(l.children.map((r) => r.session_id).sort()).toEqual([kid.session_id, tailKid.session_id, grandKid.session_id].sort());
     expect(l.children.find((r) => r.session_id === kid.session_id)?.running).toBe(true);
-  });
-
-  test("a group waits for its next page before showing older rows", () => {
-    const own: List = { rows: span(100, 91), children: [], next: "g" };
-    const rows = [...span(100, 91), row(50), row(40)];
-    expect(names(groupRows(rows, own))).toEqual(names(span(100, 91)));
-    expect(groupRows(rows, { ...own, next: null })).toHaveLength(12);
-    expect(groupRows(rows, undefined)).toHaveLength(12);
   });
 
   test("the lists combine once each, the freshest copy, newest first, with the open chat", () => {

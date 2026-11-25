@@ -94,6 +94,21 @@ let PAGE = null;
     check(first >= 50 && first < 120, `one or a few pages at first (${first})`);
     check((await p.locator(LOOSE).first().innerText()).trim() === 'Chat 119', 'the newest on top');
 
+    // Opened before scrolling: the project's own newest chats, though no
+    // loaded page of the main list has them.
+    await p.click(`${BOX} button[aria-label="Expand Old project"]`);
+    await p.waitForFunction(() => document.querySelectorAll('.project-box ul.chats > li > a.session-item').length === 5);
+    const inBox = () => p.locator(`${BOX} ul.chats > li > a.session-item`).allInnerTexts();
+    check((await inBox())[0].trim() === 'Old 11', 'its newest first');
+    await p.click(`${BOX} button:text-is("Show 5 more")`);
+    check((await inBox()).length === 10, 'its first page: ten');
+    await p.click(`${BOX} button:text-is("Show more")`);
+    await p.waitForFunction(() => document.querySelectorAll('.project-box ul.chats > li > a.session-item').length === 12);
+    const box = await inBox();
+    check(box.every((t, i) => t.trim() === `Old ${11 - i}`), `the project's chats in order: ${box}`);
+    await p.locator('aside.sidebar').screenshot({ path: `${OUT}/pages-project-open.png` });
+    log('the project showed its own older chats and its next page');
+
     // Scroll to the end until there is nothing more to load.
     for (let i = 0; i < 40 && (await p.locator('.load-more').count()); i++) {
       await p.locator('.sidebar-scroll').evaluate((el) => el.scrollTo(0, el.scrollHeight));
@@ -107,20 +122,6 @@ let PAGE = null;
     const after = lists.filter((s) => s.includes('after='));
     check(after.length >= 1, `scrolling asked for the next pages: ${lists}`);
     log(`scrolled: ${titles.length} chats in ${after.length + 1} pages`);
-
-    // Opened: the project's own newest chats, though no loaded page has them.
-    await p.click(`${BOX} button[aria-label="Expand Old project"]`);
-    await p.waitForFunction(() => document.querySelectorAll('.project-box ul.chats > li > a.session-item').length === 5);
-    const inBox = () => p.locator(`${BOX} ul.chats > li > a.session-item`).allInnerTexts();
-    check((await inBox())[0].trim() === 'Old 11', 'its newest first');
-    await p.click(`${BOX} button:text-is("Show 5 more")`);
-    check((await inBox()).length === 10, 'its first page: ten');
-    await p.click(`${BOX} button:text-is("Show more")`);
-    await p.waitForFunction(() => document.querySelectorAll('.project-box ul.chats > li > a.session-item').length === 12);
-    const box = await inBox();
-    check(box.every((t, i) => t.trim() === `Old ${11 - i}`), `the project's chats in order: ${box}`);
-    await p.locator('aside.sidebar').screenshot({ path: `${OUT}/pages-project-open.png` });
-    log('the project showed its own older chats and its next page');
 
     // A chat made elsewhere shows on top after the nudge, the rest stay.
     await chat({ title: 'Brand new' });

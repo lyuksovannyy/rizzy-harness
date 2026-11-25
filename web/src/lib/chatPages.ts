@@ -78,15 +78,6 @@ export function applyRefetch(l: List | null, p: Page): List {
   return { rows: [...p.sessions, ...tail], children: [...p.children, ...oldKids], next: l.next };
 }
 
-/** A project group's rows, from every list that holds them, newest first.
- * While the group's own pages have more, rows older than its last loaded
- * one wait for its next page, so the group never shows a gap that a page
- * later fills in the middle. */
-export function groupRows(rows: SessionRow[], own: List | undefined): SessionRow[] {
-  const last = own?.next ? own.rows[own.rows.length - 1] : undefined;
-  return last ? rows.filter((r) => !older(r, last)) : rows;
-}
-
 /** Every listed row once (the freshest copy: the highest `head_seq`), and
  * `extra` (the open chat's own row, when no page holds it), newest first. */
 export function combine(lists: List[], extra: SessionRow | null): SessionRow[] {

@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { SessionRow } from "../types";
-import { appendPage, applyRefetch, coalesce, combine, type List, type Page, refetchLimit } from "./chatPages";
+import { appendPage, applyRefetch, coalesce, combine, type List, refetchLimit } from "./chatPages";
 import { pruneDrafts } from "./drafts";
 
 /** The main list's page (the server's default). */
@@ -23,6 +23,9 @@ export interface ChatPages {
   /** The last load failed: load again on a click only, never by scrolling
    * (a failing page in view would otherwise be asked for in a loop). */
   stalled: boolean;
+  /** How many older chats the last page added (`at` tells two equal ones
+   * apart), for the sidebar's polite status line. */
+  loaded: { n: number; at: number } | null;
   /** An open project group (or the open project's page) wants its own
    * newest chats; the returned function lets go. */
   watch(project: string): () => void;
@@ -30,8 +33,6 @@ export interface ChatPages {
   moreIn(project: string): void;
 }
 
-type Got = { sessions: SessionRow[]; children?: SessionRow[]; next?: string | null };
-const norm = (r: Got): Page => ({ sessions: r.sessions, children: r.children ?? [], next: r.next ?? null });
 
 export function useChatList(
   workspaceId: string | null,
@@ -44,10 +45,18 @@ export function useChatList(
   const [groups, setGroups] = useState<Record<string, List>>({});
   const [busy, setBusy] = useState(false);
   const [stalled, setStalled] = useState(false);
+  const [loaded, setLoaded] = useState<{ n: number; at: number } | null>(null);
+  const groupBusy = useRef(new Set<string>());
+  // Groups whose first page is on its way when a nudge comes: refetched once
+  // it lands, so the nudge is not lost for them.
+  const nudged = useRef(new Set<string>());
+  // The open chat's row as refreshed here, when no loaded page holds it.
+  const [fresh, setFresh] = useState<SessionRow | null>(null);
+  const extra = opts.extra && (opts.extra.workspace_id ?? null) === workspaceId ? opts.extra : null;
   // The latest lists, for callbacks that outlive a render.
-  const now = useRef({ main, groups });
+  const now = useRef({ main, groups, extra });
   useEffect(() => {
-    now.current = { main, groups };
+    now.current = { main, groups, extra };
   });
   const watched = useRef(new Map<string, number>());
   const err = useRef(onError);
@@ -58,17 +67,25 @@ export function useChatList(
   const loading = useRef(false);
 
   const get = useCallback(
-    (o: { limit?: number; after?: string; project?: string }) => api.sessions(workspaceId, o).then(norm),
+    (o: { limit?: number; after?: string; project?: string }) => api.sessions(workspaceId, o),
     [workspaceId],
   );
   const putGroup = useCallback((id: string, f: (l: List | undefined) => List) => {
     setGroups((g) => (watched.current.has(id) ? { ...g, [id]: f(g[id]) } : g));
   }, []);
 
+  const refetchGroup = useCallback(
+    (id: string, loaded: number) =>
+      get({ project: id, limit: refetchLimit(loaded, GROUP) }).then((p) =>
+        putGroup(id, (l) => (l ? applyRefetch(l, p) : appendPage(null, p))),
+      ),
+    [get, putGroup],
+  );
+
   const refresh = useMemo(
     () =>
       coalesce(() => {
-        const { main, groups } = now.current;
+        const { main, groups, extra } = now.current;
         const limit = refetchLimit(main?.rows.length ?? 0, FIRST);
         const top = get(limit === FIRST ? {} : { limit }).then((p) => {
           setMain((m) => (m ? applyRefetch(m, p) : appendPage(null, p)));
@@ -78,16 +95,24 @@ export function useChatList(
             pruneDrafts(p.sessions);
           }
         });
-        // Open groups whose first page came; the others are still on their way.
-        const open = [...watched.current.keys()].filter((id) => groups[id]);
-        const each = open.map((id) =>
-          get({ project: id, limit: refetchLimit(groups[id]!.rows.length, GROUP) }).then((p) =>
-            putGroup(id, (l) => (l ? applyRefetch(l, p) : appendPage(null, p))),
-          ),
-        );
-        return Promise.all([top, ...each]).catch((e: unknown) => err.current(e));
+        // Open groups whose first page came; the others are still on their
+        // way and refetch once it lands.
+        const open = [...watched.current.keys()];
+        for (const id of open) if (!groups[id]) nudged.current.add(id);
+        const each = open.filter((id) => groups[id]).map((id) => refetchGroup(id, groups[id]!.rows.length));
+        // The open chat outside every loaded page: its row again (a rename or
+        // a move does not bring it to the top). A 404 means it is gone.
+        const held = (id: string) => [main, ...Object.values(groups)].some((l) => l?.rows.some((r) => r.session_id === id) || l?.children.some((r) => r.session_id === id));
+        const own =
+          extra && main && !held(extra.session_id)
+            ? api.session(extra.session_id).then(
+                (r) => setFresh(r),
+                () => {},
+              )
+            : null;
+        return Promise.all([top, ...each, own]).catch((e: unknown) => err.current(e));
       }),
-    [get, putGroup],
+    [get, refetchGroup],
   );
 
   const more = useCallback(() => {
@@ -97,6 +122,8 @@ export function useChatList(
     setBusy(true);
     get({ after: next })
       .then((p) => {
+        const had = new Set(now.current.main?.rows.map((r) => r.session_id));
+        setLoaded({ n: p.sessions.filter((r) => !had.has(r.session_id)).length, at: Date.now() });
         setMain((m) => (m ? appendPage(m, p) : m));
         setStalled(false);
       })
@@ -116,7 +143,10 @@ export function useChatList(
       watched.current.set(id, n + 1);
       if (n === 0)
         get({ project: id, limit: GROUP })
-          .then((p) => putGroup(id, () => appendPage(null, p)))
+          .then((p) => {
+            putGroup(id, () => appendPage(null, p));
+            if (nudged.current.delete(id) && watched.current.has(id)) return refetchGroup(id, p.sessions.length);
+          })
           // A project deleted meanwhile is a 404: the group goes with the next list.
           .catch((e: unknown) => err.current(e));
       return () => {
@@ -127,27 +157,31 @@ export function useChatList(
         setGroups(({ [id]: _, ...rest }) => rest);
       };
     },
-    [get, putGroup],
+    [get, putGroup, refetchGroup],
   );
 
   const moreIn = useCallback(
     (id: string) => {
       const next = now.current.groups[id]?.next;
-      if (next)
-        get({ project: id, after: next, limit: GROUP })
-          .then((p) => putGroup(id, (l) => appendPage(l ?? null, p)))
-          .catch((e: unknown) => err.current(e));
+      // A click while that group's page loads is ignored.
+      if (!next || groupBusy.current.has(id)) return;
+      groupBusy.current.add(id);
+      get({ project: id, after: next, limit: GROUP })
+        .then((p) => putGroup(id, (l) => appendPage(l ?? null, p)))
+        .catch((e: unknown) => err.current(e))
+        .finally(() => groupBusy.current.delete(id));
     },
     [get, putGroup],
   );
 
   useEffect(() => (opts.keep ? watch(opts.keep) : undefined), [opts.keep, watch]);
 
-  const extra = opts.extra && (opts.extra.workspace_id ?? null) === workspaceId ? opts.extra : null;
-  const sessions = useMemo(() => (main ? combine([main, ...Object.values(groups)], extra) : null), [main, groups, extra]);
+  // Refreshed into another workspace, it no longer shows here.
+  const shown = extra && fresh?.session_id === extra.session_id ? ((fresh.workspace_id ?? null) === workspaceId ? fresh : null) : extra;
+  const sessions = useMemo(() => (main ? combine([main, ...Object.values(groups)], shown) : null), [main, groups, shown]);
   const pages: ChatPages = useMemo(
-    () => ({ more: main?.next ? more : null, busy, stalled, watch, group: (id: string) => groups[id], moreIn }),
-    [main?.next, more, busy, stalled, watch, groups, moreIn],
+    () => ({ more: main?.next ? more : null, busy, stalled, loaded, watch, group: (id: string) => groups[id], moreIn }),
+    [main?.next, more, busy, stalled, loaded, watch, groups, moreIn],
   );
   return { sessions, refresh, pages };
 }

@@ -5,7 +5,6 @@
 // a cap shows it in its place, and a closed group's header carries its mark.
 import { ChevronRight, Cloud, Plus } from "lucide-react";
 import { lazy, type ReactNode, Suspense, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { groupRows } from "../lib/chatPages";
 import { ACCENTS } from "../lib/appearance";
 import { t } from "../lib/i18n";
 import { ProjectIcon } from "../lib/projectIcons";
@@ -77,13 +76,17 @@ function LoadMore(props: { more: () => void; busy: boolean; stalled: boolean }) 
     const el = ref.current;
     if (busy || stalled || !el || typeof IntersectionObserver === "undefined") return;
     // A new observer after each page reports at once whether the end is
-    // still in view, so a tall sidebar fills itself.
-    const io = new IntersectionObserver((es) => es.some((e) => e.isIntersecting) && more(), { rootMargin: "200px" });
+    // still in view, so a tall sidebar fills itself. The scrolling box is
+    // the root: a margin on the viewport is clipped by it, so nothing would
+    // load ahead.
+    const root = el.closest(".sidebar-scroll");
+    const io = new IntersectionObserver((es) => es.some((e) => e.isIntersecting) && more(), { root, rootMargin: "200px" });
     io.observe(el);
     return () => io.disconnect();
   }, [more, busy, stalled]);
+  // Never `disabled` while it loads: that would drop a keyboard user's focus.
   return (
-    <button ref={ref} type="button" className="link small show-more load-more" onClick={more} disabled={busy}>
+    <button ref={ref} type="button" className="link small show-more load-more" onClick={() => busy || more()} aria-busy={busy}>
       {t("nav.olderChats")}
     </button>
   );
@@ -129,10 +132,26 @@ function Chat({ s, c }: { s: SessionRow; c: Ctx }) {
 }
 
 function Chats({ list, c, cap = Infinity, sub, load }: { list: SessionRow[]; c: Ctx; cap?: number; sub?: boolean; load?: () => void }) {
+  const ul = useRef<HTMLUListElement>(null);
+  const asked = useRef(false);
+  // The last page came and nothing is left: its "Show more" goes, and focus
+  // moves to the last row it added instead of falling to the page.
+  useEffect(() => {
+    if (load || !asked.current) return;
+    asked.current = false;
+    const rows = ul.current?.querySelectorAll<HTMLElement>(":scope > li > a.session-item");
+    rows?.[rows.length - 1]?.focus();
+  }, [load, list.length]);
+  const asking = load
+    ? () => {
+        asked.current = true;
+        load();
+      }
+    : undefined;
   return (
     // `role`: Safari drops a styled list's semantics.
-    <ul role="list" className={sub ? "chats sub" : "chats"}>
-      <Capped items={list} cap={cap} keep={(s) => c.path.has(s.session_id)} row={(s) => <Chat key={s.session_id} s={s} c={c} />} load={load} />
+    <ul ref={ul} role="list" className={sub ? "chats sub" : "chats"}>
+      <Capped items={list} cap={cap} keep={(s) => c.path.has(s.session_id)} row={(s) => <Chat key={s.session_id} s={s} c={c} />} load={asking} />
     </ul>
   );
 }
@@ -187,8 +206,11 @@ function Box(props: { p: ProjectSummary; chats: SessionRow[]; open: boolean; onT
   const id = p.project_id;
   // Open, the group loads its own newest chats; closed, it costs nothing.
   useEffect(() => (props.open && pages ? pages.watch(id) : undefined), [props.open, pages?.watch, id]);
+  // The main list's rows of the project and the group's own are both the
+  // project's newest, in order, so together they have no gap; the open
+  // chat's own row may come from its lookup, older than both, and shows.
   const own = pages?.group(id);
-  const chats = groupRows(props.chats, own);
+  const chats = props.chats;
   // Another member may have named it: hidden characters show (W-3).
   const name = shownName(p.name);
   const here = !props.open && props.chats.some((s) => c.path.has(s.session_id));
@@ -331,6 +353,9 @@ export function SidebarLists(props: {
       {tree.none && <div className="muted pad small">{t("nav.noChats")}</div>}
       <Chats list={tree.loose} c={c} />
       {props.pages?.more && <LoadMore more={props.pages.more} busy={props.pages.busy} stalled={props.pages.stalled} />}
+      <div className="sr-only" role="status" aria-live="polite">
+        {props.pages?.loaded && <span key={props.pages.loaded.at}>{t("nav.olderLoaded", { n: String(props.pages.loaded.n) })}</span>}
+      </div>
     </div>
   );
 }

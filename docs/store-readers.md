@@ -309,9 +309,17 @@ Each slice is reviewable alone and starts with a test that fails on the old code
    Tests in `web/` for the merge of a refetch with loaded pages; an e2e script that creates 120 chats with the demo provider and scrolls.
    First-load bytes: the hook replaces existing code; measured with `pnpm size` before and after.
    Built as `web/src/lib/useChatList.ts` (state) and `chatPages.ts` (the merge, tested in `chatPages.test.ts`), the sidebar's end a button that is also the IntersectionObserver's target (`ProjectNav.tsx`, `LoadMore`), and `web/e2e/chat-list-pages.cjs`.
-   The open chat's lookup row joins the list when it is in this workspace, so the open chat always shows.
+   The open chat's lookup row joins the list when it is in this workspace, so the open chat always shows; when no loaded page holds it, each refetch asks for that row again (a rename or a project move does not bring a chat to the top).
+   A project group shows the union of the main list's rows of that project and its own pages: both are the project's newest chats in order, so the union has no gap, and the open chat's lookup row, older than both, shows too (an earlier filter that held back rows older than the group's last page hid it, review F2).
+   "Finished" notifications count only chats the tab saw before and saw not unread then: a chat that enters the list already unread (a scrolled page, an opened group) is shown by its dot, and folding a group does not make its chats new again (review F1).
+   "Load older chats" is never `disabled` (it is `aria-busy` and ignores clicks while a page loads), its observer's root is the sidebar's scrolling box so the 200px margin loads ahead, a polite status line says how many older chats came, and when a group's last page leaves nothing more its "Show more" goes and focus moves to the last row it added.
+   A nudge that comes while a group's first page is on its way refetches that group once the page lands.
    `subAgentRunning` reads the page's `children`; the sub-agents of an open chat older than every loaded page are not known (a chat that starts a sub-agent has just been active, so it is on the first page).
-   First load grew by 1.5 KB gzip (103.3 to 104.8 KB of the 110 ceiling): the merge and the paging state replace a dozen lines.
+   First load grew by 1.9 KB gzip (103.3 to 105.2 KB of the 110 ceiling): the merge, the paging state and the review fixes replace a dozen lines.
+
+   Known limits (review F5, F6; not fixed in this slice):
+   - Screens that pick from "your chats" see only the loaded ones: the project page's "Add a chat" list, and the board card editor's chat list, where a card linked to an older chat shows "None" (saving keeps the link); a folded group has no unread dot for chats beyond the first page. Slice 4 gives them their own queries.
+   - Each `sessions_changed` now costs one request for the list plus one per open, loaded project group (five by default; more after "Show N more" on the projects); a team project's page can hold the store lock about 9 ms (§4, Project). Accepted for now; a cap is the fix if it shows.
 4. **The other whole-table and N+1 callers:** `board_json`, both `chat_owners`, `own_chats`, the search no-words branch and `chat_results`, `delete_workspace`, member removal, user delete, `cancel_revoked`, the members roster (`member_json`'s two calls per member).
    Test: a store wrapper or SQLite `trace` counts statements per request for a roster of 20 and a board of 50 cards, constant in N.
 5. **The FTS merge out of the delete path**, into the hourly maintenance with a bounded `('merge', N)`.

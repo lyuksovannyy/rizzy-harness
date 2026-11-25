@@ -1529,3 +1529,68 @@ fn a_project_never_widens_the_owner() {
         "the fixture links a chat of a to c's project"
     );
 }
+
+/// The owner check inside a project page's links subquery is for speed
+/// only (the outer owner filter keeps the result right without it): with
+/// it, another member's chat in a shared project is dropped inside the
+/// subquery. This counts the virtual machine's steps with and without it,
+/// so removing it fails here, and checks the answer is the same.
+#[test]
+fn the_owner_check_inside_the_links_saves_work() {
+    let s = Store::open_in_memory().unwrap();
+    user(&s, "a");
+    user(&s, "b");
+    let team = s.create_workspace("Team", "a").unwrap().workspace_id;
+    s.add_member(&team, "b", "member").unwrap();
+    exec(
+        &s,
+        "INSERT INTO projects (project_id, workspace_id, name, icon, accent, created_ms, updated_ms)
+         VALUES ('pt', ?1, 'p', 'i', 'a', 0, 0)",
+        params![team],
+    );
+    for k in 0..2_000 {
+        let id = plain(&s, "b", k).to_string();
+        exec(
+            &s,
+            "INSERT INTO session_workspaces (session_id, workspace_id) VALUES (?1, ?2)",
+            params![id, team],
+        );
+        exec(
+            &s,
+            "INSERT INTO session_projects (session_id, project_id, added_ms) VALUES (?1, 'pt', 0)",
+            params![id],
+        );
+    }
+    let sql = page_sql(Owner::User("a"), false, true);
+    assert!(sql.contains("AND o.owner_id = ?1"), "{sql}");
+    let without = sql.replace("AND o.owner_id = ?1", "AND 1");
+    let run = |text: &str| {
+        let c = s.lock();
+        let mut st = c.prepare(text).unwrap();
+        let n = st
+            .query_map(
+                params![
+                    "a",
+                    None::<i64>,
+                    None::<String>,
+                    team,
+                    true,
+                    true,
+                    51i64,
+                    "pt"
+                ],
+                |_| Ok(()),
+            )
+            .unwrap()
+            .count();
+        (n, st.get_status(rusqlite::StatementStatus::VmStep))
+    };
+    let (rows, with_check) = run(&sql);
+    let (rows_without, without_check) = run(&without);
+    println!("vm steps: with the inner check {with_check}, without {without_check}");
+    assert_eq!((rows, rows_without), (0, 0), "the same answer either way");
+    assert!(
+        with_check * 4 < without_check * 3,
+        "steps with the inner owner check {with_check}, without {without_check}"
+    );
+}

@@ -69,9 +69,43 @@ afterEach(() => {
 });
 
 describe("finished, unread", () => {
-  test("newly finished: unread, not running, not unread before", () => {
-    const rows = [chat("a", { unread: true }), chat("b", { unread: true, running: true }), chat("c", { unread: true }), chat("d")];
-    expect(newlyFinished(new Set(["c"]), rows).map((r) => r.session_id)).toEqual(["a"]);
+  test("newly finished: unread, not running, seen before and not unread then", () => {
+    const rows = [chat("a", { unread: true }), chat("b", { unread: true, running: true }), chat("c", { unread: true }), chat("d"), chat("e", { unread: true })];
+    // e was never seen: it enters the list already unread (paging, a group).
+    const before = new Map([
+      ["a", false],
+      ["b", false],
+      ["c", true],
+      ["d", false],
+    ]);
+    expect(newlyFinished(before, rows).map((r) => r.session_id)).toEqual(["a"]);
+  });
+
+  // Review F1: rows that enter by paging or by opening a project group.
+  test("an old unread chat that a page or an opened group brings in is not notified", async () => {
+    await show([chat("a")]);
+    await show([chat("a"), chat("old", { unread: true })]);
+    expect(shown).toEqual([]);
+  });
+
+  test("folding and unfolding a group twice notifies nothing", async () => {
+    await show([chat("a")]);
+    for (let i = 0; i < 2; i++) {
+      await show([chat("a"), chat("old", { unread: true })]);
+      await show([chat("a")]);
+    }
+    await show([chat("a"), chat("old", { unread: true })]);
+    expect(shown).toEqual([]);
+  });
+
+  test("a chat on page one that really finishes still notifies once, also across a fold", async () => {
+    await show([chat("a"), chat("b")]);
+    await show([chat("a"), chat("b", { unread: true })]);
+    expect(shown).toHaveLength(1);
+    // Its group folds and unfolds: no second notification.
+    await show([chat("a")]);
+    await show([chat("a"), chat("b", { unread: true })]);
+    expect(shown).toHaveLength(1);
   });
 
   test("one notification per newly finished chat, with fixed words and its place in the list", async () => {

@@ -160,11 +160,9 @@ export const api = {
   /** One page of the caller's top-level chats in a workspace (the API
    * token: every owner's, unless one is named), newest first, with every
    * sub-agent chat below them in `children` and the next page's start in
-   * `next`; `project`: that project's chats only. `routineRuns` also lists
-   * the routine run chats left out once seen. */
-  sessions: (workspace?: string | null, opts: { routineRuns?: boolean; limit?: number; after?: string; project?: string } = {}) => {
+   * `next`; `project`: that project's chats only. */
+  sessions: (workspace?: string | null, opts: { limit?: number; after?: string; project?: string } = {}) => {
     const q = new URLSearchParams();
-    if (opts.routineRuns) q.set("routine_runs", "1");
     if (opts.project) q.set("project", opts.project);
     if (opts.limit) q.set("limit", String(opts.limit));
     if (opts.after) q.set("after", opts.after);

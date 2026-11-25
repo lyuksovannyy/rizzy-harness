@@ -13,14 +13,18 @@ import { APP_TITLE } from "./brand";
 import { t } from "./i18n";
 import { notifyEnabled } from "./notify";
 
-/** Unread chats in `now` that were not unread in `before`. Pure, for tests. */
-export function newlyFinished(before: ReadonlySet<string>, now: SessionRow[]): SessionRow[] {
-  return now.filter((s) => s.unread && !s.running && !before.has(s.session_id));
+/** Unread chats in `now` that this tab saw before and saw not unread then.
+ * `before`: every chat seen so far, and whether it was finished and unread
+ * when last seen. A chat seen for the first time already unread (a page
+ * loaded by scrolling, a project group opened) finished before it came into
+ * view: its dot says so, a notification would not be news. Pure, for tests. */
+export function newlyFinished(before: ReadonlyMap<string, boolean>, now: SessionRow[]): SessionRow[] {
+  return now.filter((s) => done(s) && before.get(s.session_id) === false);
 }
 
 const NONE: SessionRow[] = [];
 
-const unreadIds = (rows: SessionRow[]) => new Set(rows.filter((s) => s.unread && !s.running).map((s) => s.session_id));
+const done = (s: SessionRow) => !!s.unread && !s.running;
 
 const looking = (id: string, viewing: string | null) => viewing === id && document.visibilityState === "visible";
 
@@ -30,7 +34,7 @@ export function useFinishedSignal(loaded: SessionRow[] | null, viewing: string |
   const listed = loaded ?? NONE;
   // Null until the first list: what was unread before this tab opened is
   // shown by its dot, never notified.
-  const before = useRef<Set<string> | null>(null);
+  const before = useRef<Map<string, boolean> | null>(null);
   useEffect(() => {
     if (!loaded) return;
     if (before.current && notifyEnabled()) {
@@ -48,7 +52,11 @@ export function useFinishedSignal(loaded: SessionRow[] | null, viewing: string |
         };
       }
     }
-    before.current = unreadIds(listed);
+    // Chats that leave the list (a folded group) keep what was last seen of
+    // them, so coming back is no news either.
+    const seen = before.current ?? new Map<string, boolean>();
+    for (const s of listed) seen.set(s.session_id, done(s));
+    before.current = seen;
   }, [loaded, listed, viewing]);
 
   // Looking at a finished chat counts as seeing it, now or when the tab
