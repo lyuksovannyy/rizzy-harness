@@ -170,12 +170,30 @@ OpenClaw notes that `VACUUM` may renumber implicit rowids; ours are only used fo
 
 ## A copy before each migration (the row's second half)
 
-The read-only preflight (`check_schemas`, `main.rs:204`) already reads every database's version before any is opened, under the exclusive lock.
-When any of them is older than this build, it first writes the four databases with `VACUUM INTO` to `<data>/pre-migration/` with a manifest (from-versions, build), replacing the previous set: one set kept, removed only when the next migrating start replaces it, sized like the databases (blobs are not copied: a migration does not touch them).
-If the copy cannot be made (disk full) the start stops before anything is migrated.
-Rolling back: stop the new build, run `rizzy-harness restore --pre-migration` (puts the four files back, removing the migrated files' `-wal` and `-shm`, which must never meet an older file), start the old build.
-It is small (the preflight already has the versions; the snapshot code is PR A's), and it gives `docs/node-update.md` §6.3 its second option.
-It ships as PR B, after PR A, because its restore reuses PR A's checks.
+Built in PR B (`crates/cli/src/premigration.rs`), reworked after its review (B1, B2, H1, M1 to M3).
+
+**When a set is made, kept or refused** (`before_start`, at `serve`, `node run` and `node join`, holding the lock, after `check_schemas`, before any database is opened):
+- A database counts when present with tables; it is *behind* when its version is above 0 and below the build's, or 0 with tables (4.3 adopts such a file as version 1 and migrates on; its `before` is recorded as 0).
+- *Upgraded*: at least one of the set's databases present, and every present database at the set's `target` (a database the set lacks at the build's version); a directory holding only a set is not upgraded (`a_set_alone_is_no_first_run`). Then the set is only a way back: a database deleted on purpose is made new as always (`after_a_good_upgrade_a_deleted_database_is_made_again`).
+- Refused first, unless upgraded: a database the set names is missing while an upgrade is under way; the sentence gives every way out (put it back; roll back; or delete `pre-migration/` and start once with `--migrate-without-copy`, the start being otherwise refused for mixed versions; `mid_upgrade_a_missing_database_is_refused_with_every_way_out` follows each of the three and the server starts). For `serve`, no `master.db` while stored files, `*.failed-upgrade-*` files or (unless upgraded) `pre-migration/` are there. No first-run claim code is made over such a directory.
+- Nothing behind: nothing is done.
+- **Kept:** only while a migration is under way: a set whose `target` is this build's versions, with every database at that set's `before` or `target` version (a database the set lacks only at the build's version, made by the failed start), and **at least one database no longer at its `before`**, and every file's hash checked (logged before and after, with the set's size). An older build refuses such a directory, so nothing can have changed the others since. The migration resumes; a retried or looping start never replaces the only good set (`failing_starts_keep_the_first_set`, `a_resumed_migration_keeps_the_set`).
+- **Made fresh** whenever every database is still at one consistent pre-upgrade state, whether or not an older set with the same target exists: the older build may have written since (after a rollback), and keeping the old set would lose that at the next rollback (`a_second_rollback_keeps_what_the_older_build_wrote`). A start whose first migration fails leaves every database at `before` (the migration is one transaction), so the next start makes a fresh set from the same state: the same content.
+- **Made:** only from one consistent state: `master.db`, `chat.db` and `node.db` (one schema, always migrated together) at one version, 0 with tables counting as 1; `memory.db` has its own schema and is alone in its family.
+- **Refused:** mixed store versions with no matching set (no older build left that state together); `--migrate-without-copy` overrides, logged.
+- A copy that cannot be written stops the start before anything is migrated (`an_unwritable_copy_stops_the_start`, a partial folder this user cannot empty; mutation-checked: ignoring the error makes it fail).
+- Free space: the databases' bytes (with `-wal`, `-shm`, `-journal`) three times (the byte copy, the snapshot, and SQLite's temporary space for `VACUUM INTO`, counted at the database's size) plus 64 MiB or a tenth; numbers in MiB.
+The copy is the offline backup's: a byte copy of each database with its `-wal`, `-shm` and `-journal` into `pre-migration.partial/work/`, `VACUUM INTO` from it, a `MANIFEST.json` (kind, build, time, `before`, `target`, sizes and SHA-256), the complete set swapped in by rename (`pre-migration.old` for the moment of the swap). A database a read-only reader may not read (a hot journal) has its version read from such a copy.
+A start that made or kept a set and then fails, for any reason, prints the rollback advice when a database is no longer at its `before` version (`any_failure_after_a_migration_names_the_rollback`, a debug-only hook failing the start after `master.db` was opened).
+
+**The rollback** (`restore --pre-migration`, under the lock): it reads and hashes the set, shows what it will do (the set's time, age and build, each database's version in the set and now, the stored files without a row in the set) and stops unless `--yes`. Then, staged: free space; `RESTORING` with a rollback's mark (every command but this one refuses it, with advice to run it again); each copy written beside its database as `<db>.rollback-partial` and synced; each live database with its `-wal`, `-shm` and `-journal` put aside as `<file>.failed-upgrade-<ms>` (0600) and its copy renamed into place; the stored files without a row in the set moved into `blobs.failed-upgrade-<ms>/` (kept, so the upgraded state can be put back); the versions checked; the mark removed last. The mark holds the rollback's time stamp: a rerun reuses it, never sets aside a database whose bytes are the set's copy (one an interrupted run placed), and lists everything set aside under that one stamp; the README's way back to the upgraded state (the server stopped; the older build's live `-wal`, `-shm` and `-journal` moved beside as `*.older-build-<time>` first, since an older WAL meeting the upgraded database makes it unreadable; the files, not the shard folders, which already exist) is run word for word, with a live WAL of the older build left beforehand, in `a_rollback_killed_at_any_step_can_be_run_again`. The set is never changed or removed by a rollback, so after an interruption at any stage the rollback run again finishes from it (`a_rollback_killed_at_any_step_can_be_run_again`, killed after each stage through a debug-only pause).
+**The blob store cannot be wiped from an empty table** (its own commit): if `master.db` names no stored file while files lie in `blobs/`, neither the start's sweep nor the hourly one deletes them (a new server has neither; deleting every file removes the files with their rows); the log says so.
+A stored file deleted after the upgrade is named by a restored row but gone: a Media download answers 500 ("cannot open a stored file" in the log), and an Artifact version is marked failed at the start (`fail_missing`).
+`backup` leaves `pre-migration/`, the `.failed-upgrade-` files and folders and the `.rollback-partial` files out and says so; restore's path shape refuses them; `doctor` prints a line with the set's date, versions and size.
+
+**Left over (known hazards, not changed here):** the blob guard covers only an empty table. An older `master.db` placed beside a newer blob folder (a hand-made rollback, a restore of one file) still loses, at the next start, the stored files it does not name: the start deletes files without a row. Moving such files aside at start instead of deleting them would change every server's start and is left for its own change. The guard's error is logged once per process run, and `doctor` prints a line while it holds.
+
+**A master and its remote nodes are rolled back separately.** The link's hello carries only the protocol version (`harness_protocol::PROTOCOL_VERSION`, refused by `nodes::protocol_refusal` when it differs), never a schema version, so builds with different schemas talk as long as the protocol matches. A master rolled back while its nodes are not has a mirror older than their logs: the nodes resend what it lacks, and a chat begun on a node after the upgrade comes back without its owner's stamp (only the API token sees it), as with a restored backup. A node rolled back while its master is not has a log older than the master's mirror: its chats that moved on since the upgrade freeze ("two writers sent different events under one seq"). Roll a node back only together with its master, or not at all.
 
 ## Measured
 
@@ -183,7 +201,7 @@ USB disk of this machine, debug build, the server running, 61 media files (a 302
 A release build hashes faster; these are upper figures.
 Copies stream through one 1 MiB buffer: a 2 GB file raises the peak RSS by far less than 64 MB (`a_large_file_streams_through_the_buffer`).
 
-## PR B, a copy before each migration (left)
+## PR B, a copy before each migration (built)
 
 As above: the four databases into `<data>/pre-migration/` before a migrating start, one set kept, a start that cannot write it stops (decision 4), `restore --pre-migration` to roll back; tests: a version-5 fixture opens, the copy holds version 5, the rollback restores it and the old schema opens; a full disk stops the start before any migration.
 
@@ -197,4 +215,4 @@ The session lead's (2026-11-25), each open to the owner's override:
 2. **The API token stays in the backup**; the README says a backup is as sensitive as the server itself.
 3. **Routines after a restore are as they were**, with the printed warning and `--pause-routines`.
 4. **A migration whose copy cannot be written stops the start** (PR B).
-5. **PR B comes right after PR A.**
+5. **PR B comes right after PR A** (done: `feat/pre-migration-copy`).

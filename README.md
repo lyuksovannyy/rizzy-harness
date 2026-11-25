@@ -5507,6 +5507,85 @@ In Docker, mount a second folder (the backup may not go inside `/data`):
 `volumes: ["./data:/data", "./backups:/backups"]`, then
 `docker compose exec rizzy-harness rizzy-harness backup /backups/2026-11-25`.
 
+### Before an upgrade
+
+A start of a newer build that will migrate a database (its schema version
+is older than the build's, or it is an old file from before schema versions,
+at version 0 with tables) first copies **all** the databases, as they are,
+into `pre-migration/` in the data directory (0700, files 0600, with a
+manifest). That copy is the rollback point of **this** upgrade:
+
+- A start retried while a migration is under way (some databases already
+  upgraded: a restart loop, or you trying again) keeps it and resumes the
+  migration; it never replaces it with the half-migrated state.
+- A start that finds every database still at its old version makes a fresh
+  copy, even if an older one exists: the older build may have written since
+  (after a rollback, say), and an old copy would lose that.
+- After an upgrade that ran well, the copy is only a way back: a database
+  you delete on purpose is made new as always.
+- A copy is made only when the databases are at one consistent version.
+  If they are mixed and no copy of this upgrade matches them, the start
+  stops: no honest rollback point can be made.
+- The next upgrade replaces it with its own (then the first rollback point
+  is gone): back up first if you want to keep it.
+- If the copy cannot be written (not enough free space: the start gives
+  what it needs, in MiB, counting the copy, the snapshot and SQLite's
+  temporary space, and what is free; a disk it cannot write), the start
+  **stops before migrating anything**.
+
+To migrate anyway, without a way back, start once with
+`--migrate-without-copy` (or `HARNESS_MIGRATE_WITHOUT_COPY=1`); the log
+says so loudly. `doctor` shows the copy, its date, versions and size. Delete
+the folder to free the space once the upgrade runs well; a backup does not
+include it.
+
+### Rolling an upgrade back
+
+```bash
+# stop the server first
+rizzy-harness --data-dir ~/.local/share/rizzy-harness restore --pre-migration         # says what it will do
+rizzy-harness --data-dir ~/.local/share/rizzy-harness restore --pre-migration --yes   # does it
+# then start the OLDER build
+```
+
+Without `--yes` it shows the copy's date, age and build, each database's
+version in the copy and now, and how many stored files have no row in the
+copy, and changes nothing. With `--yes` it checks the copy against its
+manifest (an incomplete or changed copy, or a directory a server runs on, is
+refused), checks free space, then works in stages under a `RESTORING` mark:
+the copies are written beside the databases, each current database is kept
+beside as `<file>.failed-upgrade-<time>` (0600) and its copy takes its place,
+and the stored files saved after the upgrade (no row in the copy) are moved
+into `blobs.failed-upgrade-<time>/`. If it is interrupted, every command
+refuses the directory and says to run `restore --pre-migration --yes` again,
+which finishes from the copy (a rollback never changes it). If only an
+interrupted copy's leftovers are there (`pre-migration.old`,
+`pre-migration.partial`), it says so.
+
+Everything one rollback sets aside carries one `<time>` (a rollback run again
+after an interruption reuses it), and the rollback lists it at the end. To
+return to the upgraded state instead, stop the server first (no process may
+hold the databases), then, with that time:
+
+```bash
+# the server stopped
+cd ~/.local/share/rizzy-harness && T=<time> && \
+for f in *.db-wal *.db-shm *.db-journal; do if [ -e "$f" ]; then mv "$f" "$f.older-build-$T"; fi; done && \
+(cd "blobs.failed-upgrade-$T" && find . -type f | while read -r f; do mkdir -p "../blobs/${f%/*}" && mv "$f" "../blobs/$f"; done) && \
+rm -r "blobs.failed-upgrade-$T" && \
+for f in *.db*.failed-upgrade-$T; do mv "$f" "${f%.failed-upgrade-$T}"; done
+```
+
+(the first line moves the older build's `-wal`, `-shm` and `-journal` beside,
+as `*.older-build-<time>`: left in place, a WAL of the older build would meet
+the upgraded database and make it unreadable; moving whole shard folders
+fails where the shard exists, which is the usual case, so the files are
+moved). Once the older build runs well, delete the
+`*.failed-upgrade-<time>` files and the folder instead. A stored file deleted after the upgrade is gone though a
+restored row names it (its download fails; an Artifact version shows as
+failed). Chats and changes made after the upgrade are lost with the rollback.
+A master and its remote nodes are rolled back separately: see the design note.
+
 How it works and why: [`docs/backup-restore.md`](docs/backup-restore.md).
 
 ## Development

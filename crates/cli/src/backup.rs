@@ -61,7 +61,7 @@ pub const BUF: usize = 1 << 20;
 const MANIFEST_MAX: u64 = 64 << 20;
 
 /// The databases, in the order they are copied, with their schema.
-fn databases() -> [(
+pub(crate) fn databases() -> [(
     &'static str,
     &'static harness_store::migrate::Schema<'static>,
 ); 4] {
@@ -89,7 +89,7 @@ pub const NOT_INCLUDED: &str = "\
 Not in this backup: the project folders and repositories the chats work in; checkpoints \
 (after a restore, undo and rewind of the turns made before it are refused); a remote node's \
 own data (back it up on that machine, with its --data-dir); .env and HARNESS_* environment \
-variables.";
+variables; pre-migration/ (the copy of older databases kept for rolling an upgrade back).";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -162,7 +162,7 @@ pub fn valid_path(p: &str) -> bool {
 }
 
 /// Create `p` 0600, exclusively, not through a link.
-fn create_private(p: &Path) -> io::Result<File> {
+pub(crate) fn create_private(p: &Path) -> io::Result<File> {
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -172,7 +172,7 @@ fn create_private(p: &Path) -> io::Result<File> {
 }
 
 /// Make folder `p` 0700 (it may exist already as a real folder of ours).
-fn mkdir_private(p: &Path) -> io::Result<()> {
+pub(crate) fn mkdir_private(p: &Path) -> io::Result<()> {
     match fs::DirBuilder::new().mode(0o700).create(p) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -189,7 +189,7 @@ fn mkdir_private(p: &Path) -> io::Result<()> {
     }
 }
 
-fn sync_dir(p: &Path) -> io::Result<()> {
+pub(crate) fn sync_dir(p: &Path) -> io::Result<()> {
     File::open(p)?.sync_all()
 }
 
@@ -217,7 +217,7 @@ fn kind(p: &Path) -> io::Result<Kind> {
 /// never a FIFO or device (judged before the open, so opening one blocks
 /// nothing and touches no device; the open itself is non-blocking and
 /// makes no terminal ours, and the file opened must be the one judged).
-fn open_regular(p: &Path) -> io::Result<(File, fs::Metadata)> {
+pub(crate) fn open_regular(p: &Path) -> io::Result<(File, fs::Metadata)> {
     let not_regular = || {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -324,10 +324,17 @@ fn known_top(n: &str) -> bool {
         "keys",
         "agents",
         "update-pending.json",
+        "master.db.rollback-partial",
+        "chat.db.rollback-partial",
+        "node.db.rollback-partial",
+        "memory.db.rollback-partial",
+        crate::premigration::SET,
+        crate::premigration::SET_PARTIAL,
+        crate::premigration::SET_OLD,
         "update-failed",
         "rizzy-harness.prev",
     ];
-    if LEFT_OUT.contains(&n) || PLAIN.contains(&n) {
+    if LEFT_OUT.contains(&n) || PLAIN.contains(&n) || n.contains(crate::premigration::ASIDE) {
         return true;
     }
     databases().iter().any(|(d, _)| {
@@ -340,7 +347,7 @@ fn known_top(n: &str) -> bool {
 
 /// A database and the files SQLite opens beside it: each absent or a
 /// regular file (SQLite's own open would block on a FIFO).
-fn db_files_regular(dir: &Path, name: &str) -> anyhow::Result<()> {
+pub(crate) fn db_files_regular(dir: &Path, name: &str) -> anyhow::Result<()> {
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let f = format!("{name}{suffix}");
         match kind(&dir.join(&f))? {
@@ -403,8 +410,8 @@ pub fn copy_stream(
     Ok((n, hex::encode(h.finalize())))
 }
 
-fn mb(n: u64) -> String {
-    format!("{:.1} MB", n as f64 / 1_000_000.0)
+pub(crate) fn mb(n: u64) -> String {
+    format!("{:.1} MiB", n as f64 / 1_048_576.0)
 }
 
 /// Each stored file `master` names, decrypted from `path_of(id)` and
@@ -443,7 +450,7 @@ fn verify_blobs(
 
 /// Check one database copy: SQLite's integrity and foreign keys, and a
 /// schema this build knows (a newer one is refused).
-fn check_db(
+pub(crate) fn check_db(
     name: &str,
     p: &Path,
     schema: &harness_store::migrate::Schema<'_>,
@@ -510,7 +517,15 @@ fn prepare_dest(data: &Path, dest: &Path) -> anyhow::Result<(PathBuf, bool)> {
 /// Free bytes for this user on `p`'s file system (the field types differ
 /// between platforms, hence the casts).
 #[allow(clippy::unnecessary_cast)]
-fn free_bytes(p: &Path) -> nix::Result<u64> {
+pub(crate) fn free_bytes(p: &Path) -> nix::Result<u64> {
+    // Tests only (debug builds): a disk this full.
+    #[cfg(debug_assertions)]
+    if let Some(n) = std::env::var("HARNESS_TEST_FREE_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        return Ok(n);
+    }
     let v = nix::sys::statvfs::statvfs(p)?;
     Ok((v.blocks_available() as u64).saturating_mul(v.fragment_size() as u64))
 }
@@ -731,7 +746,7 @@ fn tmp_name(dir: &Path, name: &str) -> PathBuf {
 /// copy of `master.db` and the links); the restore's after its first file
 /// (it is killed there).
 #[cfg(debug_assertions)]
-fn test_pause(var: &str) {
+pub(crate) fn test_pause(var: &str) {
     let Ok(p) = std::env::var(var) else {
         return;
     };
@@ -746,7 +761,7 @@ fn test_pause(var: &str) {
 }
 
 #[cfg(not(debug_assertions))]
-fn test_pause(_: &str) {}
+pub(crate) fn test_pause(_: &str) {}
 
 /// The result, for the lines the command prints.
 pub struct Done {
@@ -829,7 +844,7 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
         // The copies go beside the data, on its own disk.
         let need: u64 = present
             .iter()
-            .flat_map(|n| ["", "-wal", "-shm"].map(|s| data.join(format!("{n}{s}"))))
+            .flat_map(|n| ["", "-wal", "-shm", "-journal"].map(|s| data.join(format!("{n}{s}"))))
             .filter_map(|p| fs::symlink_metadata(p).ok())
             .map(|m| m.len())
             .sum();
@@ -839,7 +854,7 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
         let into = staging.dir.join("db");
         mkdir_private(&into)?;
         for n in &present {
-            for suffix in ["", "-wal", "-shm"] {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
                 let f = format!("{n}{suffix}");
                 let (mut src, _) = match open_regular(&data.join(&f)) {
                     Ok(v) => v,
@@ -1768,8 +1783,50 @@ pub fn refuse_restoring(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What `RESTORING` holds when a rollback (`restore --pre-migration`)
+/// wrote it: that command, and only it, may then run again.
+pub const ROLLBACK_MARK: &str = "rollback from pre-migration\n";
+
+fn marker_text(dir: &Path) -> Option<String> {
+    open_regular(&dir.join(RESTORING))
+        .ok()
+        .and_then(|(mut f, m)| {
+            (m.len() < 256).then(|| {
+                let mut s = String::new();
+                io::Read::read_to_string(&mut f, &mut s).ok().map(|_| s)
+            })?
+        })
+}
+
+/// Whether `RESTORING` is a rollback's.
+pub fn rollback_marked(dir: &Path) -> bool {
+    marker_text(dir).is_some_and(|s| s.starts_with(ROLLBACK_MARK))
+}
+
+/// The time stamp a rollback's `RESTORING` names (what it sets aside is
+/// named with it; a rerun reuses it).
+pub fn rollback_stamp(dir: &Path) -> Option<i64> {
+    marker_text(dir)?
+        .strip_prefix(ROLLBACK_MARK)?
+        .trim()
+        .strip_prefix("stamp ")?
+        .parse()
+        .ok()
+}
+
 /// What to do about an interrupted restore, in words.
 pub fn restoring_advice(dir: &Path) -> String {
+    if rollback_marked(dir) {
+        return format!(
+            "{} holds an interrupted rollback (a {RESTORING} file is in it), and no command uses \
+             it as it is: run `{} --data-dir {} restore --pre-migration --yes` again; it finishes \
+             from the copy in {}/, which a rollback never changes",
+            dir.display(),
+            harness_core::BRAND,
+            dir.display(),
+            crate::premigration::SET
+        );
+    }
     format!(
         "{} holds an interrupted restore (a {RESTORING} file is in it), and no command uses it \
          as it is: delete everything in it (lock and backup.lock too), or the directory \
@@ -1832,6 +1889,8 @@ mod tests {
             "RESTORING",
             "claim-code",
             "checkpoints/x.git",
+            "pre-migration/master.db",
+            "pre-migration",
             "blobs/ab/0123456789abcdef0123456789abcdaa.rzb",
             "blobs/aa/0123456789ABCDEF0123456789abcdaa.rzb",
             "blobs/aa/0123456789abcdef0123456789abcdaa.rzb/x",
@@ -1917,7 +1976,10 @@ mod tests {
     #[test]
     fn an_offline_backup_needs_room_for_its_copies() {
         let e = room_for(500 << 20, 100 << 20).unwrap_err().to_string();
-        assert!(e.contains("524.3 MB") && e.contains("104.9 MB free"), "{e}");
+        assert!(
+            e.contains("500.0 MiB") && e.contains("100.0 MiB free"),
+            "{e}"
+        );
         room_for(500 << 20, 1 << 30).unwrap();
     }
 

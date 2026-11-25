@@ -65,6 +65,41 @@ pub fn needs_writer(e: &rusqlite::Error) -> bool {
     )
 }
 
+/// The schema version of a private copy (see [`snapshot_private_copy`]),
+/// opened read-write so SQLite first rolls back a hot journal or recovers
+/// a WAL in the copy.
+pub fn user_version_private_copy(path: &Path) -> rusqlite::Result<i64> {
+    let c = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    c.busy_timeout(BUSY)?;
+    c.query_row("PRAGMA user_version", [], |r| r.get(0))
+}
+
+/// The schema version and the number of tables of a database file,
+/// read-only (`private_copy`: of a private copy, read-write, so SQLite
+/// first recovers it there).
+pub fn version_and_tables(path: &Path, private_copy: bool) -> rusqlite::Result<(i64, i64)> {
+    let c = if private_copy {
+        let c = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        c.busy_timeout(BUSY)?;
+        c
+    } else {
+        open_ro(path)?
+    };
+    let v = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let t = c.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok((v, t))
+}
+
 /// The schema version of a database file (read-only).
 pub fn user_version(path: &Path) -> rusqlite::Result<i64> {
     open_ro(path)?.query_row("PRAGMA user_version", [], |r| r.get(0))

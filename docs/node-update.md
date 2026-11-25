@@ -231,8 +231,10 @@ refuses a database with a newer schema version than its own. A new build that mi
 at start and then fails its handshake leaves a `node.db` the rolled-back build refuses, and the
 rollback ends in a node that does not start. N.9 must choose one of: the new build migrates only
 after the handshake is accepted (`Accepted`); or it keeps a copy of `node.db` made before the
-migration (`VACUUM INTO`, fix plan 4.4: the copy before each migration is PR B of
-`docs/backup-restore.md`, after `backup`/`restore` landed) and the rollback restores that copy, losing what the new
+migration (`VACUUM INTO`, fix plan 4.4: **built**: every start that migrates copies all
+databases into `<data>/pre-migration/` first, and `restore --pre-migration` puts them back;
+an automatic rollback can run that command before it starts the previous build,
+`docs/backup-restore.md`) and the rollback restores that copy, losing what the new
 build logged; or an update that changes a schema version is never installed automatically (never
 `auto`). Not decided; N.9 is not done until it is.
 

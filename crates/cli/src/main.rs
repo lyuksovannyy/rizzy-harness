@@ -8,6 +8,7 @@ mod backup;
 mod listen;
 mod lock;
 mod net;
+mod premigration;
 mod push_check;
 mod stop;
 
@@ -29,6 +30,16 @@ struct Cli {
     /// Data directory (default: ~/.local/share/rizzy-harness).
     #[arg(long, global = true, env = "HARNESS_DATA_DIR")]
     data_dir: Option<PathBuf>,
+    /// Migrate the databases at a start without copying them first into
+    /// `pre-migration/` (when the copy cannot be written). A migration that
+    /// then fails has no way back to the older build. Off by default.
+    #[arg(
+        long,
+        global = true,
+        env = "HARNESS_MIGRATE_WITHOUT_COPY",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    migrate_without_copy: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -98,11 +109,21 @@ enum Cmd {
     /// Restore a backup into a new or empty data directory (--data-dir).
     Restore {
         /// The backup folder `backup` wrote.
-        dir: PathBuf,
+        #[arg(required_unless_present = "pre_migration")]
+        dir: Option<PathBuf>,
         /// Restore every routine paused (for a trial copy beside the
         /// original).
         #[arg(long)]
         pause_routines: bool,
+        /// Roll an upgrade back: put the databases back from the data
+        /// directory's `pre-migration/` copy (the server must be stopped),
+        /// then start the older build.
+        #[arg(long, conflicts_with_all = ["dir", "pause_routines"])]
+        pre_migration: bool,
+        /// With --pre-migration: do it (without, it only says what it would
+        /// do).
+        #[arg(long, requires = "pre_migration")]
+        yes: bool,
     },
     /// Node commands.
     Node {
@@ -362,6 +383,12 @@ async fn serve(
     );
 
     let mirror = Store::open(&dir.join("master.db"), Durability::Normal)?;
+    // Tests only (debug builds): a start that fails for another reason than
+    // a migration once master.db was opened (and migrated).
+    #[cfg(debug_assertions)]
+    if std::env::var("HARNESS_TEST_FAIL_AFTER_OPEN").is_ok_and(|v| v == "master.db") {
+        bail!("test: the start fails after opening master.db");
+    }
     // Accounts older than workspaces get their Personal one here, so every
     // user-owned chat has a workspace from the first request on.
     let added = mirror.call(|s| s.ensure_personal_workspaces()).await?;
@@ -1264,6 +1291,16 @@ async fn doctor(dir: &Path) -> anyhow::Result<()> {
         check("restore", Err(backup::restoring_advice(dir)));
         bail!("doctor found problems");
     }
+    if let Some(l) = premigration::doctor_line(dir) {
+        println!("info  {l}");
+    }
+    if let Some(n) = premigration::unclaimed_blobs(dir) {
+        println!(
+            "warn  stored files: master.db names none, yet blobs/ holds {n}: the server keeps \
+             them (it never wipes the store from an empty table); restore the master.db they \
+             belong to, or move them away if they are not wanted"
+        );
+    }
     for db in ["master.db", "chat.db", "node.db"] {
         let mark = dir.join(format!("{db}{}", harness_store::TRUNCATE_PENDING));
         if std::fs::symlink_metadata(&mark).is_ok() {
@@ -1680,7 +1717,15 @@ fn main() -> anyhow::Result<()> {
     // node join and run, token, claim-code, graphify, backup, restore);
     // `doctor` reports it. The helpers above (sandbox-exec, pdf-text,
     // doc-text, doc-edit) never get here and use no data directory.
-    if !matches!(cli.cmd, Cmd::Doctor) {
+    // A rollback's own marker lets only that rollback run again.
+    let rollback_again = matches!(
+        cli.cmd,
+        Cmd::Restore {
+            pre_migration: true,
+            ..
+        }
+    ) && backup::rollback_marked(&dir);
+    if !matches!(cli.cmd, Cmd::Doctor) && !rollback_again {
         backup::refuse_restoring(&dir)?;
     }
     // One process per data directory (A.20), before anything else touches
@@ -1699,14 +1744,19 @@ fn main() -> anyhow::Result<()> {
     };
     let _lock = role.map(|r| lock::take(&dir, r)).transpose()?;
 
-    if role.is_some() && role != Some("restore") {
+    // Before any database is opened: a start that will migrate copies
+    // them all first (FIX_PLAN 4.4), or stops.
+    let mut rollback_advice = None;
+    if let Some(r) = role.filter(|r| *r != "restore") {
         check_schemas(&dir)?;
+        rollback_advice = premigration::before_start(&dir, r, cli.migrate_without_copy)?;
     }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     // A panic too ends in the bounded shutdown below, never in a plain drop
     // of the runtime (which would wait for a stuck thread without end).
+    let dir_for_advice = dir.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         rt.block_on(async_main(cli, dir, loaded))
     }))
@@ -1718,6 +1768,12 @@ fn main() -> anyhow::Result<()> {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("Error: {e:?}");
+            // Any failure once a database left the version the set holds.
+            if let Some(a) = &rollback_advice
+                && premigration::moved(&dir_for_advice, &a.before)
+            {
+                eprintln!("{}", a.advice);
+            }
             if e.chain().any(|c| {
                 matches!(
                     c.downcast_ref::<harness_link::LinkError>(),
@@ -1868,9 +1924,16 @@ async fn async_main(cli: Cli, dir: PathBuf, dotenv_names: Vec<String>) -> anyhow
             Ok(())
         }
         Cmd::Restore {
+            pre_migration: true,
+            yes,
+            ..
+        } => premigration::rollback(&dir, yes),
+        Cmd::Restore {
             dir: from,
             pause_routines,
+            ..
         } => {
+            let from = from.context("restore needs the backup folder")?;
             let to = dir.clone();
             let r = backup::run_stoppable(move |c| backup::restore(&to, &from, pause_routines, c))
                 .await?;
