@@ -31,6 +31,7 @@ mod forks;
 pub mod git_state;
 mod handoff;
 mod http;
+pub mod keyed_limit;
 pub mod levels;
 pub mod limits;
 pub mod made;
@@ -304,7 +305,7 @@ pub struct MasterInner {
     acks: Mutex<HashMap<String, PendingAck>>,
     /// Audit rows written for failed node handshakes, per node id and per
     /// peer address (Gate 3 review L-7).
-    node_auth_audits: auth::limits::FailureMap,
+    node_auth_audits: nodes::AuthAuditLimits,
     /// Set by [`Master::begin_stop`] (SIGTERM or SIGINT to `serve`, A.19).
     server_stopping: std::sync::atomic::AtomicBool,
     pub auth: auth::Auth,
@@ -874,7 +875,7 @@ impl Master {
                 nodes: Mutex::new(HashMap::new()),
                 live,
                 acks: Mutex::new(HashMap::new()),
-                node_auth_audits: nodes::auth_audit_limit(),
+                node_auth_audits: nodes::AuthAuditLimits::new(),
                 server_stopping: Default::default(),
                 auth,
                 models: Mutex::new(Vec::new()),

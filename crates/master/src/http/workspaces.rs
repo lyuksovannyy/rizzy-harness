@@ -523,12 +523,12 @@ pub(super) async fn add_member(
     let auth = &m.inner.auth;
     // Reserved before the lookup and kept when it fails, so parallel adds
     // cannot all pass the check before any failure counts.
-    if !auth.try_reserve_lookup(&caller, now) {
+    let Ok(slot) = auth.reserve_lookup(&caller, now) else {
         return Err(ApiError(
             StatusCode::TOO_MANY_REQUESTS,
             "too many unknown usernames; try again in 15 minutes".into(),
         ));
-    }
+    };
     let name = b.username.trim().to_ascii_lowercase();
     let found = m
         .inner
@@ -538,14 +538,15 @@ pub(super) async fn add_member(
     let user = match found {
         Ok(u) => u.filter(|u| !u.disabled),
         Err(e) => {
-            auth.release_lookup(&caller, now);
+            drop(slot);
             return Err(e.into());
         }
     };
     let Some(user) = user else {
+        slot.failed();
         return Err(ApiError(StatusCode::NOT_FOUND, "no such user".into()));
     };
-    auth.release_lookup(&caller, now);
+    drop(slot);
     let (ws, uid) = (a.id().to_string(), user.user_id.clone());
     let added = m
         .inner

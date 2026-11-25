@@ -77,6 +77,7 @@ async fn fifty_parallel_wrong_passwords_record_five_failures() {
     let s = start().await;
     claim_admin(&s).await;
     let base = s.base.clone();
+    let hashed_before = s.auth.hashes_started();
     let tasks: Vec<_> = (0..50)
         .map(|_| {
             let base = base.clone();
@@ -106,6 +107,12 @@ async fn fifty_parallel_wrong_passwords_record_five_failures() {
         "exactly 5 guesses checked"
     );
     assert_eq!(refused, 50 - wrong);
+    // The slot is taken before the hash: the 45 refused guesses cost none.
+    assert_eq!(
+        s.auth.hashes_started() - hashed_before,
+        harness_master::auth::THROTTLE_MAX_FAILURES,
+        "exactly 5 hashes run"
+    );
     // Locked: even the right password waits out the window.
     let (st, retry, _) = login(&s, "alex", "admin password").await;
     assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);

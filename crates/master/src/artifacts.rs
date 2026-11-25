@@ -8,7 +8,6 @@
 //! and project come from the publishing session's own mirror row, never
 //! from its parent and never from the node (T7, T10, T18).
 
-use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use harness_core::RawEvent;
@@ -23,7 +22,7 @@ use serde_json::{Value, json};
 use crate::auth::Principal;
 use crate::search::{SearchCtx, SearchResult};
 use crate::workspaces::{self as ws, Access};
-use crate::{Master, lock, storage};
+use crate::{Master, storage};
 
 /// `[artifacts]` in config.toml; left out of the file while it is the
 /// default.
@@ -67,26 +66,51 @@ const LINEAGES_PER_WORKSPACE: u64 = 1000;
 pub const STAGE_TTL: Duration = Duration::from_secs(24 * 3600);
 pub const TOO_OLD: &str = "the worker node is too old to publish; update it";
 
-/// Per-node counts of recent `artifact_staged` events.
-#[derive(Default)]
+/// Nodes the throttle remembers; past it the node with the oldest event is
+/// forgotten (`keyed_limit` has the rule).
+const THROTTLE_NODES: usize = 4096;
+
+/// Per-node counts of recent `artifact_staged` events: the keyed limiter,
+/// one slot per event, on a monotonic clock (milliseconds since the
+/// throttle was made), so a step of the wall clock changes no node's count.
 pub struct Throttle {
-    seen: std::sync::Mutex<HashMap<String, VecDeque<Instant>>>,
+    seen: crate::keyed_limit::FailureMap,
+    start: Instant,
+}
+
+impl Default for Throttle {
+    fn default() -> Self {
+        Self {
+            seen: crate::keyed_limit::FailureMap::new(
+                THROTTLE_NODES,
+                STAGED_PER_HOUR,
+                HOUR.as_millis() as i64,
+            ),
+            start: Instant::now(),
+        }
+    }
 }
 
 impl Throttle {
     /// Count one event of `node_id`; false once it is over the hourly cap.
     fn admit(&self, node_id: &str) -> bool {
-        let now = Instant::now();
-        let mut seen = lock(&self.seen);
-        let q = seen.entry(node_id.to_string()).or_default();
-        while q.front().is_some_and(|t| now.duration_since(*t) >= HOUR) {
-            q.pop_front();
+        self.admit_at(node_id, self.start.elapsed().as_millis() as i64)
+    }
+
+    /// [`admit`](Self::admit) at `now_ms` on the throttle's own clock (tests).
+    fn admit_at(&self, node_id: &str, now_ms: i64) -> bool {
+        match self.seen.try_reserve(node_id, now_ms) {
+            Ok(slot) => {
+                slot.failed();
+                true
+            }
+            Err(_) => false,
         }
-        if q.len() >= STAGED_PER_HOUR {
-            return false;
-        }
-        q.push_back(now);
-        true
+    }
+
+    #[cfg(test)]
+    fn nodes(&self) -> usize {
+        self.seen.len()
     }
 }
 
@@ -546,6 +570,39 @@ mod tests {
         }
         assert!(!t.admit("a"), "the 31st in an hour");
         assert!(t.admit("b"));
+    }
+
+    #[test]
+    fn the_throttle_keeps_a_bounded_number_of_nodes() {
+        let t = Throttle::default();
+        for i in 0..5_000 {
+            assert!(t.admit(&format!("node-{i}")));
+        }
+        assert!(t.nodes() <= 4096, "{} nodes held", t.nodes());
+    }
+
+    #[test]
+    fn the_hour_slides_on_the_throttles_own_clock() {
+        let t = Throttle::default();
+        let hour = HOUR.as_millis() as i64;
+        for i in 0..STAGED_PER_HOUR as i64 {
+            assert!(t.admit_at("a", i));
+        }
+        assert!(
+            !t.admit_at("a", 1000),
+            "the 31st, refused events are not counted"
+        );
+        assert!(
+            !t.admit_at("a", hour - 1),
+            "still inside the hour of the first"
+        );
+        assert!(t.admit_at("a", hour), "the first has aged out");
+        assert!(
+            !t.admit_at("a", hour),
+            "full again: events at 1..29 and `hour`"
+        );
+        assert!(t.admit_at("a", hour + 1), "the one at 1 ms has aged out");
+        assert_eq!(t.nodes(), 1);
     }
 
     #[test]

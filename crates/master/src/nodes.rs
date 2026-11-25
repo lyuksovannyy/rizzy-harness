@@ -31,10 +31,42 @@ fn plausible_node_id(id: &str) -> bool {
     harness_link::wire::is_node_id(id)
 }
 
-/// The limiter of audit rows for failed handshakes ([`AUTH_FAILURE_AUDITS`]
-/// per key; keys are `node:<id>` and `peer:<address>`).
-pub(crate) fn auth_audit_limit() -> crate::auth::limits::FailureMap {
-    crate::auth::limits::FailureMap::new(4096, AUTH_FAILURE_AUDITS, AUTH_FAILURE_WINDOW_MS)
+/// The limiters of audit rows for failed handshakes ([`AUTH_FAILURE_AUDITS`]
+/// per key): one map per node id and one per peer address, so that many
+/// addresses, which are known before any authentication, cannot push a node
+/// id's count out of its map.
+pub(crate) struct AuthAuditLimits {
+    by_node: crate::keyed_limit::FailureMap,
+    by_peer: crate::keyed_limit::FailureMap,
+}
+
+impl AuthAuditLimits {
+    pub(crate) fn new() -> Self {
+        let map = || {
+            crate::keyed_limit::FailureMap::new(4096, AUTH_FAILURE_AUDITS, AUTH_FAILURE_WINDOW_MS)
+        };
+        Self {
+            by_node: map(),
+            by_peer: map(),
+        }
+    }
+
+    /// Whether a failed handshake for `node_id` from `peer` may write its
+    /// audit row: both are under their limit, and then both count it.
+    fn admit(&self, node_id: &str, peer: &str, now_ms: i64) -> bool {
+        match (
+            self.by_node.try_reserve(node_id, now_ms),
+            self.by_peer.try_reserve(peer, now_ms),
+        ) {
+            (Ok(a), Ok(b)) => {
+                a.failed();
+                b.failed();
+                true
+            }
+            // A reservation not settled is given back when dropped.
+            _ => false,
+        }
+    }
 }
 
 /// Why a node speaking `node` is refused, for the person who runs it: both
@@ -321,21 +353,9 @@ impl Master {
     /// audit row: both its node id and its address are under their limit,
     /// and then both count it.
     fn audit_auth_failure(&self, node_id: &str, peer: std::net::SocketAddr) -> bool {
-        let now = harness_core::now_ms();
-        let (by_id, by_peer) = (format!("node:{node_id}"), format!("peer:{}", peer.ip()));
-        let limit = &self.inner.node_auth_audits;
-        match (
-            limit.try_reserve(&by_id, now),
-            limit.try_reserve(&by_peer, now),
-        ) {
-            (Ok(a), Ok(b)) => {
-                a.failed();
-                b.failed();
-                true
-            }
-            // A reservation not settled is given back when dropped.
-            _ => false,
-        }
+        self.inner
+            .node_auth_audits
+            .admit(node_id, &peer.ip().to_string(), harness_core::now_ms())
     }
 
     /// Registered remote nodes with their connection state.
@@ -359,5 +379,32 @@ impl Master {
                 })
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod audit_limit_tests {
+    use super::*;
+
+    #[test]
+    fn a_flood_of_addresses_leaves_a_node_ids_count_intact() {
+        let l = AuthAuditLimits::new();
+        for t in 0..AUTH_FAILURE_AUDITS as i64 - 1 {
+            assert!(l.admit("node-a", &format!("addr-{t}"), t));
+        }
+        // As many addresses as it takes (through `admit` an address is kept
+        // only beside a node id's own five rows, so this is the worst case).
+        for i in 0..5_000 {
+            l.by_peer
+                .try_reserve(&format!("flood-{i}"), 20 + i)
+                .unwrap()
+                .failed();
+        }
+        assert!(l.admit("node-a", "addr-x", 6_000), "the fifth row");
+        assert!(
+            !l.admit("node-a", "addr-y", 6_001),
+            "5,000 addresses did not reset node-a's count of 4"
+        );
+        assert!(l.by_peer.len() <= 4096 && l.by_node.len() <= 4096);
     }
 }
