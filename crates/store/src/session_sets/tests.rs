@@ -380,6 +380,50 @@ fn owned_chats_include_odd_spellings_and_skip_garbage() {
     );
 }
 
+/// Review R2-1 of slice 4: an odd-spelled row whose id parses to the same
+/// id as another row (here b's live, canonical chat) is never acted on for
+/// its owner, since every command, tombstone and cleanup keyed by that id
+/// would hit b's chat; b's own canonical row is never skipped for it. Two
+/// odd rows of one id with no canonical one are both skipped.
+#[test]
+fn an_odd_row_that_shares_another_rows_id_is_never_acted_on() {
+    let s = Store::open_in_memory().unwrap();
+    user(&s, "a");
+    user(&s, "b");
+    let bs = plain(&s, "b", 1);
+    let low = bs.to_string();
+    // a's row: b's chat id, upper-cased.
+    exec(
+        &s,
+        "INSERT INTO sessions (session_id, node_id, title, created_ms, updated_ms, head_seq, owner_id)
+         VALUES (upper(?1), 'node-1', 't', 0, 2, 1, 'a')",
+        params![low],
+    );
+    // Two odd rows of one id, no canonical one.
+    let lone = SessionId::new().to_string();
+    for (stored, owner) in [(lone.to_uppercase(), "a"), (format!("{{{lone}}}"), "a")] {
+        exec(
+            &s,
+            "INSERT INTO sessions (session_id, node_id, title, created_ms, updated_ms, head_seq, owner_id)
+             VALUES (?1, 'node-1', 't', 0, 3, 1, ?2)",
+            params![stored, owner],
+        );
+    }
+    // a's own plain chat is still found.
+    let mine = plain(&s, "a", 4);
+    let a = s.sessions_owned_by(&["a".to_string()], None).unwrap();
+    let ids: Vec<SessionId> = a.iter().map(|c| c.row.session_id).collect();
+    assert_eq!(ids, vec![mine], "{a:?}");
+    let b = s.sessions_owned_by(&["b".to_string()], None).unwrap();
+    assert_eq!(b.len(), 1);
+    assert_eq!(b[0].row.session_id, bs);
+    assert!(b[0].canonical());
+    let both = s
+        .sessions_owned_by(&["a".to_string(), "b".to_string()], None)
+        .unwrap();
+    assert_eq!(both.len(), 2);
+}
+
 // ---- the members roster: `kv_get_many`, `profile_image_shas` ----
 
 #[test]

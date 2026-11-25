@@ -80,9 +80,29 @@ fn by_ids_sql(owner: Owner<'_>) -> String {
 /// stopped, cancelled or deleted, and a chat whose stored id is in another
 /// spelling must go with its owner like any other. Its stored text comes
 /// back beside the row ([`OwnedChat::stored_id`]).
+///
+/// The last column says, for a row not in the canonical spelling only,
+/// whether another row's id is a spelling of the same id (review R2-1):
+/// every command, tombstone and cleanup keyed by that id would reach the
+/// other chat, so such a row is never acted on. Decided in this statement,
+/// so no write can come between the check and the answer. A canonical row
+/// is never marked (the `CASE` answers 0 before the search runs), and the
+/// search, a walk of every row, runs only for odd rows, which no writer
+/// makes.
 fn owned_sql() -> String {
+    let canonical = canonical_id("s.session_id");
+    let norm = |c: &str| {
+        format!(
+            "replace(replace(replace(replace(lower({c}), 'urn:uuid:', ''), '{{', ''), '}}', ''), '-', '')"
+        )
+    };
+    let (mine, other) = (norm("s.session_id"), norm("o.session_id"));
     format!(
-        "SELECT {SESSION_COLS}, {EFFECTIVE_WS} FROM sessions s {WS_JOINS}
+        "SELECT {SESSION_COLS}, {EFFECTIVE_WS},
+                CASE WHEN {canonical} THEN 0 ELSE EXISTS (
+                    SELECT 1 FROM sessions o
+                     WHERE o.rowid <> s.rowid AND {other} = {mine}) END
+         FROM sessions s {WS_JOINS}
          WHERE s.owner_id IN (SELECT value FROM json_each(?1))
            AND (?2 IS NULL OR {EFFECTIVE_WS} = ?2)
          ORDER BY s.updated_ms DESC, s.session_id DESC"
@@ -200,9 +220,10 @@ impl Store {
     /// given), whatever kind and however its id is spelled: what a member's
     /// removal, a workspace's or an account's deletion and the revocation
     /// sweep act on. A row whose id does not parse as a session id at all
-    /// cannot be acted on: it is skipped, and one warning per call gives
-    /// how many (never the stored text), so one corrupt row does not stop
-    /// the operation for every other chat.
+    /// cannot be acted on, nor can an odd spelling of an id another row
+    /// also holds (see `owned_sql`): both are skipped, and one warning per
+    /// call gives how many (never the stored text), so one corrupt row does
+    /// not stop the operation for every other chat.
     pub fn sessions_owned_by(
         &self,
         owners: &[String],
@@ -219,12 +240,17 @@ impl Store {
             Ok((
                 r.get::<_, Option<String>>(0).ok().flatten(),
                 Self::session_from_row_after_id(r)?,
+                r.get::<_, bool>(16)?,
             ))
         })?;
         let mut out = Vec::new();
-        let mut skipped = 0usize;
+        let (mut skipped, mut shared) = (0usize, 0usize);
         for r in rows {
-            let (stored, mut row) = r?;
+            let (stored, mut row, twin) = r?;
+            if twin {
+                shared += 1;
+                continue;
+            }
             match stored.as_deref().map(str::parse::<SessionId>) {
                 Some(Ok(id)) => {
                     row.session_id = id;
@@ -236,10 +262,12 @@ impl Store {
                 _ => skipped += 1,
             }
         }
-        if skipped > 0 {
+        if skipped + shared > 0 {
             tracing::warn!(
                 skipped,
-                "chats whose stored id is not a session id were left out (corrupt rows; not stopped or deleted)"
+                shared,
+                "chats left out, not stopped or deleted: stored ids that are no session id (skipped), \
+                 or another spelling of another row's id (shared; acting on it would reach that chat)"
             );
         }
         Ok(out)

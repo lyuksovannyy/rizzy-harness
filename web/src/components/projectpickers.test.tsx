@@ -156,6 +156,22 @@ describe("Add a chat stays current", () => {
   });
 });
 
+describe("Add a chat after the page is gone", () => {
+  test("a refetch queued before unmount never starts", async () => {
+    const pending: ((p: { sessions: SessionRow[]; next: string | null }) => void)[] = [];
+    looseChats.mockImplementation(() => new Promise((r) => pending.push(r)));
+    await show("chats", []);
+    expect(looseChats).toHaveBeenCalledTimes(1);
+    // A nudge while the first page is on its way queues one refetch.
+    await act(async () => nudgeSessions());
+    act(() => root.unmount());
+    await act(async () => pending.shift()!({ sessions: [row(1)], next: null }));
+    await act(async () => nudgeSessions());
+    expect(looseChats).toHaveBeenCalledTimes(1);
+    root = createRoot(host);
+  });
+});
+
 describe("a board card's chat", () => {
   test("is offered even when the sidebar has not loaded it", async () => {
     looseChats.mockResolvedValue({ sessions: [], next: null });

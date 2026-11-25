@@ -17,8 +17,12 @@
 //! calls it, which is the point); the store crate itself (its `sessions()`
 //! is the one being fenced; `backup.rs` calls it from the offline
 //! `restore`); and other unscoped reads it does not list (`routine_marks`,
-//! one statement per id, is one: review F4 of slice 4). It is a tripwire,
-//! not a proof.
+//! one statement per id, is one: review F4 of slice 4). Three one-line
+//! misses (review R2-4): `m.mirror.call(<Store>::sessions)` (the token
+//! before `::` is `>`); a lower-case alias (`use harness_store::Store as
+//! st; st::sessions(s)`); and a whole-table read under a scoped name
+//! (`s.sessions_owned_by(&every_user_id, None)`). It is a tripwire, not a
+//! proof.
 
 use std::path::{Path, PathBuf};
 

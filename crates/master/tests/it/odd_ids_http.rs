@@ -325,3 +325,103 @@ async fn a_deleted_accounts_odd_id_chat_is_deleted_on_its_node_and_in_the_mirror
         "carol's chat went"
     );
 }
+
+// ---- review R2-1: an odd row that shares the id of another member's chat ----
+
+/// Bob's row stored under carol's chat id, upper-cased (two hand-edited
+/// rows would make it): carol's chat has a kv mark the deletion would clear.
+fn twin_of_carols(t: &T) -> String {
+    let low = t.carols.to_string();
+    let up = low.to_uppercase();
+    t.store
+        .execute_batch_for_test(&format!(
+            "CREATE TEMP TABLE twin AS SELECT * FROM sessions WHERE session_id = '{low}';
+             UPDATE twin SET session_id = '{up}', owner_id = 'bob';
+             INSERT INTO sessions SELECT * FROM twin;
+             DROP TABLE twin;
+             INSERT INTO session_workspaces (session_id, workspace_id) VALUES ('{up}', '{ws}');",
+            ws = t.team
+        ))
+        .unwrap();
+    t.store
+        .kv_set(
+            &harness_store::mirror_keys::auto_model_key(t.carols),
+            "mark",
+        )
+        .unwrap();
+    assert_eq!(raw_count(t, &up), 1);
+    up
+}
+
+/// Carol's chat after a path ran for bob: no command, its row, its kv mark,
+/// no tombstone.
+async fn carols_intact(t: &T) {
+    let sent = sent(t, t.carols, 800).await;
+    assert!(
+        sent.is_empty(),
+        "the node was sent {sent:?} for carol's chat"
+    );
+    let row = t.store.session(t.carols).unwrap();
+    assert!(row.is_some_and(|r| r.owner_id.as_deref() == Some("carol")));
+    assert_eq!(
+        t.store
+            .kv_get(&harness_store::mirror_keys::auto_model_key(t.carols))
+            .unwrap()
+            .as_deref(),
+        Some("mark")
+    );
+    let tomb = t
+        .store
+        .query_i64_for_test(&format!(
+            "SELECT COUNT(*) FROM deleted_sessions WHERE session_id = '{}'",
+            t.carols
+        ))
+        .unwrap();
+    assert_eq!(tomb, 0, "carol's chat id was tombstoned");
+}
+
+#[tokio::test]
+async fn a_removed_members_twin_of_anothers_chat_touches_nothing_of_it() {
+    let t = start().await;
+    twin_of_carols(&t);
+    let st = delete(&t, &format!("/api/workspaces/{}/members/bob", t.team)).await;
+    assert_eq!(st, StatusCode::OK);
+    carols_intact(&t).await;
+}
+
+#[tokio::test]
+async fn a_deleted_workspaces_twin_sends_nothing_for_the_other_chat() {
+    let t = start().await;
+    twin_of_carols(&t);
+    // Carol's own chat is in the workspace too and is stopped for her; the
+    // twin must add nothing: one cancel and one stop at most, not two.
+    let st = delete(&t, &format!("/api/workspaces/{}", t.team)).await;
+    assert_eq!(st, StatusCode::OK);
+    let sent = sent(&t, t.carols, 800).await;
+    let cancels = sent.iter().filter(|w| **w == "cancel").count();
+    assert!(cancels <= 1, "carol's chat was cancelled twice: {sent:?}");
+    assert!(!sent.contains(&"delete"), "{sent:?}");
+}
+
+#[tokio::test]
+async fn the_revocation_sweep_never_cancels_another_owners_chat_through_a_twin() {
+    let t = start().await;
+    twin_of_carols(&t);
+    use harness_core::policy::ExecLevel;
+    assert!(
+        t.store
+            .set_exec_ceiling("bob", ExecLevel::Host, ExecLevel::None, None, "{}")
+            .unwrap()
+    );
+    harness_master::workspaces::cancel_revoked(&t.m, &["bob".to_string()]).await;
+    carols_intact(&t).await;
+}
+
+#[tokio::test]
+async fn a_deleted_accounts_twin_never_deletes_the_other_chat() {
+    let t = start().await;
+    twin_of_carols(&t);
+    let st = delete(&t, "/api/users/bob").await;
+    assert_eq!(st, StatusCode::OK);
+    carols_intact(&t).await;
+}

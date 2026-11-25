@@ -409,7 +409,13 @@ function useLooseChats(workspace: string) {
     state.current = { list: null, busy: false, again: false };
     setList(null);
     run("refresh");
-    return onSessionsNudge(() => run("refresh"));
+    const off = onSessionsNudge(() => run("refresh"));
+    return () => {
+      off();
+      // A load still on its way finds a new state: its answer is dropped
+      // and a refetch it had queued never starts (review R2-3).
+      state.current = { list: null, busy: false, again: false };
+    };
   }, [run]);
   return {
     rows: list?.rows ?? [],
