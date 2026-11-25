@@ -287,12 +287,17 @@ pub fn chat_workspace(row: &SessionRow) -> Option<&str> {
 
 // ---- chats in projects ----
 
-/// Every chat's stored link, by chat.
-pub async fn links(
+/// The effective project of one chat ([`effective`]), from its own link
+/// (one keyed lookup, never every chat's links).
+pub async fn effective_of(
     m: &Master,
-) -> Result<HashMap<SessionId, ProjectLink>, harness_store::StoreError> {
-    let all = m.inner.mirror.call(|s| s.project_links(None)).await?;
-    Ok(all.into_iter().map(|l| (l.session_id, l)).collect())
+    row: &SessionRow,
+) -> Result<Option<String>, harness_store::StoreError> {
+    let sid = row.session_id;
+    let link = m.inner.mirror.call(move |s| s.session_project(sid)).await?;
+    let links: HashMap<SessionId, ProjectLink> =
+        link.map(|l| (l.session_id, l)).into_iter().collect();
+    Ok(effective(&links, row).map(str::to_string))
 }
 
 /// A chat's effective project: its link, while the project is in the chat's

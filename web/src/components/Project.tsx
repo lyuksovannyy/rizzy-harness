@@ -176,7 +176,7 @@ export default function Project(props: {
             </button>
           ))}
         </div>
-        {tab === "chats" && <Chats project={project} own={own} all={props.chats} onOpen={props.onOpenChat} more={props.moreChats} />}
+        {tab === "chats" && <Chats project={project} own={own} onOpen={props.onOpenChat} more={props.moreChats} />}
         {tab === "board" && <BoardView project={project} chats={own} version={version} onOpen={props.onOpenChat} />}
         {tab === "memory" && <ProjectMemory project={project} version={props.memoryVersion} onOpen={props.onOpenChat} />}
         {tab === "artifacts" && <ProjectArtifacts project={project} workspaceId={props.workspaceId} />}
@@ -352,12 +352,49 @@ function ProjectArtifacts(props: { project: ProjectDetail; workspaceId: string |
   );
 }
 
-function Chats(props: { project: ProjectDetail; own: SessionRow[]; all: SessionRow[]; onOpen: (id: string) => void; more?: () => void }) {
+/** The caller's chats in no project, a page at a time from the server
+ * (the sidebar holds only what it loaded); `drop` takes one out once it
+ * joined the project, `refresh` reads the first page again. */
+function useLooseChats(workspace: string) {
+  const [rows, setRows] = useState<SessionRow[]>([]);
+  const [next, setNext] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(
+    (after: string | null) => {
+      setBusy(true);
+      projectsApi.looseChats(workspace, after).then(
+        (p) => {
+          setRows((old) => {
+            const seen = new Set(after ? old.map((r) => r.session_id) : []);
+            return [...(after ? old : []), ...p.sessions.filter((r) => !seen.has(r.session_id))];
+          });
+          setNext(p.next);
+          setBusy(false);
+        },
+        () => setBusy(false),
+      );
+    },
+    [workspace],
+  );
+  useEffect(() => load(null), [load]);
+  return {
+    rows,
+    more: next && !busy ? () => load(next) : null,
+    drop: (sid: string) => setRows((old) => old.filter((r) => r.session_id !== sid)),
+    refresh: () => load(null),
+  };
+}
+
+function Chats(props: { project: ProjectDetail; own: SessionRow[]; onOpen: (id: string) => void; more?: () => void }) {
   const [error, setError] = useState<string | null>(null);
-  const loose = props.all.filter((c) => !c.project_id);
+  const looseChats = useLooseChats(props.project.workspace_id);
+  const loose = looseChats.rows;
   const move = (sid: string, to: string | null) => {
     setError(null);
-    projectsApi.setChatProject(sid, to).catch((e) => setError(message(e)));
+    projectsApi.setChatProject(sid, to).then(
+      () => (to ? looseChats.drop(sid) : looseChats.refresh()),
+      (e) => setError(message(e)),
+    );
   };
   return (
     <div className="stack">
@@ -394,6 +431,11 @@ function Chats(props: { project: ProjectDetail; own: SessionRow[]; all: SessionR
               </option>
             ))}
           </select>
+          {looseChats.more && (
+            <button type="button" className="link small" onClick={looseChats.more}>
+              Older chats
+            </button>
+          )}
         </label>
       )}
       <p className="field-hint">Each person sees only their own chats here. The instructions, memory and board are shared.</p>
@@ -579,8 +621,11 @@ function CardEditor(props: {
   const [title, setTitle] = useState(card.title);
   const [notes, setNotes] = useState(card.notes);
   const [column, setColumn] = useState(card.column_id);
-  const linked = card.chat && card.chat !== "private" ? card.chat.session_id : null;
-  const [chat, setChat] = useState(linked ?? "");
+  const linked = card.chat && card.chat !== "private" ? card.chat : null;
+  const [chat, setChat] = useState(linked?.session_id ?? "");
+  // The linked chat from the board itself (its title is the caller's own),
+  // so an older chat the sidebar has not loaded still shows (review F5).
+  const choices = linked && !props.chats.some((c) => c.session_id === linked.session_id) ? [...props.chats, linked] : props.chats;
   return (
     <li className="board-card editing">
       <form
@@ -608,7 +653,7 @@ function CardEditor(props: {
             Chat
             <select value={chat} onChange={(e) => setChat(e.target.value)}>
               <option value="">None</option>
-              {props.chats.map((c) => (
+              {choices.map((c) => (
                 <option key={c.session_id} value={c.session_id}>
                   {shownName(c.title) || "New chat"}
                 </option>

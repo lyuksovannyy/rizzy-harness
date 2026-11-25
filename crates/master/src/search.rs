@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use harness_core::SessionId;
-use harness_store::{HIT_END, HIT_START, SearchHit, SessionRow, Store};
+use harness_store::session_pages::Owner;
+use harness_store::{HIT_END, HIT_START, ProjectLink, SearchHit, SessionRow, Store};
 use serde::Serialize;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -497,74 +498,61 @@ fn one_line(s: &str) -> String {
         .collect()
 }
 
-/// Whether the empty search lists chat `r` for `owner` in `workspace`: the
-/// chat list's rows (`list_sessions`: the caller's own, in the scope's
-/// workspace), less incognito and sub-agent chats. Routine run chats are
-/// left out by the caller.
-fn listed(r: &SessionRow, owner: Option<&str>, workspace: Option<&str>) -> bool {
-    owner.is_none_or(|o| r.owner_id.as_deref() == Some(o))
-        && workspace.is_none_or(|w| r.workspace_id.as_deref() == Some(w))
-        && !r.incognito
-        && r.parent_id.is_none()
+/// Whose chats the search reads: the caller's (the API token: everyone's).
+fn scope<'a>(ctx: &SearchCtx<'a>) -> Owner<'a> {
+    match ctx.owner {
+        Some(u) => Owner::User(u),
+        None => Owner::Everyone,
+    }
 }
 
 /// Chats. With words: bm25 over titles and messages, every word required,
 /// paged through the deduped best-first window, routine run chats included.
-/// Without: the newest visible chats, never routine run chats (they would
-/// crowd out the rest).
+/// Without: the newest visible chats (the chat list's rows less incognito
+/// and sub-agent chats), never routine run chats (they would crowd out the
+/// rest). Each is a fixed number of statements, whatever the hits.
 pub fn chats(s: &Store, ctx: &SearchCtx) -> harness_store::Result<Vec<SearchResult>> {
-    let mut found: Vec<(SessionRow, Option<String>)> = Vec::new();
-    match &ctx.fts {
+    let owner = scope(ctx);
+    let found: Vec<(SessionRow, Option<String>)> = match &ctx.fts {
         Some(fq) => {
             let want = ctx.offset.saturating_add(ctx.limit);
-            for h in s
+            let hits: Vec<_> = s
                 .search(fq, ctx.owner, ctx.workspace, want)?
                 .into_iter()
                 .skip(ctx.offset)
-            {
-                if let Some(row) = s.session(h.session_id)? {
-                    found.push((row, Some(h.snippet)));
-                }
-            }
-        }
-        None => {
-            let rows: Vec<SessionRow> = s
-                .sessions_of(ctx.owner)?
-                .into_iter()
-                .filter(|r| listed(r, ctx.owner, ctx.workspace))
                 .collect();
-            let ids: Vec<SessionId> = rows.iter().map(|r| r.session_id).collect();
-            let runs = s.routine_marks(&ids)?;
-            found.extend(
-                rows.into_iter()
-                    .filter(|r| !runs.contains_key(&r.session_id))
-                    .skip(ctx.offset)
-                    .take(ctx.limit)
-                    .map(|r| (r, None)),
-            );
+            let ids: Vec<SessionId> = hits.iter().map(|h| h.session_id).collect();
+            let mut rows = s.sessions_by_ids(owner, &ids)?;
+            hits.into_iter()
+                .filter_map(|h| Some((rows.remove(&h.session_id)?, Some(h.snippet))))
+                .collect()
         }
-    }
-    chat_results(s, &found, ctx.tokens)
+        None => s
+            .recent_chats(owner, ctx.workspace, ctx.offset, ctx.limit)?
+            .into_iter()
+            .map(|r| (r, None))
+            .collect(),
+    };
+    chat_results(s, owner, &found, ctx.tokens)
 }
 
 /// Rows for `found` chats (with their FTS excerpt): routine marks, latest
-/// messages and project links are read for these rows only.
+/// messages and project links are read for these rows only, one statement
+/// each.
 fn chat_results(
     s: &Store,
+    owner: Owner<'_>,
     found: &[(SessionRow, Option<String>)],
     tokens: &[String],
 ) -> harness_store::Result<Vec<SearchResult>> {
     let ids: Vec<SessionId> = found.iter().map(|(r, _)| r.session_id).collect();
-    let runs = s.routine_marks(&ids)?;
+    let runs = s.routine_marks_of(owner, &ids)?;
     let texts = s.latest_message_texts(&ids)?;
-    let mut links = HashMap::new();
-    for id in &ids {
-        links.extend(
-            s.project_links(Some(*id))?
-                .into_iter()
-                .map(|l| (l.session_id, l)),
-        );
-    }
+    let links: HashMap<SessionId, ProjectLink> = s
+        .project_links_of(owner, &ids)?
+        .into_iter()
+        .map(|l| (l.session_id, l))
+        .collect();
     Ok(found
         .iter()
         .map(|(row, snippet)| {
@@ -693,7 +681,11 @@ pub fn suggest(
             found.push((row, Some(h.snippet)));
         }
     }
-    chat_results(store, &found, &toks)
+    let scope = match owner {
+        Some(u) => Owner::User(u),
+        None => Owner::Everyone,
+    };
+    chat_results(store, scope, &found, &toks)
 }
 
 #[cfg(test)]
@@ -965,28 +957,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_empty_search_lists_what_the_chat_list_does() {
-        let mine = row("chat");
-        assert!(listed(&mine, Some("u1"), Some("w1")));
-        assert!(listed(&mine, None, None), "the API token sees every chat");
-        assert!(
-            !listed(&mine, Some("u2"), Some("w1")),
-            "never another user's chat"
-        );
-        assert!(
-            !listed(&mine, Some("u1"), Some("w2")),
-            "only in the workspace asked for"
-        );
-        let incognito = SessionRow {
-            incognito: true,
-            ..row("chat")
-        };
-        assert!(!listed(&incognito, Some("u1"), Some("w1")));
-        let sub = SessionRow {
-            parent_id: Some("x".into()),
-            ..row("chat")
-        };
-        assert!(!listed(&sub, Some("u1"), Some("w1")));
-    }
+    // What the empty search lists (the caller's top-level chats in the
+    // workspace, no routine runs) is the store's `recent_chats` now, tested
+    // against the old filter there (`session_sets::tests`).
 }

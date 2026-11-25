@@ -96,6 +96,26 @@ impl Store {
             .optional()?)
     }
 
+    /// The SHA-256 of each of `users`' `slot` picture, by account (those
+    /// without one are left out), in one statement: a roster's avatars.
+    pub fn profile_image_shas(
+        &self,
+        users: &[String],
+        slot: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        if users.is_empty() {
+            return Ok(Default::default());
+        }
+        let list = serde_json::to_string(users)?;
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT p.user_id, b.sha256 FROM profile_images p JOIN blobs b ON b.blob_id = p.blob_id
+             WHERE p.user_id IN (SELECT value FROM json_each(?1)) AND p.slot = ?2",
+        )?;
+        let rows = stmt.query_map(params![list, slot], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Remove the account's `slot` picture; returns the blobs it left
     /// unreferenced.
     pub fn profile_image_delete(&self, user_id: &str, slot: &str) -> Result<Vec<String>> {

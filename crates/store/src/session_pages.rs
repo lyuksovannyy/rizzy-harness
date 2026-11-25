@@ -41,7 +41,7 @@ pub enum Owner<'a> {
 }
 
 impl<'a> Owner<'a> {
-    fn bind(self) -> Option<&'a str> {
+    pub(crate) fn bind(self) -> Option<&'a str> {
         match self {
             Owner::User(u) => Some(u),
             Owner::Everyone => None,
@@ -133,7 +133,7 @@ pub struct PageQuery<'a> {
 /// The owner term: `?1` is bound either way, so both texts take the same
 /// parameters. A separate text, not `?1 IS NULL OR …`, which would keep
 /// SQLite off the `sessions_owner` index.
-fn owner_term(owner: Owner<'_>) -> &'static str {
+pub(crate) fn owner_term(owner: Owner<'_>) -> &'static str {
     match owner {
         Owner::User(_) => "s.owner_id = ?1",
         Owner::Everyone => "?1 IS NULL",
@@ -147,7 +147,7 @@ fn owner_term(owner: Owner<'_>) -> &'static str {
 /// keyset compares stored text, so another spelling as a cursor would page
 /// in a loop, and a value that is not text cannot be read as an id at all.
 /// A residual filter: it does not change which index a query uses.
-fn canonical_id(col: &str) -> String {
+pub(crate) fn canonical_id(col: &str) -> String {
     const HEX: &str = "[0-9a-f]";
     let group = |n: usize| HEX.repeat(n);
     let pattern = [group(8), group(4), group(4), group(4), group(12)].join("-");
@@ -158,7 +158,17 @@ fn canonical_id(col: &str) -> String {
     )
 }
 
-fn page_sql(owner: Owner<'_>, after: bool, project: bool) -> String {
+/// Which chats a page lists by project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ByProject {
+    /// `PageQuery.project` (`?8`): one project's, or (`None`) any.
+    Asked,
+    /// Only chats in no project: no link whose project is in the chat's
+    /// effective workspace (the master's `projects::effective` is `None`).
+    Loose,
+}
+
+fn page_sql(owner: Owner<'_>, after: bool, project: bool, by: ByProject) -> String {
     // A project's page is driven by the project's links, the owner a filter
     // only (`+`): as a plain term SQLite walks the owner's chats through
     // `sessions_owner` and checks each against the links, which for a
@@ -198,6 +208,12 @@ fn page_sql(owner: Owner<'_>, after: bool, project: bool) -> String {
                  JOIN sessions o ON o.session_id = sp.session_id
                  WHERE sp.project_id = ?8 AND {link_owner})
            AND {EFFECTIVE_WS} = (SELECT p.workspace_id FROM projects p WHERE p.project_id = ?8)"
+        )
+    } else if by == ByProject::Loose {
+        format!(
+            "?8 IS NULL AND NOT EXISTS (
+                 SELECT 1 FROM session_projects sp JOIN projects p ON p.project_id = sp.project_id
+                  WHERE sp.session_id = s.session_id AND p.workspace_id = {EFFECTIVE_WS})"
         )
     } else {
         "?8 IS NULL".to_string()
@@ -271,7 +287,7 @@ fn children_sql(owner: Owner<'_>) -> String {
 /// id-list annotations look each id up by key and drop chats of somebody
 /// else. With a plain owner term SQLite walks all of the owner's chats
 /// through `sessions_owner` instead (16 ms at 10,000, measured).
-fn owner_filter(owner: Owner<'_>) -> &'static str {
+pub(crate) fn owner_filter(owner: Owner<'_>) -> &'static str {
     match owner {
         Owner::User(_) => "+s.owner_id = ?1",
         Owner::Everyone => "?1 IS NULL",
@@ -321,7 +337,7 @@ pub struct Descendants {
 }
 
 /// `ids` as one JSON array, the single parameter of an `IN` list.
-fn id_list(ids: &[SessionId]) -> Result<String> {
+pub(crate) fn id_list(ids: &[SessionId]) -> Result<String> {
     let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
     Ok(serde_json::to_string(&ids)?)
 }
@@ -330,7 +346,7 @@ fn id_list(ids: &[SessionId]) -> Result<String> {
 /// bug in the predicate, not data (the predicate's unit test covers every
 /// odd value found so far, an embedded NUL included): the error gives the length only, never
 /// the stored value.
-fn listed((text, mut row): (String, SessionRow)) -> Result<SessionRow> {
+pub(crate) fn listed((text, mut row): (String, SessionRow)) -> Result<SessionRow> {
     row.session_id = text.parse().map_err(|_| {
         StoreError::Corrupt(format!(
             "a chat id of {} bytes passed the canonical check but is not a session id",
@@ -340,7 +356,7 @@ fn listed((text, mut row): (String, SessionRow)) -> Result<SessionRow> {
     Ok(row)
 }
 
-fn sid(text: String) -> Result<SessionId> {
+pub(crate) fn sid(text: String) -> Result<SessionId> {
     text.parse()
         .map_err(|_| StoreError::Corrupt(format!("session id {text}")))
 }
@@ -358,10 +374,33 @@ impl Store {
     /// A chat whose stored id is not in canonical form is left out in SQL
     /// (see `canonical_id`); `rizzy-harness doctor` is to report such rows.
     pub fn sessions_page(&self, q: &PageQuery<'_>) -> Result<(Vec<SessionRow>, Option<Cursor>)> {
+        self.page(q, ByProject::Asked)
+    }
+
+    /// [`Store::sessions_page`] of the chats in no project (the project
+    /// page's "Add a chat" list, review F5 of slice 2+3): `q.project` must
+    /// be `None`; the owner, workspace and cursor rules are the same.
+    pub fn loose_sessions_page(
+        &self,
+        q: &PageQuery<'_>,
+    ) -> Result<(Vec<SessionRow>, Option<Cursor>)> {
+        if q.project.is_some() {
+            return Err(StoreError::Refused(
+                "a page of chats in no project names no project".into(),
+            ));
+        }
+        self.page(q, ByProject::Loose)
+    }
+
+    fn page(&self, q: &PageQuery<'_>, by: ByProject) -> Result<(Vec<SessionRow>, Option<Cursor>)> {
         let limit = q.limit.clamp(1, MAX_PAGE);
         let conn = self.lock();
-        let mut stmt =
-            conn.prepare_cached(&page_sql(q.owner, q.after.is_some(), q.project.is_some()))?;
+        let mut stmt = conn.prepare_cached(&page_sql(
+            q.owner,
+            q.after.is_some(),
+            q.project.is_some(),
+            by,
+        ))?;
         let rows = stmt.query_map(
             params![
                 q.owner.bind(),
@@ -509,4 +548,4 @@ impl Store {
 #[cfg(test)]
 mod bench;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

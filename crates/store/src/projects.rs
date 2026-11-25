@@ -486,11 +486,17 @@ impl Store {
     /// Every chat's link (or one chat's).
     pub fn project_links(&self, sid: Option<SessionId>) -> Result<Vec<ProjectLink>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(
+        // Two texts, not `?1 IS NULL OR …`, which keeps SQLite from looking
+        // one chat up by its key (it scanned `projects` for every call).
+        let mut stmt = conn.prepare_cached(if sid.is_some() {
             "SELECT sp.session_id, sp.project_id, p.workspace_id FROM session_projects sp \
              JOIN projects p ON p.project_id = sp.project_id \
-             WHERE ?1 IS NULL OR sp.session_id = ?1",
-        )?;
+             WHERE sp.session_id = ?1"
+        } else {
+            "SELECT sp.session_id, sp.project_id, p.workspace_id FROM session_projects sp \
+             JOIN projects p ON p.project_id = sp.project_id \
+             WHERE ?1 IS NULL"
+        })?;
         let rows = stmt.query_map(params![sid.map(|s| s.to_string())], |r| {
             Ok((
                 r.get::<_, String>(0)?,

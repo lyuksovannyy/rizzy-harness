@@ -39,7 +39,7 @@ pub enum Slot {
 }
 
 impl Slot {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Slot::Avatar => "avatar",
             Slot::Banner => "banner",
@@ -206,7 +206,7 @@ fn account(who: auth::Principal) -> ApiResult<String> {
 }
 
 /// A picture's version in URLs: the start of its SHA-256.
-fn version(sha256: &str) -> String {
+pub(crate) fn version(sha256: &str) -> String {
     sha256.chars().take(16).collect()
 }
 

@@ -1,7 +1,7 @@
 // Projects in the browser (docs/projects.md): types and API calls, kept out
 // of api.ts and types.ts so the page's code stays in its lazy chunk.
 import { call } from "../api";
-import type { MemoryFact } from "../types";
+import type { MemoryFact, SessionRow } from "../types";
 
 /** `?workspace=` for list calls: the Shell's workspace, never the server's idea of "active". */
 const inWorkspace = (path: string, workspace: string | null | undefined) =>
@@ -148,6 +148,13 @@ export const projectsApi = {
   /** Put a chat into a project, or take it out (null). */
   setChatProject: (sessionId: string, projectId: string | null) =>
     call<{ ok: boolean }>("PUT", `/api/sessions/${encodeURIComponent(sessionId)}/project`, { project_id: projectId }),
+  /** A page of the caller's chats in no project, in `workspace` (the
+   * "Add a chat" list): every one, not only those the sidebar loaded. */
+  looseChats: (workspace: string, after?: string | null) => {
+    const q = new URLSearchParams({ workspace, loose: "1", limit: "50" });
+    if (after) q.set("after", after);
+    return call<{ sessions: SessionRow[]; next: string | null }>("GET", `/api/sessions?${q}`);
+  },
   board: (id: string) => call<Board>("GET", `${base(id)}/board`),
   addColumn: (id: string, name: string) => call<Board>("POST", `${base(id)}/board/columns`, { name }),
   updateColumn: (id: string, col: string, b: { name?: string; done?: boolean; position?: number }) =>

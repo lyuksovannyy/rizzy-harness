@@ -726,26 +726,17 @@ pub fn sweep_revoked(m: &Master, users: Vec<String>) {
 /// server grant, or their account was disabled or deleted. Failures are
 /// logged, never returned.
 pub async fn cancel_revoked(m: &Master, users: &[String]) {
-    let mut rows = Vec::new();
-    for user in users {
-        let user = user.clone();
-        match m
-            .inner
-            .mirror
-            .call(move |s| s.sessions_of(Some(&user)))
-            .await
-        {
-            Ok(r) => rows.extend(r),
-            Err(e) => {
-                tracing::warn!(error = %e, "revocation sweep: could not list sessions");
-                return;
-            }
-        }
+    // Every chat of every one of them, in one statement.
+    let owners = users.to_vec();
+    match m
+        .inner
+        .mirror
+        .call(move |s| s.sessions_owned_by(&owners, None))
+        .await
+    {
+        Ok(rows) => cancel_blocked(m, rows.into_iter()).await,
+        Err(e) => tracing::warn!(error = %e, "revocation sweep: could not list sessions"),
     }
-    let running = rows
-        .into_iter()
-        .filter(|r| r.owner_id.as_ref().is_some_and(|o| users.contains(o)));
-    cancel_blocked(m, running).await;
 }
 
 /// The sweep again for the running sessions of `node_id`, once its link is

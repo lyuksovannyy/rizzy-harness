@@ -10,6 +10,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `Store::count_statements` for other crates' tests (statement counts per
+# request); dev-dependencies only, never a shipped build.
+test-support = []
+
 [dependencies]
 # Already the workspace's (core, master, node): the page cursor's wire form.
 base64.workspace = true

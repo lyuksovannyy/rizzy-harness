@@ -12,7 +12,7 @@ use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use super::*;
 use crate::{NewUser, Role};
 
-fn user(s: &Store, id: &str) -> String {
+pub(crate) fn user(s: &Store, id: &str) -> String {
     s.create_user(&NewUser {
         user_id: id.into(),
         username: id.into(),
@@ -53,7 +53,7 @@ fn chat(s: &Store, c: Chat<'_>) -> SessionId {
     sid
 }
 
-fn plain(s: &Store, owner: &str, updated_ms: i64) -> SessionId {
+pub(crate) fn plain(s: &Store, owner: &str, updated_ms: i64) -> SessionId {
     chat(
         s,
         Chat {
@@ -66,22 +66,22 @@ fn plain(s: &Store, owner: &str, updated_ms: i64) -> SessionId {
     )
 }
 
-fn exec(s: &Store, sql: &str, p: impl rusqlite::Params) {
+pub(crate) fn exec(s: &Store, sql: &str, p: impl rusqlite::Params) {
     s.lock().execute(sql, p).unwrap();
 }
 
 /// Workspaces and owners the mixed fixture is built from.
-struct Fix {
-    s: Store,
+pub(crate) struct Fix {
+    pub(crate) s: Store,
     /// Personal workspaces of a, b and c.
-    personal: HashMap<&'static str, String>,
+    pub(crate) personal: HashMap<&'static str, String>,
     /// a owns it, b is a member; c is not.
-    team: String,
+    pub(crate) team: String,
     /// c's workspace; a is not a member.
-    other: String,
+    pub(crate) other: String,
 }
 
-const OWNERS: [&str; 3] = ["a", "b", "c"];
+pub(crate) const OWNERS: [&str; 3] = ["a", "b", "c"];
 
 /// (status, seen, promoted) of a routine run: its chat is hidden by
 /// `hide_seen_runs` only when the run is over, seen and not continued.
@@ -101,7 +101,7 @@ const RUNS: [(&str, i64, i64); 8] = [
 /// than its parent's owner), chats mapped to a workspace their owner is
 /// not in, project links, every (status, seen, promoted) case of `RUNS`
 /// for both a and b, seen marks, and many equal `updated_ms`.
-fn fixture() -> Fix {
+pub(crate) fn fixture() -> Fix {
     let s = Store::open_in_memory().unwrap();
     let mut personal = HashMap::new();
     for u in OWNERS {
@@ -331,7 +331,7 @@ fn ids(rows: &[SessionRow]) -> Vec<SessionId> {
     clippy::disallowed_methods,
     reason = "counts statements in a test; nothing is logged"
 )]
-fn statements<R>(s: &Store, f: impl FnOnce() -> R) -> (usize, R) {
+pub(crate) fn statements<R>(s: &Store, f: impl FnOnce() -> R) -> (usize, R) {
     let n = Arc::new(AtomicUsize::new(0));
     let seen = n.clone();
     s.lock()
@@ -354,7 +354,7 @@ fn statements<R>(s: &Store, f: impl FnOnce() -> R) -> (usize, R) {
     (n.load(Ordering::SeqCst), r)
 }
 
-fn plan(s: &Store, sql: &str, p: impl rusqlite::Params) -> Vec<String> {
+pub(crate) fn plan(s: &Store, sql: &str, p: impl rusqlite::Params) -> Vec<String> {
     let c = s.lock();
     let mut st = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
     st.query_map(p, |r| r.get::<_, String>(3))
@@ -363,7 +363,7 @@ fn plan(s: &Store, sql: &str, p: impl rusqlite::Params) -> Vec<String> {
         .collect()
 }
 
-fn scans(plan: &[String], alias: &str) -> bool {
+pub(crate) fn scans(plan: &[String], alias: &str) -> bool {
     plan.iter()
         .any(|l| l == &format!("SCAN {alias}") || l.starts_with(&format!("SCAN {alias} ")))
 }
@@ -427,8 +427,15 @@ fn cursor_round_trips_and_is_parsed_strictly() {
 #[test]
 fn the_owner_page_seeks_the_owner_index_and_never_scans_sessions() {
     let f = fixture();
-    for after in [false, true] {
-        let sql = page_sql(Owner::User("a"), after, false);
+    // The page of chats in no project ("Add a chat") too: its project
+    // check is a filter on the owner's walk.
+    for (after, by) in [
+        (false, ByProject::Asked),
+        (true, ByProject::Asked),
+        (false, ByProject::Loose),
+        (true, ByProject::Loose),
+    ] {
+        let sql = page_sql(Owner::User("a"), after, false, by);
         for ws in [None, Some(f.team.as_str())] {
             for flags in [(false, false), (true, true)] {
                 let p = plan(
@@ -1425,7 +1432,7 @@ fn a_project_page_is_driven_by_its_links() {
     let f = fixture();
     for (owner, bound) in [(Owner::User("a"), Some("a")), (Owner::Everyone, None)] {
         for after in [false, true] {
-            let sql = page_sql(owner, after, true);
+            let sql = page_sql(owner, after, true, ByProject::Asked);
             for ws in [None, Some(f.team.as_str())] {
                 let p = plan(
                     &f.s,
@@ -1561,7 +1568,7 @@ fn the_owner_check_inside_the_links_saves_work() {
             params![id],
         );
     }
-    let sql = page_sql(Owner::User("a"), false, true);
+    let sql = page_sql(Owner::User("a"), false, true, ByProject::Asked);
     assert!(sql.contains("AND o.owner_id = ?1"), "{sql}");
     let without = sql.replace("AND o.owner_id = ?1", "AND 1");
     let run = |text: &str| {

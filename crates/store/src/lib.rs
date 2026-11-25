@@ -30,7 +30,10 @@ pub mod session_files;
 pub mod session_forks;
 pub mod session_images;
 pub mod session_pages;
+pub mod session_sets;
 pub mod stored_skills;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod usage;
 pub mod workspace_agents;
 pub use projects::{
@@ -2625,20 +2628,33 @@ impl Store {
     /// range); a session whose last four have no text, or that has none, is
     /// left out.
     pub fn latest_message_texts(&self, sids: &[SessionId]) -> Result<HashMap<SessionId, String>> {
+        if sids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let list = session_pages::id_list(sids)?;
         let conn = self.lock();
+        // One statement for the set (FIX_PLAN 4.5 slice 4): each chat's last
+        // four messages, newest first; the first with text wins.
         let mut stmt = conn.prepare_cached(
-            "SELECT payload FROM events WHERE session_id = ?1 AND kind IN ('user_message', 'assistant_message') ORDER BY seq DESC LIMIT 4",
+            "SELECT i.value, e.payload FROM json_each(?1) i
+               JOIN events e ON e.session_id = i.value AND e.seq IN (
+                    SELECT x.seq FROM events x
+                     WHERE x.session_id = i.value
+                       AND x.kind IN ('user_message', 'assistant_message')
+                     ORDER BY x.seq DESC LIMIT 4)
+             ORDER BY i.key, e.seq DESC",
         )?;
+        let mut rows = stmt.query(params![list])?;
         let mut out = HashMap::new();
-        for sid in sids {
-            let mut rows = stmt.query(params![sid.to_string()])?;
-            while let Some(row) = rows.next()? {
-                let payload: serde_json::Value = serde_json::from_str(&row.get::<_, String>(0)?)?;
-                let text = payload.get("text").and_then(|v| v.as_str());
-                if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
-                    out.insert(*sid, text.to_string());
-                    break;
-                }
+        while let Some(row) = rows.next()? {
+            let sid = session_pages::sid(row.get::<_, String>(0)?)?;
+            if out.contains_key(&sid) {
+                continue;
+            }
+            let payload: serde_json::Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
+            let text = payload.get("text").and_then(|v| v.as_str());
+            if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                out.insert(sid, text.to_string());
             }
         }
         Ok(out)
@@ -2860,6 +2876,20 @@ impl Store {
         Ok(conn
             .query_row("SELECT v FROM kv WHERE k = ?1", params![k], |r| r.get(0))
             .optional()?)
+    }
+
+    /// The values of `keys` that are set, in one statement (a roster's
+    /// settings rows: FIX_PLAN 4.5 slice 4).
+    pub fn kv_get_many(&self, keys: &[String]) -> Result<HashMap<String, String>> {
+        if keys.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let list = serde_json::to_string(keys)?;
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare_cached("SELECT k, v FROM kv WHERE k IN (SELECT value FROM json_each(?1))")?;
+        let rows = stmt.query_map(params![list], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Stamp a new chat once its node acknowledged the create: set its owner

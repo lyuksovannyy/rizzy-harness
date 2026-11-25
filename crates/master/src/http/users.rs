@@ -251,10 +251,9 @@ pub(super) async fn delete_user(
     let chats: Vec<_> = m
         .inner
         .mirror
-        .call(move |s| s.sessions_of(Some(&owner)))
+        .call(move |s| s.sessions_owned_by(&[owner], None))
         .await?
         .into_iter()
-        .filter(|r| r.owner_id.as_deref() == Some(uid.as_str()))
         .map(|r| r.session_id)
         .collect();
     let of = target.user_id.clone();

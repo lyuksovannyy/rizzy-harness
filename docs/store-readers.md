@@ -58,6 +58,7 @@ The server process holds three such stores: `master.db` (the mirror), `chat.db` 
 | `store/src/backup.rs:197` | `sessions()` | offline CLI (`restore`) | fine |
 
 After A, `s.sessions()` is left only in the last two rows, neither on a request path, which is what the row asks.
+Done in slice 4 (§5): every request row above now reads a scoped set, and `whole_table_reads_http.rs` keeps it so.
 
 ### N+1 loops (the audit names routines and members; each verified)
 
@@ -319,10 +320,21 @@ Each slice is reviewable alone and starts with a test that fails on the old code
    First load grew by 2.2 KB gzip (103.3 to 105.5 KB of the 110 ceiling): the merge, the paging state and the review fixes replace a dozen lines.
 
    Known limits (review F5, F6; not fixed in this slice):
-   - Screens that pick from "your chats" see only the loaded ones: the project page's "Add a chat" list, and the board card editor's chat list, where a card linked to an older chat shows "None" (saving keeps the link); a folded group has no unread dot for chats beyond the first page. Slice 4 gives them their own queries.
+   - Screens that pick from "your chats" see only the loaded ones: the project page's "Add a chat" list, and the board card editor's chat list, where a card linked to an older chat shows "None" (saving keeps the link); a folded group has no unread dot for chats beyond the first page. Slice 4 gives them their own queries (done there for both pickers; the folded group's dot is still open).
    - Each `sessions_changed` now costs one request for the list plus one per open, loaded project group (five by default; more after "Show N more" on the projects); a team project's page can hold the store lock about 9 ms (§4, Project). Accepted for now; a cap is the fix if it shows.
 4. **The other whole-table and N+1 callers:** `board_json`, both `chat_owners`, `own_chats`, the search no-words branch and `chat_results`, `delete_workspace`, member removal, user delete, `cancel_revoked`, the members roster (`member_json`'s two calls per member).
    Test: a store wrapper or SQLite `trace` counts statements per request for a roster of 20 and a board of 50 cards, constant in N.
+   Built as `crates/store/src/session_sets.rs`, one statement each, owner or owners in the `WHERE`, ids as one `json_each` array, odd ids left out as in the page:
+   - `chat_titles_of(owner, ids)`: each existing chat among `ids` with its title when it is the caller's, `None` when it is somebody else's (another account's title never leaves the store). The board's cards (`"private"` for another member's chat, as before) and both memory pages' "is this proposal from your chat" (`own_sources`; for the API token every existing chat on the project page, none on the workspace page, as before).
+   - `project_chat_counts(owner, workspace)` for `own_chats` (the project list and page): top-level, not incognito, effective project, counted in SQL.
+   - `recent_chats(owner, workspace, offset, limit)` for the empty search; `sessions_by_ids(owner, ids)` for the search hits (one statement instead of `session()` per hit); `chat_results` uses slice 1's `routine_marks_of` and `project_links_of`, and `latest_message_texts` (also the routines page's previews) became one statement (each chat's last four messages through a correlated `IN`).
+   - `sessions_owned_by(owners, workspace)` for workspace deletion (every member at once), member removal, account deletion and the revocation sweep (every user at once).
+   - The members roster reads the members, their settings rows (`kv_get_many`) and their avatars (`profile_image_shas`) in one store call: three statements.
+   - Every account's project links (`project_links(None)`, which `GET /api/sessions/{id}` and the card-link check read per request) gave way to the one chat's link (`projects::effective_of`); `project_links(Some(id))` no longer scans `projects` (its `?1 IS NULL OR` became two texts).
+   Equivalence: each set read is compared with the whole-table path it replaced, rebuilt in the test from `sessions()`, `sessions_of`, `project_links(None)` and `routine_marks`, on slice 1's mixed fixture, for each account, one with no chats and the API token (`session_sets/tests.rs`); the empty search's order among equal `updated_ms` was SQLite's choice and is now broken by id.
+   Statements per request (`Store::count_statements`, feature `test-support`, `scoped_reads_http.rs`), the same at both sizes: roster 6 (2 and 21 members; before: 8 and 46), board 7 (5 and 50 cards; 7 before as well, but one of them read every chat of every account), search with words 13 (5 and 50 hits; before: 25 and 163), empty search 12.
+   `whole_table_reads_http.rs` fails on `.sessions()`, `.sessions_of(` or `.project_links(` in the master, the node runtime and the binary; the one call left is the node runtime's start-up read of its own `node.db` (`crates/node/src/lib.rs`). The store's `backup.rs` (offline `restore`) is not scanned.
+   Review F5: "Add a chat" pages the caller's chats in no project from the server (`GET /api/sessions?loose=1`, `Store::loose_sessions_page`: the page's owner, workspace and cursor rules, no effective project), with "Older chats" for the next page; the board card editor always offers the card's linked chat from the board response itself, which already carries its title for the caller's own chat only.
 5. **The FTS merge out of the delete path**, into the hourly maintenance with a bounded `('merge', N)`.
    Test first: deleting a chat on a 20,000-message index takes under 50 ms (today 0.6 s at 50,000 chats), and the deleted chat's words are not found by search right after (tombstones) and are gone from the index pages after the hourly pass.
    Needs the owner's answer on how long deleted words may stay in index pages.

@@ -498,8 +498,8 @@ fn fifty_thousand_chats() {
         project_p99.push(show(what, t));
         // Today's text with the owner term of an owner page: SQLite then
         // seeks `sessions_owner` and checks each chat against the links.
-        let walked =
-            super::page_sql(pq.owner, false, true).replace("+s.owner_id = ?1", "s.owner_id = ?1");
+        let walked = super::page_sql(pq.owner, false, true, super::ByProject::Asked)
+            .replace("+s.owner_id = ?1", "s.owner_id = ?1");
         let (t, _) = timed(20, || {
             let c = s.lock();
             let mut st = c.prepare_cached(&walked).unwrap();
