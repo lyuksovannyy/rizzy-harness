@@ -144,7 +144,11 @@ fn canonical_id(col: &str) -> String {
     const HEX: &str = "[0-9a-f]";
     let group = |n: usize| HEX.repeat(n);
     let pattern = [group(8), group(4), group(4), group(4), group(12)].join("-");
-    format!("(typeof({col}) = 'text' AND {col} GLOB '{pattern}')")
+    // GLOB stops at a NUL, so text that goes on after one would pass on its
+    // first 36 characters: the byte length closes that.
+    format!(
+        "(typeof({col}) = 'text' AND length(CAST({col} AS BLOB)) = 36 AND {col} GLOB '{pattern}')"
+    )
 }
 
 fn page_sql(owner: Owner<'_>, after: bool) -> String {
@@ -281,7 +285,8 @@ fn id_list(ids: &[SessionId]) -> Result<String> {
 }
 
 /// A row that passed `canonical_id`, with its id parsed. Failing here is a
-/// bug in the predicate, not data: the error gives the length only, never
+/// bug in the predicate, not data (the predicate's unit test covers every
+/// odd value found so far, an embedded NUL included): the error gives the length only, never
 /// the stored value.
 fn listed((text, mut row): (String, SessionRow)) -> Result<SessionRow> {
     row.session_id = text.parse().map_err(|_| {

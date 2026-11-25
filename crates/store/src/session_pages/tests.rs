@@ -1178,6 +1178,9 @@ fn the_canonical_id_predicate_accepts_only_the_canonical_spelling() {
         Text(format!("{text}0")),
         Text(format!("{text}\n")),
         Text(format!(" {text}")),
+        // GLOB stops at a NUL: the byte-length check refuses what follows.
+        Text(format!("{text}\0junk")),
+        Text(format!("{text}\0")),
         Text(text.replacen('-', "g", 1)),
         Text(String::new()),
         Null,
@@ -1224,8 +1227,13 @@ fn a_null_or_blob_id_does_not_fail_the_list() {
     exec(
         &s,
         "INSERT INTO sessions (session_id, node_id, created_ms, updated_ms, head_seq, owner_id)
-         VALUES (NULL, 'n', 0, 5, 0, 'a'), (x'00ff', 'n', 0, 6, 0, 'a'), (?1, 'n', 0, 7, 0, 'a')",
-        params![SessionId::new().0.as_bytes().to_vec()],
+         VALUES (NULL, 'n', 0, 5, 0, 'a'), (x'00ff', 'n', 0, 6, 0, 'a'), (?1, 'n', 0, 7, 0, 'a'),
+                (?2, 'n', 0, 8, 0, 'a')",
+        params![
+            SessionId::new().0.as_bytes().to_vec(),
+            // Text with a NUL after a valid id: GLOB alone would let it pass.
+            format!("{}\0junk", SessionId::new()),
+        ],
     );
     for owner in [Owner::User("a"), Owner::Everyone] {
         assert_eq!(
@@ -1245,7 +1253,8 @@ fn an_odd_child_is_left_out_with_its_subtree() {
     let p = plain(&s, "a", 1);
     let good = child(&s, "a", p, 2);
     let upper = SessionId::new().to_string().to_uppercase();
-    for (id, t) in [("garbage".to_string(), 3), (upper.clone(), 4)] {
+    let nul = format!("{}\0junk", SessionId::new());
+    for (id, t) in [("garbage".to_string(), 3), (upper.clone(), 4), (nul, 7)] {
         exec(
             &s,
             "INSERT INTO sessions (session_id, node_id, created_ms, updated_ms, head_seq, owner_id, parent_id)
