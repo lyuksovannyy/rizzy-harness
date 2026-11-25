@@ -233,14 +233,18 @@ The owner is the caller (`who.user_id`); the API token (no user) gets every chat
 
 `GET /api/sessions?workspace=W&limit=50&after=<cursor>` → `{ "sessions": [...], "children": [...], "next": "<cursor>" | null }`.
 
-- **Cursor:** opaque to the client, `base64url("1:" + updated_ms + ":" + session_id)`; keyset, never `OFFSET`.
-  Parsed strictly (version, an `i64`, a UUID); anything else is 400.
+- **Cursor:** opaque to the client, unpadded base64url of 25 bytes (a version byte, `updated_ms` as a big-endian `i64`, the session id's 16 bytes): 34 characters; keyset, never `OFFSET`.
+  Parsed strictly (`session_pages::Cursor::parse`: length cap, version, exact length, one spelling); anything else is 400.
+  Slice 1 changed this from the text form `"1:" + updated_ms + ":" + session_id`, whose base64 is 70 to 79 characters and so never fits the 64-byte cap below.
   It is not signed: it only says where to start inside a `WHERE` that the server builds from the caller, so a forged cursor can only skip the caller's own chats.
 - **Limit:** default 50, clamped to 1..=200 (a larger value is clamped, not refused; `limit=10^9` reads 200).
 - **Owner:** always `who.user_id`; there is no owner parameter.
   The API token keeps its every-chat listing, paged by the same cursor without the owner term (3–4 ms full scan at 50,000; no index added).
 - **Workspace:** as today, `ws::scope` checks membership before any query.
 - **Children:** the sub-agent chats whose parent is on this page (one query, `parent_id IN (…)`), so nesting and `subAgentRunning` keep working.
+  Measured in slice 1: without an index on `sessions.parent_id` this query walks all of the owner's chats, 5.5 ms at 10,000 (p99 append wait behind the page 5.9 ms, against 0.27 ms without the children).
+  An index alone is not enough: SQLite still picks `sessions_owner` for `owner_id = ? AND parent_id IN (…)` (seen with a partial `sessions(parent_id)` index on the bench database), so the query would also have to steer to it (`+s.owner_id`).
+  Open: a partial index is migration 7; the bench's children assertion fails until it lands.
 
 ### Live updates
 
@@ -250,7 +254,8 @@ A chat outside the loaded pages that changes moves to the top (its `updated_ms` 
 
 ### Migration 7
 
-Not needed: `updated_ms` exists and is maintained, the index exists, and the keyset query uses it.
+Not needed for the page: `updated_ms` exists and is maintained, the index exists, and the keyset query uses it.
+The page's children may need one (see Children above).
 No backfill, nothing to survive a crash halfway.
 
 ## 5. Slices
@@ -261,6 +266,8 @@ Each slice is reviewable alone and starts with a test that fails on the old code
    `sessions_page`, `unread_of`, `project_links_of`, `routine_marks` as one `IN`; the `#[ignore]` 50,000-chat bench from this note, committed, with the plan's numbers as its assertions (run by hand and in a nightly job if there is one; 17.5 s in release, much longer in a debug build, too slow for every CI run).
    Failing first, and deterministic for CI: a test that runs `EXPLAIN QUERY PLAN` on the page query and asserts `SEARCH s USING INDEX sessions_owner`, no `SCAN s`; a test that 120 chats come back as 50 + 50 + 20 with no row twice and none lost across equal `updated_ms`; a test that `routine_marks` of 500 ids is one statement (count via `trace` or a profile hook).
    **This slice meets the plan's benchmark** (measured: 0.06 ms page, 0.3 ms p99 append wait).
+   Built as `crates/store/src/session_pages.rs` (`sessions_page`, `unread_of`, `project_links_of`, `routine_marks_of`, `children_of`, `Cursor`; the bench is `session_pages::bench`).
+   Measured in release on its own 50,000-chat database: first page 0.10 ms (p99 0.13 ms), page 101 0.10 ms, unread, links and marks of a page 0.06 ms, p99 append wait behind page and those three 0.27 ms; `children_of` 5.5 ms (see Children above).
 2. **`/api/sessions` paged** (`http/sessions.rs`, no growth of `http.rs`).
    Tests: another user's cursor returns only the caller's chats; a cursor from workspace A used in B lists B's chats from that position and nothing of A's; `limit=1000000000` returns 200; a malformed cursor is 400; seen routine run chats never shorten a page; children of the page's parents arrive.
 3. **UI: load more on scroll** (state in a hook, not in `Shell.tsx`), refetch policy, `pruneDrafts` on first load only, `subAgentRunning` from `children` and the lookup.

@@ -11,6 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# Already the workspace's (core, master, node): the page cursor's wire form.
+base64.workspace = true
 harness-core.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
@@ -20,5 +22,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# `trace` (no extra crate): tests count the statements a call runs.
+rusqlite = { workspace = true, features = ["trace"] }
 tempfile.workspace = true
 serde_json.workspace = true

@@ -29,6 +29,7 @@ pub mod routines;
 pub mod session_files;
 pub mod session_forks;
 pub mod session_images;
+pub mod session_pages;
 pub mod stored_skills;
 pub mod usage;
 pub mod workspace_agents;
