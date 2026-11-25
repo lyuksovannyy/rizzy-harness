@@ -5564,17 +5564,23 @@ interrupted copy's leftovers are there (`pre-migration.old`,
 
 Everything one rollback sets aside carries one `<time>` (a rollback run again
 after an interruption reuses it), and the rollback lists it at the end. To
-return to the upgraded state instead, stop the server, then (with that time):
+return to the upgraded state instead, stop the server first (no process may
+hold the databases), then, with that time:
 
 ```bash
+# the server stopped
 cd ~/.local/share/rizzy-harness && T=<time> && \
+for f in *.db-wal *.db-shm *.db-journal; do if [ -e "$f" ]; then mv "$f" "$f.older-build-$T"; fi; done && \
 (cd "blobs.failed-upgrade-$T" && find . -type f | while read -r f; do mkdir -p "../blobs/${f%/*}" && mv "$f" "../blobs/$f"; done) && \
 rm -r "blobs.failed-upgrade-$T" && \
 for f in *.db*.failed-upgrade-$T; do mv "$f" "${f%.failed-upgrade-$T}"; done
 ```
 
-(moving whole shard folders fails where the shard exists, which is the
-usual case; this moves the files). Once the older build runs well, delete the
+(the first line moves the older build's `-wal`, `-shm` and `-journal` beside,
+as `*.older-build-<time>`: left in place, a WAL of the older build would meet
+the upgraded database and make it unreadable; moving whole shard folders
+fails where the shard exists, which is the usual case, so the files are
+moved). Once the older build runs well, delete the
 `*.failed-upgrade-<time>` files and the folder instead. A stored file deleted after the upgrade is gone though a
 restored row names it (its download fails; an Artifact version shows as
 failed). Chats and changes made after the upgrade are lost with the rollback.

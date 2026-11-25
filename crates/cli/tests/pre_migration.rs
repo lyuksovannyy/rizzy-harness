@@ -610,12 +610,32 @@ fn a_rollback_killed_at_any_step_can_be_run_again() {
             let a = data.join(format!("{n}.failed-upgrade-{t}"));
             assert_eq!(version(&a), *v, "{step}: {n} set aside");
         }
+        // The older build ran meanwhile and left a live WAL beside the
+        // restored master.db (a connection that never closed).
+        let older = rusqlite::Connection::open(data.join("master.db")).unwrap();
+        older.pragma_update(None, "journal_mode", "WAL").unwrap();
+        older
+            .execute("INSERT INTO kv (k, v) VALUES ('older', 'run')", [])
+            .unwrap();
+        std::mem::forget(older);
+        assert!(data.join("master.db-wal").exists());
         let o = Command::new("sh")
             .arg("-c")
             .arg(back_to_upgraded(&data, &t))
             .output()
             .unwrap();
         assert!(o.status.success(), "{step}: {}", text(&o));
+        // The older build's WAL was moved beside, not left to meet the
+        // upgraded database (or deleted).
+        assert!(
+            data.join(format!("master.db-wal.older-build-{t}")).exists(),
+            "{step}: the older build's master.db-wal was not moved aside"
+        );
+        let ok_db: String = rusqlite::Connection::open(data.join("master.db"))
+            .unwrap()
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ok_db, "ok", "{step}");
         assert_eq!(
             versions(&data),
             upgraded,
@@ -635,6 +655,7 @@ fn a_rollback_killed_at_any_step_can_be_run_again() {
 fn back_to_upgraded(data: &Path, t: &str) -> String {
     format!(
         "cd '{}' && T={t} && \
+         for f in *.db-wal *.db-shm *.db-journal; do if [ -e \"$f\" ]; then mv \"$f\" \"$f.older-build-$T\"; fi; done && \
          (cd \"blobs.failed-upgrade-$T\" && find . -type f | while read -r f; do mkdir -p \"../blobs/${{f%/*}}\" && mv \"$f\" \"../blobs/$f\"; done) && \
          rm -r \"blobs.failed-upgrade-$T\" && \
          for f in *.db*.failed-upgrade-$T; do mv \"$f\" \"${{f%.failed-upgrade-$T}}\"; done",
@@ -749,15 +770,71 @@ fn after_a_good_upgrade_a_deleted_database_is_made_again() {
 /// N2: mid-upgrade, a missing database is refused with every way out.
 #[test]
 fn mid_upgrade_a_missing_database_is_refused_with_every_way_out() {
+    let setup = || {
+        let (dir, data) = old_data();
+        refused(
+            serve_refused(&data, &[FAIL_NODE]),
+            "restore --pre-migration",
+        );
+        let kept = data.parent().unwrap().join("chat.db.kept");
+        std::fs::copy(data.join("chat.db"), &kept).unwrap();
+        std::fs::remove_file(data.join("chat.db")).unwrap();
+        let t = refused(serve_refused(&data, &[]), "restore --pre-migration");
+        for s in [
+            "put chat.db back",
+            "delete pre-migration/ and start once with --migrate-without-copy",
+        ] {
+            assert!(t.contains(s), "{s} missing in {t}");
+        }
+        (dir, data, kept)
+    };
+    // Each way out the sentence names, followed: the server then starts.
+    let (dir, data, kept) = setup();
+    std::fs::copy(&kept, data.join("chat.db")).unwrap();
+    drop(real::serve(&data));
+    drop(dir);
+    let (dir, data, _) = setup();
+    ok(run(&data, &["restore", "--pre-migration", "--yes"], &[]));
+    drop(real::serve(&data));
+    drop(dir);
+    let (dir, data, _) = setup();
+    std::fs::remove_dir_all(data.join("pre-migration")).unwrap();
+    let child = cmd(
+        &data,
+        &["--migrate-without-copy", "serve", "--bind", "127.0.0.1:0"],
+        &[],
+    )
+    .spawn()
+    .unwrap();
+    let by = Instant::now() + DEADLINE;
+    while !(data.join("chat.db").exists() && version(&data.join("chat.db")) == current()) {
+        assert!(
+            Instant::now() < by,
+            "the start with the flag never migrated"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = wait_after_kill(child);
+    drop(dir);
+}
+
+/// With an upgrade under way, every database gone (no stored or set-aside
+/// files either): a set alone is no first run: refused, naming the ways out.
+#[test]
+fn a_set_alone_is_no_first_run() {
     let (dir, data) = old_data();
     refused(
         serve_refused(&data, &[FAIL_NODE]),
         "restore --pre-migration",
     );
-    std::fs::remove_file(data.join("chat.db")).unwrap();
-    let t = refused(serve_refused(&data, &[]), "restore --pre-migration");
-    for s in ["put chat.db back", "delete pre-migration/"] {
-        assert!(t.contains(s), "{s} missing in {t}");
+    for n in DBS {
+        for s in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(data.join(format!("{n}{s}")));
+        }
     }
+    let _ = std::fs::remove_file(data.join("memory.db"));
+    let t = refused(serve_refused(&data, &[]), "restore --pre-migration");
+    assert!(!t.contains("claim"), "{t}");
+    assert!(!data.join("master.db").exists(), "{t}");
     drop(dir);
 }

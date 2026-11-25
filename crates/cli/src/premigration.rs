@@ -269,11 +269,14 @@ pub fn before_start(data: &Path, role: &str, without_copy: bool) -> anyhow::Resu
     );
     // Every present database at the set's target: that upgrade ran well,
     // and the set is only a way back, no reason to refuse anything.
+    // At least one of the set's databases must be there: an empty
+    // directory beside a set is no upgrade that ran well.
     let upgraded = set.as_ref().is_some_and(|s| {
-        v.iter().all(|(n, l)| match s.target.get(*n) {
-            Some(t) => l.version == *t,
-            None => l.version == l.want,
-        })
+        s.before.keys().any(|n| v.contains_key(n.as_str()))
+            && v.iter().all(|(n, l)| match s.target.get(*n) {
+                Some(t) => l.version == *t,
+                None => l.version == l.want,
+            })
     });
     if let Some(s) = set.as_ref().filter(|_| !upgraded) {
         let missing: Vec<&str> = s
@@ -289,9 +292,9 @@ pub fn before_start(data: &Path, role: &str, without_copy: bool) -> anyhow::Resu
                  versions from before it, others not) and {SET}/ holds a copy from before it: \
                  nothing was started. Ways out: put {gone} back if you have it; or run \
                  {rollback} to return to the older build with that copy (it says what it will do \
-                 first); or, if you do not want to roll back, delete {SET}/ and start again \
-                 (then {gone} is made new and empty, and the upgrade goes on without a way \
-                 back)",
+                 first); or, if you do not want to roll back, delete {SET}/ and start once with \
+                 --migrate-without-copy (the upgrade then goes on without a way back, and \
+                 {gone} is made new and empty)",
                 data.display()
             );
         }
