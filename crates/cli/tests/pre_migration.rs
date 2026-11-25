@@ -838,3 +838,43 @@ fn a_set_alone_is_no_first_run() {
     assert!(!data.join("master.db").exists(), "{t}");
     drop(dir);
 }
+
+/// Review R5-1 of FIX_PLAN 4.5 slice 1: a database at an older version
+/// whose schema is not that version's is refused by the read-only check
+/// before anything is written, as the real open refuses it: no copy is
+/// taken and no database (`master.db` is checked first) is migrated.
+#[test]
+fn an_older_database_with_the_wrong_schema_stops_the_start_before_the_copy() {
+    let older = current() - 1;
+    let (dir, data, _ws) = real::setup();
+    for name in DBS {
+        let mut c = rusqlite::Connection::open(data.join(name)).unwrap();
+        harness_store::migrate::migrate(
+            &mut c,
+            name,
+            &harness_store::DB_SCHEMA.steps[..older as usize],
+        )
+        .unwrap();
+    }
+    // chat.db: right version, not that version's schema.
+    rusqlite::Connection::open(data.join("chat.db"))
+        .unwrap()
+        .execute_batch("CREATE TABLE stray (x INTEGER);")
+        .unwrap();
+    for name in DBS {
+        assert_eq!(version(&data.join(name)), older);
+    }
+    let t = refused(
+        serve_refused(&data, &[]),
+        &format!("does not match schema version {older}"),
+    );
+    assert!(t.contains("chat.db"), "{t}");
+    assert!(
+        !data.join("pre-migration").exists(),
+        "a copy was taken\n{t}"
+    );
+    for name in DBS {
+        assert_eq!(version(&data.join(name)), older, "{name} moved\n{t}");
+    }
+    drop(dir);
+}

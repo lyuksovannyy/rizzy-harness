@@ -238,10 +238,46 @@ fn judge(path: &Path, db: &str, schema: &Schema) -> Result<(), MigrateError> {
     )
     .map_err(sqlite)?;
     let known = schema.steps.len() as i64;
-    if refuse(db, user_version(&conn).map_err(sqlite)?, known)? == known {
+    let from = refuse(db, user_version(&conn).map_err(sqlite)?, known)?;
+    if from == known {
         same_schema(&conn, db, known, schema.recorded)?;
+    } else {
+        // The comparison the migration itself makes first (review R5-1 of
+        // FIX_PLAN 4.5 slice 1), here before any copy is written and any
+        // other database is migrated.
+        older_schema(&conn, db, from, schema.steps)?;
     }
     Ok(())
+}
+
+/// A file below the newest version is exactly its version's schema before
+/// a later migration runs over it; a version-0 file with tables only if it
+/// is exactly version 1's (owner decision), and then it starts from 1.
+/// Returns the version the migrations start after. Another kind of file
+/// with a version of its own (a memory.db in place of a node.db) would
+/// otherwise pass the `IF NOT EXISTS` migrations and fail in the first one
+/// that names a table, blamed on that migration; and migration 1 run over
+/// tables it did not make would keep an older shape, or trip on it.
+fn older_schema(
+    conn: &Connection,
+    db: &str,
+    from: i64,
+    steps: &[Migration],
+) -> Result<i64, MigrateError> {
+    let sqlite = |e| sqlite_error(db, e);
+    let now = schema_text(conn).map_err(sqlite)?;
+    let (version, upto) = match from {
+        0 if now.is_empty() => return Ok(0),
+        0 => (1, 1),
+        v => (v, v as usize),
+    };
+    if now != schema_of(&steps[..upto]).map_err(sqlite)? {
+        return Err(MigrateError::Mismatch {
+            db: db.to_string(),
+            version,
+        });
+    }
+    Ok(version)
 }
 
 /// A read-only connection's refusal to read a file that needs a writer
@@ -323,37 +359,7 @@ fn run(
         }
         return Ok(Migrated { from, to: known });
     }
-    // A version-0 file with tables (owner decision): version 1 only if it
-    // is exactly version 1's schema, never migration 1 run over tables it
-    // did not make (whose IF NOT EXISTS would keep an older shape, or
-    // trip on it and blame the migration).
-    let mut start = from;
-    if from == 0 {
-        let now = schema_text(&tx).map_err(sqlite)?;
-        if !now.is_empty() {
-            if now != schema_of(&steps[..1]).map_err(sqlite)? {
-                return Err(MigrateError::Mismatch {
-                    db: db.to_string(),
-                    version: 1,
-                });
-            }
-            start = 1;
-        }
-    }
-    // A file at a version between: it must be exactly that version's
-    // schema before a later migration runs over it. Another kind of file
-    // with a version of its own (a memory.db in place of a node.db) would
-    // otherwise pass the `IF NOT EXISTS` migrations and fail in the first
-    // one that names a table, blamed on that migration.
-    if from > 0 {
-        let now = schema_text(&tx).map_err(sqlite)?;
-        if now != schema_of(&steps[..from as usize]).map_err(sqlite)? {
-            return Err(MigrateError::Mismatch {
-                db: db.to_string(),
-                version: from,
-            });
-        }
-    }
+    let start = older_schema(&tx, db, from, steps)?;
     // Re-check D4: a reference that dangles already is not this
     // migration's doing, and must not be reported as if it were.
     if let Some((table, parent)) = dangling(&tx).map_err(sqlite)? {
