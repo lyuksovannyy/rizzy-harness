@@ -61,7 +61,7 @@ pub const BUF: usize = 1 << 20;
 const MANIFEST_MAX: u64 = 64 << 20;
 
 /// The databases, in the order they are copied, with their schema.
-fn databases() -> [(
+pub(crate) fn databases() -> [(
     &'static str,
     &'static harness_store::migrate::Schema<'static>,
 ); 4] {
@@ -89,7 +89,7 @@ pub const NOT_INCLUDED: &str = "\
 Not in this backup: the project folders and repositories the chats work in; checkpoints \
 (after a restore, undo and rewind of the turns made before it are refused); a remote node's \
 own data (back it up on that machine, with its --data-dir); .env and HARNESS_* environment \
-variables.";
+variables; pre-migration/ (the copy of older databases kept for rolling an upgrade back).";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -162,7 +162,7 @@ pub fn valid_path(p: &str) -> bool {
 }
 
 /// Create `p` 0600, exclusively, not through a link.
-fn create_private(p: &Path) -> io::Result<File> {
+pub(crate) fn create_private(p: &Path) -> io::Result<File> {
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -172,7 +172,7 @@ fn create_private(p: &Path) -> io::Result<File> {
 }
 
 /// Make folder `p` 0700 (it may exist already as a real folder of ours).
-fn mkdir_private(p: &Path) -> io::Result<()> {
+pub(crate) fn mkdir_private(p: &Path) -> io::Result<()> {
     match fs::DirBuilder::new().mode(0o700).create(p) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -189,7 +189,7 @@ fn mkdir_private(p: &Path) -> io::Result<()> {
     }
 }
 
-fn sync_dir(p: &Path) -> io::Result<()> {
+pub(crate) fn sync_dir(p: &Path) -> io::Result<()> {
     File::open(p)?.sync_all()
 }
 
@@ -217,7 +217,7 @@ fn kind(p: &Path) -> io::Result<Kind> {
 /// never a FIFO or device (judged before the open, so opening one blocks
 /// nothing and touches no device; the open itself is non-blocking and
 /// makes no terminal ours, and the file opened must be the one judged).
-fn open_regular(p: &Path) -> io::Result<(File, fs::Metadata)> {
+pub(crate) fn open_regular(p: &Path) -> io::Result<(File, fs::Metadata)> {
     let not_regular = || {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -324,10 +324,13 @@ fn known_top(n: &str) -> bool {
         "keys",
         "agents",
         "update-pending.json",
+        crate::premigration::SET,
+        crate::premigration::SET_PARTIAL,
+        crate::premigration::SET_OLD,
         "update-failed",
         "rizzy-harness.prev",
     ];
-    if LEFT_OUT.contains(&n) || PLAIN.contains(&n) {
+    if LEFT_OUT.contains(&n) || PLAIN.contains(&n) || n.contains(crate::premigration::ASIDE) {
         return true;
     }
     databases().iter().any(|(d, _)| {
@@ -340,7 +343,7 @@ fn known_top(n: &str) -> bool {
 
 /// A database and the files SQLite opens beside it: each absent or a
 /// regular file (SQLite's own open would block on a FIFO).
-fn db_files_regular(dir: &Path, name: &str) -> anyhow::Result<()> {
+pub(crate) fn db_files_regular(dir: &Path, name: &str) -> anyhow::Result<()> {
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let f = format!("{name}{suffix}");
         match kind(&dir.join(&f))? {
@@ -403,7 +406,7 @@ pub fn copy_stream(
     Ok((n, hex::encode(h.finalize())))
 }
 
-fn mb(n: u64) -> String {
+pub(crate) fn mb(n: u64) -> String {
     format!("{:.1} MB", n as f64 / 1_000_000.0)
 }
 
@@ -443,7 +446,7 @@ fn verify_blobs(
 
 /// Check one database copy: SQLite's integrity and foreign keys, and a
 /// schema this build knows (a newer one is refused).
-fn check_db(
+pub(crate) fn check_db(
     name: &str,
     p: &Path,
     schema: &harness_store::migrate::Schema<'_>,
@@ -510,7 +513,15 @@ fn prepare_dest(data: &Path, dest: &Path) -> anyhow::Result<(PathBuf, bool)> {
 /// Free bytes for this user on `p`'s file system (the field types differ
 /// between platforms, hence the casts).
 #[allow(clippy::unnecessary_cast)]
-fn free_bytes(p: &Path) -> nix::Result<u64> {
+pub(crate) fn free_bytes(p: &Path) -> nix::Result<u64> {
+    // Tests only (debug builds): a disk this full.
+    #[cfg(debug_assertions)]
+    if let Some(n) = std::env::var("HARNESS_TEST_FREE_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        return Ok(n);
+    }
     let v = nix::sys::statvfs::statvfs(p)?;
     Ok((v.blocks_available() as u64).saturating_mul(v.fragment_size() as u64))
 }
@@ -1832,6 +1843,8 @@ mod tests {
             "RESTORING",
             "claim-code",
             "checkpoints/x.git",
+            "pre-migration/master.db",
+            "pre-migration",
             "blobs/ab/0123456789abcdef0123456789abcdaa.rzb",
             "blobs/aa/0123456789ABCDEF0123456789abcdaa.rzb",
             "blobs/aa/0123456789abcdef0123456789abcdaa.rzb/x",

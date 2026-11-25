@@ -170,12 +170,15 @@ OpenClaw notes that `VACUUM` may renumber implicit rowids; ours are only used fo
 
 ## A copy before each migration (the row's second half)
 
-The read-only preflight (`check_schemas`, `main.rs:204`) already reads every database's version before any is opened, under the exclusive lock.
-When any of them is older than this build, it first writes the four databases with `VACUUM INTO` to `<data>/pre-migration/` with a manifest (from-versions, build), replacing the previous set: one set kept, removed only when the next migrating start replaces it, sized like the databases (blobs are not copied: a migration does not touch them).
-If the copy cannot be made (disk full) the start stops before anything is migrated.
-Rolling back: stop the new build, run `rizzy-harness restore --pre-migration` (puts the four files back, removing the migrated files' `-wal` and `-shm`, which must never meet an older file), start the old build.
-It is small (the preflight already has the versions; the snapshot code is PR A's), and it gives `docs/node-update.md` §6.3 its second option.
-It ships as PR B, after PR A, because its restore reuses PR A's checks.
+Built in PR B (`crates/cli/src/premigration.rs`).
+At `serve`, `node run` and `node join`, holding the data directory's lock and after the read-only schema preflight (`check_schemas`), before any database is opened: if any database is at a version above 0 and below the build's, all present databases are copied, because they are restored together.
+The copy is the offline backup's: a byte copy of each database with its `-wal` and `-shm` into `pre-migration.partial/work/`, `VACUUM INTO` from it (`snapshot_private_copy`), each file 0600, a `MANIFEST.json` (kind `pre-migration`, the build, the time, each database's version before and target, sizes and SHA-256), then the swap: the old set to `pre-migration.old`, the new one to `pre-migration`, the old removed; one set is kept.
+Free space is checked first (the databases' bytes twice, plus 64 MiB or a tenth); a refusal gives both numbers, and any failure (a read-only disk) stops the start before anything is migrated (decision 4), naming `--migrate-without-copy` (or `HARNESS_MIGRATE_WITHOUT_COPY`), the operator's escape, which logs a warning and prints one.
+A start whose migration then fails prints, after its error, where the set is, its versions and the rollback command (`a_failed_migration_is_rolled_back_from_the_set`: a debug-only hook `HARNESS_TEST_FAIL_MIGRATION` fails the second database's migration after `master.db` migrated).
+`restore --pre-migration`, under the lock (a running server's directory is refused): checks the manifest, every file's size and SHA-256 and that every database the manifest names is there; puts every live database with its `-wal`, `-shm` and `-journal` aside as `<file>.failed-upgrade-<ms>` (0600), streams the copies back, checks their integrity and versions, and says to start the older build (this build would migrate again).
+The set is kept after a rollback (a second try is possible); the next migrating start replaces it.
+Stored files are not touched: one stored after the upgrade has no row in the restored `master.db`, and the storage sweep at the next start (`storage::open`, `remove_orphans` with no age) deletes it; one deleted after the upgrade is named by a restored row but gone: a download answers 500 ("cannot open a stored file" in the log), and an Artifact version is marked failed at the start (`fail_missing`).
+`backup` leaves `pre-migration/` (and the `.failed-upgrade-` files) out and says so; a manifest naming it is refused by restore's path shape; `doctor` prints a line with the set's date, versions and size.
 
 ## Measured
 
@@ -183,7 +186,7 @@ USB disk of this machine, debug build, the server running, 61 media files (a 302
 A release build hashes faster; these are upper figures.
 Copies stream through one 1 MiB buffer: a 2 GB file raises the peak RSS by far less than 64 MB (`a_large_file_streams_through_the_buffer`).
 
-## PR B, a copy before each migration (left)
+## PR B, a copy before each migration (built)
 
 As above: the four databases into `<data>/pre-migration/` before a migrating start, one set kept, a start that cannot write it stops (decision 4), `restore --pre-migration` to roll back; tests: a version-5 fixture opens, the copy holds version 5, the rollback restores it and the old schema opens; a full disk stops the start before any migration.
 
@@ -197,4 +200,4 @@ The session lead's (2026-11-25), each open to the owner's override:
 2. **The API token stays in the backup**; the README says a backup is as sensitive as the server itself.
 3. **Routines after a restore are as they were**, with the printed warning and `--pause-routines`.
 4. **A migration whose copy cannot be written stops the start** (PR B).
-5. **PR B comes right after PR A.**
+5. **PR B comes right after PR A** (done: `feat/pre-migration-copy`).

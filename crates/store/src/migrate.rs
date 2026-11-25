@@ -376,6 +376,22 @@ fn run(
                 })?;
         }
     }
+    // Tests only (debug builds): a migration of the file whose name ends in
+    // `HARNESS_TEST_FAIL_MIGRATION` fails here, after its steps ran and
+    // before the commit, as a real failing step would (nothing is kept).
+    #[cfg(debug_assertions)]
+    if from != 0
+        && std::env::var("HARNESS_TEST_FAIL_MIGRATION")
+            .is_ok_and(|v| !v.is_empty() && db.ends_with(&v))
+    {
+        return Err(MigrateError::Failed {
+            db: db.to_string(),
+            from,
+            to: known,
+            step: known,
+            source: rusqlite::Error::InvalidQuery,
+        });
+    }
     if let Some(expected) = expected {
         same_schema(&tx, db, known, expected)?;
     }

@@ -8,6 +8,7 @@ mod backup;
 mod listen;
 mod lock;
 mod net;
+mod premigration;
 mod push_check;
 mod stop;
 
@@ -29,6 +30,16 @@ struct Cli {
     /// Data directory (default: ~/.local/share/rizzy-harness).
     #[arg(long, global = true, env = "HARNESS_DATA_DIR")]
     data_dir: Option<PathBuf>,
+    /// Migrate the databases at a start without copying them first into
+    /// `pre-migration/` (when the copy cannot be written). A migration that
+    /// then fails has no way back to the older build. Off by default.
+    #[arg(
+        long,
+        global = true,
+        env = "HARNESS_MIGRATE_WITHOUT_COPY",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    migrate_without_copy: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -98,11 +109,17 @@ enum Cmd {
     /// Restore a backup into a new or empty data directory (--data-dir).
     Restore {
         /// The backup folder `backup` wrote.
-        dir: PathBuf,
+        #[arg(required_unless_present = "pre_migration")]
+        dir: Option<PathBuf>,
         /// Restore every routine paused (for a trial copy beside the
         /// original).
         #[arg(long)]
         pause_routines: bool,
+        /// Roll an upgrade back: put the databases back from the data
+        /// directory's `pre-migration/` copy (the server must be stopped),
+        /// then start the older build.
+        #[arg(long, conflicts_with_all = ["dir", "pause_routines"])]
+        pre_migration: bool,
     },
     /// Node commands.
     Node {
@@ -1264,6 +1281,9 @@ async fn doctor(dir: &Path) -> anyhow::Result<()> {
         check("restore", Err(backup::restoring_advice(dir)));
         bail!("doctor found problems");
     }
+    if let Some(l) = premigration::doctor_line(dir) {
+        println!("info  {l}");
+    }
     for db in ["master.db", "chat.db", "node.db"] {
         let mark = dir.join(format!("{db}{}", harness_store::TRUNCATE_PENDING));
         if std::fs::symlink_metadata(&mark).is_ok() {
@@ -1699,8 +1719,14 @@ fn main() -> anyhow::Result<()> {
     };
     let _lock = role.map(|r| lock::take(&dir, r)).transpose()?;
 
+    // Before any database is opened: a start that will migrate copies
+    // them all first (FIX_PLAN 4.4), or stops.
+    let mut rollback_advice = None;
     if role.is_some() && role != Some("restore") {
         check_schemas(&dir)?;
+        if let Some(made) = premigration::before_start(&dir, cli.migrate_without_copy)? {
+            rollback_advice = Some(made.advice);
+        }
     }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1718,6 +1744,22 @@ fn main() -> anyhow::Result<()> {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("Error: {e:?}");
+            if let Some(a) = &rollback_advice
+                && e.chain().any(|c| {
+                    c.downcast_ref::<harness_store::migrate::MigrateError>()
+                        .is_some()
+                        || matches!(
+                            c.downcast_ref::<harness_store::StoreError>(),
+                            Some(harness_store::StoreError::Migrate(_))
+                        )
+                        || matches!(
+                            c.downcast_ref::<harness_memory::MemoryError>(),
+                            Some(harness_memory::MemoryError::Migrate(_))
+                        )
+                })
+            {
+                eprintln!("{a}");
+            }
             if e.chain().any(|c| {
                 matches!(
                     c.downcast_ref::<harness_link::LinkError>(),
@@ -1868,9 +1910,15 @@ async fn async_main(cli: Cli, dir: PathBuf, dotenv_names: Vec<String>) -> anyhow
             Ok(())
         }
         Cmd::Restore {
+            pre_migration: true,
+            ..
+        } => premigration::rollback(&dir),
+        Cmd::Restore {
             dir: from,
             pause_routines,
+            ..
         } => {
+            let from = from.context("restore needs the backup folder")?;
             let to = dir.clone();
             let r = backup::run_stoppable(move |c| backup::restore(&to, &from, pause_routines, c))
                 .await?;
