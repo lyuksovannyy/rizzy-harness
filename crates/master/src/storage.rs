@@ -236,7 +236,12 @@ pub fn open(m: &Master, data_dir: &Path) -> std::io::Result<()> {
         .mirror
         .known_blob_ids()
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let removed = remove_orphans(&st.root, &known, None);
+    let removed = if known.is_empty() && has_files(&st.root) {
+        refuse_wipe(&st.root);
+        0
+    } else {
+        remove_orphans(&st.root, &known, None)
+    };
     if removed > 0 {
         tracing::info!(files = removed, "removed stored files without a row");
     }
@@ -300,6 +305,34 @@ fn remove_orphans(
         }
     }
     n
+}
+
+/// Whether any shard holds a stored file.
+fn has_files(root: &Path) -> bool {
+    let Ok(shards) = std::fs::read_dir(root) else {
+        return false;
+    };
+    shards.flatten().any(|s| {
+        s.file_name().len() == 2
+            && std::fs::read_dir(s.path()).is_ok_and(|mut f| {
+                f.any(|e| e.is_ok_and(|e| e.file_name().to_string_lossy().ends_with(".rzb")))
+            })
+    })
+}
+
+/// The sweep's guard: `master.db` names no stored file at all while files
+/// lie in the store. On a healthy server that cannot be: a new one has no
+/// rows and no files, and one whose every file was deleted lost the files
+/// with the rows (the delete unlinks them). So it is a database that does
+/// not belong to these files (a restore, a rollback or a copy gone wrong):
+/// every file is kept, and the log says so, instead of wiping the store.
+fn refuse_wipe(root: &Path) {
+    tracing::error!(
+        store = %root.display(),
+        "master.db names no stored file, yet the store holds files: they are NOT deleted. The \
+         database does not belong to them (an interrupted restore or rollback?): restore the \
+         right master.db, or move the files away yourself if they are not wanted"
+    );
 }
 
 /// Modified less than `age` ago (unknown times count as young).
@@ -724,7 +757,11 @@ pub async fn hourly(m: &Master) {
                 }
             }
         }
-        remove_orphans(&root, &known, Some(SWEEP_AGE));
+        if known.is_empty() && has_files(&root) {
+            refuse_wipe(&root);
+        } else {
+            remove_orphans(&root, &known, Some(SWEEP_AGE));
+        }
     })
     .await;
 }

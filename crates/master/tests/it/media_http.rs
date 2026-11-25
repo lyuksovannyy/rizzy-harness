@@ -1081,6 +1081,32 @@ async fn account_deletion_removes_files_keys_and_names() {
     assert_eq!(s.media_search(None, None, None, 10, 0).unwrap().len(), 1);
 }
 
+/// A master.db that names no stored file while files lie in the store
+/// (a database that does not belong to them: an interrupted rollback or
+/// restore) never has them deleted: not at start, not by the hourly sweep.
+#[tokio::test]
+async fn an_empty_blob_table_never_wipes_the_store() {
+    let t = start().await;
+    let shard = t.blobs().join("ee");
+    std::fs::create_dir_all(&shard).unwrap();
+    let file = shard.join("0193f1c2a4b57d6e8f9012345678abee.rzb");
+    std::fs::write(&file, b"a file of another database").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
+        .unwrap();
+    harness_master::storage::hourly(&t.master).await;
+    assert!(file.exists(), "the hourly sweep wiped the store");
+    let again = Master::new(
+        Store::open(&t.db(), Durability::Normal).unwrap(),
+        Auth::new(Secret::new("tok".into()), vec![], false),
+    );
+    harness_master::storage::open(&again, t.dir.path()).unwrap();
+    assert!(file.exists(), "the start wiped the store");
+}
+
 #[tokio::test]
 async fn sweeps_remove_orphans_and_temp_files() {
     let t = start().await;
