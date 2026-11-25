@@ -157,6 +157,60 @@ impl Serve {
         self.owner = Some((ck, key));
     }
 
+    /// Sign in as `name` with `password` (an account that exists, as after
+    /// a restore: its logins were dropped) and act as it from now on.
+    #[allow(dead_code)] // backup_restore only
+    pub async fn sign_in(&mut self, name: &str, password: &str) {
+        let r = reqwest::Client::new()
+            .post(format!("http://{}/api/login", self.addr))
+            .json(&json!({"username": name, "password": password}))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success(), "login: {}", r.status());
+        let ck = r.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let key = r.json::<Value>().await.unwrap()["login_key"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        self.owner = Some((ck, key));
+    }
+
+    /// The login the test acts as, if any: (cookie, key).
+    #[allow(dead_code)] // backup_restore only
+    pub fn login(&self) -> Option<(String, String)> {
+        self.owner.clone()
+    }
+
+    /// Act with `login` (an old one, to see it refused), or the API token.
+    #[allow(dead_code)] // backup_restore only
+    pub fn set_login(&mut self, login: Option<(String, String)>) {
+        self.owner = login;
+    }
+
+    /// A request with a raw body (an upload): status and body.
+    #[allow(dead_code)] // backup_restore only
+    pub async fn send_bytes(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> (reqwest::StatusCode, Vec<u8>) {
+        let mut rb = self.req(method, path).body(body);
+        for (k, v) in headers {
+            rb = rb.header(*k, *v);
+        }
+        let r = rb.send().await.unwrap();
+        (r.status(), r.bytes().await.unwrap().to_vec())
+    }
+
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let rb = reqwest::Client::new().request(method, format!("http://{}{path}", self.addr));
         match &self.owner {
@@ -252,6 +306,7 @@ impl Serve {
         v
     }
 
+    #[allow(dead_code)] // not backup_restore
     pub async fn prompt(&self, sid: &str, steps: &[Value]) {
         self.post(
             &format!("/api/sessions/{sid}/prompt"),

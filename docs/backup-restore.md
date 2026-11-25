@@ -1,8 +1,8 @@
 # Backup and restore
 
 FIX_PLAN 4.4 (review R43-3, `docs/node-update.md` §6.3).
-Stage 0: the design and a spike; nothing here is built yet.
-The spike's scripts and logs are in `.claude/handoff-2026-11-15/b-backup/` (git-ignored); every number below comes from them.
+PR A built `backup`, `backup --verify` and `restore` (`crates/cli/src/backup.rs`, `crates/store/src/backup.rs`, PLAN.md T103, README "Back up and restore"); PR B, the copy before each migration, is left.
+The stage-0 spike's scripts and logs are in `.claude/handoff-2026-11-15/b-backup/` (git-ignored); the spike numbers below come from them.
 
 ## The row as written does not work
 
@@ -40,7 +40,7 @@ All four are WAL (`Store::open`, `crates/store/src/lib.rs:795`; `SqliteMemory::o
 | `keys/master-cert.der`, `master-key.der` | `--node-listen` (`crates/link/src/tls.rs:35`) | the identity remote nodes pin | yes |
 | `keys/ui-cert.pem` and its key | `--tls` | the UI's self-signed certificate browsers trust | yes |
 | `keys/node.key`, `remote.toml` | `node join` (`main.rs:1115`, `1122`) | a remote node's identity and its master's address and fingerprint | yes (on a node) |
-| `api-token` | `main.rs:1207` | the machine owner's root key | yes (see "Open questions") |
+| `api-token` | `main.rs:1207` | the machine owner's root key | yes (decision 2) |
 | `agents/`, `AGENTS.md`, `project-mcp.json` | the operator; repository MCP approvals | agent definitions, node instructions, approved repository MCP servers | yes |
 | `claim-code` | first start | the one-time code of an unclaimed install | no (made again while no account exists) |
 | `lock` | every `serve`/`node` start | holder hint | no |
@@ -54,7 +54,7 @@ All four are WAL (`Store::open`, `crates/store/src/lib.rs:795`; `SqliteMemory::o
 The same command run there with that node's `--data-dir` backs those up.
 
 **Checkpoints are left out.** A shadow repository is useless without the repository it borrows from, and copying one to another machine leaves `alternates` pointing at paths that do not exist.
-A restored server keeps every chat and every turn's diff text; what it loses is undo and rewind of turns made before the backup, which A.16 refuses when the content is gone (`docs/undo-and-stash.md`, "All or nothing"; to confirm in PR A's test).
+A restored server keeps every chat and every turn's diff text; what it loses is undo and rewind of turns made before the backup, which A.16 refuses when the content is gone (`docs/undo-and-stash.md`, "All or nothing"; `undo_after_a_restore_without_checkpoints_is_refused_in_words` checks the 409 and that the folder is untouched).
 
 ## Consistency while the server runs
 
@@ -68,12 +68,21 @@ That is the price of rule 3, and the spike shows the other order is far worse.
    Free: the server is stopped; hold the lock to the end (no server can start meanwhile) and everything below is trivially consistent.
    Held by `serve` or `node run`: online mode, same steps, no lock.
 2. `VACUUM INTO` of `master.db` through a read-only connection, into the destination.
-3. Hard-link every file the snapshot's `blobs` names into `<data>/backup-staging-<pid>/` (same file system, by construction).
-   A file that is missing had its row deleted after the snapshot: discard the links, go back to 2, at most 5 times, then fail with "files are being deleted faster than the backup can link them: try again, or stop the server".
+3. Hard-link every file the snapshot's `blobs` names into `<data>/backup-staging/` (same file system, by construction; 0700; one backup at a time per data directory, by an flock on `<data>/backup.lock`; removed on every way out but SIGKILL, and a leftover is removed by the next backup; it is outside `blobs/`, so neither the start-up sweep nor the hourly one reads it, which a test checks after a SIGKILL).
+   The links are only ever opened to read: a link shares the live file's inode, and nothing chmods or writes it.
+   Where linking fails for another reason than a missing file (another mount, no links), the file is copied instead, which widens the window the retry covers.
+   A file that is missing had its row deleted after the snapshot: discard the links, go back to 2, at most 5 times, then fail with nothing kept ("try again, or stop the server and back up then").
 4. `VACUUM INTO` of `memory.db`, `chat.db`, `node.db` (after `master.db`, rule 3).
+   Then, in the copies of `chat.db` and `node.db`, every chat the `master.db` copy does not know is removed (`drop_unknown_chats`): it began after `master.db` was copied, and the master writes a chat's owner, workspace and project into `master.db` only once the node has made it, so it would come back without an owner, out of its owner's reach (PR A's test found this; the spike, with API-token chats that have no owner, could not).
+   A sub-agent's chat under a kept chat stays (it inherits its owner).
+   The command says how many it left out.
+   This needs the copy at this build's schema version (it is opened as a store); otherwise it is skipped with a line saying so.
 5. Copy the plain files and `keys/` (after the databases).
-6. Copy the staged blobs into the destination, hashing as it goes; remove the staging folder.
-7. Write `MANIFEST.json` last (temp name, fsync, rename, fsync the folder): a backup without it is incomplete and restore refuses it.
+6. Copy the staged blobs into the destination (a real copy, streamed through one 1 MiB buffer, hashing as it goes); remove the staging folder; decrypt every copied file once and check it against the SHA-256 and size of its row.
+7. Every file is created 0600 with `O_EXCL|O_NOFOLLOW` under `.<name>.partial`, synced, renamed, and every folder synced; `VACUUM INTO` writes into an empty 0600 file made that way (SQLite accepts an empty file and keeps its mode, checked by a test).
+   Write `MANIFEST.json` last (temp name, fsync, rename, fsync the folder): a backup without it is incomplete and restore refuses it.
+   The command prints the manifest's SHA-256 for the operator to note.
+   A failure or SIGINT/SIGTERM removes what was written (the folder too when the backup made it).
 
 **The spike** (Python driving the real binary over HTTP with the API token on a temporary data directory and HOME; tmpfs; scripts in the handoff folder):
 
@@ -89,7 +98,7 @@ That is the price of rule 3, and the spike shows the other order is far worse.
 
 **A finding outside this row:** `Store::checkpoint` (`crates/store/src/lib.rs:2005`) ignores the `busy` column of `wal_checkpoint(TRUNCATE)`, and it runs holding the store's only connection.
 With any outside reader (this backup, `sqlite3`, a future `doctor` check) it blocks every `master.db` call for up to `busy_timeout` (5 s) and then silently leaves the WAL untruncated, which is the step the blob deletes rely on to drop a deleted file's key from disk (`storage.rs` `unlink` comment).
-PR A should read the column, log it, and let the next sweep try again.
+PR A fixed it in its own commit: the checkpoint runs with a zero busy timeout, returns whether it truncated, logs a missed truncate once and remembers it, and the next checkpoint or the hourly storage sweep (`retry_truncate`) makes it (`crates/store/tests/checkpoint.rs`, which failed on the old code: the checkpoint waited 5.0 s, and the WAL was left untruncated without a word).
 
 **Why not the server.** A request to the running server (HTTP with the API token, or a socket in the data directory) could hold `commit`, make `unlink` take it, and so be exact without a retry.
 It would add a route that writes every secret to disk, an address the CLI must discover (the bind address is written nowhere today), and code in the master for something a second process does with no server change.
@@ -102,19 +111,21 @@ Recommended: the CLI. If the lead or owner wants exactness under any delete rate
 
 - **Target:** absent, or an empty directory (a mount point or a container volume is often exactly that, which is why nothing is renamed over it); "empty" means no entry at all, or only the `lock` file restore itself creates.
   Restore takes the target's exclusive lock (role `restore`), so a server cannot start on it meanwhile, and a running server's directory is refused twice over (not empty, locked).
+- Empty means no entry at all but the `lock` file: a lone `lost+found` makes it not empty, simply, and the refusal says so.
 - **First** it writes `<new>/RESTORING`; **last** it removes it.
+  A failure empties the directory again (the lock file stays), and only if that fails does `RESTORING` stay.
   `serve` and `node run` refuse a directory with that file ("an interrupted restore: empty the directory and run restore again"), so a half-restored directory never starts.
 - **Before any byte is copied** it reads `MANIFEST.json` and refuses: no manifest (incomplete), an unknown format, a database whose `user_version` is newer than this build's, any listed path outside the fixed shape (top-level names from a fixed list, `keys/<name>`, `agents/<relative>`, `blobs/<xx>/<32 hex>.rzb`; no `..`, no absolute path, no empty segment), a listed file that is missing, of another size or another SHA-256, or is not a regular file (`O_NOFOLLOW`; a symlink in the backup is refused, not followed).
   Files in the backup that the manifest does not list are not copied, and restore says how many it ignored.
 - Every file is written 0600 and every folder 0700, whatever the backup's modes; the data directory itself through the existing `data_dir` (0700, owner checked).
 - The restored `master.db` gets `DELETE FROM ui_sessions`: every login is dropped and everyone signs in again (cookies are only hashes there; the API token stays, see below).
-- Then each database is opened read-only with the migration preflight (`migrate::check_file`) and `integrity_check`; an older one is left for the first `serve` to migrate (fix plan 4.3), which is exactly what a restore of last month's backup onto this month's binary needs.
+- Then each database passes `integrity_check`, `foreign_key_check` and the migration preflight (`migrate::check_file`), and its version must be the manifest's; an older one is left for the first `serve` to migrate (fix plan 4.3), which a test checks with databases built at schema version 1.
 
 **What a restored copy is:** the same server.
 Same accounts and passwords, chats, files, routines, connections: sealed tokens open on any machine, because the key is `keys/secrets.key`, a file in the backup, not anything of the machine's (`sealed.rs` header; a `master.db` without its key opens nothing, and a key of another server is refused at start by `forge::open`).
 Same identity: remote nodes pin `keys/master-cert.der` and find the master by the address in their `remote.toml`, and the master pins their keys in `nodes`, so they reconnect as soon as that address reaches the restored machine; their chats' logs refill the mirror (rule 3).
 
-**What it is not:** logged in (dropped above); holding checkpoints (above); holding a remote node's own state (above).
+**What it is not:** logged in (dropped above); holding checkpoints (above; on the restored server an undo of an earlier turn answers 409 "this checkpoint is no longer kept (only the latest 100 changes are)", a sentence written for pruning: a follow-up should name the restore); holding a remote node's own state (above).
 **Two copies at once are one identity twice.** A restored copy started beside a running original accepts the same nodes, the same API token and the same join tokens, and runs the same routines: a routine with `catch_up = once` fires a late run at the first start (`docs/routines.md`, "Missed runs"), and every routine runs on both, so anything it does outside (a pull request, a message) happens twice.
 Restore prints this warning; `--pause-routines` sets every routine `enabled = 0` in the copy for a trial restore.
 **A remote node restored from an older backup** is the case the master already detects: its replayed events differ from the mirror and those chats freeze until deleted (`AppendOutcome::Diverged`; research round 2 appendix, "A node restored from a backup").
@@ -136,7 +147,7 @@ A plain directory that mirrors the data directory (inspectable, `rsync`-able, re
 Not an archive: an archive needs a streaming writer and reader and its own traversal checks for nothing the directory lacks, and every tool an operator would use to encrypt or ship it works on a directory.
 OpenClaw writes `.tar.gz` with a verify command and refuses a non-empty restore target (`research-repos/openclaw/src/commands/backup-restore.ts:66`); its SQLite snapshots run a read transaction and end in `VACUUM INTO` (`src/infra/sqlite-snapshot.ts`, 640 to 700).
 We take the empty target, the read-only snapshot and the verified manifest, and skip the archive.
-OpenClaw notes that `VACUUM` may renumber implicit rowids; ours are only used for `ORDER BY rowid` (audit, routine triggers, clones) and the FTS tables keep their own ids, and a test on SQLite 3.54.1 kept every rowid through `VACUUM INTO`; PR A's test compares the audit order before and after.
+OpenClaw notes that `VACUUM` may renumber implicit rowids; ours are only used for `ORDER BY rowid` (audit, routine triggers, clones) and the FTS tables keep their own ids, and `a_snapshot_keeps_implicit_rowids` checks the bundled SQLite keeps every `audit` rowid through `VACUUM INTO` after deletions.
 
 ## A copy before each migration (the row's second half)
 
@@ -147,23 +158,24 @@ Rolling back: stop the new build, run `rizzy-harness restore --pre-migration` (p
 It is small (the preflight already has the versions; the snapshot code is PR A's), and it gives `docs/node-update.md` §6.3 its second option.
 It ships as PR B, after PR A, because its restore reuses PR A's checks.
 
-## Work plan
+## Measured
 
-**PR A, backup and restore (M, about 900 lines with tests).**
-- `crates/store/src/backup.rs`: `vacuum_into(src, dst)` through a read-only connection, the manifest types, `verify` (integrity, `foreign_key_check`, versions against `DB_SCHEMA`); `Store::checkpoint` reads `busy`.
-- `crates/cli/src/backup.rs`: the two commands and their flags (`backup <dir>`, `restore <dir> [--pause-routines]`, the global `--data-dir`); `lock::try_take` returning held or busy; destination checks; staging; the `RESTORING` refusal in `serve` and `node run`.
-- Uses what is in the workspace: rusqlite 0.41 (bundled SQLite; `VACUUM INTO` is plain SQL, the `backup` feature is not needed and its stepped copy restarts on every write from another process), `sha2`, `nix`, `serde_json`. No new dependency.
-- Tests, in `crates/cli/tests/backup_restore.rs` against the binary: the row's (a chat and a stored file, back up a running server, restore into a new directory, start there, read both back); a backup taken offline; the order under a writer (no frozen chat); a file deleted between snapshot and link (a test hook pauses there); and the abuse cases: a destination that is a symlink, a non-empty destination, a planted file in the backup (ignored), a manifest path with `..`, an absolute one, a symlink entry, a truncated database, a flipped byte in a blob, a newer `user_version`, a missing manifest (interrupted backup), restore into a running server's directory, an interrupted restore (`RESTORING` blocks `serve`), an older-schema backup (`crates/store/schema/1.sql`) migrated forward at the first start, logins dropped, `--pause-routines`, modes 0600 and 0700, no secret value in stdout or stderr.
-- Docs: README section with the two commands and the warnings (secret, no encryption, two copies, remote nodes, checkpoints, what lives outside); threat row `docs/threats/T103.md` and its index line; this note; FIX_PLAN 4.4.
+USB disk of this machine, debug build, the server running, 61 media files (a 302 MB data directory): `backup` 311.5 MB in 19.0 s (peak RSS 53 MB, most of it the binary's own pages), `backup --verify` 8.8 s (47 MB), `restore` 13.4 s (48 MB).
+A release build hashes faster; these are upper figures.
+Copies stream through one 1 MiB buffer: a 2 GB file raises the peak RSS by far less than 64 MB (`a_large_file_streams_through_the_buffer`).
 
-**PR B, a copy before each migration (S).** As above, with tests: a version-5 fixture opens, the copy holds version 5, a rollback restores it and the old schema opens; a full disk stops the start before any migration.
+## PR B, a copy before each migration (left)
 
-**Later, not now:** the server route (exact under any delete rate), `--with-checkpoints`, encryption, scheduled backups (OpenClaw has them).
+As above: the four databases into `<data>/pre-migration/` before a migrating start, one set kept, a start that cannot write it stops (decision 4), `restore --pre-migration` to roll back; tests: a version-5 fixture opens, the copy holds version 5, the rollback restores it and the old schema opens; a full disk stops the start before any migration.
 
-## Open questions
+**Later, not now:** a server route (exact under any delete rate), `--with-checkpoints`, encryption, scheduled backups (OpenClaw has them).
 
-1. **Who runs it:** the CLI as a second process (recommended, above) or a route of the running server.
-2. **The API token in the backup:** kept (scripts keep working after a restore; recommended) or left out and made new at the first start (a stolen backup then lacks the root key, but holds every password hash and secret anyway).
-3. **Routines on restore:** as they were, with the printed warning and `--pause-routines` (recommended), or paused by default (a disaster restore then needs a step to resume them).
-4. **A migration whose copy cannot be written:** stop the start (recommended) or migrate with a warning.
-5. **The timing of PR B:** right after PR A (recommended; N.9 needs it) or with N.9.
+## Decisions
+
+The session lead's (2026-11-25), each open to the owner's override:
+
+1. **The CLI as a second process** runs the backup; a server route is a follow-up only if exactness under any delete rate is wanted.
+2. **The API token stays in the backup**; the README says a backup is as sensitive as the server itself.
+3. **Routines after a restore are as they were**, with the printed warning and `--pause-routines`.
+4. **A migration whose copy cannot be written stops the start** (PR B).
+5. **PR B comes right after PR A.**

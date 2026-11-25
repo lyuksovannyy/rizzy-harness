@@ -5428,6 +5428,66 @@ its chats readable, needing another agent, and a default or routine that
 names it is refused until changed. A turn that is running keeps the agent it
 started with. Design notes: [docs/agent-pages.md](docs/agent-pages.md).
 
+## Back up and restore
+
+```bash
+rizzy-harness backup /mnt/backups/harness-2026-11-25      # the server may be running
+rizzy-harness backup --verify /mnt/backups/harness-2026-11-25
+rizzy-harness --data-dir ~/.local/share/rizzy-harness restore /mnt/backups/harness-2026-11-25
+```
+
+`backup <folder>` copies the data directory (`--data-dir`, as for every
+command) into a new or empty folder, with the server running or stopped.
+Running: it copies beside it and the server goes on (writes slow down a
+little while the databases are read). Stopped: it holds the data
+directory's lock, so a server started meanwhile is refused. It prints the
+SHA-256 of the backup's `MANIFEST.json`: note it. `backup --verify
+<folder>` checks a backup against its manifest, every database and every
+stored file, without restoring anything. On this project's USB test disk a
+311 MB data directory took 19 s to back up, 9 s to verify and 13 s to
+restore (a debug build).
+
+`restore <folder>` writes a backup into a data directory that is new or
+empty (anything in it, even `lost+found`, counts as not empty) and that no
+server uses. Every file is checked against the manifest as it is copied; a
+damaged or changed file stops the restore, names the file, and leaves the
+directory empty again. A restore that was cut off leaves a `RESTORING` file,
+and no server starts there until you empty the directory and restore again.
+Every login is dropped: everyone signs in again with their password.
+
+**In a backup:** the four databases (accounts, chats, routines, connections,
+memory), every stored file (Media, Artifacts, attachments, avatars),
+`config.toml`, `node.toml`, `secrets.toml`, `keys/`, the API token,
+`agents/`, the node's `AGENTS.md` and `project-mcp.json`.
+**Not in it:** the project folders and repositories the chats work in;
+checkpoints (after a restore, undo and rewind of turns made before it are
+refused); a remote node's own data (run `backup` on that machine with its
+`--data-dir`); `.env` and `HARNESS_*` environment variables. A chat begun
+during the few seconds a backup runs is left out of it.
+
+**A backup is as sensitive as the server itself.** It holds every account's
+password hash, every chat, every stored file with its key, every provider
+key, the key that seals forge tokens, and the API token, **unencrypted**.
+It is written 0700/0600, but keep it on an encrypted disk or put it through
+an encrypting backup tool (restic, borg, age), never in a synced or shared
+folder as it is.
+
+**A restored copy is the same server**: same accounts, chats, API token,
+node keys and join tokens, so remote nodes connect to it once their address
+reaches it. Never run it beside the original: nodes accept either, and
+every routine runs on both (a routine set to catch up once runs late at the
+first start). For a trial restore use `restore --pause-routines`.
+**A remote node restored from an older backup** finds that the server's copy
+of its chats is newer than its own log: those chats freeze (the server says
+"two writers sent different events under one seq") until they are deleted.
+Restore a node only when the node itself is lost.
+
+In Docker, mount a second folder (the backup may not go inside `/data`):
+`volumes: ["./data:/data", "./backups:/backups"]`, then
+`docker compose exec rizzy-harness rizzy-harness backup /backups/2026-11-25`.
+
+How it works and why: [`docs/backup-restore.md`](docs/backup-restore.md).
+
 ## Development
 
 The Rust checks CI runs (`cargo deny` needs `cargo install cargo-deny`):

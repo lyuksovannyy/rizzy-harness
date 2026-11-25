@@ -12,6 +12,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 // Each feature keeps its tables in its own file; their types are reached by
 // module path (`routines::RoutineMark`), so no `pub use` lines are added.
 pub mod artifacts;
+pub mod backup;
 pub mod blobs;
 pub mod chat_uploads;
 pub mod connections;
