@@ -1245,3 +1245,35 @@ fn fnv1a(bytes: &[u8]) -> u64 {
         (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
     })
 }
+
+/// A file at an older version whose schema is not that version's (another
+/// kind of database with a version of its own, or one changed by hand) is
+/// refused as a mismatch before any later migration runs over it, not
+/// blamed on the first migration that names a table it lacks. Unchanged.
+#[test]
+fn an_older_version_with_another_schema_is_refused_before_any_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    for version in [1, 6] {
+        let path = dir.path().join(format!("v{version}.db"));
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(&format!(
+                "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT);
+                 PRAGMA user_version = {version};"
+            ))
+            .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let err = Store::open(&path, Durability::Normal)
+            .err()
+            .unwrap_or_else(|| panic!("version {version} opened"))
+            .to_string();
+        assert!(
+            err.contains(&format!("does not match schema version {version}")),
+            "{err}"
+        );
+        assert!(!err.contains("no such table"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "version {version}");
+        assert_eq!(version_of(&path), version);
+    }
+}
