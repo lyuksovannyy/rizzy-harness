@@ -284,7 +284,10 @@ fn owned_chats_are_what_the_per_member_loop_found() {
                 .sessions_owned_by(&users, ws.as_deref())
                 .unwrap()
                 .iter()
-                .map(|r| r.session_id)
+                .map(|c| {
+                    assert!(c.canonical());
+                    c.row.session_id
+                })
                 .collect();
             assert_eq!(got.len(), old.len(), "no chat twice: {users:?} {ws:?}");
             assert_eq!(
@@ -294,6 +297,87 @@ fn owned_chats_are_what_the_per_member_loop_found() {
             );
         }
     }
+}
+
+/// Review F1 of slice 4: a chat whose stored id is another spelling of a
+/// session id (upper case, braces, no hyphens) is found with its owner, its
+/// stored text beside it, so it is stopped and deleted like any other; one
+/// that is no session id at all is skipped (counted in one warning), and
+/// never stops the call for the rest. The account's deletion then removes
+/// the odd row by its stored text and tombstones the canonical id.
+#[test]
+fn owned_chats_include_odd_spellings_and_skip_garbage() {
+    let s = Store::open_in_memory().unwrap();
+    user(&s, "a");
+    user(&s, "b");
+    let spell: [fn(&str) -> String; 4] = [
+        |t| t.to_string(),
+        |t| t.to_uppercase(),
+        |t| format!("{{{t}}}"),
+        |t| t.replace('-', ""),
+    ];
+    let mut want = Vec::new();
+    for (k, f) in spell.iter().enumerate() {
+        let sid = plain(&s, "a", k as i64);
+        let stored = f(&sid.to_string());
+        exec(
+            &s,
+            "UPDATE sessions SET session_id = ?1 WHERE session_id = ?2",
+            params![stored, sid.to_string()],
+        );
+        want.push((sid, stored));
+    }
+    // Garbage, and b's chat.
+    let junk = plain(&s, "a", 10);
+    exec(
+        &s,
+        "UPDATE sessions SET session_id = 'not an id' WHERE session_id = ?1",
+        params![junk.to_string()],
+    );
+    let bs = plain(&s, "b", 11);
+    let got = s.sessions_owned_by(&["a".to_string()], None).unwrap();
+    let mut got: Vec<(SessionId, String, bool)> = got
+        .into_iter()
+        .map(|c| (c.row.session_id, c.stored_id.clone(), c.canonical()))
+        .collect();
+    got.sort_by_key(|g| g.1.clone());
+    let mut expected: Vec<(SessionId, String, bool)> = want
+        .iter()
+        .enumerate()
+        .map(|(k, (sid, stored))| (*sid, stored.clone(), k == 0))
+        .collect();
+    expected.sort_by_key(|g| g.1.clone());
+    assert_eq!(got, expected);
+    // The odd ones go by their stored text; b's stays.
+    for (sid, stored) in &want[1..] {
+        assert_eq!(
+            s.forget_stored_session(stored, *sid).unwrap().as_deref(),
+            Some("a")
+        );
+        let left: i64 = s
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_id = ?1",
+                params![stored],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "{stored}");
+        let tomb: i64 = s
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM deleted_sessions WHERE session_id = ?1",
+                params![sid.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tomb, 1, "the canonical id is tombstoned");
+    }
+    assert!(s.session(bs).unwrap().is_some());
+    assert_eq!(
+        s.sessions_owned_by(&["a".to_string()], None).unwrap().len(),
+        1
+    );
 }
 
 // ---- the members roster: `kv_get_many`, `profile_image_shas` ----

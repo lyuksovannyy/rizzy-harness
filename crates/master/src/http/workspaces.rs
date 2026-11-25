@@ -457,7 +457,7 @@ async fn delete_workspace(m: &Master, ws: String) -> ApiResult<Option<Vec<String
             let chats: Vec<_> = s
                 .sessions_owned_by(&members, Some(&ws))?
                 .into_iter()
-                .map(|r| r.session_id)
+                .map(|c| (c.row.session_id, c.row.node_id))
                 .collect();
             Ok::<_, StoreError>(s.delete_workspace(&ws)?.then_some((members, chats)))
         })
@@ -667,7 +667,7 @@ pub(super) async fn remove_member(
         .call(move |s| s.sessions_owned_by(&[uid], Some(&ws)))
         .await?
         .into_iter()
-        .map(|r| r.session_id)
+        .map(|c| (c.row.session_id, c.row.node_id))
         .collect();
     let (ws, uid) = (a.id().to_string(), user_id.clone());
     // The store refuses to take the last enabled owner away, and a removal

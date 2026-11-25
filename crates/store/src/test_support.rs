@@ -1,5 +1,6 @@
 //! Test-only hooks (feature `test-support`, which only the dev-dependencies
-//! of other crates turn on; never in a shipped build).
+//! of other crates turn on; never in a shipped build): statement counts,
+//! and raw SQL for rows no writer makes.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,6 +30,17 @@ impl StatementCounter {
 }
 
 impl Store {
+    /// Run `sql` on the store's connection as it is: for tests that need
+    /// data no writer makes (a corrupt or hand-edited row).
+    pub fn execute_batch_for_test(&self, sql: &str) -> rusqlite::Result<()> {
+        self.lock().execute_batch(sql)
+    }
+
+    /// The first column of the first row of `sql`, as a number.
+    pub fn query_i64_for_test(&self, sql: &str) -> rusqlite::Result<i64> {
+        self.lock().query_row(sql, [], |r| r.get(0))
+    }
+
     /// Start counting the statements run on this store's connection.
     #[expect(
         clippy::disallowed_methods,

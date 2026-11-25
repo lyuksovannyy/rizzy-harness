@@ -150,8 +150,8 @@ export const projectsApi = {
     call<{ ok: boolean }>("PUT", `/api/sessions/${encodeURIComponent(sessionId)}/project`, { project_id: projectId }),
   /** A page of the caller's chats in no project, in `workspace` (the
    * "Add a chat" list): every one, not only those the sidebar loaded. */
-  looseChats: (workspace: string, after?: string | null) => {
-    const q = new URLSearchParams({ workspace, loose: "1", limit: "50" });
+  looseChats: (workspace: string, after?: string | null, limit = 50) => {
+    const q = new URLSearchParams({ workspace, loose: "1", limit: String(limit) });
     if (after) q.set("after", after);
     return call<{ sessions: SessionRow[]; next: string | null }>("GET", `/api/sessions?${q}`);
   },

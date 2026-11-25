@@ -252,10 +252,7 @@ pub(super) async fn delete_user(
         .inner
         .mirror
         .call(move |s| s.sessions_owned_by(&[owner], None))
-        .await?
-        .into_iter()
-        .map(|r| r.session_id)
-        .collect();
+        .await?;
     let of = target.user_id.clone();
     let workspaces: Vec<String> = m
         .inner

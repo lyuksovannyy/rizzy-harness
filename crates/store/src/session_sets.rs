@@ -76,14 +76,35 @@ fn by_ids_sql(owner: Owner<'_>) -> String {
     )
 }
 
+/// No canonical-id filter here (review F1 of slice 4): these chats are
+/// stopped, cancelled or deleted, and a chat whose stored id is in another
+/// spelling must go with its owner like any other. Its stored text comes
+/// back beside the row ([`OwnedChat::stored_id`]).
 fn owned_sql() -> String {
-    let canonical = canonical_id("s.session_id");
     format!(
         "SELECT {SESSION_COLS}, {EFFECTIVE_WS} FROM sessions s {WS_JOINS}
-         WHERE s.owner_id IN (SELECT value FROM json_each(?1)) AND {canonical}
+         WHERE s.owner_id IN (SELECT value FROM json_each(?1))
            AND (?2 IS NULL OR {EFFECTIVE_WS} = ?2)
          ORDER BY s.updated_ms DESC, s.session_id DESC"
     )
+}
+
+/// A chat [`Store::sessions_owned_by`] found: its row (the id parsed), and
+/// the id exactly as stored, which a destructive write must key on when it
+/// is not the canonical spelling (no writer stores one; a hand edit or a
+/// corrupt file can).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedChat {
+    pub row: SessionRow,
+    pub stored_id: String,
+}
+
+impl OwnedChat {
+    /// Stored as `SessionId::to_string()` writes it: every lookup by id
+    /// finds it.
+    pub fn canonical(&self) -> bool {
+        self.stored_id == self.row.session_id.to_string()
+    }
 }
 
 impl Store {
@@ -176,21 +197,52 @@ impl Store {
     }
 
     /// Every chat owned by one of `owners` (in `workspace`, effective, when
-    /// given), whatever kind: what a member's removal, a workspace's or an
-    /// account's deletion and the revocation sweep act on.
+    /// given), whatever kind and however its id is spelled: what a member's
+    /// removal, a workspace's or an account's deletion and the revocation
+    /// sweep act on. A row whose id does not parse as a session id at all
+    /// cannot be acted on: it is skipped, and one warning per call gives
+    /// how many (never the stored text), so one corrupt row does not stop
+    /// the operation for every other chat.
     pub fn sessions_owned_by(
         &self,
         owners: &[String],
         workspace: Option<&str>,
-    ) -> Result<Vec<SessionRow>> {
+    ) -> Result<Vec<OwnedChat>> {
         if owners.is_empty() {
             return Ok(Vec::new());
         }
         let list = owner_list(owners)?;
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&owned_sql())?;
-        let rows = stmt.query_map(params![list, workspace], Self::session_from_row)?;
-        rows.map(|r| listed(r?)).collect()
+        let rows = stmt.query_map(params![list, workspace], |r| {
+            // A stored id that is not text (NULL, a BLOB) reads as None.
+            Ok((
+                r.get::<_, Option<String>>(0).ok().flatten(),
+                Self::session_from_row_after_id(r)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        let mut skipped = 0usize;
+        for r in rows {
+            let (stored, mut row) = r?;
+            match stored.as_deref().map(str::parse::<SessionId>) {
+                Some(Ok(id)) => {
+                    row.session_id = id;
+                    out.push(OwnedChat {
+                        row,
+                        stored_id: stored.unwrap_or_default(),
+                    });
+                }
+                _ => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                skipped,
+                "chats whose stored id is not a session id were left out (corrupt rows; not stopped or deleted)"
+            );
+        }
+        Ok(out)
     }
 }
 

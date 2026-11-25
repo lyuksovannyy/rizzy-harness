@@ -68,6 +68,7 @@ mod memory_http;
 mod memory_places_http;
 mod mirror;
 mod model_cache_http;
+mod odd_ids_http;
 mod orchestration;
 mod pdf_http;
 mod peers_http;

@@ -15,7 +15,7 @@ vi.mock("../api", () => ({
   HttpError: Error,
 }));
 const get = vi.fn<(id: string) => Promise<ProjectDetail>>();
-const looseChats = vi.fn<(workspace: string, after?: string | null) => Promise<{ sessions: SessionRow[]; next: string | null }>>();
+const looseChats = vi.fn<(workspace: string, after?: string | null, limit?: number) => Promise<{ sessions: SessionRow[]; next: string | null }>>();
 const board = vi.fn<(id: string) => Promise<Board>>();
 vi.mock("../lib/projects", async (original) => {
   const m = await original<typeof import("../lib/projects")>();
@@ -24,13 +24,14 @@ vi.mock("../lib/projects", async (original) => {
     projectsApi: {
       ...m.projectsApi,
       get: (id: string) => get(id),
-      looseChats: (w: string, after?: string | null) => looseChats(w, after),
+      looseChats: (w: string, after?: string | null, limit?: number) => looseChats(w, after, limit),
       board: (id: string) => board(id),
       templates: () => Promise.resolve({ templates: [] }),
     },
   };
 });
 const { default: Project } = await import("./Project");
+const { nudgeSessions } = await import("../lib/sessionsNudge");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -106,14 +107,52 @@ describe("Add a chat", () => {
     // The sidebar loaded one loose chat that the server does not list
     // first: it is not what the picker shows.
     await show("chats", [row(9)]);
-    expect(looseChats).toHaveBeenCalledWith("w1", null);
+    expect(looseChats).toHaveBeenCalledWith("w1", null, 50);
     const select = host.querySelector<HTMLSelectElement>(".field-inline select")!;
     expect(options(select)).toEqual(["Choose one of your chats…", "chat 3", "chat 2"]);
     const older = [...host.querySelectorAll("button")].find((b) => b.textContent === "Older chats")!;
     await act(async () => older.click());
-    expect(looseChats).toHaveBeenLastCalledWith("w1", "c1");
+    expect(looseChats).toHaveBeenLastCalledWith("w1", "c1", 50);
     expect(options(select)).toEqual(["Choose one of your chats…", "chat 3", "chat 2", "chat 1"]);
     expect([...host.querySelectorAll("button")].some((b) => b.textContent === "Older chats")).toBe(false);
+  });
+});
+
+describe("Add a chat stays current", () => {
+  test("a sessions_changed nudge refetches it from the top", async () => {
+    looseChats.mockResolvedValue({ sessions: [row(2), row(1)], next: null });
+    await show("chats", []);
+    const select = host.querySelector<HTMLSelectElement>(".field-inline select")!;
+    expect(options(select)).toEqual(["Choose one of your chats…", "chat 2", "chat 1"]);
+    looseChats.mockResolvedValue({ sessions: [row(7), row(2), row(1)], next: null });
+    await act(async () => nudgeSessions());
+    expect(looseChats).toHaveBeenLastCalledWith("w1", null, 50);
+    expect(options(select)).toEqual(["Choose one of your chats…", "chat 7", "chat 2", "chat 1"]);
+  });
+
+  test("a refetch asked during a next page waits for it, and nothing lands twice or is lost", async () => {
+    const pending: ((p: { sessions: SessionRow[]; next: string | null }) => void)[] = [];
+    looseChats.mockImplementation(() => new Promise((r) => pending.push(r)));
+    await show("chats", []);
+    await act(async () => pending.shift()!({ sessions: [row(3), row(2)], next: "c1" }));
+    const older = () => [...host.querySelectorAll("button")].find((b) => b.textContent === "Older chats");
+    await act(async () => older()!.click());
+    expect(looseChats).toHaveBeenCalledTimes(2);
+    // While the next page is on its way: two nudges, and no second "Older".
+    await act(async () => {
+      nudgeSessions();
+      nudgeSessions();
+    });
+    expect(older()).toBeUndefined();
+    expect(looseChats).toHaveBeenCalledTimes(2);
+    await act(async () => pending.shift()!({ sessions: [row(1)], next: null }));
+    // Then exactly one refetch from the top.
+    expect(looseChats).toHaveBeenCalledTimes(3);
+    expect(looseChats).toHaveBeenLastCalledWith("w1", null, 50);
+    await act(async () => pending.shift()!({ sessions: [row(9), row(3), row(2), row(1)], next: null }));
+    const select = host.querySelector<HTMLSelectElement>(".field-inline select")!;
+    expect(options(select)).toEqual(["Choose one of your chats…", "chat 9", "chat 3", "chat 2", "chat 1"]);
+    expect(pending).toHaveLength(0);
   });
 });
 

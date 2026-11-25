@@ -8,6 +8,7 @@ import { Live } from "../live";
 import { t } from "../lib/i18n";
 import { useClassifier } from "../lib/useClassifier";
 import { useChatList } from "../lib/useChatList";
+import { nudgeSessions } from "../lib/sessionsNudge";
 import { agenticBlockReason, hostRightOf } from "../lib/modes";
 import { parseRoute, type Route, routeHash } from "../lib/routes";
 import { afterChange, followRoute, keepsRoute, switchRoute, workspaceName } from "../lib/workspaces";
@@ -239,6 +240,7 @@ export function Shell(props: {
   const refreshSessions = useCallback(() => {
     refreshChats();
     refreshAttention();
+    nudgeSessions();
   }, [refreshChats, refreshAttention]);
   // Models, agents and notices follow the workspace's defaults and chains.
   const scope = useMemo(() => (workspaceId ? { workspace: workspaceId } : null), [workspaceId]);

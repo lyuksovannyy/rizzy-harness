@@ -2298,7 +2298,7 @@ impl Master {
             };
             if let Some(why) = workspaces::work_refusal(&this, &row).await {
                 tracing::info!(session = %sid, reason = %why, "a command acked after its owner's level was lowered: stopping its work");
-                workspaces::stop_removed(&this, vec![sid]);
+                workspaces::stop_removed(&this, vec![(sid, row.node_id.clone())]);
             }
         });
     }
@@ -3433,7 +3433,15 @@ impl Master {
 
     pub async fn cancel(&self, sid: SessionId) -> Result<(), CommandError> {
         let node = self.owner(sid).await?;
-        self.send_command(&node, |req_id| MasterToNode::Cancel {
+        self.cancel_on(&node, sid).await
+    }
+
+    /// [`Self::cancel`] on a node the caller already read from the chat's
+    /// row: the revocation and removal paths, which may hold a row whose
+    /// stored id is not in the canonical spelling, so that a lookup by id
+    /// would miss it (review F1 of FIX_PLAN 4.5 slice 4).
+    pub async fn cancel_on(&self, node: &str, sid: SessionId) -> Result<(), CommandError> {
+        self.send_command(node, |req_id| MasterToNode::Cancel {
             req_id,
             session_id: sid,
         })
@@ -3449,10 +3457,22 @@ impl Master {
         by: harness_protocol::StopBackgroundBy,
     ) -> Result<(), CommandError> {
         let node = self.owner(sid).await?;
-        if !self.node_has(&node, harness_protocol::CAP_BACKGROUND) {
+        self.stop_background_on(&node, sid, bg_id, by).await
+    }
+
+    /// [`Self::stop_background`] on a node read from the chat's row (see
+    /// [`Self::cancel_on`]).
+    pub async fn stop_background_on(
+        &self,
+        node: &str,
+        sid: SessionId,
+        bg_id: Option<String>,
+        by: harness_protocol::StopBackgroundBy,
+    ) -> Result<(), CommandError> {
+        if !self.node_has(node, harness_protocol::CAP_BACKGROUND) {
             return Ok(());
         }
-        self.send_command(&node, |req_id| MasterToNode::StopBackground {
+        self.send_command(node, |req_id| MasterToNode::StopBackground {
             req_id,
             session_id: sid,
             bg_id,
@@ -3533,10 +3553,15 @@ impl Master {
     /// deleted, Gate 3 review P-6): on the mirror at once (with tombstones),
     /// and on each owning node now or, for a node that is away, when it says
     /// hello again. Runs in the background; failures are logged.
-    pub fn delete_sessions_of(&self, sids: Vec<SessionId>) {
+    pub fn delete_sessions_of(&self, chats: Vec<harness_store::session_sets::OwnedChat>) {
         let this = self.clone();
         tokio::spawn(async move {
-            for sid in sids {
+            for chat in chats {
+                let sid = chat.row.session_id;
+                if !chat.canonical() {
+                    this.delete_stored(chat).await;
+                    continue;
+                }
                 match this.delete_session(sid).await {
                     // Went with its parent's, earlier in this list.
                     Ok(()) | Err(CommandError::UnknownSession) => {}
@@ -3681,8 +3706,37 @@ impl Master {
         Ok(())
     }
 
+    /// A deleted account's chat whose stored id is not in the canonical
+    /// spelling (review F1 of FIX_PLAN 4.5 slice 4): no lookup by id finds
+    /// its row, so its node (read from the row) is told to delete the chat
+    /// by its id, and the mirror row goes by its stored text. Its
+    /// sub-agents' chats are the same account's and in the same list.
+    async fn delete_stored(&self, chat: harness_store::session_sets::OwnedChat) {
+        let sid = chat.row.session_id;
+        let res = self
+            .send_command(&chat.row.node_id, |req_id| MasterToNode::Delete {
+                req_id,
+                session_id: sid,
+            })
+            .await;
+        match res {
+            Ok(()) | Err(CommandError::NodeOffline(_)) | Err(CommandError::Timeout) => {}
+            Err(e) => {
+                tracing::warn!(session = %sid, error = %e, "could not delete a deleted user's chat");
+                return;
+            }
+        }
+        self.forget_keyed(sid, Some(chat.stored_id)).await;
+    }
+
     /// Drop the mirror copy of a session and refuse its events from now on.
     async fn forget(&self, sid: SessionId) {
+        self.forget_keyed(sid, None).await;
+    }
+
+    /// [`Self::forget`]; with `stored`, the mirror row is the one stored
+    /// under that text (see [`Self::delete_stored`]).
+    async fn forget_keyed(&self, sid: SessionId, stored: Option<String>) {
         self.inner.recall.forget(sid);
         self.inner.attached.forget(sid);
         self.inner.made.forget(sid);
@@ -3696,7 +3750,10 @@ impl Master {
             .call(move |s| {
                 // Read first: the row is gone after, and only its owner is
                 // told (T58).
-                let owner = s.forget_session(sid)?;
+                let owner = match &stored {
+                    Some(text) => s.forget_stored_session(text, sid)?,
+                    None => s.forget_session(sid)?,
+                };
                 s.checkpoint()?;
                 Ok::<_, harness_store::StoreError>(owner)
             })

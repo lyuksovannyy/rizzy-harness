@@ -1518,6 +1518,45 @@ impl Store {
             )?;
         }
         let id = sid.to_string();
+        let n = Self::delete_keyed(&tx, &id, tombstone.then_some(id.as_str()))?;
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
+    /// The mirror copy of a chat whose stored id is `stored`, which is not
+    /// `sid`'s canonical spelling (a hand edit or a corrupt file; no writer
+    /// stores one): every row keyed by that text goes, as
+    /// [`Store::forget_session`] does for a canonical one, and the tombstone
+    /// is written under `sid`, the spelling the node's events use. Returns
+    /// the chat's owner.
+    pub fn forget_stored_session(&self, stored: &str, sid: SessionId) -> Result<Option<String>> {
+        let owner = {
+            let mut conn = self.lock();
+            let tx = conn.transaction()?;
+            let owner: Option<String> = tx
+                .query_row(
+                    "SELECT owner_id FROM sessions WHERE session_id = ?1",
+                    params![stored],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            Self::delete_keyed(&tx, stored, Some(&sid.to_string()))?;
+            tx.commit()?;
+            owner
+        };
+        self.kv_delete(&mirror_keys::auto_model_key(sid))?;
+        self.kv_delete(&mirror_keys::callback_attention_key(sid))?;
+        Ok(owner)
+    }
+
+    /// Everything keyed by stored chat id `id`, in `tx`; the tombstone (if
+    /// any) under `tombstone`. Returns the `sessions` rows deleted.
+    fn delete_keyed(
+        tx: &rusqlite::Transaction<'_>,
+        id: &str,
+        tombstone: Option<&str>,
+    ) -> Result<usize> {
         let node: Option<String> = tx
             .query_row(
                 "SELECT node_id FROM sessions WHERE session_id = ?1",
@@ -1533,8 +1572,8 @@ impl Store {
         }
         // What the chat's sub-agents' chats inherited through it, handed
         // down while its row still links them to the chats above it.
-        routines::hand_down(&tx, &id)?;
-        custom_connectors::hand_down(&tx, &id)?;
+        routines::hand_down(tx, id)?;
+        custom_connectors::hand_down(tx, id)?;
         let n = tx.execute("DELETE FROM sessions WHERE session_id = ?1", params![id])?;
         tx.execute(
             "DELETE FROM session_workspaces WHERE session_id = ?1",
@@ -1548,24 +1587,23 @@ impl Store {
             "UPDATE board_cards SET session_id = NULL WHERE session_id = ?1",
             params![id],
         )?;
-        if tombstone {
+        if let Some(tomb) = tombstone {
             tx.execute(
                 "INSERT INTO deleted_sessions (session_id, ts_ms, node_id) VALUES (?1, ?2, ?3)
                  ON CONFLICT(session_id) DO UPDATE SET ts_ms = ?2,
                      node_id = COALESCE(?3, deleted_sessions.node_id)",
-                params![id, harness_core::now_ms(), node],
+                params![tomb, harness_core::now_ms(), node],
             )?;
         }
         // Rows that name the chat without a foreign key (it is deleted on
         // its own) go in the same transaction.
-        routines::on_session_deleted(&tx, &id)?;
-        media::on_session_deleted(&tx, &id)?;
-        session_images::on_session_deleted(&tx, &id)?;
-        session_files::on_session_deleted(&tx, &id)?;
-        session_forks::on_session_deleted(&tx, &id)?;
-        custom_connectors::on_session_deleted(&tx, &id)?;
-        tx.commit()?;
-        Ok(n > 0)
+        routines::on_session_deleted(tx, id)?;
+        media::on_session_deleted(tx, id)?;
+        session_images::on_session_deleted(tx, id)?;
+        session_files::on_session_deleted(tx, id)?;
+        session_forks::on_session_deleted(tx, id)?;
+        custom_connectors::on_session_deleted(tx, id)?;
+        Ok(n)
     }
 
     /// The chats below `sid` (the sub-agents' chats it started, theirs in
@@ -2691,28 +2729,31 @@ impl Store {
     }
 
     fn session_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(String, SessionRow)> {
-        Ok((
-            r.get::<_, String>(0)?,
-            SessionRow {
-                // Placeholder; parsed by the caller so errors stay typed.
-                session_id: SessionId(Default::default()),
-                node_id: r.get(1)?,
-                title: r.get(2)?,
-                cwd: r.get(3)?,
-                model: r.get(4)?,
-                created_ms: r.get(5)?,
-                updated_ms: r.get(6)?,
-                head_seq: r.get::<_, i64>(7)? as u64,
-                running: r.get::<_, i64>(8)? != 0,
-                owner_id: r.get(9)?,
-                agent_id: r.get(10)?,
-                profile: r.get(11)?,
-                incognito: r.get::<_, i64>(12)? != 0,
-                parent_id: r.get(13)?,
-                exec_mode: r.get(14)?,
-                workspace_id: r.get(15)?,
-            },
-        ))
+        Ok((r.get::<_, String>(0)?, Self::session_from_row_after_id(r)?))
+    }
+
+    /// The row's columns after the id; the id is a placeholder the caller
+    /// sets once it has read and parsed column 0 its own way.
+    fn session_from_row_after_id(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
+        Ok(SessionRow {
+            // Placeholder; parsed by the caller so errors stay typed.
+            session_id: SessionId(Default::default()),
+            node_id: r.get(1)?,
+            title: r.get(2)?,
+            cwd: r.get(3)?,
+            model: r.get(4)?,
+            created_ms: r.get(5)?,
+            updated_ms: r.get(6)?,
+            head_seq: r.get::<_, i64>(7)? as u64,
+            running: r.get::<_, i64>(8)? != 0,
+            owner_id: r.get(9)?,
+            agent_id: r.get(10)?,
+            profile: r.get(11)?,
+            incognito: r.get::<_, i64>(12)? != 0,
+            parent_id: r.get(13)?,
+            exec_mode: r.get(14)?,
+            workspace_id: r.get(15)?,
+        })
     }
 
     fn finish_session((sid, mut session): (String, SessionRow)) -> Result<SessionRow> {

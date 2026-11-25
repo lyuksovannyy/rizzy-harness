@@ -31,6 +31,8 @@ import { ACCENTS } from "./forms";
 import { LinkedA } from "./Linked";
 import { shownName } from "../md/hiddenChars";
 import { useNewChatAgent, type AgentDefaults } from "../lib/agentDefaults";
+import { appendPage, applyRefetch, type List, refetchLimit } from "../lib/chatPages";
+import { onSessionsNudge } from "../lib/sessionsNudge";
 import ProjectMcp from "./ProjectMcp";
 
 // Artifacts has no route of its own (lib/routes.ts): the tab is this page's.
@@ -352,36 +354,73 @@ function ProjectArtifacts(props: { project: ProjectDetail; workspaceId: string |
   );
 }
 
+/** First page of the "Add a chat" list. */
+const LOOSE_PAGE = 50;
+
 /** The caller's chats in no project, a page at a time from the server
- * (the sidebar holds only what it loaded); `drop` takes one out once it
- * joined the project, `refresh` reads the first page again. */
+ * (the sidebar holds only what it loaded). One load at a time, refetch or
+ * next page: a refetch asked for while one runs (a `sessions_changed`
+ * nudge, a chat taken out of the project) runs once after it, so a
+ * refetch and a next page never land out of order and no page is dropped
+ * or listed twice; the next page is not offered while a load runs. A
+ * refetch asks from the top for as many rows as are loaded (as the chat
+ * list does, `applyRefetch`). */
 function useLooseChats(workspace: string) {
-  const [rows, setRows] = useState<SessionRow[]>([]);
-  const [next, setNext] = useState<string | null>(null);
+  const [list, setList] = useState<List | null>(null);
   const [busy, setBusy] = useState(false);
-  const load = useCallback(
-    (after: string | null) => {
+  const state = useRef<{ list: List | null; busy: boolean; again: boolean }>({ list: null, busy: false, again: false });
+  const run = useCallback(
+    (kind: "refresh" | "more") => {
+      const s = state.current;
+      if (s.busy) {
+        if (kind === "refresh") s.again = true;
+        return;
+      }
+      const after = kind === "more" ? s.list?.next : null;
+      if (kind === "more" && !after) return;
+      s.busy = true;
       setBusy(true);
-      projectsApi.looseChats(workspace, after).then(
-        (p) => {
-          setRows((old) => {
-            const seen = new Set(after ? old.map((r) => r.session_id) : []);
-            return [...(after ? old : []), ...p.sessions.filter((r) => !seen.has(r.session_id))];
-          });
-          setNext(p.next);
+      const limit = kind === "more" ? LOOSE_PAGE : refetchLimit(s.list?.rows.length ?? 0, LOOSE_PAGE);
+      projectsApi
+        .looseChats(workspace, after, limit)
+        .then(
+          (p) => {
+            if (state.current !== s) return;
+            const page = { sessions: p.sessions, children: [], next: p.next };
+            s.list = kind === "more" ? appendPage(s.list, page) : applyRefetch(s.list, page);
+            setList(s.list);
+          },
+          () => {},
+        )
+        .finally(() => {
+          if (state.current !== s) return;
+          s.busy = false;
           setBusy(false);
-        },
-        () => setBusy(false),
-      );
+          if (s.again) {
+            s.again = false;
+            run("refresh");
+          }
+        });
     },
     [workspace],
   );
-  useEffect(() => load(null), [load]);
+  useEffect(() => {
+    // A new workspace starts over; an answer for the old one is dropped.
+    state.current = { list: null, busy: false, again: false };
+    setList(null);
+    run("refresh");
+    return onSessionsNudge(() => run("refresh"));
+  }, [run]);
   return {
-    rows,
-    more: next && !busy ? () => load(next) : null,
-    drop: (sid: string) => setRows((old) => old.filter((r) => r.session_id !== sid)),
-    refresh: () => load(null),
+    rows: list?.rows ?? [],
+    more: list?.next && !busy ? () => run("more") : null,
+    drop: (sid: string) => {
+      const s = state.current;
+      if (!s.list) return;
+      s.list = { ...s.list, rows: s.list.rows.filter((r) => r.session_id !== sid) };
+      setList(s.list);
+    },
+    refresh: () => run("refresh"),
   };
 }
 

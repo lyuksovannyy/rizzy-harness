@@ -734,7 +734,7 @@ pub async fn cancel_revoked(m: &Master, users: &[String]) {
         .call(move |s| s.sessions_owned_by(&owners, None))
         .await
     {
-        Ok(rows) => cancel_blocked(m, rows.into_iter()).await,
+        Ok(chats) => cancel_blocked(m, chats.into_iter().map(|c| c.row)).await,
         Err(e) => tracing::warn!(error = %e, "revocation sweep: could not list sessions"),
     }
 }
@@ -816,22 +816,25 @@ async fn cancel_blocked(m: &Master, rows: impl Iterator<Item = SessionRow>) {
         let Ok(Some(why)) = reason else {
             continue;
         };
+        // To the node the row names: the row may be stored under another
+        // spelling of its id, which a lookup by id would miss (review F1 of
+        // FIX_PLAN 4.5 slice 4).
         if row.running {
             tracing::info!(session = %row.session_id, reason = %why, "cancelling an agentic turn that lost its access");
-            cancel_retrying(m, row.session_id).await;
+            cancel_retrying(m, row.session_id, &row.node_id).await;
         }
-        stop_background_revoked(m, row.session_id).await;
+        stop_background_revoked(m, row.session_id, &row.node_id).await;
     }
 }
 
 /// The revocation's stop of a session's background commands. A node
 /// that is offline gets it from the sweep at its next hello (which sends
 /// it for every blocked session there); a failure is logged.
-async fn stop_background_revoked(m: &Master, sid: harness_core::SessionId) {
+async fn stop_background_revoked(m: &Master, sid: harness_core::SessionId, node: &str) {
     use harness_protocol::StopBackgroundBy;
     for attempt in 1..=CANCEL_TRIES {
         match m
-            .stop_background(sid, None, StopBackgroundBy::AccessRevoked)
+            .stop_background_on(node, sid, None, StopBackgroundBy::AccessRevoked)
             .await
         {
             Err(crate::CommandError::Timeout) if attempt < CANCEL_TRIES => {
@@ -854,19 +857,22 @@ async fn stop_background_revoked(m: &Master, sid: harness_core::SessionId) {
 /// what was running for the team stops now, whatever that ceiling is. Also
 /// a workspace's deletion (review L2-3), and a command its node acked after
 /// its owner's level was lowered (`Master::recheck_after_ack`, L2-1).
-pub fn stop_removed(m: &Master, sids: Vec<harness_core::SessionId>) {
-    if sids.is_empty() {
+///
+/// Each chat comes with the node its row names, so that one whose stored id
+/// is in another spelling is reached too (review F1 of FIX_PLAN 4.5 slice 4).
+pub fn stop_removed(m: &Master, chats: Vec<(harness_core::SessionId, String)>) {
+    if chats.is_empty() {
         return;
     }
     let m = m.clone();
     tokio::spawn(async move {
-        for sid in sids {
+        for (sid, node) in chats {
             // Whether or not the mirror shows a turn yet: one the node
             // started just now may not have reached it (review L2-1), and a
             // cancel with nothing running changes nothing.
             {
                 for attempt in 1..=CANCEL_TRIES {
-                    match m.cancel(sid).await {
+                    match m.cancel_on(&node, sid).await {
                         Err(crate::CommandError::Timeout) if attempt < CANCEL_TRIES => {
                             tokio::time::sleep(CANCEL_RETRY).await;
                         }
@@ -878,7 +884,7 @@ pub fn stop_removed(m: &Master, sids: Vec<harness_core::SessionId>) {
                     }
                 }
             }
-            stop_background_revoked(&m, sid).await;
+            stop_background_revoked(&m, sid, &node).await;
         }
     });
 }
@@ -891,8 +897,8 @@ const CANCEL_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
 /// Cancel `sid`; a cancel that could not be queued or was not acknowledged
 /// is tried again in the background (Gate 3 review P-3). A node that is
 /// offline gets it from the sweep at its next hello.
-async fn cancel_retrying(m: &Master, sid: harness_core::SessionId) {
-    match m.cancel(sid).await {
+async fn cancel_retrying(m: &Master, sid: harness_core::SessionId, node: &str) {
+    match m.cancel_on(node, sid).await {
         Err(crate::CommandError::Timeout) => {}
         Err(crate::CommandError::NodeOffline(_)) => {
             tracing::info!(session = %sid, "revocation sweep: node offline; cancelled when it is back");
