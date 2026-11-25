@@ -64,20 +64,27 @@ That is the price of rule 3, and the spike shows the other order is far worse.
 
 **The algorithm** (one process, `rizzy-harness backup <dir>`):
 
+0. Refuse first, before anything is opened: a data directory holding `RESTORING` (an interrupted restore; every command but `doctor` refuses it, `doctor` reports it); a database, or the `-wal`, `-shm` or `-journal` beside it, that is not a regular file (SQLite's own open would block on a FIFO).
 1. Try the exclusive data-directory lock.
    Free: the server is stopped; hold the lock to the end (no server can start meanwhile) and everything below is trivially consistent.
    Held by `serve` or `node run`: online mode, same steps, no lock.
-2. `VACUUM INTO` of `master.db` through a read-only connection, into the destination.
-3. Hard-link every file the snapshot's `blobs` names into `<data>/backup-staging/` (same file system, by construction; 0700; one backup at a time per data directory, by an flock on `<data>/backup.lock`; removed on every way out but SIGKILL, and a leftover is removed by the next backup; it is outside `blobs/`, so neither the start-up sweep nor the hourly one reads it, which a test checks after a SIGKILL).
+   **The source is only ever read.** Online, each database is read by a read-only connection (a reader writes only its read marks into the running server's `-shm` index, as every reader does).
+   Offline, the stopped server's files (database, `-wal`, `-shm`) are first copied byte for byte into the staging folder and read from there: a test with the bundled SQLite showed that a read-only connection on a crashed database changes its `-shm` and, when the `-shm` is missing, makes one beside the source, so even read-only is not "untouched"; the private copy, opened read-write, also recovers a WAL whose `-shm` is gone.
+   The offline backup leaves every source file byte-identical (`an_offline_backup_changes_nothing_and_keeps_the_wal`, `-wal` and `-shm` included; only the hint in `lock` changes) and keeps the rows only the WAL held.
+   Online, a database that needs a writer's recovery is refused with a sentence ("stop the server and back up then"); a running server's files never need it.
+   Every database's schema is checked before any is copied (`migrate::check_file`): one of a newer build is refused with the source untouched.
+2. `VACUUM INTO` of `master.db`, into the destination.
+3. Hard-link every file the snapshot's `blobs` names into `<data>/backup-staging/` (same file system, by construction; 0700; one backup at a time per data directory, by an flock on `<data>/backup.lock`, and a file system without locks is refused with a sentence; removed on every way out but SIGKILL, and a leftover is removed by the next backup; it is outside `blobs/`, so neither the start-up sweep nor the hourly one reads it, which a test checks after a SIGKILL).
    The links are only ever opened to read: a link shares the live file's inode, and nothing chmods or writes it.
    Where linking fails for another reason than a missing file (another mount, no links), the file is copied instead, which widens the window the retry covers.
    A file that is missing had its row deleted after the snapshot: discard the links, go back to 2, at most 5 times, then fail with nothing kept ("try again, or stop the server and back up then").
 4. `VACUUM INTO` of `memory.db`, `chat.db`, `node.db` (after `master.db`, rule 3).
-   Then, in the copies of `chat.db` and `node.db`, every chat the `master.db` copy does not know is removed (`drop_unknown_chats`): it began after `master.db` was copied, and the master writes a chat's owner, workspace and project into `master.db` only once the node has made it, so it would come back without an owner, out of its owner's reach (PR A's test found this; the spike, with API-token chats that have no owner, could not).
-   A sub-agent's chat under a kept chat stays (it inherits its owner).
-   The command says how many it left out.
-   This needs the copy at this build's schema version (it is opened as a store); otherwise it is skipped with a line saying so.
-5. Copy the plain files and `keys/` (after the databases).
+   Then the copies are settled as of the `master.db` copy (`settle_copies`; all at this build's schema version, else skipped with a printed line):
+   - a chat whose row in the `master.db` copy has no owner but still has its create intent in `kv` (the master stamps the owner and drops the intent in two statements; the drop now comes after the stamp, so a copy between them always finds the intent) is stamped from the intent, as the master's late claim does; an ownerless chat with an intent that names another node or nobody is left out;
+   - a chat in a node log's copy the `master.db` copy does not know began after it: left out (the master writes a chat's owner only once the node has made it, so it would come back out of its owner's reach; PR A's test found this); a sub-agent's chat under a kept chat stays;
+   - a chat of `master` (`chat.db`) or `local` (`node.db`) in the `master.db` copy that its log's copy no longer has was deleted meanwhile: removed from the `master.db` copy, with the tombstone a delete leaves.
+   The command says how many chats each rule changed.
+5. Copy the plain files, `keys/` and `agents/` (after the databases): only regular files directly in `keys/` and `agents/`; a symbolic link is skipped with a line naming it (back up its target yourself), a sub-folder of `agents/` is skipped with a line, and a FIFO, device or socket stops the backup with a sentence naming it.
 6. Copy the staged blobs into the destination (a real copy, streamed through one 1 MiB buffer, hashing as it goes); remove the staging folder; decrypt every copied file once and check it against the SHA-256 and size of its row.
 7. Every file is created 0600 with `O_EXCL|O_NOFOLLOW` under `.<name>.partial`, synced, renamed, and every folder synced; `VACUUM INTO` writes into an empty 0600 file made that way (SQLite accepts an empty file and keeps its mode, checked by a test).
    Write `MANIFEST.json` last (temp name, fsync, rename, fsync the folder): a backup without it is incomplete and restore refuses it.
@@ -96,6 +103,8 @@ That is the price of rule 3, and the spike shows the other order is far worse.
 - **Writers.** On tmpfs, HTTP latency did not move during the backups (max 65 ms during, 75 ms overall).
   On the USB disk (SQLite alone, same pragmas as `Durability::Full`), `VACUUM INTO` of a 274 MB database took 5.1 s; a one-row append, about 50 ms on that disk with `synchronous = FULL`, took up to 0.64 s while it ran (disk contention, not locking: WAL readers do not block writers), and one `wal_checkpoint(TRUNCATE)` waited 3.6 s for the backup's read to end.
 
+**Retrying a missed truncate:** `master.db` in the hourly storage sweep; `chat.db` and `node.db` in each node runtime's existing one-minute loop (the background-command prune); a pending truncate leaves `<db>-truncate-pending` beside the file, which `doctor` reports.
+
 **A finding outside this row:** `Store::checkpoint` (`crates/store/src/lib.rs:2005`) ignores the `busy` column of `wal_checkpoint(TRUNCATE)`, and it runs holding the store's only connection.
 With any outside reader (this backup, `sqlite3`, a future `doctor` check) it blocks every `master.db` call for up to `busy_timeout` (5 s) and then silently leaves the WAL untruncated, which is the step the blob deletes rely on to drop a deleted file's key from disk (`storage.rs` `unlink` comment).
 PR A fixed it in its own commit: the checkpoint runs with a zero busy timeout, returns whether it truncated, logs a missed truncate once and remembers it, and the next checkpoint or the hourly storage sweep (`retry_truncate`) makes it (`crates/store/tests/checkpoint.rs`, which failed on the old code: the checkpoint waited 5.0 s, and the WAL was left untruncated without a word).
@@ -109,13 +118,16 @@ Recommended: the CLI. If the lead or owner wants exactness under any delete rate
 
 `rizzy-harness restore <backup> --data-dir <new>`:
 
+- **After a failed restore** the directory is empty again (but `lock`): fix what the sentence names (or take another backup) and run `restore` again; after a killed one, follow the `RESTORING` sentence.
 - **Target:** absent, or an empty directory (a mount point or a container volume is often exactly that, which is why nothing is renamed over it); "empty" means no entry at all, or only the `lock` file restore itself creates.
   Restore takes the target's exclusive lock (role `restore`), so a server cannot start on it meanwhile, and a running server's directory is refused twice over (not empty, locked).
 - Empty means no entry at all but the `lock` file: a lone `lost+found` makes it not empty, simply, and the refusal says so.
 - **First** it writes `<new>/RESTORING`; **last** it removes it.
-  A failure empties the directory again (the lock file stays), and only if that fails does `RESTORING` stay.
-  `serve` and `node run` refuse a directory with that file ("an interrupted restore: empty the directory and run restore again"), so a half-restored directory never starts.
-- **Before any byte is copied** it reads `MANIFEST.json` and refuses: no manifest (incomplete), an unknown format, a database whose `user_version` is newer than this build's, any listed path outside the fixed shape (top-level names from a fixed list, `keys/<name>`, `agents/<relative>`, `blobs/<xx>/<32 hex>.rzb`; no `..`, no absolute path, no empty segment), a listed file that is missing, of another size or another SHA-256, or is not a regular file (`O_NOFOLLOW`; a symlink in the backup is refused, not followed).
+  A failure (a damaged file, SIGINT, SIGTERM) empties the directory again (the lock file stays); a SIGKILL, a power cut or a failed cleanup leaves `RESTORING`.
+  Every command that reads or writes a data directory (`serve`, `node join`, `node run`, `token`, `claim-code`, `graphify`, `backup`, `restore`) refuses a directory with that file, before touching anything, and says what to do: delete everything in it (`lock` and `backup.lock` too) or the directory itself, then restore again; `doctor` reports it.
+  `the_advice_after_an_interrupted_restore_works` kills a restore halfway, follows the sentence word for word and restores again.
+- Each file of the backup is judged before it is opened (a regular file, no link on the way or at it; a FIFO or device is refused without being opened, so nothing blocks and no device is touched), opened non-blocking, checked to be the file judged, then streamed: at most its declared size and one byte more are read (a file that grows is refused), and its SHA-256 is compared at the end; any mismatch names the file and the copy is undone.
+- **Before any byte is copied** it reads `MANIFEST.json` and refuses: no manifest (incomplete), an unknown format, a database whose `user_version` is newer than this build's, any listed path outside the fixed shape (top-level names from a fixed list, `keys/<name>`, `agents/<name>`, `blobs/<xx>/<32 hex>.rzb`; no `..`, no absolute path, no empty segment), a listed file that is missing, of another size, or is not a regular file (a link, FIFO or device in the backup is refused, never followed or opened); the SHA-256 is checked while each file streams in (below).
   Files in the backup that the manifest does not list are not copied, and restore says how many it ignored.
 - Every file is written 0600 and every folder 0700, whatever the backup's modes; the data directory itself through the existing `data_dir` (0700, owner checked).
 - The restored `master.db` gets `DELETE FROM ui_sessions`: every login is dropped and everyone signs in again (cookies are only hashes there; the API token stays, see below).
@@ -125,7 +137,7 @@ Recommended: the CLI. If the lead or owner wants exactness under any delete rate
 Same accounts and passwords, chats, files, routines, connections: sealed tokens open on any machine, because the key is `keys/secrets.key`, a file in the backup, not anything of the machine's (`sealed.rs` header; a `master.db` without its key opens nothing, and a key of another server is refused at start by `forge::open`).
 Same identity: remote nodes pin `keys/master-cert.der` and find the master by the address in their `remote.toml`, and the master pins their keys in `nodes`, so they reconnect as soon as that address reaches the restored machine; their chats' logs refill the mirror (rule 3).
 
-**What it is not:** logged in (dropped above); holding checkpoints (above; on the restored server an undo of an earlier turn answers 409 "this checkpoint is no longer kept (only the latest 100 changes are)", a sentence written for pruning: a follow-up should name the restore); holding a remote node's own state (above).
+**What it is not:** logged in (dropped above); holding checkpoints (above; on the restored server an undo of an earlier turn answers 409 "this checkpoint is no longer kept (only the latest 100 changes are)", a sentence written for pruning; the node cannot cheaply tell a restored directory from a pruned checkpoint (the checkpoint store is made again for the folder at the first use), so the sentence stays and the README's restore section says what it means after a restore); holding a remote node's own state (above).
 **Two copies at once are one identity twice.** A restored copy started beside a running original accepts the same nodes, the same API token and the same join tokens, and runs the same routines: a routine with `catch_up = once` fires a late run at the first start (`docs/routines.md`, "Missed runs"), and every routine runs on both, so anything it does outside (a pull request, a message) happens twice.
 Restore prints this warning; `--pause-routines` sets every routine `enabled = 0` in the copy for a trial restore.
 **A remote node restored from an older backup** is the case the master already detects: its replayed events differ from the mirror and those chats freeze until deleted (`AppendOutcome::Diverged`; research round 2 appendix, "A node restored from a backup").
@@ -135,6 +147,7 @@ The README must say: restore a node's data directory only when the node is gone,
 
 It holds every account's password hash, every chat, every file's key next to the file, every provider key and the token key.
 - The destination must be absent or an empty directory owned by this user and not a symlink (`lstat`); it is created 0700 (`DirBuilder` mode, never visible under the umask); files are created 0600 with `create_new` inside it, so nothing can be planted to redirect a write.
+  It must not be the data directory or lie inside or around it, judged by name and by the folders' device and inode along both ancestor chains (a bind mount of the data directory under another name is caught; not tested: no unprivileged mount here).
 - Nothing in it is printed or logged: the command prints counts, sizes, time and the destination.
 - No encryption in this change: nothing trivial and dependency-free does it well.
   The README says so and points to an encrypted volume or an encrypting backup tool (restic, borg, age) over the directory.
@@ -146,7 +159,7 @@ It holds every account's password hash, every chat, every file's key next to the
 A plain directory that mirrors the data directory (inspectable, `rsync`-able, readable by `sqlite3`), with `MANIFEST.json`: format 1, the harness version, the time, each database with its `user_version`, and every file with its path, size and SHA-256.
 Not an archive: an archive needs a streaming writer and reader and its own traversal checks for nothing the directory lacks, and every tool an operator would use to encrypt or ship it works on a directory.
 OpenClaw writes `.tar.gz` with a verify command and refuses a non-empty restore target (`research-repos/openclaw/src/commands/backup-restore.ts:66`); its SQLite snapshots run a read transaction and end in `VACUUM INTO` (`src/infra/sqlite-snapshot.ts`, 640 to 700).
-We take the empty target, the read-only snapshot and the verified manifest, and skip the archive.
+We take the empty target, the snapshot that never writes its source and the verified manifest, and skip the archive.
 OpenClaw notes that `VACUUM` may renumber implicit rowids; ours are only used for `ORDER BY rowid` (audit, routine triggers, clones) and the FTS tables keep their own ids, and `a_snapshot_keeps_implicit_rowids` checks the bundled SQLite keeps every `audit` rowid through `VACUUM INTO` after deletions.
 
 ## A copy before each migration (the row's second half)

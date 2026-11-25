@@ -19,32 +19,50 @@ fn open_ro(path: &Path) -> rusqlite::Result<Connection> {
     Ok(c)
 }
 
-/// `VACUUM INTO` `dst` from `src`: one read transaction, so the copy is the
-/// database as one commit left it, with the WAL folded in and free pages
-/// (deleted rows) left behind. `dst` must not exist or be an empty file:
-/// the caller makes it first, 0600 and exclusively, so the copy is never
-/// readable by others, not even for a moment.
-///
-/// `writable`: open the source read-write (no create), for a backup that
-/// holds the data directory's lock: a WAL a crashed server left needs a
-/// writer to be recovered, and nothing else has the file open. Otherwise
-/// read-only (a running server owns the file; WAL readers never block it).
-pub fn snapshot(src: &Path, dst: &Path, writable: bool) -> rusqlite::Result<()> {
-    let c = if writable {
-        let c = Connection::open_with_flags(
-            src,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        c.busy_timeout(BUSY)?;
-        c
-    } else {
-        open_ro(src)?
-    };
+/// `VACUUM INTO` `dst` from `src` through a read-only connection: one read
+/// transaction, so the copy is the database as one commit left it, with
+/// the WAL folded in (a crashed server's too: a read-only connection reads
+/// the WAL through its `-shm`) and free pages (deleted rows) left behind.
+/// Nothing of the source is written, whether a server runs or not. `dst`
+/// must not exist or be an empty file: the caller makes it first, 0600 and
+/// exclusively, so the copy is never readable by others.
+pub fn snapshot(src: &Path, dst: &Path) -> rusqlite::Result<()> {
+    vacuum_into(&open_ro(src)?, dst)
+}
+
+/// [`snapshot`] of a private copy this process made of a stopped server's
+/// files (database, `-wal`, `-shm`): opened read-write, so SQLite may
+/// recover a WAL whose `-shm` is missing, in the copy, never the source.
+pub fn snapshot_private_copy(src: &Path, dst: &Path) -> rusqlite::Result<()> {
+    let c = Connection::open_with_flags(
+        src,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    c.busy_timeout(BUSY)?;
+    vacuum_into(&c, dst)
+}
+
+fn vacuum_into(c: &Connection, dst: &Path) -> rusqlite::Result<()> {
     let to = dst
         .to_str()
         .ok_or_else(|| rusqlite::Error::InvalidPath(dst.to_path_buf()))?;
     c.execute("VACUUM INTO ?1", [to])?;
     Ok(())
+}
+
+/// Whether an error is SQLite refusing a read-only reader a file that needs
+/// a writer first (a WAL to recover without its index, a hot journal).
+pub fn needs_writer(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(f, _) if matches!(
+            f.extended_code,
+            rusqlite::ffi::SQLITE_READONLY_ROLLBACK
+                | rusqlite::ffi::SQLITE_READONLY_RECOVERY
+                | rusqlite::ffi::SQLITE_READONLY_CANTINIT
+                | rusqlite::ffi::SQLITE_READONLY_CANTLOCK
+        )
+    )
 }
 
 /// The schema version of a database file (read-only).
@@ -122,66 +140,149 @@ fn has_table(c: &Connection, name: &str) -> rusqlite::Result<bool> {
     .map(|n| n > 0)
 }
 
-/// Remove from a node log's copy (`chat.db`, `node.db`) every chat that
-/// the `master.db` copy does not know: one created after `master.db` was
-/// copied. The master writes a chat's owner, workspace and project into
-/// `master.db` only once the node has made it, so such a chat would come
-/// back without an owner, out of its owner's reach. A sub-agent's chat
-/// whose parent is kept stays (it inherits its owner from the parent).
-/// Returns how many chats went.
+/// The kv prefix of a create's intended owner (the master's
+/// `create_intent_key`).
+const CREATE_INTENT: &str = "create-intent:";
+/// The master's mark that a chat follows the default model.
+const AUTO_MODEL: &str = "session-model-auto:";
+
+/// What [`settle_copies`] changed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Settled {
+    /// Chats caught between their create and its owner stamp, stamped from
+    /// the create's intent, as the master's late claim does.
+    pub stamped: usize,
+    /// Chats begun after the `master.db` copy, or caught ownerless with no
+    /// usable intent: removed from every copy.
+    pub left_out: usize,
+    /// Chats deleted after the `master.db` copy: removed from it.
+    pub deleted: usize,
+}
+
+fn store_ids(s: &crate::Store) -> crate::Result<Vec<crate::SessionRow>> {
+    s.sessions()
+}
+
+/// Make the copies of `master.db` and of this machine's node logs agree,
+/// as of the `master.db` copy (docs/backup-restore.md):
 ///
-/// The copy must be at this build's schema version (the caller checks):
-/// it is opened as a store, which would migrate an older one.
-pub fn drop_unknown_chats(node_copy: &Path, master_copy: &Path) -> crate::Result<usize> {
-    let mut known = std::collections::HashSet::new();
+/// 1. A chat whose row has no owner yet but whose create intent is still in
+///    `kv` (the master drops the intent and stamps the owner in two steps)
+///    is stamped from the intent, when the intent names this chat's node;
+///    an ownerless chat with an intent that cannot be read is left out.
+/// 2. A chat in a node log's copy that the `master.db` copy does not know
+///    began after it (the master stamps the owner only once the node has
+///    the chat): left out, so it never comes back without an owner. A
+///    sub-agent's chat under a kept chat stays (it inherits its owner).
+/// 3. A chat of one of these nodes in the `master.db` copy that its node
+///    log's copy no longer has was deleted meanwhile: removed from it.
+///
+/// `nodes`: each node log's copy with the node id it logs for (`chat.db`
+/// for `master`, `node.db` for `local`). Every copy must be at this build's
+/// schema version (the caller checks): they are opened as stores, which
+/// would migrate an older one. Each is put back to one plain file.
+pub fn settle_copies(master_copy: &Path, nodes: &[(&Path, &str)]) -> crate::Result<Settled> {
+    let mut out = Settled::default();
     {
-        let c = open_ro(master_copy)?;
-        let mut st = c.prepare("SELECT session_id FROM sessions")?;
-        let ids = st.query_map([], |r| r.get::<_, String>(0))?;
-        for id in ids {
-            known.insert(id?);
+        let m = crate::Store::open(master_copy, crate::Durability::Full)?;
+        // 1: the intents.
+        for (key, v) in m.kv_prefix(CREATE_INTENT)? {
+            let Some(sid) = key
+                .strip_prefix(CREATE_INTENT)
+                .and_then(|id| id.parse::<harness_core::SessionId>().ok())
+            else {
+                continue;
+            };
+            let Some(row) = m.session(sid)? else {
+                continue;
+            };
+            if row.owner_id.is_some() {
+                m.kv_delete(&key)?;
+                continue;
+            }
+            let v: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
+            let owner = v["owner"].as_str();
+            let workspace = v["workspace"].as_str();
+            if v["node"].as_str() != Some(row.node_id.as_str())
+                || (owner.is_none() && workspace.is_none())
+            {
+                m.delete_session(sid, false)?;
+                m.kv_delete(&key)?;
+                out.left_out += 1;
+                continue;
+            }
+            m.claim_session(sid, owner, workspace)?;
+            if v["auto"].as_bool() == Some(true) {
+                m.kv_set(&format!("{AUTO_MODEL}{sid}"), "1")?;
+            }
+            if let Some(p) = v["project"].as_str() {
+                m.link_new_session(sid, p)?;
+            }
+            m.kv_delete(&key)?;
+            out.stamped += 1;
         }
-    }
-    let n = {
-        let s = crate::Store::open(node_copy, crate::Durability::Full)?;
-        let rows = s.sessions()?;
-        let mut keep: std::collections::HashSet<String> = rows
+        let known: std::collections::HashSet<String> = store_ids(&m)?
             .iter()
             .map(|r| r.session_id.to_string())
-            .filter(|id| known.contains(id))
             .collect();
-        // Sub-agents' chats under a kept chat, at any depth.
-        loop {
-            let more: Vec<String> = rows
+        // 2 and 3, per node log.
+        for (copy, node_id) in nodes {
+            let n = crate::Store::open(copy, crate::Durability::Full)?;
+            let rows = store_ids(&n)?;
+            let mut keep: std::collections::HashSet<String> = rows
                 .iter()
-                .filter(|r| {
-                    let id = r.session_id.to_string();
-                    !keep.contains(&id) && r.parent_id.as_ref().is_some_and(|p| keep.contains(p))
-                })
                 .map(|r| r.session_id.to_string())
+                .filter(|id| known.contains(id))
                 .collect();
-            if more.is_empty() {
-                break;
+            loop {
+                let more: Vec<String> = rows
+                    .iter()
+                    .filter(|r| {
+                        let id = r.session_id.to_string();
+                        !keep.contains(&id)
+                            && r.parent_id.as_ref().is_some_and(|p| keep.contains(p))
+                    })
+                    .map(|r| r.session_id.to_string())
+                    .collect();
+                if more.is_empty() {
+                    break;
+                }
+                keep.extend(more);
             }
-            keep.extend(more);
-        }
-        let mut n = 0;
-        for r in &rows {
-            if !keep.contains(&r.session_id.to_string()) {
-                s.delete_session(r.session_id, false)?;
-                n += 1;
+            for r in &rows {
+                if !keep.contains(&r.session_id.to_string()) {
+                    n.delete_session(r.session_id, false)?;
+                    out.left_out += 1;
+                }
+            }
+            let in_log: std::collections::HashSet<String> =
+                rows.iter().map(|r| r.session_id.to_string()).collect();
+            for r in store_ids(&m)? {
+                if r.node_id == *node_id && !in_log.contains(&r.session_id.to_string()) {
+                    // As the master's own delete of a chat: its node will
+                    // not send it again.
+                    m.delete_session(r.session_id, true)?;
+                    out.deleted += 1;
+                }
             }
         }
-        n
-    };
-    // Back to one plain file, as `VACUUM INTO` left it.
+    }
+    for p in std::iter::once(master_copy).chain(nodes.iter().map(|(p, _)| *p)) {
+        plain_file(p)?;
+    }
+    Ok(out)
+}
+
+/// Fold a copy's WAL back and make it one plain file again, as
+/// `VACUUM INTO` left it.
+fn plain_file(p: &Path) -> rusqlite::Result<()> {
     let c = Connection::open_with_flags(
-        node_copy,
+        p,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
     c.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))?;
-    Ok(n)
+    Ok(())
 }
 
 /// What a restore changes in its copy of `master.db`.
@@ -242,7 +343,7 @@ mod tests {
         std::fs::create_dir(&out).unwrap();
         let dst = out.join("a.db");
         empty_0600(&dst);
-        snapshot(&src, &dst, false).unwrap();
+        snapshot(&src, &dst).unwrap();
         let mode = std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         let names: Vec<_> = std::fs::read_dir(&out)
@@ -256,7 +357,7 @@ mod tests {
         );
         check(&dst).unwrap();
         // A file that is not empty is refused, not overwritten.
-        assert!(snapshot(&src, &dst, false).is_err());
+        assert!(snapshot(&src, &dst).is_err());
     }
 
     /// OpenClaw's note that VACUUM may renumber implicit rowids: our
@@ -284,7 +385,7 @@ mod tests {
         let before = rows(&c);
         let dst = d.path().join("b.db");
         empty_0600(&dst);
-        snapshot(&src, &dst, false).unwrap();
+        snapshot(&src, &dst).unwrap();
         assert_eq!(rows(&Connection::open(&dst).unwrap()), before);
         assert_eq!(before.len(), 200);
     }
@@ -332,5 +433,218 @@ mod tests {
             }
         );
         assert_eq!(enabled(&c), 0);
+    }
+
+    fn new_user(id: &str) -> crate::NewUser {
+        crate::NewUser {
+            user_id: id.into(),
+            username: id.into(),
+            password_hash: "$argon2id$x".into(),
+            role: crate::Role::Member,
+            exec_ceiling: harness_core::policy::ExecLevel::None,
+            must_change_password: false,
+        }
+    }
+
+    fn created(s: &crate::Store, node: &str, sid: harness_core::SessionId) {
+        s.append(
+            node,
+            &harness_core::RawEvent {
+                session_id: sid,
+                seq: 1,
+                ts_ms: 1,
+                kind: "session_created".into(),
+                payload: serde_json::json!({"title": "t", "cwd": "", "model": "m",
+                    "backend": "native", "node_id": node, "profile": "chat",
+                    "approval_mode": "ask"}),
+            },
+        )
+        .unwrap();
+    }
+
+    /// The create's two steps (drop the intent, stamp the owner) are not
+    /// one transaction, so a copy can hold the chat with no owner and its
+    /// intent still there: the copy step stamps it as the claim would, and
+    /// the chat keeps its owner and stays in the node log's copy.
+    #[test]
+    fn a_chat_caught_before_its_stamp_gets_its_owner_from_the_intent() {
+        let d = tempfile::tempdir().unwrap();
+        let (m, n) = (d.path().join("master.db"), d.path().join("chat.db"));
+        let master = crate::Store::open(&m, crate::Durability::Full).unwrap();
+        let node = crate::Store::open(&n, crate::Durability::Full).unwrap();
+        master.create_user(&new_user("u1")).unwrap();
+        let sid = harness_core::SessionId::new();
+        created(&master, "master", sid);
+        created(&node, "master", sid);
+        drop(node);
+        master
+            .kv_set(
+                &format!("create-intent:{sid}"),
+                &serde_json::json!({"node": "master", "owner": "u1", "workspace": null,
+                    "at": harness_core::now_ms(), "project": null, "auto": true})
+                .to_string(),
+            )
+            .unwrap();
+        drop(master);
+        let done = settle_copies(&m, &[(&n, "master")]).unwrap();
+        assert_eq!(
+            done,
+            Settled {
+                stamped: 1,
+                left_out: 0,
+                deleted: 0
+            }
+        );
+        let master = crate::Store::open(&m, crate::Durability::Full).unwrap();
+        let row = master.session(sid).unwrap().unwrap();
+        assert_eq!(
+            row.owner_id.as_deref(),
+            Some("u1"),
+            "the chat came back ownerless"
+        );
+        assert!(
+            master
+                .kv_get(&format!("create-intent:{sid}"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    fn files(dir: &Path) -> Vec<(String, u64, u64)> {
+        let mut v: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| {
+                let p = e.unwrap().path();
+                let b = std::fs::read(&p).unwrap();
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(&b, &mut h);
+                (
+                    p.file_name().unwrap().to_string_lossy().into_owned(),
+                    b.len() as u64,
+                    std::hash::Hasher::finish(&h),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// A database as a crash leaves it (`-wal` and `-shm` beside it, rows
+    /// only in the WAL), read by the bundled SQLite through a read-only
+    /// connection: the copy has the WAL's rows, and the database and WAL
+    /// do not change; the `-shm` does (every reader, a running server's
+    /// too, writes its read marks into that index), which is why a
+    /// stopped server's files are copied first and snapshotted from the
+    /// copy. Without its `-shm` a read-only reader even makes one; the
+    /// private copy, opened read-write, recovers and has the rows.
+    #[test]
+    fn a_crashed_wal_is_read_without_writing_or_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let live = d.path().join("live");
+        std::fs::create_dir(&live).unwrap();
+        let s = crate::Store::open(&live.join("m.db"), crate::Durability::Full).unwrap();
+        s.kv_set("in-the-wal", "yes").unwrap();
+        // The process "dies": its files are taken as they are, open.
+        let crashed = d.path().join("crashed");
+        std::fs::create_dir(&crashed).unwrap();
+        for n in ["m.db", "m.db-wal", "m.db-shm"] {
+            std::fs::copy(live.join(n), crashed.join(n)).unwrap();
+        }
+        assert!(std::fs::metadata(crashed.join("m.db-wal")).unwrap().len() > 0);
+        let before = files(&crashed);
+        let out = d.path().join("out.db");
+        empty_0600(&out);
+        snapshot(&crashed.join("m.db"), &out).unwrap();
+        let no_shm = |v: Vec<(String, u64, u64)>| -> Vec<_> {
+            v.into_iter().filter(|f| !f.0.ends_with("-shm")).collect()
+        };
+        assert_eq!(
+            no_shm(files(&crashed)),
+            no_shm(before),
+            "the read-only snapshot wrote"
+        );
+        let got: Option<String> = Connection::open(&out)
+            .unwrap()
+            .query_row("SELECT v FROM kv WHERE k = 'in-the-wal'", [], |r| r.get(0))
+            .optional()
+            .unwrap();
+        assert_eq!(got.as_deref(), Some("yes"), "the WAL's row is missing");
+
+        // Without its `-shm`, a read-only reader makes one beside the
+        // source (so it writes): never done on a source. The private copy,
+        // opened read-write, recovers and has the rows.
+        let bare = d.path().join("bare");
+        std::fs::create_dir(&bare).unwrap();
+        for n in ["m.db", "m.db-wal"] {
+            std::fs::copy(crashed.join(n), bare.join(n)).unwrap();
+        }
+        let throwaway = d.path().join("throwaway");
+        std::fs::create_dir(&throwaway).unwrap();
+        for n in ["m.db", "m.db-wal"] {
+            std::fs::copy(bare.join(n), throwaway.join(n)).unwrap();
+        }
+        let o = d.path().join("o.db");
+        empty_0600(&o);
+        let _ = snapshot(&throwaway.join("m.db"), &o);
+        assert!(
+            throwaway.join("m.db-shm").exists(),
+            "SQLite no longer makes a -shm for a read-only reader: revisit the private copy"
+        );
+        let before = files(&bare);
+        let private = d.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        for n in ["m.db", "m.db-wal"] {
+            std::fs::copy(bare.join(n), private.join(n)).unwrap();
+        }
+        let out3 = d.path().join("out3.db");
+        empty_0600(&out3);
+        snapshot_private_copy(&private.join("m.db"), &out3).unwrap();
+        assert_eq!(files(&bare), before);
+        let got: Option<String> = Connection::open(&out3)
+            .unwrap()
+            .query_row("SELECT v FROM kv WHERE k = 'in-the-wal'", [], |r| r.get(0))
+            .optional()
+            .unwrap();
+        assert_eq!(got.as_deref(), Some("yes"), "the private copy lost the WAL");
+        drop(s);
+    }
+
+    /// The other two settlements: a chat only the node log's copy has is
+    /// left out; a chat only the `master.db` copy has, of that node, is
+    /// deleted from it; a chat of another node stays.
+    #[test]
+    fn settling_leaves_out_late_chats_and_deleted_ones() {
+        let d = tempfile::tempdir().unwrap();
+        let (m, n) = (d.path().join("master.db"), d.path().join("chat.db"));
+        let master = crate::Store::open(&m, crate::Durability::Full).unwrap();
+        let node = crate::Store::open(&n, crate::Durability::Full).unwrap();
+        let (both, late, gone, remote) = (
+            harness_core::SessionId::new(),
+            harness_core::SessionId::new(),
+            harness_core::SessionId::new(),
+            harness_core::SessionId::new(),
+        );
+        created(&master, "master", both);
+        created(&node, "master", both);
+        created(&node, "master", late);
+        created(&master, "master", gone);
+        created(&master, "elsewhere", remote);
+        drop((master, node));
+        let done = settle_copies(&m, &[(&n, "master")]).unwrap();
+        assert_eq!(
+            done,
+            Settled {
+                stamped: 0,
+                left_out: 1,
+                deleted: 1
+            }
+        );
+        let master = crate::Store::open(&m, crate::Durability::Full).unwrap();
+        let node = crate::Store::open(&n, crate::Durability::Full).unwrap();
+        assert!(master.session(both).unwrap().is_some());
+        assert!(master.session(gone).unwrap().is_none());
+        assert!(master.session(remote).unwrap().is_some());
+        assert!(node.session(late).unwrap().is_none());
+        assert!(node.session(both).unwrap().is_some());
     }
 }

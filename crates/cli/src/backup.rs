@@ -186,20 +186,88 @@ fn sync_dir(p: &Path) -> io::Result<()> {
     File::open(p)?.sync_all()
 }
 
-/// Open a file to read: never through a link, and only a regular file.
+/// What a path in the data directory or a backup is, without opening it.
+#[derive(Debug, PartialEq, Eq)]
+enum Kind {
+    Missing,
+    Regular,
+    Link,
+    /// A FIFO, a device, a socket or a folder.
+    Other,
+}
+
+fn kind(p: &Path) -> io::Result<Kind> {
+    match fs::symlink_metadata(p) {
+        Ok(m) if m.file_type().is_symlink() => Ok(Kind::Link),
+        Ok(m) if m.is_file() => Ok(Kind::Regular),
+        Ok(_) => Ok(Kind::Other),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Kind::Missing),
+        Err(e) => Err(e),
+    }
+}
+
+/// Open a file to read, and only a regular file: never through a link,
+/// never a FIFO or device (judged before the open, so opening one blocks
+/// nothing and touches no device; the open itself is non-blocking and
+/// makes no terminal ours, and the file opened must be the one judged).
 fn open_regular(p: &Path) -> io::Result<(File, fs::Metadata)> {
+    let not_regular = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file (a link, a FIFO, a device or a socket)",
+        )
+    };
+    let before = fs::symlink_metadata(p)?;
+    if !before.is_file() {
+        return Err(not_regular());
+    }
     let f = OpenOptions::new()
         .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .custom_flags(
+            nix::libc::O_NOFOLLOW
+                | nix::libc::O_CLOEXEC
+                | nix::libc::O_NONBLOCK
+                | nix::libc::O_NOCTTY,
+        )
         .open(p)?;
     let m = f.metadata()?;
-    if !m.is_file() {
-        return Err(io::Error::other(format!(
-            "{} is not a regular file",
-            p.display()
-        )));
+    if !m.is_file() || m.dev() != before.dev() || m.ino() != before.ino() {
+        return Err(not_regular());
     }
     Ok((f, m))
+}
+
+/// A database and the files SQLite opens beside it: each absent or a
+/// regular file (SQLite's own open would block on a FIFO).
+fn db_files_regular(dir: &Path, name: &str) -> anyhow::Result<()> {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let f = format!("{name}{suffix}");
+        match kind(&dir.join(&f))? {
+            Kind::Missing | Kind::Regular => {}
+            _ => bail!(
+                "{f} in {} is not a regular file (a link, a FIFO, a device or a socket): \
+                 nothing was read from it; remove it, or put the real file back",
+                dir.display()
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// Stream at most `size` bytes of `from` into `to` (one more is read, to
+/// refuse a file that grew past what its manifest says), hashing.
+pub fn copy_declared(
+    from: &mut impl Read,
+    to: &mut impl Write,
+    size: u64,
+    buf: &mut [u8],
+    cancel: &AtomicBool,
+) -> anyhow::Result<(u64, String)> {
+    let (n, h) = copy_stream(&mut from.take(size.saturating_add(1)), to, buf, cancel)?;
+    if n > size {
+        bail!("it grew past the {size} bytes its manifest says while it was read");
+    }
+    Ok((n, h))
 }
 
 /// Stream `from` into `to` through `buf` (nothing else is held, whatever
@@ -294,7 +362,7 @@ fn prepare_dest(data: &Path, dest: &Path) -> anyhow::Result<(PathBuf, bool)> {
         .canonicalize()
         .with_context(|| format!("the folder {} must exist", parent.display()))?;
     let real = parent.join(name);
-    if real.starts_with(data) || data.starts_with(&real) {
+    if real.starts_with(data) || data.starts_with(&real) || aliased(data, &real)? {
         bail!(
             "{} is inside the data directory {} or holds it: a backup goes somewhere else",
             dest.display(),
@@ -331,6 +399,40 @@ fn prepare_dest(data: &Path, dest: &Path) -> anyhow::Result<(PathBuf, bool)> {
     }
 }
 
+/// The identity of a folder.
+fn id_of(p: &Path) -> io::Result<(u64, u64)> {
+    let m = fs::metadata(p)?;
+    Ok((m.dev(), m.ino()))
+}
+
+/// Whether `dest` lies inside `data`, or holds it, by the folders' own
+/// identities (device and inode) rather than their names: a bind mount of
+/// the data directory under another name is caught too.
+fn aliased(data: &Path, dest: &Path) -> io::Result<bool> {
+    let d = id_of(data)?;
+    // dest, or the part of it that exists, and every ancestor.
+    let mut at = Some(dest);
+    while let Some(p) = at {
+        if let Ok(id) = id_of(p)
+            && id == d
+        {
+            return Ok(true);
+        }
+        at = p.parent();
+    }
+    // data's ancestors (data itself included) against dest, if it exists.
+    if let Ok(t) = id_of(dest) {
+        let mut at = Some(data);
+        while let Some(p) = at {
+            if id_of(p)? == t {
+                return Ok(true);
+            }
+            at = p.parent();
+        }
+    }
+    Ok(false)
+}
+
 /// The hard links of one backup, removed when dropped (every way out but
 /// SIGKILL; a leftover is removed by the next backup, and the server never
 /// reads it: it is outside `blobs/`).
@@ -357,8 +459,12 @@ impl Staging {
                 "another backup of {} is running: one at a time",
                 data.display()
             ),
-            // No file locks here: nothing to coordinate with, carry on.
-            Err(fs::TryLockError::Error(_)) => {}
+            Err(fs::TryLockError::Error(e)) => bail!(
+                "{} cannot be locked ({e}): without the lock two backups could share the \
+                 staging folder, so none is taken here; back up from a file system with file \
+                 locks",
+                lp.display()
+            ),
         }
         let dir = data.join(STAGING);
         // A leftover of a backup that was killed.
@@ -440,11 +546,13 @@ fn tmp_name(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!(".{name}.partial"))
 }
 
-/// The pause before the first links (debug builds only): the tests delete
-/// a file or add events between the copy of `master.db` and the links.
+/// A pause for the tests (debug builds only), named by `var`: the backup's
+/// before the first links (a file is deleted, events are added between the
+/// copy of `master.db` and the links); the restore's after its first file
+/// (it is killed there).
 #[cfg(debug_assertions)]
-fn test_pause() {
-    let Ok(p) = std::env::var("HARNESS_BACKUP_PAUSE_FILE") else {
+fn test_pause(var: &str) {
+    let Ok(p) = std::env::var(var) else {
         return;
     };
     let go = PathBuf::from(&p);
@@ -458,7 +566,7 @@ fn test_pause() {
 }
 
 #[cfg(not(debug_assertions))]
-fn test_pause() {}
+fn test_pause(_: &str) {}
 
 /// The result, for the lines the command prints.
 pub struct Done {
@@ -468,8 +576,8 @@ pub struct Done {
     pub others: usize,
     pub bytes: u64,
     pub attempts: u32,
-    /// Chats begun during the backup, left out of it.
-    pub left_out: usize,
+    /// What the settling of the copies did.
+    pub settled: db::Settled,
     pub manifest_sha256: String,
     pub skipped: Vec<String>,
     pub secs: f64,
@@ -478,7 +586,14 @@ pub struct Done {
 /// Back up `data` into `dest`.
 pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<Done> {
     let started = Instant::now();
-    if !databases().iter().any(|(n, _)| data.join(n).exists()) {
+    // Before anything is opened: SQLite's own open would block on a FIFO.
+    for (name, _) in databases() {
+        db_files_regular(data, name)?;
+    }
+    if !databases()
+        .iter()
+        .any(|(n, _)| kind(&data.join(n)).is_ok_and(|k| k == Kind::Regular))
+    {
         bail!(
             "{} holds no rizzy-harness database: is --data-dir right?",
             data.display()
@@ -500,11 +615,71 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
     let mut pending: Vec<Pending> = Vec::new();
     let mut versions = BTreeMap::new();
 
+    // Where each database is read from. Beside a running server: its own
+    // files, read-only (a reader writes only its read marks into the
+    // server's `-shm` index, as every reader does). With the lock held: a
+    // byte copy of the stopped server's files (database, `-wal`, `-shm`)
+    // in the staging folder, so not a byte of the source changes, not even
+    // the index a crashed server left, and a WAL without its index is
+    // recovered in the copy. Every database's schema is checked there
+    // before any is copied: one of a newer build is refused untouched.
+    let present: Vec<&str> = databases()
+        .iter()
+        .map(|(n, _)| *n)
+        .filter(|n| data.join(n).exists())
+        .collect();
+    let mut source = BTreeMap::new();
+    if online {
+        for n in &present {
+            source.insert(*n, data.join(n));
+        }
+    } else {
+        let into = staging.dir.join("db");
+        mkdir_private(&into)?;
+        for n in &present {
+            for suffix in ["", "-wal", "-shm"] {
+                let f = format!("{n}{suffix}");
+                let (mut src, _) = match open_regular(&data.join(&f)) {
+                    Ok(v) => v,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e).with_context(|| format!("reading {f}")),
+                };
+                let mut out = create_private(&into.join(&f))?;
+                copy_stream(&mut src, &mut out, &mut buf, cancel)?;
+            }
+            source.insert(*n, into.join(n));
+        }
+    }
+    for (name, schema) in databases() {
+        if let Some(src) = source.get(name) {
+            harness_store::migrate::check_file(src, schema)
+                .map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
+        }
+    }
+    let snap = |name: &str, tmp: &Path| -> anyhow::Result<()> {
+        let src = &source[name];
+        let r = if online {
+            db::snapshot(src, tmp)
+        } else {
+            db::snapshot_private_copy(src, tmp)
+        };
+        r.map_err(|e| {
+            if db::needs_writer(&e) {
+                anyhow::anyhow!(
+                    "{name} needs SQLite's recovery, which only a writer may make, and a server \
+                     holds it: stop the server and back up then (nothing was written to it)"
+                )
+            } else {
+                anyhow::anyhow!("copying {name}: {e}")
+            }
+        })
+    };
+
     // 1 and 2: master.db and the links to the files it names.
     let master_tmp = tmp_name(&dest, "master.db");
     let mut attempts = 0;
     let mut blob_ids: Vec<String> = Vec::new();
-    if data.join("master.db").exists() {
+    if source.contains_key("master.db") {
         loop {
             attempts += 1;
             check_cancel(cancel)?;
@@ -514,10 +689,9 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
             }
             w.note(&master_tmp);
             drop(create_private(&master_tmp)?);
-            db::snapshot(&data.join("master.db"), &master_tmp, !online)
-                .context("copying master.db")?;
+            snap("master.db", &master_tmp)?;
             if attempts == 1 {
-                test_pause();
+                test_pause("HARNESS_BACKUP_PAUSE_FILE");
             }
             blob_ids = db::blob_ids(&master_tmp).map_err(|e| anyhow::anyhow!("master.db: {e}"))?;
             let root = data.join("blobs");
@@ -567,14 +741,13 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
     // 3: the other databases, after master.db.
     for (name, _) in databases().iter().skip(1) {
         check_cancel(cancel)?;
-        let src = data.join(name);
-        if !src.exists() {
+        if !source.contains_key(name) {
             continue;
         }
         let tmp = tmp_name(&dest, name);
         w.note(&tmp);
         drop(create_private(&tmp)?);
-        db::snapshot(&src, &tmp, !online).with_context(|| format!("copying {name}"))?;
+        snap(name, &tmp)?;
         pending.push(Pending {
             tmp,
             path: (*name).into(),
@@ -586,27 +759,42 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
             versions.insert(name.to_string(), check_db(name, &p.tmp, schema)?);
         }
     }
-    // Chats begun after master.db's copy would come back without their
-    // owner: they are left out (docs/backup-restore.md).
-    let mut left_out = 0;
+    // The copies made to agree as of master.db's copy: chats caught
+    // before their owner's stamp get it, chats begun later are left out,
+    // chats deleted meanwhile go (docs/backup-restore.md).
+    let mut settled = db::Settled::default();
     let mut skipped = Vec::new();
     if versions.contains_key("master.db") {
         let current = harness_store::DB_SCHEMA.steps.len() as i64;
-        for name in ["chat.db", "node.db"] {
-            let Some(p) = pending.iter().find(|p| p.path == name) else {
-                continue;
-            };
-            if versions.get(name) == Some(&current) {
-                left_out += db::drop_unknown_chats(&p.tmp, &master_tmp)
-                    .with_context(|| format!("{name}: leaving out chats begun meanwhile"))?;
-                check_db(name, &p.tmp, &harness_store::DB_SCHEMA)?;
-            } else {
-                skipped.push(format!(
-                    "nothing of {name}: it is at another schema version than this build; chats \
-                     begun during the backup are in it without their owner (back up with the \
-                     server's own build to avoid this)"
-                ));
+        let logs: Vec<(&Path, &str)> = [("chat.db", "master"), ("node.db", "local")]
+            .iter()
+            .filter_map(|(name, node)| {
+                pending
+                    .iter()
+                    .find(|p| p.path == *name)
+                    .map(|p| (p.tmp.as_path(), *node))
+            })
+            .collect();
+        let all_current = ["master.db", "chat.db", "node.db"]
+            .iter()
+            .all(|n| versions.get(*n).is_none_or(|v| *v == current));
+        if all_current {
+            settled = db::settle_copies(&master_tmp, &logs)
+                .context("making the copies of master.db and the node logs agree")?;
+            for (name, schema) in databases() {
+                if name != "memory.db"
+                    && let Some(p) = pending.iter().find(|p| p.path == name)
+                {
+                    check_db(name, &p.tmp, schema)?;
+                }
             }
+        } else {
+            skipped.push(
+                "the settling of chats begun, stamped or deleted during the backup: the \
+                 databases are at another schema version than this build (back up with the \
+                 server's own build)"
+                    .into(),
+            );
         }
     }
 
@@ -619,11 +807,21 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
                    pending: &mut Vec<Pending>,
                    buf: &mut [u8]|
      -> anyhow::Result<Option<String>> {
-        let (mut f, _) = match open_regular(src) {
-            Ok(v) => v,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Ok(Some(format!("{path} (a link or not a regular file)"))),
-        };
+        match kind(src)? {
+            Kind::Missing => return Ok(None),
+            Kind::Link => {
+                return Ok(Some(format!(
+                    "{path} (a symbolic link: back up its target yourself)"
+                )));
+            }
+            Kind::Other => bail!(
+                "{path} in the data directory is not a regular file (a FIFO, a device, a \
+                 socket or a folder): nothing was backed up; remove it, or put the real file \
+                 back"
+            ),
+            Kind::Regular => {}
+        }
+        let (mut f, _) = open_regular(src).with_context(|| format!("reading {path}"))?;
         mkdir_private(dir)?;
         let tmp = tmp_name(dir, file);
         w.note(&tmp);
@@ -664,6 +862,14 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
             .collect();
         names.sort();
         for n in names {
+            if sub == "agents"
+                && fs::symlink_metadata(data.join(sub).join(&n)).is_ok_and(|m| m.is_dir())
+            {
+                skipped.push(format!(
+                    "{sub}/{n:?}/ (a folder: a backup keeps only the files directly in {sub}/)"
+                ));
+                continue;
+            }
             if !valid_name(&n) {
                 skipped.push(format!("{sub}/{n:?} (a name a backup does not keep)"));
                 continue;
@@ -781,7 +987,7 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
         others: pending.len() - n_db - blob_ids.len(),
         bytes,
         attempts,
-        left_out,
+        settled,
         manifest_sha256: hex::encode(Sha256::digest(&text)),
         skipped,
         secs: started.elapsed().as_secs_f64(),
@@ -816,11 +1022,24 @@ pub fn print_backup(given: &Path, d: &Done) {
             String::new()
         }
     );
-    if d.left_out > 0 {
+    if d.settled.left_out > 0 {
         println!(
             "{} chats begun while the backup ran are not in it (they began after master.db \
              was copied)",
-            d.left_out
+            d.settled.left_out
+        );
+    }
+    if d.settled.deleted > 0 {
+        println!(
+            "{} chats deleted while the backup ran are not in it",
+            d.settled.deleted
+        );
+    }
+    if d.settled.stamped > 0 {
+        println!(
+            "{} chats caught between their creation and their owner's stamp were given their \
+             owner",
+            d.settled.stamped
         );
     }
     for s in &d.skipped {
@@ -997,11 +1216,25 @@ pub fn verify(backup: &Path, cancel: &AtomicBool) -> anyhow::Result<()> {
     let mut bytes = 0;
     for e in &man.files {
         let mut f = open_entry(backup, e)?;
-        let (n, h) = copy_stream(&mut f, &mut io::sink(), &mut buf, cancel)?;
+        let (n, h) = copy_declared(&mut f, &mut io::sink(), e.size, &mut buf, cancel)
+            .with_context(|| e.path.clone())?;
         if n != e.size || h != e.sha256 {
             return Err(mismatch(&e.path));
         }
         bytes += n;
+    }
+    // SQLite opens these beside a database (and would block on a FIFO); a
+    // backup never holds them.
+    for (name, _) in databases() {
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let f = format!("{name}{suffix}");
+            if kind(&backup.join(&f))? != Kind::Missing {
+                bail!(
+                    "the backup holds {f}, which a backup never has: it was changed; nothing \
+                     was opened"
+                );
+            }
+        }
     }
     for (name, schema) in databases() {
         if man.databases.contains_key(name) {
@@ -1112,13 +1345,17 @@ pub fn restore(
             mkdir_private(&d)?;
         }
         let mut out = create_private(&to).with_context(|| format!("creating {}", e.path))?;
-        let (n, h) = copy_stream(&mut f, &mut out, &mut buf, cancel)?;
+        let (n, h) = copy_declared(&mut f, &mut out, e.size, &mut buf, cancel)
+            .with_context(|| e.path.clone())?;
         if n != e.size || h != e.sha256 {
             return Err(mismatch(&e.path));
         }
         out.sync_all()?;
         bytes += n;
         dirs.insert(parent);
+        if bytes == n {
+            test_pause("HARNESS_RESTORE_PAUSE_FILE");
+        }
     }
     for (name, schema) in databases() {
         if let Some(v) = man.databases.get(name) {
@@ -1226,15 +1463,37 @@ pub fn print_restore(data: &Path, r: &Restored) {
     println!("{NOT_INCLUDED}");
 }
 
+/// Refuse a data directory that holds an interrupted restore (every
+/// command that reads or writes one; `doctor` reports it instead).
+pub fn refuse_restoring(dir: &Path) -> anyhow::Result<()> {
+    if fs::symlink_metadata(dir.join(RESTORING)).is_ok() {
+        bail!("{}", restoring_advice(dir));
+    }
+    Ok(())
+}
+
+/// What to do about an interrupted restore, in words.
+pub fn restoring_advice(dir: &Path) -> String {
+    format!(
+        "{} holds an interrupted restore (a {RESTORING} file is in it), and no command uses it \
+         as it is: delete everything in it (lock and backup.lock too), or the directory \
+         itself, then run `{} --data-dir {} restore <backup>` again",
+        dir.display(),
+        harness_core::BRAND,
+        dir.display()
+    )
+}
+
 /// Run `f` off the async runtime; SIGINT or SIGTERM asks it to stop (it
 /// removes what it wrote and ends with "interrupted").
 pub async fn run_stoppable<T: Send + 'static>(
     f: impl FnOnce(&AtomicBool) -> anyhow::Result<T> + Send + 'static,
 ) -> anyhow::Result<T> {
+    // First, so a signal at any moment after the work starts is caught.
+    let mut signals = crate::stop::Signals::install().context("catching stop signals")?;
     let cancel = Arc::new(AtomicBool::new(false));
     let c = cancel.clone();
     let mut task = tokio::task::spawn_blocking(move || f(&c));
-    let mut signals = crate::stop::Signals::install().context("catching stop signals")?;
     tokio::select! {
         r = &mut task => r.context("the command's task ended")?,
         name = signals.first() => {
@@ -1324,5 +1583,34 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.to_string(), "interrupted");
+    }
+
+    /// A file that grows past its declared size while it streams in is
+    /// refused (the copy reads at most one byte past it).
+    #[test]
+    fn a_file_longer_than_declared_is_refused() {
+        let mut buf = vec![0u8; 16];
+        // Without end, as a file that keeps growing: refused after 101 bytes.
+        let mut endless = io::repeat(7);
+        let mut seen = Vec::new();
+        let e = copy_declared(
+            &mut endless,
+            &mut seen,
+            100,
+            &mut buf,
+            &AtomicBool::new(false),
+        );
+        assert!(e.unwrap_err().to_string().contains("grew"));
+        assert_eq!(seen.len(), 101);
+        // Exactly as declared: taken.
+        let (n, _) = copy_declared(
+            &mut io::repeat(7).take(100),
+            &mut io::sink(),
+            100,
+            &mut buf,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(n, 100);
     }
 }

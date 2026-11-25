@@ -42,11 +42,14 @@ fn a_checkpoint_beside_an_outside_reader_neither_waits_nor_hides_it() {
     assert!(!truncated, "the truncate could not be made and must say so");
     assert!(wal_len(&db) > 0);
     assert!(s.truncate_pending());
+    let mark = dir.path().join("master.db-truncate-pending");
+    assert!(mark.exists(), "doctor has nothing to report");
 
     drop(reader);
     assert!(s.retry_truncate().unwrap(), "no reader left: it truncates");
     assert_eq!(wal_len(&db), 0);
     assert!(!s.truncate_pending());
+    assert!(!mark.exists());
     // Nothing pending: the retry does nothing and says it is done.
     assert!(s.retry_truncate().unwrap());
 }

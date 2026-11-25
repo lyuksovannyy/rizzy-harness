@@ -26,12 +26,93 @@ fn cmd(data: &Path, args: &[&str]) -> Command {
         .current_dir(data.parent().unwrap())
         .env("HARNESS_LOG", "warn")
         .env_remove("HARNESS_BACKUP_PAUSE_FILE")
+        .env_remove("HARNESS_RESTORE_PAUSE_FILE")
         .stdin(Stdio::null());
     c
 }
 
+/// Any command here ends well within this, or the test fails saying so.
+const DEADLINE: Duration = Duration::from_secs(120);
+/// A `serve` that must be refused is refused within this.
+const REFUSED_WITHIN: Duration = Duration::from_secs(10);
+
+/// Wait for `child` at most `within`; past it, kill it (by its own pid)
+/// and fail with `what` and everything it printed.
+fn wait_within(mut child: Child, within: Duration, what: &str) -> Output {
+    use std::io::Read;
+    let mut out = child.stdout.take();
+    let mut err = child.stderr.take();
+    let o = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(o) = out.as_mut() {
+            let _ = o.read_to_end(&mut b);
+        }
+        b
+    });
+    let e = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(e) = err.as_mut() {
+            let _ = e.read_to_end(&mut b);
+        }
+        b
+    });
+    let by = Instant::now() + within;
+    let status = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break Some(st);
+        }
+        if Instant::now() >= by {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let (stdout, stderr) = (o.join().unwrap(), e.join().unwrap());
+    let Some(status) = status else {
+        panic!(
+            "{what}: still running after {within:?}, killed; it printed:\n--- stdout\n{}--- stderr\n{}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+    };
+    Output {
+        status,
+        stdout,
+        stderr,
+    }
+}
+
+fn run_within(data: &Path, args: &[&str], within: Duration, what: &str) -> Output {
+    let child = cmd(data, args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_within(child, within, what)
+}
+
 fn run(data: &Path, args: &[&str]) -> Output {
-    cmd(data, args).output().unwrap()
+    run_within(
+        data,
+        args,
+        DEADLINE,
+        &format!("`{EXE} --data-dir {} {}`", data.display(), args.join(" ")),
+    )
+}
+
+/// `serve` on `data`, which must be refused: one that stays up is killed
+/// and fails the test with that sentence.
+fn serve_refused(data: &Path) -> Output {
+    run_within(
+        data,
+        &["serve", "--bind", "127.0.0.1:0"],
+        REFUSED_WITHIN,
+        &format!(
+            "serve on {} started although it must be refused",
+            data.display()
+        ),
+    )
 }
 
 fn text(o: &Output) -> String {
@@ -74,7 +155,7 @@ fn paused_backup(data: &Path, dest: &Path, pause: &Path) -> Child {
 
 fn release(child: Child, pause: &Path) -> Output {
     std::fs::write(pause, b"").unwrap();
-    child.wait_with_output().unwrap()
+    wait_within(child, DEADLINE, "the released backup")
 }
 
 /// Every folder under `root` (itself too) is 0700 and every file 0600.
@@ -254,8 +335,7 @@ async fn a_stopped_server_is_backed_up_under_the_lock() {
     let dest = root.join("backup");
     let pause = root.join("go");
     let b = paused_backup(&data, &dest, &pause);
-    let o = run(&data, &["serve", "--bind", "127.0.0.1:0"]);
-    refused(o, "is in use by backup (pid");
+    refused(serve_refused(&data), "is in use by backup (pid");
     let out = ok(release(b, &pause));
     assert!(out.contains("no server was running"), "{out}");
 
@@ -659,10 +739,7 @@ fn restore_targets_that_are_refused() {
     let done = root.join("done");
     ok(run(&done, &["restore", b.to_str().unwrap()]));
     std::fs::write(done.join("RESTORING"), b"").unwrap();
-    refused(
-        run(&done, &["serve", "--bind", "127.0.0.1:0"]),
-        "holds an interrupted restore",
-    );
+    refused(serve_refused(&done), "holds an interrupted restore");
     drop(dir);
 }
 
@@ -804,4 +881,351 @@ async fn undo_after_a_restore_without_checkpoints_is_refused_in_words() {
     assert!(r.get("/api/sessions").await["sessions"].is_array());
     eprintln!("undo after restore answered {st}: {why}");
     drop((r, dir));
+}
+
+/// A copy of backup `b` to break, beside it.
+fn copy_of(root: &Path, b: &Path) -> PathBuf {
+    let n = root.join(format!("copy-{}", rand_name()));
+    let o = Command::new("cp")
+        .args(["-a", b.to_str().unwrap(), n.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    n
+}
+
+fn fifo(p: &Path) {
+    if std::fs::symlink_metadata(p).is_ok() {
+        std::fs::remove_file(p).unwrap();
+    }
+    nix::unistd::mkfifo(p, nix::sys::stat::Mode::S_IRWXU).unwrap();
+}
+
+/// A character device at `p` (`/dev/null`'s numbers), if this user may
+/// make one (usually not: then the test says so and goes on).
+fn device(p: &Path) -> bool {
+    use nix::sys::stat::{Mode, SFlag, makedev, mknod};
+    if std::fs::symlink_metadata(p).is_ok() {
+        std::fs::remove_file(p).unwrap();
+    }
+    match mknod(p, SFlag::S_IFCHR, Mode::S_IRWXU, makedev(1, 3)) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("note: no device node test here: mknod is refused to this user ({e})");
+            false
+        }
+    }
+}
+
+const QUICK: Duration = Duration::from_secs(30);
+
+fn empty_but_lock(data: &Path) {
+    let left: Vec<_> = std::fs::read_dir(data)
+        .map(|r| r.map(|e| e.unwrap().file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.iter().all(|n| n == "lock"), "left {left:?}");
+}
+
+/// A FIFO (or a device) in place of a file of a backup: `--verify` and
+/// `restore` refuse it at once, naming it, and the restore leaves the
+/// target empty. A FIFO the manifest does not list (a `-wal` beside a
+/// database) is refused by `--verify`, which would open it through SQLite.
+#[test]
+fn a_fifo_or_device_in_a_backup_is_refused_at_once() {
+    let (dir, root, b) = a_backup();
+    let blob = a_blob(&b);
+    for (i, victim) in ["api-token", "chat.db", blob.as_str()].iter().enumerate() {
+        for kind in ["fifo", "device"] {
+            let c = copy_of(&root, &b);
+            if kind == "fifo" {
+                fifo(&c.join(victim));
+            } else if !device(&c.join(victim)) {
+                continue;
+            }
+            let o = run_within(
+                &root,
+                &["backup", "--verify", c.to_str().unwrap()],
+                QUICK,
+                &format!("backup --verify with a {kind} as {victim}"),
+            );
+            refused(o, victim);
+            let t = root.join(format!("{kind}-{i}"));
+            let o = run_within(
+                &t,
+                &["restore", c.to_str().unwrap()],
+                QUICK,
+                &format!("restore with a {kind} as {victim}"),
+            );
+            refused(o, victim);
+            empty_but_lock(&t);
+        }
+    }
+    let c = copy_of(&root, &b);
+    fifo(&c.join("master.db-wal"));
+    let o = run_within(
+        &root,
+        &["backup", "--verify", c.to_str().unwrap()],
+        QUICK,
+        "backup --verify with a FIFO as master.db-wal",
+    );
+    refused(o, "master.db-wal");
+    drop(dir);
+}
+
+/// A FIFO (or a device) in the data directory in place of a file a backup
+/// reads: refused at once, naming it, nothing kept.
+#[test]
+fn a_fifo_or_device_in_the_data_directory_is_refused_at_once() {
+    let (dir, data, _ws) = real::setup();
+    let root = data.parent().unwrap().to_path_buf();
+    drop(real::serve(&data));
+    for (i, victim) in [
+        "config.toml",
+        "keys/a.key",
+        "agents/a.md",
+        "master.db-wal",
+        "chat.db",
+    ]
+    .iter()
+    .enumerate()
+    {
+        for kind in ["fifo", "device"] {
+            let d = copy_of(&root, &data);
+            std::fs::create_dir_all(d.join("keys")).unwrap();
+            std::fs::create_dir_all(d.join("agents")).unwrap();
+            if kind == "fifo" {
+                fifo(&d.join(victim));
+            } else if !device(&d.join(victim)) {
+                continue;
+            }
+            let dest = root.join(format!("b-{kind}-{i}"));
+            let o = run_within(
+                &d,
+                &["backup", dest.to_str().unwrap()],
+                QUICK,
+                &format!("backup with a {kind} as {victim}"),
+            );
+            refused(o, victim);
+            assert!(!dest.exists(), "{kind} {victim}: left {}", dest.display());
+            assert!(!d.join("backup-staging").exists());
+        }
+    }
+    drop(dir);
+}
+
+/// A directory holding `RESTORING` is refused by every command that reads
+/// or writes a data directory, before it touches anything (no
+/// `backup.lock`, no destination); `doctor` reports it.
+#[test]
+fn every_command_refuses_a_half_restored_directory() {
+    let (dir, root, b) = a_backup();
+    let t = root.join("half");
+    ok(run(&t, &["restore", b.to_str().unwrap()]));
+    std::fs::write(t.join("RESTORING"), b"").unwrap();
+    let before: Vec<_> = {
+        let mut v: Vec<_> = std::fs::read_dir(&t)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        v.sort();
+        v
+    };
+    let dest = root.join("from-half");
+    for args in [
+        vec!["backup", dest.to_str().unwrap()],
+        vec!["token"],
+        vec!["claim-code"],
+        vec!["graphify", "status"],
+        vec!["node", "run"],
+    ] {
+        refused(run(&t, &args), "holds an interrupted restore");
+    }
+    refused(serve_refused(&t), "holds an interrupted restore");
+    assert!(!dest.exists());
+    let mut after: Vec<_> = std::fs::read_dir(&t)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    after.sort();
+    assert_eq!(before, after, "a refused command changed the directory");
+    let o = run(&t, &["doctor"]);
+    assert!(text(&o).contains("interrupted restore"), "{}", text(&o));
+    drop(dir);
+}
+
+/// A restore killed halfway: the server refuses the directory with advice;
+/// following the advice word for word (delete everything in it, `lock`
+/// included) and restoring again works, and the server starts.
+#[test]
+fn the_advice_after_an_interrupted_restore_works() {
+    let (dir, root, b) = a_backup();
+    let t = root.join("half");
+    let pause = root.join("rgo");
+    let mut c = cmd(&t, &["restore", b.to_str().unwrap()]);
+    c.env("HARNESS_RESTORE_PAUSE_FILE", &pause)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = c.spawn().unwrap();
+    let mark = PathBuf::from(format!("{}.snapshotted", pause.display()));
+    let by = Instant::now() + DEADLINE;
+    while !mark.exists() {
+        assert!(Instant::now() < by, "the restore never reached its pause");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(t.join("RESTORING").exists());
+    let why = refused(serve_refused(&t), "holds an interrupted restore");
+    assert!(
+        why.contains("delete everything in it (lock and backup.lock too)"),
+        "{why}"
+    );
+    for e in std::fs::read_dir(&t).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_dir() {
+            std::fs::remove_dir_all(p).unwrap();
+        } else {
+            std::fs::remove_file(p).unwrap();
+        }
+    }
+    ok(run(&t, &["restore", b.to_str().unwrap()]));
+    let s = real::serve(&t);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    assert!(rt.block_on(s.get("/api/sessions"))["sessions"].is_array());
+    drop((s, dir));
+}
+
+fn hashes(dir: &Path) -> std::collections::BTreeMap<String, String> {
+    use sha2::Digest;
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            let m = std::fs::symlink_metadata(&p).unwrap();
+            if m.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let rel = p.strip_prefix(dir).unwrap().display().to_string();
+            // The lock files carry the holder's hint (not data).
+            if rel == "lock" || rel == "backup.lock" {
+                continue;
+            }
+            out.insert(
+                rel,
+                hex_of(&sha2::Sha256::digest(std::fs::read(&p).unwrap())),
+            );
+        }
+    }
+    out
+}
+
+/// An offline backup of a killed server's directory reads only: every file
+/// of it (the `-wal` and `-shm` too) is byte-identical afterwards, and the
+/// backup holds a row that was only in the WAL.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_offline_backup_changes_nothing_and_keeps_the_wal() {
+    let (dir, data, _ws) = real::setup();
+    let root = data.parent().unwrap().to_path_buf();
+    let mut s = real::serve(&data);
+    s.as_member("ana").await;
+    let sid = chat(&s, "a chat").await;
+    let title = "a title only the WAL holds";
+    let r = s
+        .raw(
+            reqwest::Method::PUT,
+            &format!("/api/sessions/{sid}/title"),
+            Some(json!({"title": title})),
+        )
+        .await;
+    assert!(r.0.is_success(), "{r:?}");
+    drop(s); // SIGKILL: the WAL stays as a crash leaves it
+    assert!(std::fs::metadata(data.join("master.db-wal")).unwrap().len() > 0);
+    // Without its WAL the main file does not have the title.
+    let alone = root.join("alone.db");
+    std::fs::copy(data.join("master.db"), &alone).unwrap();
+    let c = rusqlite::Connection::open(&alone).unwrap();
+    let n: i64 = c
+        .query_row(
+            "SELECT count(*) FROM sessions WHERE title = ?1",
+            [title],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        n, 0,
+        "the title is in the main file already: no WAL-only row"
+    );
+    let before = hashes(&data);
+    let dest = root.join("backup");
+    let out = ok(run(&data, &["backup", dest.to_str().unwrap()]));
+    assert!(out.contains("no server was running"), "{out}");
+    assert_eq!(
+        before,
+        hashes(&data),
+        "the offline backup changed its source"
+    );
+    let c = rusqlite::Connection::open(dest.join("master.db")).unwrap();
+    let n: i64 = c
+        .query_row(
+            "SELECT count(*) FROM sessions WHERE title = ?1",
+            [title],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1, "the backup lost the WAL's row");
+    drop(dir);
+}
+
+/// A database of a newer build: refused before anything is opened to copy
+/// it, and the source is byte-identical.
+#[test]
+fn a_newer_database_is_refused_with_the_source_untouched() {
+    let (dir, data, _ws) = real::setup();
+    let root = data.parent().unwrap().to_path_buf();
+    drop(real::serve(&data));
+    let c = rusqlite::Connection::open(data.join("master.db")).unwrap();
+    c.pragma_update(None, "user_version", 99).unwrap();
+    drop(c);
+    let before = hashes(&data);
+    let dest = root.join("b");
+    refused(
+        run(&data, &["backup", dest.to_str().unwrap()]),
+        "written by a newer rizzy-harness",
+    );
+    assert_eq!(before, hashes(&data));
+    drop(dir);
+}
+
+/// A chat deleted between the copy of master.db and the node logs: it is
+/// not in the restored server's list, and opening it says it is unknown.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_deleted_during_the_backup_is_not_restored() {
+    let (dir, data, _ws) = real::setup();
+    let root = data.parent().unwrap().to_path_buf();
+    let mut s = real::serve(&data);
+    s.as_member("ana").await;
+    let gone = chat(&s, "deleted meanwhile").await;
+    let kept = chat(&s, "kept").await;
+    let dest = root.join("backup");
+    let pause = root.join("go");
+    let b = paused_backup(&data, &dest, &pause);
+    let (st, _) = s
+        .raw(
+            reqwest::Method::DELETE,
+            &format!("/api/sessions/{gone}"),
+            None,
+        )
+        .await;
+    assert!(st.is_success(), "{st}");
+    ok(release(b, &pause));
+    let (_d2, r, _) = restore_and_serve(&root, "restored", &dest, "ana").await;
+    let listed = r.get("/api/sessions").await.to_string();
+    assert!(listed.contains(&kept), "{listed}");
+    assert!(
+        !listed.contains(&gone),
+        "a deleted chat came back: {listed}"
+    );
+    drop((s, r, dir));
 }

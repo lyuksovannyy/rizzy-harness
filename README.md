@@ -5454,6 +5454,15 @@ damaged or changed file stops the restore, names the file, and leaves the
 directory empty again. A restore that was cut off leaves a `RESTORING` file,
 and no server starts there until you empty the directory and restore again.
 Every login is dropped: everyone signs in again with their password.
+If a restore fails, the directory is left empty again: fix what it names and
+run it again. If it was killed (or the power went), every command refuses that
+directory and says to delete everything in it (`lock` and `backup.lock` too)
+and restore again. A FIFO or device in a backup or in the data directory
+stops the command with a sentence naming it; a symbolic link in the data
+directory is skipped with a line (back up its target yourself), and so is a
+sub-folder of `agents/`. After a restore, undoing a turn made before the backup
+answers "this checkpoint is no longer kept": the checkpoints were not in the
+backup.
 
 **In a backup:** the four databases (accounts, chats, routines, connections,
 memory), every stored file (Media, Artifacts, attachments, avatars),

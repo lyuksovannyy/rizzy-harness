@@ -763,12 +763,18 @@ impl NodeRuntime {
         let this = Self { inner };
         // Ended background commands are pruned by time whether their chat
         // calls in or not (T8D-1).
+        // The same minute retries a WAL truncate a checkpoint could not
+        // make (another program had the log open: a backup).
         {
             let reg = this.inner.background.clone();
+            let store = this.inner.cfg.store.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(harness_tools::background::PRUNE_EVERY).await;
                     reg.prune_all();
+                    if store.truncate_pending() {
+                        let _ = store.call(|s| s.retry_truncate()).await;
+                    }
                 }
             });
         }

@@ -2462,11 +2462,6 @@ impl Master {
                     s.kv_set(&key, "1")?;
                 }
                 let mut dropped = None;
-                // A hostile or odd node may ack before the chat exists; then
-                // the intent stays and the chat is claimed when it lands.
-                if s.session(sid)?.is_some() {
-                    s.kv_delete(&create_intent_key(sid))?;
-                }
                 if owner.is_some() || workspace.is_some() {
                     // The claim drops a parent of another owner (L-1).
                     let named = s.session(sid)?.and_then(|r| r.parent_id);
@@ -2483,6 +2478,14 @@ impl Master {
                     Some(p) => s.link_new_session(sid, &p)?,
                     None => false,
                 };
+                // Only after the stamp (these are separate statements): a
+                // backup's copy taken in between still finds the intent and
+                // stamps the chat from it (docs/backup-restore.md). A hostile
+                // or odd node may ack before the chat exists; then the
+                // intent stays and the chat is claimed when it lands.
+                if s.session(sid)?.is_some() {
+                    s.kv_delete(&create_intent_key(sid))?;
+                }
                 Ok::<_, harness_store::StoreError>((linked, dropped))
             })
             .await?;

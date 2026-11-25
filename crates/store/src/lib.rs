@@ -356,6 +356,10 @@ pub struct Store {
     truncate_pending: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Beside a database while a WAL truncate is pending (`doctor` reports
+/// it): `<db>-truncate-pending`.
+pub const TRUNCATE_PENDING: &str = "-truncate-pending";
+
 /// How long a store connection waits for another one's lock.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
 
@@ -2030,13 +2034,30 @@ impl Store {
         let was = self
             .truncate_pending
             .swap(!done, std::sync::atomic::Ordering::SeqCst);
+        // Beside the file, for `doctor` (another process) to report.
+        let mark = conn
+            .path()
+            .filter(|p| !p.is_empty())
+            .map(|p| format!("{p}{TRUNCATE_PENDING}"));
         if !done && !was {
             tracing::warn!(
                 db = conn.path().unwrap_or_default(),
                 "the database's write-ahead log could not be truncated now: another program \
                  holds a read open on it (a backup or the sqlite3 shell); deleted rows stay in \
-                 that log until the next checkpoint, which tries again (at the latest in an hour)"
+                 that log until a checkpoint truncates it: the next delete or the retry every \
+                 minute (master.db: hourly) tries again"
             );
+            if let Some(m) = &mark {
+                let _ = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(m);
+            }
+        }
+        // Also one an earlier process left.
+        if done && let Some(m) = &mark {
+            let _ = std::fs::remove_file(m);
         }
         Ok(done)
     }

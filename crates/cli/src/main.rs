@@ -1258,6 +1258,20 @@ async fn doctor(dir: &Path) -> anyhow::Result<()> {
         }
     };
     check("data dir", Ok(dir.display().to_string()));
+    if std::fs::symlink_metadata(dir.join(backup::RESTORING)).is_ok() {
+        check("restore", Err(backup::restoring_advice(dir)));
+    }
+    for db in ["master.db", "chat.db", "node.db"] {
+        let mark = dir.join(format!("{db}{}", harness_store::TRUNCATE_PENDING));
+        if std::fs::symlink_metadata(&mark).is_ok() {
+            println!(
+                "warn  {db}: a WAL truncate is pending (another program had the file open for \
+                 reading when rows were deleted); the running server retries it (master.db \
+                 hourly, chat.db and node.db every minute); a server that stopped since folded its \
+                 log away as it closed the file, and this note goes at its next checkpoint"
+            );
+        }
+    }
     match lock::status(dir) {
         Ok(lock::Status::Unsupported(m)) => println!("warn  data dir lock: {m}"),
         Ok(lock::Status::Free(m) | lock::Status::Held(m)) => check("data dir lock", Ok(m)),
@@ -1658,6 +1672,14 @@ fn main() -> anyhow::Result<()> {
         Cmd::Backup { .. } => existing_data_dir(&cli.data_dir)?,
         _ => data_dir(&cli.data_dir)?,
     };
+    // An interrupted restore (FIX_PLAN 4.4): every command that reads or
+    // writes a data directory refuses it before touching anything (serve,
+    // node join and run, token, claim-code, graphify, backup, restore);
+    // `doctor` reports it. The helpers above (sandbox-exec, pdf-text,
+    // doc-text, doc-edit) never get here and use no data directory.
+    if !matches!(cli.cmd, Cmd::Doctor) {
+        backup::refuse_restoring(&dir)?;
+    }
     // One process per data directory (A.20), before anything else touches
     // it. Held here, outside the runtime, and never dropped: the process
     // exits with it held and the kernel releases it only once the process
@@ -1673,17 +1695,7 @@ fn main() -> anyhow::Result<()> {
         _ => None,
     };
     let _lock = role.map(|r| lock::take(&dir, r)).transpose()?;
-    // A restore that did not finish (FIX_PLAN 4.4): never started on.
-    if matches!(role, Some("serve" | "node run" | "node join"))
-        && std::fs::symlink_metadata(dir.join(backup::RESTORING)).is_ok()
-    {
-        bail!(
-            "{} holds an interrupted restore ({} is there): empty the directory and run \
-             `{BRAND} restore` again",
-            dir.display(),
-            backup::RESTORING
-        );
-    }
+
     if role.is_some() && role != Some("restore") {
         check_schemas(&dir)?;
     }
