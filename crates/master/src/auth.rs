@@ -86,7 +86,7 @@ pub struct Auth {
     secure_cookie: bool,
     claim: Arc<tokio::sync::Mutex<Option<Claim>>>,
     /// Lowercase username -> recent failed logins; bounded.
-    failures: Arc<limits::FailureMap>,
+    failures: Arc<crate::keyed_limit::FailureMap>,
     /// Every password hash and verification runs here.
     hasher: Hasher,
     /// Caller (user id, or `api-token`) -> recent failed lookups by
@@ -484,7 +484,7 @@ impl Auth {
             allowed_hosts,
             secure_cookie,
             claim: Arc::new(tokio::sync::Mutex::new(None)),
-            failures: Arc::new(limits::FailureMap::new(
+            failures: Arc::new(crate::keyed_limit::FailureMap::new(
                 FAILURE_MAP_CAPACITY,
                 THROTTLE_MAX_FAILURES,
                 THROTTLE_WINDOW_MS,

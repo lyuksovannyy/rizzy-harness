@@ -33,8 +33,8 @@ fn plausible_node_id(id: &str) -> bool {
 
 /// The limiter of audit rows for failed handshakes ([`AUTH_FAILURE_AUDITS`]
 /// per key; keys are `node:<id>` and `peer:<address>`).
-pub(crate) fn auth_audit_limit() -> crate::auth::limits::FailureMap {
-    crate::auth::limits::FailureMap::new(4096, AUTH_FAILURE_AUDITS, AUTH_FAILURE_WINDOW_MS)
+pub(crate) fn auth_audit_limit() -> crate::keyed_limit::FailureMap {
+    crate::keyed_limit::FailureMap::new(4096, AUTH_FAILURE_AUDITS, AUTH_FAILURE_WINDOW_MS)
 }
 
 /// Why a node speaking `node` is refused, for the person who runs it: both
