@@ -331,7 +331,7 @@ fn one_of(name: &str, v: &Option<String>, allowed: &[&str]) -> Result<(), String
     }
 }
 
-fn key(user: Option<&str>) -> String {
+pub(crate) fn key(user: Option<&str>) -> String {
     format!("settings:{}", user.unwrap_or("api-token"))
 }
 
@@ -485,13 +485,22 @@ impl Prefs {
 
     pub async fn load(m: &Master, user: Option<&str>) -> Prefs {
         let k = key(user);
-        m.inner
-            .mirror
-            .call(move |s| s.kv_get(&k))
-            .await
-            .ok()
-            .flatten()
-            .and_then(|v| serde_json::from_str(&v).ok())
+        Self::read(
+            m.inner
+                .mirror
+                .call(move |s| s.kv_get(&k))
+                .await
+                .ok()
+                .flatten()
+                .as_deref(),
+        )
+    }
+
+    /// A stored settings row as [`Prefs::load`] reads it: missing or
+    /// unreadable is the default.
+    pub fn read(stored: Option<&str>) -> Prefs {
+        stored
+            .and_then(|v| serde_json::from_str(v).ok())
             .unwrap_or_default()
     }
 

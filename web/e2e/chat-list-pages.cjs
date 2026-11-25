@@ -2,7 +2,9 @@
 // chats in no project come a page at a time as the sidebar scrolls, each
 // once; a project whose chats are older than every loaded page shows them
 // when it is opened (its own query) and loads its next page on "Show more";
-// a chat made meanwhile shows on top after the server's nudge.
+// a chat made meanwhile shows on top after the server's nudge. The project
+// page's pickers see past the loaded pages: a board card's linked chat and
+// every chat in no project for "Add a chat" (slice 4, review F5).
 // Usage: node web/e2e/chat-list-pages.cjs <path-to-harness-binary> [out-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -77,7 +79,8 @@ let PAGE = null;
     const r = await api('POST', '/api/projects', { name: 'Old project' });
     check(r.status === 200 || r.status === 201, `project: ${r.status}`);
     const pid = r.body.project_id;
-    for (let i = 0; i < 12; i++) await chat({ title: `Old ${i}`, project_id: pid });
+    const old = [];
+    for (let i = 0; i < 12; i++) old.push(await chat({ title: `Old ${i}`, project_id: pid }));
     for (let i = 0; i < 120; i++) await chat({ title: `Chat ${i}` });
     log('made 12 project chats and 120 loose ones');
 
@@ -129,6 +132,38 @@ let PAGE = null;
     const now = await p.locator(LOOSE).allInnerTexts();
     check(now.length === 121 && new Set(now).size === 121, `121 chats once each (${now.length})`);
     log('a new chat came on top after the nudge');
+
+    // The project page's pickers see past the loaded pages (slice 4, F5).
+    // A card linked to the project's oldest chat, which no first page holds.
+    const board = await api('GET', `/api/projects/${pid}/board`);
+    check(board.status === 200 && board.body.columns.length > 0, `board: ${board.status}`);
+    const card = await api('POST', `/api/projects/${pid}/board/cards`, { column_id: board.body.columns[0].column_id, title: 'Old work', session_id: old[0] });
+    check(card.status === 200, `card: ${card.status} ${JSON.stringify(card.body)}`);
+    await p.goto(`${URL_}#/p/${pid}/board`);
+    await p.reload();
+    await p.waitForSelector('.board-card .card-open');
+    await p.click('.board-card .card-open:has-text("Old work")');
+    const linked = await p.locator('.board-card.editing select').last().evaluate((el) => ({ value: el.value, text: el.selectedOptions[0]?.textContent }));
+    check(linked.value === old[0] && linked.text === 'Old 0', `the card's chat is offered: ${JSON.stringify(linked)}`);
+    await p.click('.board-card.editing button:text-is("Cancel")');
+    log('a card linked to an unloaded chat shows it');
+
+    // "Add a chat": every chat in no project, a page at a time.
+    await p.goto(`${URL_}#/p/${pid}/chats`);
+    const pick = '.field-inline select';
+    await p.waitForFunction((sel) => (document.querySelector(sel)?.options.length ?? 0) > 1, pick);
+    const firstPick = await p.locator(`${pick} option`).count();
+    check(firstPick === 51, `one page of loose chats first (${firstPick - 1})`);
+    for (let i = 0; i < 5 && (await p.locator('button:text-is("Older chats")').count()); i++) {
+      await p.click('button:text-is("Older chats")');
+      await sleep(250);
+    }
+    const offered = (await p.locator(`${pick} option`).allInnerTexts()).slice(1);
+    check(offered.length === 121 && new Set(offered).size === 121, `every loose chat once (${offered.length})`);
+    check(offered.includes('Chat 0') && !offered.some((t) => t.startsWith('Old ')), 'the oldest loose chat, no project chat');
+    await p.selectOption(pick, { label: 'Chat 0' });
+    await p.waitForFunction((sel) => ![...(document.querySelector(sel)?.options ?? [])].some((o) => o.textContent === 'Chat 0'), pick);
+    log('Add a chat offered all 121 loose chats and moved the oldest in');
 
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
     await b.close();

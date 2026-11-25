@@ -95,6 +95,10 @@ struct SessionsQuery {
     /// workspace): each project group of the sidebar pages on its own.
     #[serde(default)]
     project: Option<String>,
+    /// Only chats in no project (the project page's "Add a chat" list);
+    /// not with `project`.
+    #[serde(default, deserialize_with = "query_flag")]
+    loose: bool,
     /// Also the routine run chats the list leaves out once seen.
     #[serde(default, deserialize_with = "query_flag")]
     routine_runs: bool,
@@ -130,6 +134,13 @@ async fn list_sessions(
         ),
     };
     let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE as i64) as usize;
+    if q.loose && q.project.is_some() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "loose lists chats in no project: name no project".into(),
+        ));
+    }
+    let loose = q.loose;
     let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
     let project = match q.project.as_deref() {
         Some(id) => Some(projects::listed_in(&m, &who, scope.as_ref().map(|a| a.id()), id).await?),
@@ -148,7 +159,7 @@ async fn list_sessions(
                 Some(u) => Owner::User(u),
                 None => Owner::Everyone,
             };
-            let (rows, next) = s.sessions_page(&PageQuery {
+            let q = PageQuery {
                 owner,
                 workspace: workspace.as_deref(),
                 top_level: true,
@@ -156,7 +167,12 @@ async fn list_sessions(
                 hide_seen_runs,
                 after,
                 limit,
-            })?;
+            };
+            let (rows, next) = if loose {
+                s.loose_sessions_page(&q)?
+            } else {
+                s.sessions_page(&q)?
+            };
             let ids: Vec<SessionId> = rows.iter().map(|r| r.session_id).collect();
             let children = s.children_of(owner, &ids)?;
             let all: Vec<SessionId> = ids
@@ -234,10 +250,7 @@ async fn get_session(
     let row = visible_session(&m, &who, &id).await?;
     let blocked = ws::agentic_blocked(&m, &who, &row).await;
     let mut v = session_json(&row, blocked.as_deref());
-    v["project_id"] = json!(crate::projects::effective(
-        &crate::projects::links(&m).await?,
-        &row
-    ));
+    v["project_id"] = json!(crate::projects::effective_of(&m, &row).await?);
     crate::routines::annotate_one(&m, &mut v).await?;
     m.annotate_background(std::slice::from_mut(&mut v));
     // Whether custom connectors are off in this chat and why (`this_chat`,

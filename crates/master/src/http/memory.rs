@@ -318,17 +318,18 @@ async fn ws_standing(m: &Master, who: &Principal, id: &str) -> ApiResult<(String
     Ok((ws, may, a.can(Perm::Settings)))
 }
 
-/// Who started each chat, for a proposal's "from your chat".
-async fn chat_owners(
+/// Which of the facts' source chats are the caller's own, in one
+/// statement. Only a person's: the API token owns no chat here, so for it
+/// the set is empty (a proposal is "from your chat" to nobody).
+async fn own_sources(
     m: &Master,
-) -> ApiResult<std::collections::HashMap<harness_core::SessionId, Option<String>>> {
-    Ok(m.inner
-        .mirror
-        .call(|s| s.sessions())
-        .await?
-        .into_iter()
-        .map(|r| (r.session_id, r.owner_id))
-        .collect())
+    who: &Principal,
+    facts: &[&Fact],
+) -> ApiResult<std::collections::HashSet<harness_core::SessionId>> {
+    if who.user_id.is_none() {
+        return Ok(Default::default());
+    }
+    super::projects::own_sources(m, who, facts).await
 }
 
 /// Every account's name, for "added by"; one whose account is gone reads
@@ -396,15 +397,11 @@ async fn ws_list(
         .list(Some(&workspace_owner(&ws)))
         .await
         .map_err(memory_err)?;
-    let owners = chat_owners(&m).await?;
+    let own = own_sources(&m, &who, &facts.iter().collect::<Vec<_>>()).await?;
     let metas = crate::memory::proposal_metas(&m).await;
     let authors = crate::memory::authorships(&m).await;
     let names = names(&m).await?;
-    let mine = |f: &Fact| {
-        f.source_session
-            .and_then(|s| owners.get(&s).cloned().flatten())
-            .is_some_and(|o| who.user_id.as_deref() == Some(o.as_str()))
-    };
+    let mine = |f: &Fact| f.source_session.is_some_and(|s| own.contains(&s));
     let mut waiting = 0;
     let mut out = Vec::new();
     for f in &facts {
@@ -499,11 +496,10 @@ async fn ws_fact(
         .map_err(memory_err)?
         .filter(|f| f.owner_id.as_deref() == Some(workspace_owner(&ws).as_str()))
         .ok_or_else(not_found)?;
-    let owners = chat_owners(m).await?;
-    let own = f.status == Status::Proposed
-        && f.source_session
-            .and_then(|s| owners.get(&s).cloned().flatten())
-            .is_some_and(|o| who.user_id.as_deref() == Some(o.as_str()));
+    let own = f.status == Status::Proposed && {
+        let sources = own_sources(m, who, &[&f]).await?;
+        f.source_session.is_some_and(|s| sources.contains(&s))
+    };
     let sent = crate::memory::proposal_meta(m, &f.id).await.submitted;
     if own {
         return Ok((mem, f, WsRight::Own, admin, ws));

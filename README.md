@@ -3670,7 +3670,9 @@ A project groups chats around one piece of work inside a workspace:
 **Projects** in the sidebar → **+**, then pick a
 name, an icon, an accent and a board template. In a team workspace owners and
 admins manage projects; every member sees them and works in them with their
-own chats. Start chats from the project's page, or add a chat from the project
+own chats. Start chats from the project's page, add one of your chats in no
+project from its Chats tab ("Add a chat"; **Older chats** reaches further back),
+or add a chat from the project
 name after its title in the chat's header (the picker). Every message in a project's chats gets, after the history:
 the project's **instructions** (Settings tab, up to 4,000 characters), the
 project's confirmed **memory**, and the open cards of its **board**. Memory

@@ -16,7 +16,7 @@ vi.mock("../api", () => ({ api: { features: () => features() }, call: vi.fn(), H
 const get = vi.fn<(id: string) => Promise<ProjectDetail>>();
 vi.mock("../lib/projects", async (original) => {
   const m = await original<typeof import("../lib/projects")>();
-  return { ...m, projectsApi: { ...m.projectsApi, get: (id: string) => get(id) } };
+  return { ...m, projectsApi: { ...m.projectsApi, get: (id: string) => get(id), looseChats: () => Promise.resolve({ sessions: [], next: null }) } };
 });
 const list = vi.fn<(q: ArtifactQuery) => Promise<ArtifactPage>>();
 vi.mock("../lib/artifacts", async (original) => ({ ...(await original<typeof import("../lib/artifacts")>()), artifactsApi: { list: (q: ArtifactQuery) => list(q) } }));

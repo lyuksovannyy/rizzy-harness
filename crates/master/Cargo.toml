@@ -83,6 +83,9 @@ axum = { workspace = true, features = ["multipart"] }
 # Breaks a table under a running master (tests/it/plugins_http.rs: settings
 # that cannot be read fail closed); already the store's dependency.
 rusqlite.workspace = true
+# `Store::count_statements`: a request's statements, constant in the data
+# (FIX_PLAN 4.5 slice 4).
+harness-store = { workspace = true, features = ["test-support"] }
 harness-link.workspace = true
 async-trait.workspace = true
 harness-agent-native.workspace = true

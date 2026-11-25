@@ -2,7 +2,7 @@
 //! hold, their boards, saved board templates and project memory. Who may do
 //! what is decided by the helpers in `crate::projects`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -162,25 +162,19 @@ async fn managed(m: &Master, who: Principal, id: &str) -> ApiResult<(Principal, 
     Ok((who, row))
 }
 
-/// The caller's own top-level chats per project (each sees only their own).
-async fn own_chats(m: &Master, who: &Principal) -> ApiResult<HashMap<String, usize>> {
-    let owner = who.user_id.clone();
-    let rows = m
-        .inner
+/// The caller's own top-level chats per project (each sees only their own),
+/// counted in one statement; with `workspace`, that workspace's projects.
+async fn own_chats(
+    m: &Master,
+    who: &Principal,
+    workspace: Option<&str>,
+) -> ApiResult<HashMap<String, usize>> {
+    let who = who.clone();
+    let ws = workspace.map(str::to_string);
+    Ok(m.inner
         .mirror
-        .call(move |s| s.sessions_of(owner.as_deref()))
-        .await?;
-    let links = p::links(m).await?;
-    let mut n = HashMap::new();
-    for r in rows
-        .iter()
-        .filter(|r| who.can_see(r.owner_id.as_deref()) && !r.incognito && r.parent_id.is_none())
-    {
-        if let Some(pid) = p::effective(&links, r) {
-            *n.entry(pid.to_string()).or_default() += 1;
-        }
-    }
-    Ok(n)
+        .call(move |s| s.project_chat_counts(who.chat_scope(), ws.as_deref()))
+        .await?)
 }
 
 fn summary(r: &ProjectRow, chats: usize) -> Value {
@@ -202,7 +196,10 @@ fn summary(r: &ProjectRow, chats: usize) -> Value {
 }
 
 async fn detail_json(m: &Master, who: &Principal, a: &Access, r: &ProjectRow) -> ApiResult<Value> {
-    let chats = own_chats(m, who).await?.remove(&r.project_id).unwrap_or(0);
+    let chats = own_chats(m, who, Some(&r.workspace_id))
+        .await?
+        .remove(&r.project_id)
+        .unwrap_or(0);
     let mut v = summary(r, chats);
     v["instructions"] = json!(r.instructions);
     v["settings"] = json!(ProjectSettings::read(&r.settings));
@@ -231,7 +228,7 @@ async fn list(
         .mirror
         .call(move |s| s.projects(filter.as_deref()))
         .await?;
-    let counts = own_chats(&m, &who).await?;
+    let counts = own_chats(&m, &who, ws.as_deref()).await?;
     let can_create = scope.as_ref().is_some_and(p::may_manage);
     // Projects whose folder is being cloned (or whose clone failed, for its
     // starter): apart from `projects`, so that nothing takes one for a
@@ -621,15 +618,22 @@ pub(super) async fn for_new_chat(
 /// only to whoever may see that chat; others see "private" (T10).
 async fn board_json(m: &Master, who: &Principal, project: &str) -> ApiResult<Value> {
     let pid = project.to_string();
-    let (cols, cards) = m.inner.mirror.call(move |s| s.board(&pid)).await?;
-    let rows: HashMap<String, SessionRow> = m
+    let viewer = who.clone();
+    // The cards' chats only, in the same call: the title of the caller's
+    // own, "private" for anyone else's (one statement, whatever the board).
+    let (cols, cards, titles) = m
         .inner
         .mirror
-        .call(|s| s.sessions())
-        .await?
-        .into_iter()
-        .map(|r| (r.session_id.to_string(), r))
-        .collect();
+        .call(move |s| {
+            let (cols, cards) = s.board(&pid)?;
+            let ids: Vec<SessionId> = cards
+                .iter()
+                .filter_map(|k| k.session_id.as_deref()?.parse().ok())
+                .collect();
+            let titles = s.chat_titles_of(viewer.chat_scope(), &ids)?;
+            Ok::<_, StoreError>((cols, cards, titles))
+        })
+        .await?;
     let columns: Vec<Value> = cols
         .iter()
         .map(|c| {
@@ -637,11 +641,13 @@ async fn board_json(m: &Master, who: &Principal, project: &str) -> ApiResult<Val
                 .iter()
                 .filter(|k| k.column_id == c.column_id)
                 .map(|k| {
-                    let chat = match k.session_id.as_deref().and_then(|s| rows.get(s)) {
-                        Some(r) if who.can_see(r.owner_id.as_deref()) => {
-                            json!({ "session_id": r.session_id, "title": r.title })
-                        }
-                        Some(_) => json!("private"),
+                    let linked = k
+                        .session_id
+                        .as_deref()
+                        .and_then(|s| s.parse::<SessionId>().ok());
+                    let chat = match linked.and_then(|id| Some((id, titles.get(&id)?))) {
+                        Some((id, Some(title))) => json!({ "session_id": id, "title": title }),
+                        Some((_, None)) => json!("private"),
                         None => Value::Null,
                     };
                     json!({
@@ -766,8 +772,7 @@ async fn check_card_chat(m: &Master, who: &Principal, project: &str, sid: &str) 
     let row = visible_session(m, who, sid)
         .await
         .map_err(|_| bad("link one of your chats in this project"))?;
-    let links = p::links(m).await?;
-    if p::effective(&links, &row) != Some(project) {
+    if p::effective_of(m, &row).await?.as_deref() != Some(project) {
         return Err(bad("link one of your chats in this project"));
     }
     Ok(())
@@ -1008,14 +1013,25 @@ async fn delete_template(
 
 // ---- project memory ----
 
-/// Who wrote each chat, for proposals (shown only to their chat's owner).
-async fn chat_owners(m: &Master) -> ApiResult<HashMap<SessionId, Option<String>>> {
+/// Which of the facts' source chats are the caller's (the API token: every
+/// one that exists), in one statement: a proposal is shown to its chat's
+/// owner, and the source chat is named only to them.
+pub(super) async fn own_sources(
+    m: &Master,
+    who: &Principal,
+    facts: &[&harness_memory::Fact],
+) -> ApiResult<HashSet<SessionId>> {
+    let ids: Vec<SessionId> = facts.iter().filter_map(|f| f.source_session).collect();
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let who = who.clone();
     Ok(m.inner
         .mirror
-        .call(|s| s.sessions())
+        .call(move |s| s.chat_titles_of(who.chat_scope(), &ids))
         .await?
         .into_iter()
-        .map(|r| (r.session_id, r.owner_id))
+        .filter_map(|(id, title)| title.map(|_| id))
         .collect())
 }
 
@@ -1026,7 +1042,7 @@ async fn chat_owners(m: &Master) -> ApiResult<HashMap<SessionId, Option<String>>
 fn proposal_visible(
     who: &Principal,
     f: &harness_memory::Fact,
-    owners: &HashMap<SessionId, Option<String>>,
+    own: &HashSet<SessionId>,
     decides: bool,
     metas: &HashMap<String, crate::memory::ProposalMeta>,
 ) -> bool {
@@ -1036,10 +1052,7 @@ fn proposal_visible(
     match who.user_id.as_deref() {
         None => true,
         Some(_) if decides && sent => true,
-        Some(me) => f
-            .source_session
-            .and_then(|s| owners.get(&s).cloned().flatten())
-            .is_some_and(|o| o == me),
+        Some(_) => f.source_session.is_some_and(|s| own.contains(&s)),
     }
 }
 
@@ -1051,29 +1064,30 @@ fn decides(a: &Access, row: &ProjectRow) -> bool {
 /// A fact as the caller sees it: the source chat only when it is theirs;
 /// a proposal says what it would replace or drop (`proposal`).
 struct Credits {
-    owners: HashMap<SessionId, Option<String>>,
+    /// The facts' source chats that are the caller's.
+    own: HashSet<SessionId>,
     metas: HashMap<String, crate::memory::ProposalMeta>,
     authors: HashMap<String, crate::memory::Authorship>,
     names: HashMap<String, String>,
 }
 
-async fn credits(m: &Master) -> ApiResult<Credits> {
+async fn credits(
+    m: &Master,
+    who: &Principal,
+    facts: &[&harness_memory::Fact],
+) -> ApiResult<Credits> {
     Ok(Credits {
-        owners: chat_owners(m).await?,
+        own: own_sources(m, who, facts).await?,
         metas: crate::memory::proposal_metas(m).await,
         authors: crate::memory::authorships(m).await,
         names: super::memory::names(m).await?,
     })
 }
 
-fn fact_json(who: &Principal, f: &harness_memory::Fact, c: &Credits) -> Value {
-    let owners = &c.owners;
+fn fact_json(f: &harness_memory::Fact, c: &Credits) -> Value {
     let mut v = json!(f);
     super::memory::credit(&mut v, f, &c.authors, &c.metas, &c.names);
-    let own = f
-        .source_session
-        .and_then(|s| owners.get(&s))
-        .is_some_and(|o| who.can_see(o.as_deref()));
+    let own = f.source_session.is_some_and(|s| c.own.contains(&s));
     if !own {
         v["source_session"] = Value::Null;
     }
@@ -1091,7 +1105,7 @@ async fn list_memory(
         .list(Some(&p::memory_owner(&row.project_id)))
         .await
         .map_err(memory_err)?;
-    let c = credits(&m).await?;
+    let c = credits(&m, &who, &facts.iter().collect::<Vec<_>>()).await?;
     let decides = decides(&a, &row);
     let shown: Vec<Value> = facts
         .iter()
@@ -1099,9 +1113,9 @@ async fn list_memory(
         // shown to every member, restorable by those who may manage.
         .filter(|f| {
             f.status != harness_memory::Status::Proposed
-                || proposal_visible(&who, f, &c.owners, decides, &c.metas)
+                || proposal_visible(&who, f, &c.own, decides, &c.metas)
         })
-        .map(|f| fact_json(&who, f, &c))
+        .map(|f| fact_json(f, &c))
         .collect();
     Ok(Json(json!({ "memories": shown })))
 }
@@ -1158,13 +1172,13 @@ async fn own_project_fact(
     let (who, row, a) = visible(m, who, id).await?;
     let mem = memory_store(m)?;
     let f = mem.get(fact).await.map_err(memory_err)?;
-    let owners = chat_owners(m).await?;
+    let own = own_sources(m, &who, &f.iter().collect::<Vec<_>>()).await?;
     let metas = crate::memory::proposal_metas(m).await;
     let f = match f {
         Some(f)
             if f.owner_id.as_deref() == Some(p::memory_owner(&row.project_id).as_str())
                 && (f.status != harness_memory::Status::Proposed
-                    || proposal_visible(&who, &f, &owners, decides(&a, &row), &metas)) =>
+                    || proposal_visible(&who, &f, &own, decides(&a, &row), &metas)) =>
         {
             f
         }
@@ -1213,10 +1227,10 @@ async fn update_memory(
         crate::memory::keep_proposal(&m, &*mem, &cur, who.user_id.as_deref())
             .await
             .map_err(memory_err)?;
-        let c = credits(&m).await?;
         let now = mem.get(&fact).await.map_err(memory_err)?;
+        let c = credits(&m, &who, &now.iter().collect::<Vec<_>>()).await?;
         return Ok(Json(match now {
-            Some(f) => fact_json(&who, &f, &c),
+            Some(f) => fact_json(&f, &c),
             None => json!({ "ok": true }),
         }));
     }
@@ -1242,8 +1256,8 @@ async fn update_memory(
         memory_changed(&m, after);
     }
     memory_changed(&m, before);
-    let c = credits(&m).await?;
-    Ok(Json(fact_json(&who, &f, &c)))
+    let c = credits(&m, &who, &[&f]).await?;
+    Ok(Json(fact_json(&f, &c)))
 }
 
 async fn delete_memory(

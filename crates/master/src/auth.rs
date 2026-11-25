@@ -166,6 +166,16 @@ impl Principal {
             Some(me) => owner_id == Some(me.as_str()),
         }
     }
+
+    /// Whose chats this principal reads, as the store's scoped queries take
+    /// it: the same rule as [`Principal::can_see`], in the query's `WHERE`.
+    pub fn chat_scope(&self) -> harness_store::session_pages::Owner<'_> {
+        use harness_store::session_pages::Owner;
+        match &self.user_id {
+            None => Owner::Everyone,
+            Some(me) => Owner::User(me),
+        }
+    }
 }
 
 pub fn random_hex(bytes: usize) -> String {

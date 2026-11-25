@@ -159,14 +159,25 @@ async fn detail(m: &Master, who: &Principal, a: &Access) -> ApiResult<Json<Value
 /// account's ceiling, so an owner at a `none` ceiling shows `none`.
 pub(super) async fn member_json(m: &Master, r: &MemberRow, with_levels: bool) -> Value {
     let prefs = crate::prefs::Prefs::load(m, Some(&r.user_id)).await;
+    let avatar = super::profile::image_version(m, &r.user_id, super::profile::Slot::Avatar).await;
+    member_row_json(r, prefs.display_name, avatar, with_levels)
+}
+
+/// [`member_json`] from what the roster read for every member at once.
+fn member_row_json(
+    r: &MemberRow,
+    display_name: Option<String>,
+    avatar: Option<String>,
+    with_levels: bool,
+) -> Value {
     let owner = r.role_id == Role::Owner.id();
     let mut v = json!({
         "user_id": r.user_id,
         "username": r.username,
-        "display_name": prefs.display_name,
+        "display_name": display_name,
         // Its version, for `/api/users/{id}/avatar?v=` (members see each
         // other's: PLAN.md T74).
-        "avatar": super::profile::image_version(m, &r.user_id, super::profile::Slot::Avatar).await,
+        "avatar": avatar,
         "role": r.role_id,
         "joined_ms": r.joined_ms,
     });
@@ -441,17 +452,13 @@ async fn delete_workspace(m: &Master, ws: String) -> ApiResult<Option<Vec<String
         .call(move |s| {
             let members: Vec<String> = s.members(&ws)?.into_iter().map(|r| r.user_id).collect();
             // The chats in it, read before it goes and they return to their
-            // owners' Personal workspaces (review L2-3).
-            let mut chats = Vec::new();
-            for u in &members {
-                chats.extend(
-                    s.sessions_of(Some(u))?
-                        .into_iter()
-                        .filter(|r| r.owner_id.as_deref() == Some(u.as_str()))
-                        .filter(|r| r.workspace_id.as_deref() == Some(ws.as_str()))
-                        .map(|r| r.session_id),
-                );
-            }
+            // owners' Personal workspaces (review L2-3): one statement for
+            // every member.
+            let chats: Vec<_> = s
+                .sessions_owned_by(&members, Some(&ws))?
+                .into_iter()
+                .map(|c| (c.row.session_id, c.row.node_id))
+                .collect();
             Ok::<_, StoreError>(s.delete_workspace(&ws)?.then_some((members, chats)))
         })
         .await?;
@@ -483,12 +490,31 @@ pub(super) async fn members(
     // else, only their own (review L2-7).
     let all = a.can(Perm::Members);
     let ws = a.id().to_string();
-    let rows = m.inner.mirror.call(move |s| s.members(&ws)).await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for r in &rows {
-        let own = who.user_id.as_deref() == Some(r.user_id.as_str());
-        out.push(member_json(&m, r, all || own).await);
-    }
+    // The members, their settings rows and their avatars: three statements
+    // in one call, whatever the roster's size.
+    let avatar = super::profile::Slot::Avatar.name();
+    let (rows, prefs, avatars) = m
+        .inner
+        .mirror
+        .call(move |s| {
+            let rows = s.members(&ws)?;
+            let users: Vec<String> = rows.iter().map(|r| r.user_id.clone()).collect();
+            let keys: Vec<String> = users.iter().map(|u| crate::prefs::key(Some(u))).collect();
+            let prefs = s.kv_get_many(&keys)?;
+            let avatars = s.profile_image_shas(&users, avatar)?;
+            Ok::<_, StoreError>((rows, prefs, avatars))
+        })
+        .await?;
+    let out: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let own = who.user_id.as_deref() == Some(r.user_id.as_str());
+            let stored = prefs.get(&crate::prefs::key(Some(&r.user_id)));
+            let display = crate::prefs::Prefs::read(stored.map(String::as_str)).display_name;
+            let pic = avatars.get(&r.user_id).map(|s| super::profile::version(s));
+            member_row_json(r, display, pic, all || own)
+        })
+        .collect();
     Ok(Json(json!({ "members": out })))
 }
 
@@ -638,12 +664,10 @@ pub(super) async fn remove_member(
     let theirs: Vec<_> = m
         .inner
         .mirror
-        .call(move |s| s.sessions_of(Some(&uid)))
+        .call(move |s| s.sessions_owned_by(&[uid], Some(&ws)))
         .await?
         .into_iter()
-        .filter(|r| r.owner_id.as_deref() == Some(user_id.as_str()))
-        .filter(|r| r.workspace_id.as_deref() == Some(ws.as_str()))
-        .map(|r| r.session_id)
+        .map(|c| (c.row.session_id, c.row.node_id))
         .collect();
     let (ws, uid) = (a.id().to_string(), user_id.clone());
     // The store refuses to take the last enabled owner away, and a removal
