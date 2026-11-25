@@ -840,7 +840,7 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
         // The copies go beside the data, on its own disk.
         let need: u64 = present
             .iter()
-            .flat_map(|n| ["", "-wal", "-shm"].map(|s| data.join(format!("{n}{s}"))))
+            .flat_map(|n| ["", "-wal", "-shm", "-journal"].map(|s| data.join(format!("{n}{s}"))))
             .filter_map(|p| fs::symlink_metadata(p).ok())
             .map(|m| m.len())
             .sum();
@@ -850,7 +850,7 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
         let into = staging.dir.join("db");
         mkdir_private(&into)?;
         for n in &present {
-            for suffix in ["", "-wal", "-shm"] {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
                 let f = format!("{n}{suffix}");
                 let (mut src, _) = match open_regular(&data.join(&f)) {
                     Ok(v) => v,

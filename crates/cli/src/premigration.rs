@@ -69,10 +69,43 @@ fn versions(data: &Path) -> anyhow::Result<BTreeMap<&'static str, (i64, i64)>> {
         if !p.is_file() {
             continue;
         }
-        let v = db::user_version(&p).with_context(|| format!("reading {name}'s schema version"))?;
+        let v = match db::user_version(&p) {
+            Ok(v) => v,
+            // A hot journal or a WAL without its index (an interrupted
+            // write): a read-only reader may not read it, so the version
+            // is read from a private copy, recovered there.
+            Err(e) if db::needs_writer(&e) => probe_version(data, name)?,
+            Err(e) => return Err(e).with_context(|| format!("reading {name}'s schema version")),
+        };
         out.insert(name, (v, schema.steps.len() as i64));
     }
+    remove_any(&data.join(SET_PARTIAL))?;
     Ok(out)
+}
+
+/// The version of `name` as SQLite's recovery would leave it, read from a
+/// byte copy in `pre-migration.partial/probe/` (the source is not written).
+fn probe_version(data: &Path, name: &str) -> anyhow::Result<i64> {
+    let probe = data.join(SET_PARTIAL).join("probe");
+    remove_any(&data.join(SET_PARTIAL))?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(&probe)?;
+    let cancel = AtomicBool::new(false);
+    let mut buf = vec![0u8; crate::backup::BUF];
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let f = format!("{name}{suffix}");
+        let (mut src, _) = match open_regular(&data.join(&f)) {
+            Ok(x) => x,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {f}")),
+        };
+        let mut out = create_private(&probe.join(&f))?;
+        copy_stream(&mut src, &mut out, &mut buf, &cancel)?;
+    }
+    db::user_version_private_copy(&probe.join(name))
+        .with_context(|| format!("reading {name}'s schema version from a copy"))
 }
 
 /// At a start, holding the data directory's lock and before any database
@@ -115,7 +148,7 @@ pub fn before_start(data: &Path, without_copy: bool) -> anyhow::Result<Option<Ma
     // snapshot from it.
     let size: u64 = v
         .keys()
-        .flat_map(|n| ["", "-wal", "-shm"].map(|s| data.join(format!("{n}{s}"))))
+        .flat_map(|n| ["", "-wal", "-shm", "-journal"].map(|s| data.join(format!("{n}{s}"))))
         .filter_map(|p| fs::symlink_metadata(p).ok())
         .map(|m| m.len())
         .sum();
@@ -185,7 +218,7 @@ fn write_set(data: &Path, v: &BTreeMap<&'static str, (i64, i64)>) -> anyhow::Res
     let mut buf = vec![0u8; crate::backup::BUF];
     let mut files = Vec::new();
     for name in v.keys() {
-        for suffix in ["", "-wal", "-shm"] {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
             let f = format!("{name}{suffix}");
             let (mut src, _) = match open_regular(&data.join(&f)) {
                 Ok(x) => x,
