@@ -5515,9 +5515,14 @@ at version 0 with tables) first copies **all** the databases, as they are,
 into `pre-migration/` in the data directory (0700, files 0600, with a
 manifest). That copy is the rollback point of **this** upgrade:
 
-- A start retried after a failed one (a restart loop, or you trying again)
-  keeps it and resumes the migration; it never replaces it with the
-  half-migrated state.
+- A start retried while a migration is under way (some databases already
+  upgraded: a restart loop, or you trying again) keeps it and resumes the
+  migration; it never replaces it with the half-migrated state.
+- A start that finds every database still at its old version makes a fresh
+  copy, even if an older one exists: the older build may have written since
+  (after a rollback, say), and an old copy would lose that.
+- After an upgrade that ran well, the copy is only a way back: a database
+  you delete on purpose is made new as always.
 - A copy is made only when the databases are at one consistent version.
   If they are mixed and no copy of this upgrade matches them, the start
   stops: no honest rollback point can be made.
@@ -5557,10 +5562,20 @@ which finishes from the copy (a rollback never changes it). If only an
 interrupted copy's leftovers are there (`pre-migration.old`,
 `pre-migration.partial`), it says so.
 
-To return to the upgraded state instead, stop, move the
-`*.failed-upgrade-<time>` files back to their names and the shard folders of
-`blobs.failed-upgrade-<time>/` back into `blobs/`. Once the older build runs
-well, delete them. A stored file deleted after the upgrade is gone though a
+Everything one rollback sets aside carries one `<time>` (a rollback run again
+after an interruption reuses it), and the rollback lists it at the end. To
+return to the upgraded state instead, stop the server, then (with that time):
+
+```bash
+cd ~/.local/share/rizzy-harness && T=<time> && \
+(cd "blobs.failed-upgrade-$T" && find . -type f | while read -r f; do mkdir -p "../blobs/${f%/*}" && mv "$f" "../blobs/$f"; done) && \
+rm -r "blobs.failed-upgrade-$T" && \
+for f in *.db*.failed-upgrade-$T; do mv "$f" "${f%.failed-upgrade-$T}"; done
+```
+
+(moving whole shard folders fails where the shard exists, which is the
+usual case; this moves the files). Once the older build runs well, delete the
+`*.failed-upgrade-<time>` files and the folder instead. A stored file deleted after the upgrade is gone though a
 restored row names it (its download fails; an Artifact version shows as
 failed). Chats and changes made after the upgrade are lost with the rollback.
 A master and its remote nodes are rolled back separately: see the design note.

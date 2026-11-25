@@ -543,6 +543,7 @@ fn a_rollback_killed_at_any_step_can_be_run_again() {
             serve_refused(&data, &[FAIL_NODE]),
             "restore --pre-migration",
         );
+        let upgraded = versions(&data);
         let pause = data.parent().unwrap().join(format!("pause-{step}"));
         let mut child = cmd(
             &data,
@@ -591,8 +592,54 @@ fn a_rollback_killed_at_any_step_can_be_run_again() {
             !aside.is_empty(),
             "{step}: the stored file was not kept aside"
         );
+        // N3: one stamp for everything set aside, the aside databases at
+        // the upgraded versions, and the README's way back works.
+        let stamps: std::collections::BTreeSet<String> = std::fs::read_dir(&data)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .split_once(".failed-upgrade-")
+                    .map(|(_, t)| t.to_string())
+            })
+            .collect();
+        assert_eq!(stamps.len(), 1, "{step}: stamps {stamps:?}");
+        let t = stamps.iter().next().unwrap().clone();
+        for (n, v) in &upgraded {
+            let a = data.join(format!("{n}.failed-upgrade-{t}"));
+            assert_eq!(version(&a), *v, "{step}: {n} set aside");
+        }
+        let o = Command::new("sh")
+            .arg("-c")
+            .arg(back_to_upgraded(&data, &t))
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{step}: {}", text(&o));
+        assert_eq!(
+            versions(&data),
+            upgraded,
+            "{step}: back to the upgraded state"
+        );
+        assert!(
+            data.join("blobs/aa/0123456789abcdef0123456789abcdaa.rzb")
+                .exists(),
+            "{step}: the stored file is back"
+        );
         drop(dir);
     }
+}
+
+/// The README's commands to return to the upgraded state after a rollback
+/// (kept word for word in step with README "Rolling an upgrade back").
+fn back_to_upgraded(data: &Path, t: &str) -> String {
+    format!(
+        "cd '{}' && T={t} && \
+         (cd \"blobs.failed-upgrade-$T\" && find . -type f | while read -r f; do mkdir -p \"../blobs/${{f%/*}}\" && mv \"$f\" \"../blobs/$f\"; done) && \
+         rm -r \"blobs.failed-upgrade-$T\" && \
+         for f in *.db*.failed-upgrade-$T; do mv \"$f\" \"${{f%.failed-upgrade-$T}}\"; done",
+        data.display()
+    )
 }
 
 /// B2c: a start on a master.db with no stored-file rows while files lie in
@@ -633,5 +680,84 @@ fn missing_databases_beside_a_set_are_no_first_run() {
     let t = refused(serve_refused(&data, &[]), "stored files");
     assert!(!data.join("master.db").exists(), "{t}");
     let _ = blob_files(&data);
+    drop(dir);
+}
+
+/// N1: rolled back, the older build writes (a row and a stored file, made
+/// here directly at the old version); the same upgrade fails again and is
+/// rolled back again: what the older build wrote is still there (a fresh
+/// set was made, not the stale one kept).
+#[test]
+fn a_second_rollback_keeps_what_the_older_build_wrote() {
+    let (dir, data) = old_data();
+    refused(
+        serve_refused(&data, &[FAIL_NODE]),
+        "restore --pre-migration",
+    );
+    ok(run(&data, &["restore", "--pre-migration", "--yes"], &[]));
+    let id = "0123456789abcdef0123456789abcdbb";
+    let c = rusqlite::Connection::open(data.join("master.db")).unwrap();
+    c.execute_batch(&format!(
+        "INSERT INTO kv (k, v) VALUES ('older-build', 'wrote this');\
+         INSERT INTO blobs (blob_id, owner_id, sha256, size, kind, format, mime, display, key, created_ms) \
+         VALUES ('{id}', NULL, 'x', 1, 'image', 'png', 'image/png', 'inline', x'00', 0);"
+    ))
+    .unwrap();
+    drop(c);
+    let file = data.join("blobs/bb").join(format!("{id}.rzb"));
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"x").unwrap();
+    refused(
+        serve_refused(&data, &[FAIL_NODE]),
+        "restore --pre-migration",
+    );
+    ok(run(&data, &["restore", "--pre-migration", "--yes"], &[]));
+    let c = rusqlite::Connection::open(data.join("master.db")).unwrap();
+    let v: Option<String> = c
+        .query_row("SELECT v FROM kv WHERE k = 'older-build'", [], |r| r.get(0))
+        .ok();
+    assert_eq!(
+        v.as_deref(),
+        Some("wrote this"),
+        "the older build's row was lost"
+    );
+    assert!(
+        file.exists(),
+        "the older build's stored file was moved away"
+    );
+    for (n, v) in versions(&data) {
+        assert_eq!(v, 1, "{n}");
+    }
+    drop(dir);
+}
+
+/// N2: after a good upgrade, a database deleted on purpose is made again
+/// by the start, set or no set.
+#[test]
+fn after_a_good_upgrade_a_deleted_database_is_made_again() {
+    let (dir, data) = old_data();
+    drop(real::serve(&data));
+    std::fs::remove_file(data.join("chat.db")).unwrap();
+    for f in ["chat.db-wal", "chat.db-shm"] {
+        let _ = std::fs::remove_file(data.join(f));
+    }
+    drop(real::serve(&data));
+    assert_eq!(version(&data.join("chat.db")), current());
+    drop(dir);
+}
+
+/// N2: mid-upgrade, a missing database is refused with every way out.
+#[test]
+fn mid_upgrade_a_missing_database_is_refused_with_every_way_out() {
+    let (dir, data) = old_data();
+    refused(
+        serve_refused(&data, &[FAIL_NODE]),
+        "restore --pre-migration",
+    );
+    std::fs::remove_file(data.join("chat.db")).unwrap();
+    let t = refused(serve_refused(&data, &[]), "restore --pre-migration");
+    for s in ["put chat.db back", "delete pre-migration/"] {
+        assert!(t.contains(s), "{s} missing in {t}");
+    }
     drop(dir);
 }

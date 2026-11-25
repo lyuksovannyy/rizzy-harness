@@ -1294,6 +1294,13 @@ async fn doctor(dir: &Path) -> anyhow::Result<()> {
     if let Some(l) = premigration::doctor_line(dir) {
         println!("info  {l}");
     }
+    if let Some(n) = premigration::unclaimed_blobs(dir) {
+        println!(
+            "warn  stored files: master.db names none, yet blobs/ holds {n}: the server keeps \
+             them (it never wipes the store from an empty table); restore the master.db they \
+             belong to, or move them away if they are not wanted"
+        );
+    }
     for db in ["master.db", "chat.db", "node.db"] {
         let mark = dir.join(format!("{db}{}", harness_store::TRUNCATE_PENDING));
         if std::fs::symlink_metadata(&mark).is_ok() {

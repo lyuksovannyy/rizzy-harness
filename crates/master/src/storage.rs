@@ -327,6 +327,11 @@ fn has_files(root: &Path) -> bool {
 /// not belong to these files (a restore, a rollback or a copy gone wrong):
 /// every file is kept, and the log says so, instead of wiping the store.
 fn refuse_wipe(root: &Path) {
+    // Once per process: the hourly sweep finds the same files every hour.
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if SAID.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     tracing::error!(
         store = %root.display(),
         "master.db names no stored file, yet the store holds files: they are NOT deleted. The \

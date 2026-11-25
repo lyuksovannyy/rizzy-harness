@@ -1787,8 +1787,7 @@ pub fn refuse_restoring(dir: &Path) -> anyhow::Result<()> {
 /// wrote it: that command, and only it, may then run again.
 pub const ROLLBACK_MARK: &str = "rollback from pre-migration\n";
 
-/// Whether `RESTORING` is a rollback's.
-pub fn rollback_marked(dir: &Path) -> bool {
+fn marker_text(dir: &Path) -> Option<String> {
     open_regular(&dir.join(RESTORING))
         .ok()
         .and_then(|(mut f, m)| {
@@ -1797,7 +1796,22 @@ pub fn rollback_marked(dir: &Path) -> bool {
                 io::Read::read_to_string(&mut f, &mut s).ok().map(|_| s)
             })?
         })
-        .is_some_and(|s| s == ROLLBACK_MARK)
+}
+
+/// Whether `RESTORING` is a rollback's.
+pub fn rollback_marked(dir: &Path) -> bool {
+    marker_text(dir).is_some_and(|s| s.starts_with(ROLLBACK_MARK))
+}
+
+/// The time stamp a rollback's `RESTORING` names (what it sets aside is
+/// named with it; a rerun reuses it).
+pub fn rollback_stamp(dir: &Path) -> Option<i64> {
+    marker_text(dir)?
+        .strip_prefix(ROLLBACK_MARK)?
+        .trim()
+        .strip_prefix("stamp ")?
+        .parse()
+        .ok()
 }
 
 /// What to do about an interrupted restore, in words.

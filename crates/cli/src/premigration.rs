@@ -197,6 +197,42 @@ fn blob_files(data: &Path) -> BTreeMap<String, PathBuf> {
     out
 }
 
+/// How many stored files a `blobs`-shaped folder holds.
+fn blob_files_in(root: &Path) -> usize {
+    let Ok(shards) = fs::read_dir(root) else {
+        return 0;
+    };
+    shards
+        .flatten()
+        .filter_map(|s| fs::read_dir(s.path()).ok())
+        .map(|f| f.flatten().count())
+        .sum()
+}
+
+/// Whether `p` holds exactly the set's copy `e` (size, then SHA-256).
+fn same_bytes(p: &Path, e: &Entry) -> anyhow::Result<bool> {
+    let Ok((mut f, md)) = open_regular(p) else {
+        return Ok(false);
+    };
+    if md.len() != e.size {
+        return Ok(false);
+    }
+    let mut buf = vec![0u8; crate::backup::BUF];
+    let (_, h) = copy_stream(&mut f, &mut io::sink(), &mut buf, &AtomicBool::new(false))?;
+    Ok(h == e.sha256)
+}
+
+/// For `doctor`: `master.db` names no stored file while files lie in
+/// `blobs/` (the sweeps then keep them); how many files.
+pub fn unclaimed_blobs(data: &Path) -> Option<usize> {
+    if !data.join("master.db").is_file() {
+        return None;
+    }
+    let ids = db::blob_ids(&data.join("master.db")).ok()?;
+    let files = blob_files(data).len();
+    (ids.is_empty() && files > 0).then_some(files)
+}
+
 fn has_aside(data: &Path) -> bool {
     fs::read_dir(data).is_ok_and(|rd| {
         rd.flatten()
@@ -231,7 +267,15 @@ pub fn before_start(data: &Path, role: &str, without_copy: bool) -> anyhow::Resu
         harness_core::BRAND,
         data.display()
     );
-    if let Some(s) = &set {
+    // Every present database at the set's target: that upgrade ran well,
+    // and the set is only a way back, no reason to refuse anything.
+    let upgraded = set.as_ref().is_some_and(|s| {
+        v.iter().all(|(n, l)| match s.target.get(*n) {
+            Some(t) => l.version == *t,
+            None => l.version == l.want,
+        })
+    });
+    if let Some(s) = set.as_ref().filter(|_| !upgraded) {
         let missing: Vec<&str> = s
             .before
             .keys()
@@ -239,13 +283,16 @@ pub fn before_start(data: &Path, role: &str, without_copy: bool) -> anyhow::Resu
             .filter(|n| !v.contains_key(n))
             .collect();
         if !missing.is_empty() {
+            let gone = missing.join(", ");
             bail!(
-                "{} lacks {} although {}/ holds a copy of them from before an upgrade: this is \
-                 no first run but a rollback that did not finish, or a lost file. Nothing was \
-                 started. Run {rollback} to put the copy back (it says what it will do first)",
-                data.display(),
-                missing.join(", "),
-                SET
+                "{} lacks {gone} while an upgrade is under way (some databases are at the \
+                 versions from before it, others not) and {SET}/ holds a copy from before it: \
+                 nothing was started. Ways out: put {gone} back if you have it; or run \
+                 {rollback} to return to the older build with that copy (it says what it will do \
+                 first); or, if you do not want to roll back, delete {SET}/ and start again \
+                 (then {gone} is made new and empty, and the upgrade goes on without a way \
+                 back)",
+                data.display()
             );
         }
     }
@@ -257,14 +304,15 @@ pub fn before_start(data: &Path, role: &str, without_copy: bool) -> anyhow::Resu
         if has_aside(data) {
             found.push("files a rollback put aside (*.failed-upgrade-*)");
         }
-        if fs::symlink_metadata(data.join(SET)).is_ok() {
-            found.push("pre-migration/");
+        if !upgraded && fs::symlink_metadata(data.join(SET)).is_ok() {
+            found.push("pre-migration/ (an upgrade under way)");
         }
         if !found.is_empty() {
             bail!(
                 "{} has no master.db but holds {}: this is no first run, so no new server is \
-                 made over it. If an upgrade's rollback did not finish, run {rollback}; \
-                 otherwise put the right master.db back, or move those away to start afresh",
+                 made over it. Ways out: put the right master.db back; or, if an upgrade's \
+                 rollback did not finish, run {rollback}; or move those away (and delete \
+                 pre-migration/ if you do not want to roll back) to start afresh",
                 data.display(),
                 found.join(", ")
             );
@@ -286,7 +334,12 @@ pub fn before_start(data: &Path, role: &str, without_copy: bool) -> anyhow::Resu
     let shown = shown.join(", ");
     // A set for this very upgrade, matching what the databases show (and
     // intact: every file checked).
-    if let Some(s) = set.as_ref().filter(|_| read_set(data, true).is_ok()) {
+    // Kept only while a migration is under way: some database left its
+    // `before` version (an older build refuses such a directory, so
+    // nothing can have changed the others since). With every database
+    // still at `before`, a fresh set is made below instead: an older build
+    // may have written since the set was made.
+    if let Some(s) = &set {
         let for_this = s
             .target
             .iter()
@@ -295,7 +348,22 @@ pub fn before_start(data: &Path, role: &str, without_copy: bool) -> anyhow::Resu
             Some(b) => l.version == *b || Some(&l.version) == s.target.get(*n),
             None => l.version == l.want,
         });
-        if for_this && matches {
+        let under_way = v
+            .iter()
+            .any(|(n, l)| s.before.get(*n).is_some_and(|b| l.version != *b));
+        let intact = for_this && matches && under_way && {
+            let bytes: u64 = s.files.iter().map(|e| e.size).sum();
+            tracing::info!(
+                set = %data.join(SET).display(),
+                size = %mb(bytes),
+                "an upgrade is under way: checking the copy from before it (every file's \
+                 SHA-256) before resuming"
+            );
+            let ok = read_set(data, true).is_ok();
+            tracing::info!(intact = ok, "the copy from before the upgrade was checked");
+            ok
+        };
+        if intact {
             tracing::info!(
                 set = %data.join(SET).display(),
                 databases = %shown,
@@ -646,9 +714,12 @@ pub fn rollback(data: &Path, yes: bool) -> anyhow::Result<()> {
     }
     // 2: from here on every command but this one refuses the directory.
     let marker = data.join(RESTORING);
+    // One time stamp for everything a rollback sets aside, kept across a
+    // rerun.
+    let stamp = crate::backup::rollback_stamp(data).unwrap_or_else(harness_core::now_ms);
     remove_any(&marker)?;
     let mut f = create_private(&marker)?;
-    f.write_all(ROLLBACK_MARK.as_bytes())?;
+    f.write_all(format!("{ROLLBACK_MARK}stamp {stamp}\n").as_bytes())?;
     f.sync_all()?;
     drop(f);
     sync_dir(data)?;
@@ -673,11 +744,17 @@ pub fn rollback(data: &Path, yes: bool) -> anyhow::Result<()> {
     }
     sync_dir(data)?;
     pause("copied");
-    // 4: aside and into place.
-    let stamp = harness_core::now_ms();
-    let mut aside = Vec::new();
+    // 4: aside and into place. A database whose bytes are the set's copy
+    // is the one an interrupted run already placed: left as it is.
     let mut placed = 0;
     for (name, _) in databases() {
+        let entry = m.files.iter().find(|e| e.path == name);
+        if let Some(e) = entry
+            && same_bytes(&data.join(name), e)?
+        {
+            remove_any(&data.join(format!("{name}{STAGED}")))?;
+            continue;
+        }
         for suffix in ["", "-wal", "-shm", "-journal"] {
             let f = format!("{name}{suffix}");
             let p = data.join(&f);
@@ -685,16 +762,17 @@ pub fn rollback(data: &Path, yes: bool) -> anyhow::Result<()> {
                 continue;
             }
             let to = data.join(format!("{f}{ASIDE}{stamp}"));
+            if fs::symlink_metadata(&to).is_ok() {
+                bail!(
+                    "{f} and {} are both there and differ: nothing more was changed; compare \
+                     them, keep the right one under {f}{ASIDE}{stamp}, and run the rollback again",
+                    to.display()
+                );
+            }
             fs::rename(&p, &to).with_context(|| format!("putting {f} aside"))?;
             fs::set_permissions(&to, fs::Permissions::from_mode(0o600))?;
-            aside.push(
-                to.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-            );
         }
-        if m.files.iter().any(|e| e.path == name) {
+        if entry.is_some() {
             fs::rename(data.join(format!("{name}{STAGED}")), data.join(name))
                 .with_context(|| format!("putting {name} in place"))?;
             placed += 1;
@@ -706,7 +784,6 @@ pub fn rollback(data: &Path, yes: bool) -> anyhow::Result<()> {
     sync_dir(data)?;
     pause("placed");
     // 5: the stored files of the upgrade, kept aside.
-    let mut moved = 0;
     if !orphans.is_empty() {
         let into = data.join(format!("blobs{ASIDE}{stamp}"));
         mkdir_private(&into)?;
@@ -719,7 +796,6 @@ pub fn rollback(data: &Path, yes: bool) -> anyhow::Result<()> {
             mkdir_private(&to_dir)?;
             if let Some(file) = p.file_name() {
                 fs::rename(p, to_dir.join(file))?;
-                moved += 1;
             }
         }
         sync_dir(&into)?;
@@ -739,6 +815,16 @@ pub fn rollback(data: &Path, yes: bool) -> anyhow::Result<()> {
     fs::remove_file(&marker)?;
     sync_dir(data)?;
     let versions: Vec<String> = m.before.iter().map(|(n, v)| format!("{n} {v}")).collect();
+    // Everything set aside under this rollback's stamp, this run's and an
+    // interrupted run's alike.
+    let suffix = format!("{ASIDE}{stamp}");
+    let mut aside: Vec<String> = fs::read_dir(data)?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(&suffix) && !n.starts_with("blobs"))
+        .collect();
+    aside.sort();
+    let moved = blob_files_in(&data.join(format!("blobs{suffix}")));
     println!(
         "put back {} databases from {} (schema versions {})",
         m.files.len(),
