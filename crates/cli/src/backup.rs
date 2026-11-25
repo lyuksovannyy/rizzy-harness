@@ -324,6 +324,10 @@ fn known_top(n: &str) -> bool {
         "keys",
         "agents",
         "update-pending.json",
+        "master.db.rollback-partial",
+        "chat.db.rollback-partial",
+        "node.db.rollback-partial",
+        "memory.db.rollback-partial",
         crate::premigration::SET,
         crate::premigration::SET_PARTIAL,
         crate::premigration::SET_OLD,
@@ -407,7 +411,7 @@ pub fn copy_stream(
 }
 
 pub(crate) fn mb(n: u64) -> String {
-    format!("{:.1} MB", n as f64 / 1_000_000.0)
+    format!("{:.1} MiB", n as f64 / 1_048_576.0)
 }
 
 /// Each stored file `master` names, decrypted from `path_of(id)` and
@@ -742,7 +746,7 @@ fn tmp_name(dir: &Path, name: &str) -> PathBuf {
 /// copy of `master.db` and the links); the restore's after its first file
 /// (it is killed there).
 #[cfg(debug_assertions)]
-fn test_pause(var: &str) {
+pub(crate) fn test_pause(var: &str) {
     let Ok(p) = std::env::var(var) else {
         return;
     };
@@ -757,7 +761,7 @@ fn test_pause(var: &str) {
 }
 
 #[cfg(not(debug_assertions))]
-fn test_pause(_: &str) {}
+pub(crate) fn test_pause(_: &str) {}
 
 /// The result, for the lines the command prints.
 pub struct Done {
@@ -1779,8 +1783,36 @@ pub fn refuse_restoring(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What `RESTORING` holds when a rollback (`restore --pre-migration`)
+/// wrote it: that command, and only it, may then run again.
+pub const ROLLBACK_MARK: &str = "rollback from pre-migration\n";
+
+/// Whether `RESTORING` is a rollback's.
+pub fn rollback_marked(dir: &Path) -> bool {
+    open_regular(&dir.join(RESTORING))
+        .ok()
+        .and_then(|(mut f, m)| {
+            (m.len() < 256).then(|| {
+                let mut s = String::new();
+                io::Read::read_to_string(&mut f, &mut s).ok().map(|_| s)
+            })?
+        })
+        .is_some_and(|s| s == ROLLBACK_MARK)
+}
+
 /// What to do about an interrupted restore, in words.
 pub fn restoring_advice(dir: &Path) -> String {
+    if rollback_marked(dir) {
+        return format!(
+            "{} holds an interrupted rollback (a {RESTORING} file is in it), and no command uses \
+             it as it is: run `{} --data-dir {} restore --pre-migration --yes` again; it finishes \
+             from the copy in {}/, which a rollback never changes",
+            dir.display(),
+            harness_core::BRAND,
+            dir.display(),
+            crate::premigration::SET
+        );
+    }
     format!(
         "{} holds an interrupted restore (a {RESTORING} file is in it), and no command uses it \
          as it is: delete everything in it (lock and backup.lock too), or the directory \
@@ -1930,7 +1962,10 @@ mod tests {
     #[test]
     fn an_offline_backup_needs_room_for_its_copies() {
         let e = room_for(500 << 20, 100 << 20).unwrap_err().to_string();
-        assert!(e.contains("524.3 MB") && e.contains("104.9 MB free"), "{e}");
+        assert!(
+            e.contains("500.0 MiB") && e.contains("100.0 MiB free"),
+            "{e}"
+        );
         room_for(500 << 20, 1 << 30).unwrap();
     }
 

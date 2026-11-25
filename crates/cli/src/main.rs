@@ -120,6 +120,10 @@ enum Cmd {
         /// then start the older build.
         #[arg(long, conflicts_with_all = ["dir", "pause_routines"])]
         pre_migration: bool,
+        /// With --pre-migration: do it (without, it only says what it would
+        /// do).
+        #[arg(long, requires = "pre_migration")]
+        yes: bool,
     },
     /// Node commands.
     Node {
@@ -379,6 +383,12 @@ async fn serve(
     );
 
     let mirror = Store::open(&dir.join("master.db"), Durability::Normal)?;
+    // Tests only (debug builds): a start that fails for another reason than
+    // a migration once master.db was opened (and migrated).
+    #[cfg(debug_assertions)]
+    if std::env::var("HARNESS_TEST_FAIL_AFTER_OPEN").is_ok_and(|v| v == "master.db") {
+        bail!("test: the start fails after opening master.db");
+    }
     // Accounts older than workspaces get their Personal one here, so every
     // user-owned chat has a workspace from the first request on.
     let added = mirror.call(|s| s.ensure_personal_workspaces()).await?;
@@ -1700,7 +1710,15 @@ fn main() -> anyhow::Result<()> {
     // node join and run, token, claim-code, graphify, backup, restore);
     // `doctor` reports it. The helpers above (sandbox-exec, pdf-text,
     // doc-text, doc-edit) never get here and use no data directory.
-    if !matches!(cli.cmd, Cmd::Doctor) {
+    // A rollback's own marker lets only that rollback run again.
+    let rollback_again = matches!(
+        cli.cmd,
+        Cmd::Restore {
+            pre_migration: true,
+            ..
+        }
+    ) && backup::rollback_marked(&dir);
+    if !matches!(cli.cmd, Cmd::Doctor) && !rollback_again {
         backup::refuse_restoring(&dir)?;
     }
     // One process per data directory (A.20), before anything else touches
@@ -1722,17 +1740,16 @@ fn main() -> anyhow::Result<()> {
     // Before any database is opened: a start that will migrate copies
     // them all first (FIX_PLAN 4.4), or stops.
     let mut rollback_advice = None;
-    if role.is_some() && role != Some("restore") {
+    if let Some(r) = role.filter(|r| *r != "restore") {
         check_schemas(&dir)?;
-        if let Some(made) = premigration::before_start(&dir, cli.migrate_without_copy)? {
-            rollback_advice = Some(made.advice);
-        }
+        rollback_advice = premigration::before_start(&dir, r, cli.migrate_without_copy)?;
     }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     // A panic too ends in the bounded shutdown below, never in a plain drop
     // of the runtime (which would wait for a stuck thread without end).
+    let dir_for_advice = dir.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         rt.block_on(async_main(cli, dir, loaded))
     }))
@@ -1744,21 +1761,11 @@ fn main() -> anyhow::Result<()> {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("Error: {e:?}");
+            // Any failure once a database left the version the set holds.
             if let Some(a) = &rollback_advice
-                && e.chain().any(|c| {
-                    c.downcast_ref::<harness_store::migrate::MigrateError>()
-                        .is_some()
-                        || matches!(
-                            c.downcast_ref::<harness_store::StoreError>(),
-                            Some(harness_store::StoreError::Migrate(_))
-                        )
-                        || matches!(
-                            c.downcast_ref::<harness_memory::MemoryError>(),
-                            Some(harness_memory::MemoryError::Migrate(_))
-                        )
-                })
+                && premigration::moved(&dir_for_advice, &a.before)
             {
-                eprintln!("{a}");
+                eprintln!("{}", a.advice);
             }
             if e.chain().any(|c| {
                 matches!(
@@ -1911,8 +1918,9 @@ async fn async_main(cli: Cli, dir: PathBuf, dotenv_names: Vec<String>) -> anyhow
         }
         Cmd::Restore {
             pre_migration: true,
+            yes,
             ..
-        } => premigration::rollback(&dir),
+        } => premigration::rollback(&dir, yes),
         Cmd::Restore {
             dir: from,
             pause_routines,
