@@ -140,11 +140,7 @@ fn has_table(c: &Connection, name: &str) -> rusqlite::Result<bool> {
     .map(|n| n > 0)
 }
 
-/// The kv prefix of a create's intended owner (the master's
-/// `create_intent_key`).
-const CREATE_INTENT: &str = "create-intent:";
-/// The master's mark that a chat follows the default model.
-const AUTO_MODEL: &str = "session-model-auto:";
+use crate::mirror_keys::{CREATE_INTENT_PREFIX, auto_model_key, intent_expired};
 
 /// What [`settle_copies`] changed.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -152,6 +148,9 @@ pub struct Settled {
     /// Chats caught between their create and its owner stamp, stamped from
     /// the create's intent, as the master's late claim does.
     pub stamped: usize,
+    /// Ownerless chats whose intent had expired at the snapshot's moment:
+    /// left ownerless and the intent dropped, as the live late claim does.
+    pub expired: usize,
     /// Chats begun after the `master.db` copy, or caught ownerless with no
     /// usable intent: removed from every copy.
     pub left_out: usize,
@@ -181,14 +180,18 @@ fn store_ids(s: &crate::Store) -> crate::Result<Vec<crate::SessionRow>> {
 /// for `master`, `node.db` for `local`). Every copy must be at this build's
 /// schema version (the caller checks): they are opened as stores, which
 /// would migrate an older one. Each is put back to one plain file.
-pub fn settle_copies(master_copy: &Path, nodes: &[(&Path, &str)]) -> crate::Result<Settled> {
+pub fn settle_copies(
+    master_copy: &Path,
+    nodes: &[(&Path, &str)],
+    snapshot_ms: i64,
+) -> crate::Result<Settled> {
     let mut out = Settled::default();
     {
         let m = crate::Store::open(master_copy, crate::Durability::Full)?;
         // 1: the intents.
-        for (key, v) in m.kv_prefix(CREATE_INTENT)? {
+        for (key, v) in m.kv_prefix(CREATE_INTENT_PREFIX)? {
             let Some(sid) = key
-                .strip_prefix(CREATE_INTENT)
+                .strip_prefix(CREATE_INTENT_PREFIX)
                 .and_then(|id| id.parse::<harness_core::SessionId>().ok())
             else {
                 continue;
@@ -198,6 +201,11 @@ pub fn settle_copies(master_copy: &Path, nodes: &[(&Path, &str)]) -> crate::Resu
             };
             if row.owner_id.is_some() {
                 m.kv_delete(&key)?;
+                continue;
+            }
+            if intent_expired(&v, snapshot_ms) {
+                m.kv_delete(&key)?;
+                out.expired += 1;
                 continue;
             }
             let v: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
@@ -213,7 +221,7 @@ pub fn settle_copies(master_copy: &Path, nodes: &[(&Path, &str)]) -> crate::Resu
             }
             m.claim_session(sid, owner, workspace)?;
             if v["auto"].as_bool() == Some(true) {
-                m.kv_set(&format!("{AUTO_MODEL}{sid}"), "1")?;
+                m.kv_set(&auto_model_key(sid), "1")?;
             }
             if let Some(p) = v["project"].as_str() {
                 m.link_new_session(sid, p)?;
@@ -259,9 +267,9 @@ pub fn settle_copies(master_copy: &Path, nodes: &[(&Path, &str)]) -> crate::Resu
                 rows.iter().map(|r| r.session_id.to_string()).collect();
             for r in store_ids(&m)? {
                 if r.node_id == *node_id && !in_log.contains(&r.session_id.to_string()) {
-                    // As the master's own delete of a chat: its node will
-                    // not send it again.
-                    m.delete_session(r.session_id, true)?;
+                    // As the master's own delete of a chat (the same
+                    // path): its node will not send it again.
+                    m.forget_session(r.session_id)?;
                     out.deleted += 1;
                 }
             }
@@ -486,11 +494,12 @@ mod tests {
             )
             .unwrap();
         drop(master);
-        let done = settle_copies(&m, &[(&n, "master")]).unwrap();
+        let done = settle_copies(&m, &[(&n, "master")], harness_core::now_ms()).unwrap();
         assert_eq!(
             done,
             Settled {
                 stamped: 1,
+                expired: 0,
                 left_out: 0,
                 deleted: 0
             }
@@ -630,11 +639,12 @@ mod tests {
         created(&master, "master", gone);
         created(&master, "elsewhere", remote);
         drop((master, node));
-        let done = settle_copies(&m, &[(&n, "master")]).unwrap();
+        let done = settle_copies(&m, &[(&n, "master")], harness_core::now_ms()).unwrap();
         assert_eq!(
             done,
             Settled {
                 stamped: 0,
+                expired: 0,
                 left_out: 1,
                 deleted: 1
             }
@@ -646,5 +656,81 @@ mod tests {
         assert!(master.session(remote).unwrap().is_some());
         assert!(node.session(late).unwrap().is_none());
         assert!(node.session(both).unwrap().is_some());
+    }
+
+    /// The live server's late claim drops an intent older than its time and
+    /// leaves the chat ownerless (only the API token reads it): the copy
+    /// does the same, measured at the snapshot's moment. Just inside the
+    /// limit the chat is stamped; just outside it is not, and its intent
+    /// goes.
+    #[test]
+    fn an_expired_intent_stamps_no_owner_in_the_copy() {
+        let ttl = crate::mirror_keys::CREATE_INTENT_TTL_MS;
+        let snap_ms = 10 * ttl;
+        for (age, owned) in [(ttl - 1000, true), (ttl + 1000, false)] {
+            let d = tempfile::tempdir().unwrap();
+            let (m, n) = (d.path().join("master.db"), d.path().join("chat.db"));
+            let master = crate::Store::open(&m, crate::Durability::Full).unwrap();
+            let node = crate::Store::open(&n, crate::Durability::Full).unwrap();
+            master.create_user(&new_user("u1")).unwrap();
+            let sid = harness_core::SessionId::new();
+            created(&master, "master", sid);
+            created(&node, "master", sid);
+            master
+                .kv_set(
+                    &format!("create-intent:{sid}"),
+                    &serde_json::json!({"node": "master", "owner": "u1", "workspace": null,
+                        "at": snap_ms - age, "project": null, "auto": false})
+                    .to_string(),
+                )
+                .unwrap();
+            drop((master, node));
+            settle_copies(&m, &[(&n, "master")], snap_ms).unwrap();
+            let master = crate::Store::open(&m, crate::Durability::Full).unwrap();
+            let row = master.session(sid).unwrap().expect("the chat stays");
+            assert_eq!(row.owner_id.is_some(), owned, "age {age}");
+            assert!(
+                master
+                    .kv_get(&format!("create-intent:{sid}"))
+                    .unwrap()
+                    .is_none()
+            );
+            let node = crate::Store::open(&n, crate::Durability::Full).unwrap();
+            assert!(node.session(sid).unwrap().is_some(), "age {age}");
+        }
+    }
+
+    /// A chat deleted during the backup leaves the copy as the live delete
+    /// leaves the mirror: its auto-model mark and callback note go too.
+    #[test]
+    fn a_deleted_chat_leaves_its_marks_too() {
+        let d = tempfile::tempdir().unwrap();
+        let (m, n) = (d.path().join("master.db"), d.path().join("chat.db"));
+        let master = crate::Store::open(&m, crate::Durability::Full).unwrap();
+        let node = crate::Store::open(&n, crate::Durability::Full).unwrap();
+        let gone = harness_core::SessionId::new();
+        created(&master, "master", gone);
+        master
+            .kv_set(&format!("session-model-auto:{gone}"), "1")
+            .unwrap();
+        master
+            .kv_set(&format!("callback-attention:{gone}"), "{}")
+            .unwrap();
+        drop((master, node));
+        settle_copies(&m, &[(&n, "master")], harness_core::now_ms()).unwrap();
+        let master = crate::Store::open(&m, crate::Durability::Full).unwrap();
+        assert!(master.session(gone).unwrap().is_none());
+        assert!(
+            master
+                .kv_get(&format!("session-model-auto:{gone}"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            master
+                .kv_get(&format!("callback-attention:{gone}"))
+                .unwrap()
+                .is_none()
+        );
     }
 }

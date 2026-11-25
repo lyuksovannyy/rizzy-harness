@@ -5458,9 +5458,21 @@ If a restore fails, the directory is left empty again: fix what it names and
 run it again. If it was killed (or the power went), every command refuses that
 directory and says to delete everything in it (`lock` and `backup.lock` too)
 and restore again. A FIFO or device in a backup or in the data directory
-stops the command with a sentence naming it; a symbolic link in the data
-directory is skipped with a line (back up its target yourself), and so is a
-sub-folder of `agents/`. After a restore, undoing a turn made before the backup
+stops the command with a sentence naming it. A symbolic link among
+`config.toml`, `secrets.toml`, `node.toml`, `remote.toml`, `api-token`,
+`AGENTS.md`, `project-mcp.json`, `keys/` and `agents/` (container secrets, a
+dotfiles repository) is followed: the backup holds the content as a plain file
+(at most 16 MiB a file), says which items were links (names only, never where
+they pointed), and a link that is dangling or points at something else fails
+the backup. A database or `blobs/` behind a link is refused. Anything else the
+backup skips (an unknown file at the top, a sub-folder of `agents/`) is listed
+in its manifest and said by `backup`, `--verify` and `restore`.
+
+**Disk space:** a backup taken while the server is stopped first copies the
+databases beside the data (so not a byte of the source changes) and needs that
+much free space on the data directory's disk, plus a margin; it refuses with
+both numbers otherwise. A backup beside a running server needs no such copy.
+Either needs a file system with file locks for the data directory. After a restore, undoing a turn made before the backup
 answers "this checkpoint is no longer kept": the checkpoints were not in the
 backup.
 

@@ -1259,7 +1259,10 @@ async fn doctor(dir: &Path) -> anyhow::Result<()> {
     };
     check("data dir", Ok(dir.display().to_string()));
     if std::fs::symlink_metadata(dir.join(backup::RESTORING)).is_ok() {
+        // Nothing else is checked: some checks make folders in the data
+        // directory, and a half-restored one is not touched.
         check("restore", Err(backup::restoring_advice(dir)));
+        bail!("doctor found problems");
     }
     for db in ["master.db", "chat.db", "node.db"] {
         let mark = dir.join(format!("{db}{}", harness_store::TRUNCATE_PENDING));

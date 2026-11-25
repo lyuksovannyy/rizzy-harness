@@ -110,6 +110,13 @@ pub struct Manifest {
     /// Each database's schema version.
     pub databases: BTreeMap<String, i64>,
     pub files: Vec<Entry>,
+    /// Items that were symbolic links on the source and are plain files
+    /// here (their names only: where they pointed is not recorded).
+    #[serde(default)]
+    pub links: Vec<String>,
+    /// What the source had that this backup does not hold, in words.
+    #[serde(default)]
+    pub skipped: Vec<String>,
 }
 
 fn interrupted() -> anyhow::Error {
@@ -237,6 +244,100 @@ fn open_regular(p: &Path) -> io::Result<(File, fs::Metadata)> {
     Ok((f, m))
 }
 
+/// The most a file of the fixed list (configuration, keys, agents) may be.
+pub const ITEM_CAP: u64 = 16 << 20;
+
+/// Open one item of the fixed list, following a symbolic link one level:
+/// `None` when it is absent; else the file, its length and whether it was
+/// a link. Its target must be a regular file within [`ITEM_CAP`], judged
+/// before it is opened (non-blocking) and checked again once open; anything
+/// else fails the backup naming the item, never its target's path.
+fn open_item(p: &Path, name: &str) -> anyhow::Result<Option<(File, u64, bool)>> {
+    let lm = match fs::symlink_metadata(p) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {name}")),
+    };
+    let link = lm.file_type().is_symlink();
+    let m = if link {
+        match fs::metadata(p) {
+            Ok(m) => m,
+            Err(_) => bail!(
+                "{name} is a symbolic link whose target is missing or cannot be read: the \
+                 backup would lack it, so nothing was backed up; fix the link or remove it"
+            ),
+        }
+    } else {
+        lm
+    };
+    let through = if link {
+        " (through its symbolic link)"
+    } else {
+        ""
+    };
+    if !m.is_file() {
+        bail!(
+            "{name}{through} is not a regular file (a FIFO, a device, a socket or a folder): \
+             nothing was backed up; remove it, or put the real file back"
+        );
+    }
+    if m.len() > ITEM_CAP {
+        bail!(
+            "{name}{through} is {} bytes, more than the {} MiB a configuration file may be: \
+             nothing was backed up",
+            m.len(),
+            ITEM_CAP >> 20
+        );
+    }
+    let mut flags = nix::libc::O_CLOEXEC | nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY;
+    if !link {
+        flags |= nix::libc::O_NOFOLLOW;
+    }
+    let f = OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(p)
+        .with_context(|| format!("reading {name}"))?;
+    let o = f.metadata()?;
+    if !o.is_file() || o.dev() != m.dev() || o.ino() != m.ino() {
+        bail!("{name}{through} changed while it was read: nothing was backed up; try again");
+    }
+    Ok(Some((f, m.len(), link)))
+}
+
+/// The top-level names of a data directory a backup knows: kept, or left
+/// out by design (README "Back up and restore").
+fn known_top(n: &str) -> bool {
+    const LEFT_OUT: &[&str] = &[
+        "blobs",
+        "lock",
+        STAGING_LOCK,
+        STAGING,
+        RESTORING,
+        "claim-code",
+        "checkpoints",
+        "graphify",
+        "sandbox-tmp",
+        "uploads-stage",
+        "artifacts-stage",
+        "projects-staging",
+        "keys",
+        "agents",
+        "update-pending.json",
+        "update-failed",
+        "rizzy-harness.prev",
+    ];
+    if LEFT_OUT.contains(&n) || PLAIN.contains(&n) {
+        return true;
+    }
+    databases().iter().any(|(d, _)| {
+        n == *d
+            || ["-wal", "-shm", "-journal", harness_store::TRUNCATE_PENDING]
+                .iter()
+                .any(|s| n == format!("{d}{s}"))
+    })
+}
+
 /// A database and the files SQLite opens beside it: each absent or a
 /// regular file (SQLite's own open would block on a FIFO).
 fn db_files_regular(dir: &Path, name: &str) -> anyhow::Result<()> {
@@ -244,7 +345,14 @@ fn db_files_regular(dir: &Path, name: &str) -> anyhow::Result<()> {
         let f = format!("{name}{suffix}");
         match kind(&dir.join(&f))? {
             Kind::Missing | Kind::Regular => {}
-            _ => bail!(
+            Kind::Link => bail!(
+                "{f} in {} is a symbolic link: a database behind a link has its -wal and -shm \
+                 beside the target, not beside the link, so a copy could miss what they hold; \
+                 nothing was read; point --data-dir at the real folder or put the file itself \
+                 there",
+                dir.display()
+            ),
+            Kind::Other => bail!(
                 "{f} in {} is not a regular file (a link, a FIFO, a device or a socket): \
                  nothing was read from it; remove it, or put the real file back",
                 dir.display()
@@ -397,6 +505,78 @@ fn prepare_dest(data: &Path, dest: &Path) -> anyhow::Result<(PathBuf, bool)> {
         }
         Err(e) => Err(e).with_context(|| format!("reading {}", dest.display())),
     }
+}
+
+/// Free bytes for this user on `p`'s file system (the field types differ
+/// between platforms, hence the casts).
+#[allow(clippy::unnecessary_cast)]
+fn free_bytes(p: &Path) -> nix::Result<u64> {
+    let v = nix::sys::statvfs::statvfs(p)?;
+    Ok((v.blocks_available() as u64).saturating_mul(v.fragment_size() as u64))
+}
+
+/// Refuse an offline backup whose copies would not fit beside the data:
+/// `need` bytes of database files, a margin of 64 MiB or a tenth more.
+fn room_for(need: u64, free: u64) -> anyhow::Result<()> {
+    let want = need.saturating_add((need / 10).max(64 << 20));
+    if free < want {
+        bail!(
+            "an offline backup first copies the databases ({}) beside the data, and the data \
+             directory's disk has {} free, less than the {} it needs with a margin: free some \
+             space there, or back up while the server runs (which needs no such copy)",
+            mb(need),
+            mb(free),
+            mb(want)
+        );
+    }
+    Ok(())
+}
+
+/// Whether `<db>-shm` exists and this process may write it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shm {
+    Missing,
+    Writable,
+    ReadOnly,
+}
+
+fn shm_state(db: &Path) -> Shm {
+    let mut p = db.as_os_str().to_owned();
+    p.push("-shm");
+    let p = PathBuf::from(p);
+    if fs::symlink_metadata(&p).is_err() {
+        return Shm::Missing;
+    }
+    match nix::unistd::access(&p, nix::unistd::AccessFlags::W_OK) {
+        Ok(()) => Shm::Writable,
+        Err(_) => Shm::ReadOnly,
+    }
+}
+
+/// The refusal when SQLite will not let a read-only reader read `name`
+/// beside a lock holder, in what is true of each case.
+fn needs_writer_sentence(name: &str, holder: &str, shm: Shm, had_shm: bool) -> String {
+    let cause = match shm {
+        Shm::ReadOnly => format!(
+            "{name}-shm, the database's shared-memory file, cannot be written by this user, so \
+             SQLite cannot read the database's log through it"
+        ),
+        _ => format!(
+            "{name} needs SQLite's recovery, which only a writer may make, and the data \
+             directory is {holder}"
+        ),
+    };
+    let made = if !had_shm && shm != Shm::Missing {
+        format!(
+            "; nothing else was written, but the reader made {name}-shm (an empty index SQLite rebuilds; it may be deleted while nothing holds the directory)"
+        )
+    } else {
+        "; nothing of the database or its log was written".into()
+    };
+    format!(
+        "{cause}{made}. Stop whatever holds the directory and back up then: a backup that \
+         holds the lock reads a private copy and needs no writer"
+    )
 }
 
 /// The identity of a folder.
@@ -580,6 +760,8 @@ pub struct Done {
     pub settled: db::Settled,
     pub manifest_sha256: String,
     pub skipped: Vec<String>,
+    /// Fixed items that were symbolic links (names only).
+    pub links: Vec<String>,
     pub secs: f64,
 }
 
@@ -589,6 +771,16 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
     // Before anything is opened: SQLite's own open would block on a FIFO.
     for (name, _) in databases() {
         db_files_regular(data, name)?;
+    }
+    // The stored files are never read through a link.
+    if let Ok(m) = fs::symlink_metadata(data.join("blobs"))
+        && !m.is_dir()
+    {
+        bail!(
+            "blobs/ in {} is a symbolic link or not a folder: the stored files are never read \
+             through a link; nothing was backed up",
+            data.display()
+        );
     }
     if !databases()
         .iter()
@@ -634,6 +826,16 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
             source.insert(*n, data.join(n));
         }
     } else {
+        // The copies go beside the data, on its own disk.
+        let need: u64 = present
+            .iter()
+            .flat_map(|n| ["", "-wal", "-shm"].map(|s| data.join(format!("{n}{s}"))))
+            .filter_map(|p| fs::symlink_metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        let free =
+            free_bytes(data).context("reading the free space of the data directory's disk")?;
+        room_for(need, free)?;
         let into = staging.dir.join("db");
         mkdir_private(&into)?;
         for n in &present {
@@ -656,6 +858,18 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
                 .map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
         }
     }
+    // Who holds the directory (for a refusal's words) and which `-shm`
+    // files existed before any read.
+    let holder = match lock::status(data) {
+        Ok(lock::Status::Held(m)) => m,
+        _ => "another process".into(),
+    };
+    let shm_before: BTreeSet<&str> = present
+        .iter()
+        .copied()
+        .filter(|n| data.join(format!("{n}-shm")).exists())
+        .collect();
+    let had_shm = |n: &str| shm_before.contains(n);
     let snap = |name: &str, tmp: &Path| -> anyhow::Result<()> {
         let src = &source[name];
         let r = if online {
@@ -666,8 +880,13 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
         r.map_err(|e| {
             if db::needs_writer(&e) {
                 anyhow::anyhow!(
-                    "{name} needs SQLite's recovery, which only a writer may make, and a server \
-                     holds it: stop the server and back up then (nothing was written to it)"
+                    "{}",
+                    needs_writer_sentence(
+                        name,
+                        &holder,
+                        shm_state(&data.join(name)),
+                        had_shm(name)
+                    )
                 )
             } else {
                 anyhow::anyhow!("copying {name}: {e}")
@@ -678,6 +897,7 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
     // 1 and 2: master.db and the links to the files it names.
     let master_tmp = tmp_name(&dest, "master.db");
     let mut attempts = 0;
+    let mut snapshot_ms = harness_core::now_ms();
     let mut blob_ids: Vec<String> = Vec::new();
     if source.contains_key("master.db") {
         loop {
@@ -689,6 +909,8 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
             }
             w.note(&master_tmp);
             drop(create_private(&master_tmp)?);
+            // The moment the copies are as of (the settling's clock).
+            snapshot_ms = harness_core::now_ms();
             snap("master.db", &master_tmp)?;
             if attempts == 1 {
                 test_pause("HARNESS_BACKUP_PAUSE_FILE");
@@ -779,7 +1001,7 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
             .iter()
             .all(|n| versions.get(*n).is_none_or(|v| *v == current));
         if all_current {
-            settled = db::settle_copies(&master_tmp, &logs)
+            settled = db::settle_copies(&master_tmp, &logs, snapshot_ms)
                 .context("making the copies of master.db and the node logs agree")?;
             for (name, schema) in databases() {
                 if name != "memory.db"
@@ -798,7 +1020,10 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
         }
     }
 
-    // 4: plain files, keys/, agents/.
+    // 4: plain files, keys/, agents/. A symbolic link among these fixed
+    // items is followed (container secrets, a dotfiles repository): the
+    // content goes in as a plain file and the manifest notes the name only.
+    let mut links: Vec<String> = Vec::new();
     let copy_in = |src: &Path,
                    dir: &Path,
                    file: &str,
@@ -806,37 +1031,26 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
                    w: &mut Written,
                    pending: &mut Vec<Pending>,
                    buf: &mut [u8]|
-     -> anyhow::Result<Option<String>> {
-        match kind(src)? {
-            Kind::Missing => return Ok(None),
-            Kind::Link => {
-                return Ok(Some(format!(
-                    "{path} (a symbolic link: back up its target yourself)"
-                )));
-            }
-            Kind::Other => bail!(
-                "{path} in the data directory is not a regular file (a FIFO, a device, a \
-                 socket or a folder): nothing was backed up; remove it, or put the real file \
-                 back"
-            ),
-            Kind::Regular => {}
-        }
-        let (mut f, _) = open_regular(src).with_context(|| format!("reading {path}"))?;
+     -> anyhow::Result<Option<bool>> {
+        let Some((mut f, len, was_link)) = open_item(src, &path)? else {
+            return Ok(None);
+        };
         mkdir_private(dir)?;
         let tmp = tmp_name(dir, file);
         w.note(&tmp);
         let mut out = create_private(&tmp)?;
-        let hashed = copy_stream(&mut f, &mut out, buf, cancel)?;
+        let hashed = copy_declared(&mut f, &mut out, len, buf, cancel)
+            .with_context(|| format!("reading {path}"))?;
         out.sync_all()?;
         pending.push(Pending {
             tmp,
             path,
             hashed: Some(hashed),
         });
-        Ok(None)
+        Ok(Some(was_link))
     };
     for name in PLAIN {
-        if let Some(s) = copy_in(
+        if copy_in(
             &data.join(name),
             &dest,
             name,
@@ -844,48 +1058,76 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
             &mut w,
             &mut pending,
             &mut buf,
-        )? {
-            skipped.push(s);
+        )? == Some(true)
+        {
+            links.push((*name).into());
         }
     }
     for sub in ["keys", "agents"] {
-        let Ok(m) = fs::symlink_metadata(data.join(sub)) else {
-            continue;
+        let at = data.join(sub);
+        let lm = match fs::symlink_metadata(&at) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {sub}/")),
         };
-        if !m.is_dir() {
-            skipped.push(format!("{sub}/ (not a folder)"));
-            continue;
+        if lm.file_type().is_symlink() {
+            match fs::metadata(&at) {
+                Ok(m) if m.is_dir() => links.push(sub.into()),
+                Ok(_) => bail!(
+                    "{sub} is a symbolic link to something that is not a folder: nothing was \
+                     backed up; fix the link"
+                ),
+                Err(_) => bail!(
+                    "{sub} is a symbolic link whose target is missing: the backup would lack \
+                     it, so nothing was backed up; fix the link or remove it"
+                ),
+            }
+        } else if !lm.is_dir() {
+            bail!("{sub} in the data directory is not a folder: nothing was backed up");
         }
-        let mut names: Vec<String> = fs::read_dir(data.join(sub))?
+        let mut names: Vec<String> = fs::read_dir(&at)?
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
         for n in names {
-            if sub == "agents"
-                && fs::symlink_metadata(data.join(sub).join(&n)).is_ok_and(|m| m.is_dir())
-            {
+            let shown = format!("{sub}/{}", n.escape_debug());
+            if fs::symlink_metadata(at.join(&n)).is_ok_and(|m| m.is_dir()) {
                 skipped.push(format!(
-                    "{sub}/{n:?}/ (a folder: a backup keeps only the files directly in {sub}/)"
+                    "{shown}/ (a folder: a backup keeps only the files directly in {sub}/)"
                 ));
                 continue;
             }
             if !valid_name(&n) {
-                skipped.push(format!("{sub}/{n:?} (a name a backup does not keep)"));
+                skipped.push(format!("{shown} (a name a backup does not keep)"));
                 continue;
             }
-            if let Some(s) = copy_in(
-                &data.join(sub).join(&n),
+            if copy_in(
+                &at.join(&n),
                 &dest.join(sub),
                 &n,
                 format!("{sub}/{n}"),
                 &mut w,
                 &mut pending,
                 &mut buf,
-            )? {
-                skipped.push(s);
+            )? == Some(true)
+            {
+                links.push(format!("{sub}/{n}"));
             }
         }
+    }
+    // Anything else at the top that a backup does not know.
+    let mut tops: Vec<String> = fs::read_dir(data)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !known_top(n))
+        .collect();
+    tops.sort();
+    for n in tops {
+        skipped.push(format!(
+            "{} (not something a backup keeps)",
+            n.escape_debug()
+        ));
     }
 
     // 5: the stored files, copied for real from the links.
@@ -963,10 +1205,12 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
     let manifest = Manifest {
         format: FORMAT,
         harness: env!("CARGO_PKG_VERSION").to_string(),
-        created_ms: harness_core::now_ms(),
+        created_ms: snapshot_ms,
         online,
         databases: versions,
         files,
+        links: links.clone(),
+        skipped: skipped.clone(),
     };
     let text = serde_json::to_vec_pretty(&manifest)?;
     let tmp = tmp_name(&dest, MANIFEST);
@@ -990,6 +1234,7 @@ pub fn backup(data: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<D
         settled,
         manifest_sha256: hex::encode(Sha256::digest(&text)),
         skipped,
+        links,
         secs: started.elapsed().as_secs_f64(),
     })
 }
@@ -1041,6 +1286,9 @@ pub fn print_backup(given: &Path, d: &Done) {
              owner",
             d.settled.stamped
         );
+    }
+    for l in &d.links {
+        println!("followed the symbolic link {l}: its content is in the backup as a plain file");
     }
     for s in &d.skipped {
         println!("skipped {s}");
@@ -1123,6 +1371,18 @@ pub fn read_manifest(backup: &Path) -> anyhow::Result<(Manifest, String)> {
         if e.sha256.len() != 64 || !e.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
             bail!("the manifest's hash of {} is malformed", e.path);
         }
+    }
+    for l in &man.links {
+        if !(valid_path(l) || l == "keys" || l == "agents")
+            || databases().iter().any(|(d, _)| d == l)
+        {
+            bail!(
+                "the manifest names a link a backup never records: refused, nothing was restored"
+            );
+        }
+    }
+    if man.skipped.len() > 10_000 || man.skipped.iter().any(|s| s.len() > 1000) {
+        bail!("the manifest's list of skipped items is not one a backup writes: refused");
     }
     let known: BTreeMap<&str, i64> = databases()
         .iter()
@@ -1264,15 +1524,32 @@ pub fn verify(backup: &Path, cancel: &AtomicBool) -> anyhow::Result<()> {
         )?;
     }
     let extra = unlisted(backup, &man);
-    println!(
-        "{} is a complete backup: {} files ({}) match its manifest, {} databases pass their \
-         checks, {blobs} stored files open and match their rows ({:.1} s)",
-        backup.display(),
+    let what = format!(
+        "{} files ({}) match its manifest, {} databases pass their checks, {blobs} stored files \
+         open and match their rows ({:.1} s)",
         man.files.len(),
         mb(bytes),
         man.databases.len(),
         started.elapsed().as_secs_f64()
     );
+    if man.skipped.is_empty() {
+        println!("{} is a complete backup: {what}", backup.display());
+    } else {
+        println!(
+            "{} is a finished backup of what it holds, not of everything the source had: {what}",
+            backup.display()
+        );
+        for sk in &man.skipped {
+            println!("skipped on the source: {}", sk.escape_debug());
+        }
+    }
+    if !man.links.is_empty() {
+        println!(
+            "{} items were symbolic links on the source (now plain files): {}",
+            man.links.len(),
+            man.links.join(", ")
+        );
+    }
     if extra > 0 {
         println!("{extra} files in it are not in its manifest: a restore ignores them");
     }
@@ -1285,6 +1562,10 @@ pub fn verify(backup: &Path, cancel: &AtomicBool) -> anyhow::Result<()> {
 /// What restore found and did.
 pub struct Restored {
     pub files: usize,
+    /// Items that were symbolic links on the source (names only).
+    pub links: Vec<String>,
+    /// What the source had that the backup does not hold.
+    pub skipped: Vec<String>,
     pub bytes: u64,
     pub ignored: u64,
     pub changes: db::Restored,
@@ -1381,6 +1662,8 @@ pub fn restore(
     guard.done = true;
     Ok(Restored {
         files: man.files.len(),
+        links: man.links.clone(),
+        skipped: man.skipped.clone(),
         bytes,
         ignored: unlisted(&backup, &man),
         changes,
@@ -1436,6 +1719,19 @@ pub fn print_restore(data: &Path, r: &Restored) {
         println!(
             "{} files in the backup are not in its manifest and were not restored",
             r.ignored
+        );
+    }
+    if !r.links.is_empty() {
+        println!(
+            "{} items were symbolic links on the source and are plain files now: {}",
+            r.links.len(),
+            r.links.join(", ")
+        );
+    }
+    for sk in &r.skipped {
+        println!(
+            "not in this backup (skipped on the source): {}",
+            sk.escape_debug()
         );
     }
     if r.had_master {
@@ -1586,7 +1882,10 @@ mod tests {
     }
 
     /// A file that grows past its declared size while it streams in is
-    /// refused (the copy reads at most one byte past it).
+    /// refused (the copy reads at most one byte past it). This bound is
+    /// tested here only: an integration test of a file growing during a
+    /// restore would race the writer, and restore and `--verify` both
+    /// read through this one function.
     #[test]
     fn a_file_longer_than_declared_is_refused() {
         let mut buf = vec![0u8; 16];
@@ -1612,5 +1911,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(n, 100);
+    }
+
+    /// The free-space refusal gives both numbers; enough room passes.
+    #[test]
+    fn an_offline_backup_needs_room_for_its_copies() {
+        let e = room_for(500 << 20, 100 << 20).unwrap_err().to_string();
+        assert!(e.contains("524.3 MB") && e.contains("104.9 MB free"), "{e}");
+        room_for(500 << 20, 1 << 30).unwrap();
+    }
+
+    /// The refusal says what is true: a read-only `-shm`, or a recovery
+    /// beside the named holder; and a `-shm` the reader made is owned up to.
+    #[test]
+    fn the_needs_writer_refusal_says_what_is_true() {
+        let a = needs_writer_sentence("master.db", "held by restore (pid 7)", Shm::ReadOnly, true);
+        assert!(
+            a.contains("master.db-shm, the database's shared-memory file, cannot be written"),
+            "{a}"
+        );
+        assert!(
+            a.contains("nothing of the database or its log was written"),
+            "{a}"
+        );
+        let b = needs_writer_sentence("chat.db", "held by node join (pid 9)", Shm::Writable, false);
+        assert!(
+            b.contains("held by node join (pid 9)") && b.contains("made chat.db-shm"),
+            "{b}"
+        );
+        assert!(!b.contains("nothing was written"), "{b}");
     }
 }

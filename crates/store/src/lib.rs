@@ -20,6 +20,7 @@ pub mod custom_connectors;
 mod handoff;
 pub mod media;
 pub mod migrate;
+pub mod mirror_keys;
 pub mod plugin_access;
 pub mod profile_images;
 pub mod project_clones;
@@ -815,7 +816,16 @@ impl Store {
             Durability::Normal => "NORMAL",
         };
         conn.pragma_update(None, "synchronous", sync)?;
-        Self::init(conn)
+        let s = Self::init(conn)?;
+        // A truncate an earlier process could not make before it stopped:
+        // pending again, so the periodic retry makes it and drops the mark.
+        let mut mark = path.as_os_str().to_owned();
+        mark.push(TRUNCATE_PENDING);
+        if std::fs::symlink_metadata(&mark).is_ok() {
+            s.truncate_pending
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(s)
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -2060,6 +2070,19 @@ impl Store {
             let _ = std::fs::remove_file(m);
         }
         Ok(done)
+    }
+
+    /// Forget a chat in the master's mirror as the master's delete does:
+    /// its rows (with a tombstone, so its node's events are refused) and
+    /// the per-chat marks in `kv` (the auto-model mark, a callback note).
+    /// Returns the chat's owner. `memory.db` facts that name the chat as
+    /// their source are not the mirror's and stay, as with a live delete.
+    pub fn forget_session(&self, sid: SessionId) -> Result<Option<String>> {
+        let owner = self.session(sid)?.and_then(|r| r.owner_id);
+        self.delete_session(sid, true)?;
+        self.kv_delete(&mirror_keys::auto_model_key(sid))?;
+        self.kv_delete(&mirror_keys::callback_attention_key(sid))?;
+        Ok(owner)
     }
 
     /// A truncate [`Store::checkpoint`] could not make, still not made.

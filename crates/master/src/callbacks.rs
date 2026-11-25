@@ -64,7 +64,7 @@ const SETTLE: Duration = Duration::from_millis(300);
 /// How soon a chat whose node is away, busy or stopping is tried again.
 const RETRY: Duration = Duration::from_secs(15);
 /// The kv prefix of a chat's attention mark.
-const KEY: &str = "callback-attention:";
+const KEY: &str = harness_store::mirror_keys::CALLBACK_ATTENTION_PREFIX;
 /// The longest any command runs (`bash_timeout_max_s` at most 3600 s) and
 /// a margin: a command started before this cannot be running any more.
 const RUNNING_WINDOW_MS: i64 = 65 * 60 * 1000;

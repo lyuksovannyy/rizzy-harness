@@ -1050,6 +1050,15 @@ fn every_command_refuses_a_half_restored_directory() {
     assert_eq!(before, after, "a refused command changed the directory");
     let o = run(&t, &["doctor"]);
     assert!(text(&o).contains("interrupted restore"), "{}", text(&o));
+    let mut after_doctor: Vec<_> = std::fs::read_dir(&t)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    after_doctor.sort();
+    assert_eq!(
+        before, after_doctor,
+        "doctor wrote into a half-restored directory"
+    );
     drop(dir);
 }
 
@@ -1228,4 +1237,204 @@ async fn a_chat_deleted_during_the_backup_is_not_restored() {
         "a deleted chat came back: {listed}"
     );
     drop((s, r, dir));
+}
+
+/// Seal a forge token for `user` the way the server does (the key in
+/// `keys`), and store its connection row in `master`.
+fn sealed_connection(master: &Path, keys: &Path, user: &str) {
+    use harness_master::sealed::{Binding, Sealer, Stored};
+    let fields = ["github.com", "4242"];
+    let at = Binding {
+        table: "user_connections",
+        owner: user,
+        fields: &fields,
+    };
+    let sealer = Sealer::at(keys.join("secrets.key"));
+    let token = harness_core::Secret::new("ghp_a-made-up-token".to_string());
+    let sealed = sealer.seal(&at, &token, &Stored::default()).unwrap();
+    let s = harness_store::Store::open(master, harness_store::Durability::Full).unwrap();
+    s.connection_put(
+        &harness_store::connections::NewConnection {
+            connection_id: "c1".into(),
+            user_id: user.into(),
+            host: "github.com".into(),
+            account_id: "4242".into(),
+            login: "ana-on-github".into(),
+            display_name: None,
+            commit_email: None,
+            scopes: None,
+            scopes_more: 0,
+            sealed_token: sealed,
+        },
+        10,
+    )
+    .unwrap();
+}
+
+fn user_id(master: &Path, name: &str) -> String {
+    rusqlite::Connection::open(master)
+        .unwrap()
+        .query_row(
+            "SELECT user_id FROM users WHERE username = ?1",
+            [name],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// Move `data/<name>` to `elsewhere/<name>` and leave a symbolic link.
+fn into_link(data: &Path, elsewhere: &Path, name: &str) {
+    std::fs::create_dir_all(elsewhere).unwrap();
+    let to = elsewhere.join(name);
+    std::fs::rename(data.join(name), &to).unwrap();
+    std::os::unix::fs::symlink(&to, data.join(name)).unwrap();
+}
+
+/// The reviewer's case: `keys/`, `config.toml`, `secrets.toml` and
+/// `api-token` are symbolic links (container secrets, a dotfiles
+/// repository). They are followed: the backup holds their content as plain
+/// files, says which were links (names only), and the restored server
+/// opens the sealed token.
+#[tokio::test(flavor = "multi_thread")]
+async fn symlinked_configuration_is_followed_into_the_backup() {
+    let (dir, data, _ws) = real::setup();
+    let root = data.parent().unwrap().to_path_buf();
+    {
+        let mut s = real::serve(&data);
+        s.as_member("ana").await;
+    }
+    let uid = user_id(&data.join("master.db"), "ana");
+    std::fs::create_dir_all(data.join("keys")).unwrap();
+    std::fs::write(
+        data.join("secrets.toml"),
+        "[keys]\nprovider-x = \"made-up\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        data.join("secrets.toml"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    sealed_connection(&data.join("master.db"), &data.join("keys"), &uid);
+    let secrets_home = root.join("secrets-home");
+    for name in ["keys", "config.toml", "secrets.toml", "api-token"] {
+        into_link(&data, &secrets_home, name);
+    }
+    let dest = root.join("backup");
+    let out = ok(run(&data, &["backup", dest.to_str().unwrap()]));
+    for name in ["keys", "config.toml", "secrets.toml", "api-token"] {
+        assert!(
+            out.contains(&format!("followed the symbolic link {name}")),
+            "{out}"
+        );
+    }
+    assert!(
+        !out.contains(secrets_home.to_str().unwrap()),
+        "the link's target was printed: {out}"
+    );
+    assert!(dest.join("keys/secrets.key").is_file());
+    let m = std::fs::read_to_string(dest.join("MANIFEST.json")).unwrap();
+    assert!(!m.contains(secrets_home.to_str().unwrap()), "{m}");
+    let v = ok(run(&root, &["backup", "--verify", dest.to_str().unwrap()]));
+    assert!(v.contains("were symbolic links on the source"), "{v}");
+
+    let t = root.join("restored");
+    let r = ok(run(&t, &["restore", dest.to_str().unwrap()]));
+    assert!(
+        r.contains("4 items were symbolic links on the source"),
+        "{r}"
+    );
+    for name in ["keys", "config.toml", "secrets.toml", "api-token"] {
+        let m = std::fs::symlink_metadata(t.join(name)).unwrap();
+        assert!(!m.file_type().is_symlink(), "{name}");
+    }
+    let mut s = real::serve(&t);
+    s.sign_in("ana", PASSWORD).await;
+    let c = s.get("/api/connections").await;
+    assert_eq!(c["available"], true, "{c}\n{}", s.log());
+    assert_eq!(c["connections"].as_array().map(Vec::len), Some(1), "{c}");
+    assert!(
+        !s.log().contains("sealed secrets are unavailable"),
+        "{}",
+        s.log()
+    );
+    drop((s, dir));
+}
+
+/// A followed link that cannot be taken fails the backup, naming the item:
+/// a dangling one, one to a FIFO, one to a file over the 16 MiB cap; a
+/// database behind a link is refused (its `-wal` lies beside the target).
+#[test]
+fn links_that_cannot_be_followed_fail_the_backup() {
+    let (dir, data, _ws) = real::setup();
+    let root = data.parent().unwrap().to_path_buf();
+    drop(real::serve(&data));
+    let big = root.join("big.toml");
+    let f = std::fs::File::create(&big).unwrap();
+    f.set_len(20 << 20).unwrap();
+    let fifo_at = root.join("a-fifo");
+    fifo(&fifo_at);
+    for (i, (name, target, why)) in [
+        ("config.toml", root.join("missing.toml"), "config.toml"),
+        ("config.toml", fifo_at.clone(), "config.toml"),
+        ("config.toml", big.clone(), "config.toml"),
+        (
+            "master.db",
+            root.join("elsewhere.db"),
+            "its -wal and -shm beside the target",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let d = copy_of(&root, &data);
+        if name == "master.db" {
+            std::fs::rename(d.join("master.db"), &target).unwrap();
+        } else {
+            std::fs::remove_file(d.join(name)).unwrap();
+        }
+        std::os::unix::fs::symlink(&target, d.join(name)).unwrap();
+        let dest = root.join(format!("b{i}"));
+        let o = run_within(
+            &d,
+            &["backup", dest.to_str().unwrap()],
+            QUICK,
+            "backup with a link",
+        );
+        let t = refused(o, why);
+        assert!(t.contains(name), "{t}");
+        assert!(!dest.exists(), "{t}");
+    }
+    drop(dir);
+}
+
+/// What a backup skips (an unknown entry at the top, a folder in
+/// `agents/`) is in the manifest and said by `backup`, `--verify` and
+/// `restore`; `--verify` never calls such a backup simply complete.
+#[test]
+fn what_a_backup_skips_is_said_everywhere() {
+    let (dir, data, _ws) = real::setup();
+    let root = data.parent().unwrap().to_path_buf();
+    drop(real::serve(&data));
+    std::fs::write(data.join("my-notes.txt"), b"x").unwrap();
+    std::fs::create_dir_all(data.join("agents/team")).unwrap();
+    let dest = root.join("backup");
+    let out = ok(run(&data, &["backup", dest.to_str().unwrap()]));
+    for s in ["my-notes.txt", "agents/team"] {
+        assert!(out.contains(s), "{out}");
+    }
+    let m = std::fs::read_to_string(dest.join("MANIFEST.json")).unwrap();
+    assert!(
+        m.contains("\"skipped\"") && m.contains("my-notes.txt"),
+        "{m}"
+    );
+    let v = ok(run(&root, &["backup", "--verify", dest.to_str().unwrap()]));
+    assert!(
+        v.contains("skipped on the source: my-notes.txt") || v.contains("my-notes.txt"),
+        "{v}"
+    );
+    assert!(!v.contains("is a complete backup:"), "{v}");
+    let r = ok(run(&root.join("t"), &["restore", dest.to_str().unwrap()]));
+    assert!(r.contains("my-notes.txt"), "{r}");
+    drop(dir);
 }

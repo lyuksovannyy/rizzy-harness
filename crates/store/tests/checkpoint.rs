@@ -65,3 +65,19 @@ fn a_checkpoint_alone_truncates() {
     assert_eq!(wal_len(&db), 0);
     assert!(!s.truncate_pending());
 }
+
+/// A mark left by an earlier process (a truncate pending when it stopped):
+/// the store opened again takes it as pending, so the periodic retry makes
+/// the truncate and removes the mark, without waiting for a delete.
+#[test]
+fn a_mark_left_before_a_restart_is_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("chat.db");
+    drop(Store::open(&db, Durability::Full).unwrap());
+    let mark = dir.path().join("chat.db-truncate-pending");
+    std::fs::write(&mark, b"").unwrap();
+    let s = Store::open(&db, Durability::Full).unwrap();
+    assert!(s.truncate_pending(), "the mark was not taken as pending");
+    assert!(s.retry_truncate().unwrap());
+    assert!(!mark.exists());
+}
