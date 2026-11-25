@@ -403,13 +403,21 @@ fn the_owner_page_seeks_the_owner_index_and_never_scans_sessions() {
             }
         }
     }
-    let p = plan(&f.s, &children_sql(Owner::User("a")), params!["a", "[]"]);
-    assert!(
-        p.iter()
-            .any(|l| l.starts_with("SEARCH s USING INDEX sessions_owner (owner_id=?")),
-        "{p:#?}"
-    );
-    assert!(!scans(&p, "s"), "{p:#?}");
+    // The children are found from the parent ids (migration 7's partial
+    // index), not by walking the owner's chats; the owner is a filter.
+    for (owner, bound) in [(Owner::User("a"), Some("a")), (Owner::Everyone, None)] {
+        let p = plan(&f.s, &children_sql(owner), params![bound, "[]"]);
+        assert!(
+            p.iter()
+                .any(|l| l.starts_with("SEARCH s USING INDEX sessions_parent (parent_id=?)")),
+            "{owner:?}: {p:#?}"
+        );
+        assert!(!scans(&p, "s"), "{owner:?}: {p:#?}");
+        assert!(
+            !p.iter().any(|l| l.contains("sessions_owner")),
+            "{owner:?}: {p:#?}"
+        );
+    }
     for (sql, alias, list) in [(UNREAD_OF, "s", 2), (LINKS_OF, "sp", 1), (MARKS_OF, "r", 1)] {
         let p = if list == 2 {
             plan(&f.s, sql, params!["a", "[]"])

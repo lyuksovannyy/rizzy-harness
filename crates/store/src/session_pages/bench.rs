@@ -518,11 +518,11 @@ fn fifty_thousand_chats() {
     assert!(first < FIRST_PAGE_P99, "first page p99 {first:?}");
     assert!(first_any < FIRST_PAGE_P99, "first page p99 {first_any:?}");
     assert!(append[0] < APPEND_P99, "append p99 {:?}", append[0]);
-    // Open (slice 1): `sessions` has no index on `parent_id`, so the
-    // children walk all of the owner's chats under the lock.
+    // Without migration 7's `sessions_parent` the children walk all of
+    // the owner's chats under the lock (5.5 ms, append p99 5.9 ms).
     assert!(
         children < CHILDREN_P99 && append[1] < APPEND_P99,
-        "children p99 {children:?}, append p99 behind them {:?}: no index on sessions.parent_id",
+        "children p99 {children:?}, append p99 behind them {:?}",
         append[1]
     );
 }

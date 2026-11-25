@@ -19,6 +19,13 @@ use crate::{
     EFFECTIVE_WS, ProjectLink, Result, SESSION_COLS, SessionRow, Store, StoreError, WS_JOINS,
 };
 
+/// Schema version 7: the sub-agent chats of a page's parents are found by
+/// parent, not by walking the owner's chats. Partial: top-level chats,
+/// most of them, are not in it.
+pub const PARENT_SCHEMA: &str = r#"
+CREATE INDEX IF NOT EXISTS sessions_parent ON sessions(parent_id) WHERE parent_id IS NOT NULL;
+"#;
+
 /// The largest page; a larger `limit` is clamped to it, `0` reads 1.
 pub const MAX_PAGE: usize = 200;
 
@@ -148,11 +155,16 @@ fn page_sql(owner: Owner<'_>, after: bool) -> String {
     )
 }
 
+/// Driven from the parent ids into [`PARENT_SCHEMA`]'s index; the owner
+/// is then a filter on a handful of rows. `INDEXED BY`, not `+s.owner_id`:
+/// with an owner term SQLite prefers `sessions_owner` and walks all of
+/// the owner's chats (5.5 ms at 10,000, measured), and an unusable index
+/// is an error here instead of a silent walk.
 fn children_sql(owner: Owner<'_>) -> String {
     let owner = owner_term(owner);
     format!(
-        "SELECT {SESSION_COLS}, {EFFECTIVE_WS} FROM sessions s {WS_JOINS}
-         WHERE {owner} AND s.parent_id IN (SELECT value FROM json_each(?2))
+        "SELECT {SESSION_COLS}, {EFFECTIVE_WS} FROM sessions s INDEXED BY sessions_parent {WS_JOINS}
+         WHERE s.parent_id IN (SELECT value FROM json_each(?2)) AND {owner}
          ORDER BY s.updated_ms DESC, s.session_id DESC"
     )
 }

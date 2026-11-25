@@ -172,7 +172,7 @@ At -512 it is 8.5 MB for four, and every reader then reads more from the OS page
 - `session_owners(ids)` for the two `chat_owners` and `board_json`; `project_chat_counts(owner, workspace)` for `own_chats`.
 - The `'optimize'` merge leaves `delete_session` (and the artifact and media deletes): deleted terms stay as FTS5 tombstones, which search already skips, and the hourly maintenance runs a bounded `('merge', N)` instead.
   The privacy reason for the merge (secure delete of a deleted chat's words) holds as long as the hourly merge runs; how long a deleted chat's terms may linger in index pages is a question for the owner (below).
-- No new connection, no new dependency, no new pragma, no migration.
+- No new connection, no new dependency, no new pragma; one migration, an index (7, added in slice 1 for the page's children).
 
 ### B: A plus N read-only connections (rejected for now)
 
@@ -242,9 +242,9 @@ The owner is the caller (`who.user_id`); the API token (no user) gets every chat
   The API token keeps its every-chat listing, paged by the same cursor without the owner term (3–4 ms full scan at 50,000; no index added).
 - **Workspace:** as today, `ws::scope` checks membership before any query.
 - **Children:** the sub-agent chats whose parent is on this page (one query, `parent_id IN (…)`), so nesting and `subAgentRunning` keep working.
-  Measured in slice 1: without an index on `sessions.parent_id` this query walks all of the owner's chats, 5.5 ms at 10,000 (p99 append wait behind the page 5.9 ms, against 0.27 ms without the children).
-  An index alone is not enough: SQLite still picks `sessions_owner` for `owner_id = ? AND parent_id IN (…)` (seen with a partial `sessions(parent_id)` index on the bench database), so the query would also have to steer to it (`+s.owner_id`).
-  Open: a partial index is migration 7; the bench's children assertion fails until it lands.
+  Measured in slice 1: without an index on `sessions.parent_id` this query walked all of the owner's chats, 5.5 ms at 10,000 (p99 append wait behind the page 5.9 ms).
+  Migration 7 adds the partial index `sessions_parent ON sessions(parent_id) WHERE parent_id IS NOT NULL`, and the query names it (`INDEXED BY`): with an owner term SQLite still picks `sessions_owner` over a new index, and `INDEXED BY` makes an unusable index an error instead of a silent walk.
+  With it: 0.03 ms for a page's children, p99 append wait behind page, annotations and children 0.22 ms.
 
 ### Live updates
 
@@ -254,8 +254,9 @@ A chat outside the loaded pages that changes moves to the top (its `updated_ms` 
 
 ### Migration 7
 
-Not needed for the page: `updated_ms` exists and is maintained, the index exists, and the keyset query uses it.
-The page's children may need one (see Children above).
+Stage 0 said none was needed, and none is for the page: `updated_ms` exists and is maintained, `sessions_owner` exists, and the keyset query uses it.
+The page's children were missed: migration 7 (slice 1) adds `sessions_parent` (see Children above).
+It only creates an index, so it needs no backfill and a crash halfway leaves version 6 (the runner's transaction); `master.db`, `chat.db` and `node.db` all open through `DB_SCHEMA` and all get it.
 No backfill, nothing to survive a crash halfway.
 
 ## 5. Slices
@@ -267,7 +268,7 @@ Each slice is reviewable alone and starts with a test that fails on the old code
    Failing first, and deterministic for CI: a test that runs `EXPLAIN QUERY PLAN` on the page query and asserts `SEARCH s USING INDEX sessions_owner`, no `SCAN s`; a test that 120 chats come back as 50 + 50 + 20 with no row twice and none lost across equal `updated_ms`; a test that `routine_marks` of 500 ids is one statement (count via `trace` or a profile hook).
    **This slice meets the plan's benchmark** (measured: 0.06 ms page, 0.3 ms p99 append wait).
    Built as `crates/store/src/session_pages.rs` (`sessions_page`, `unread_of`, `project_links_of`, `routine_marks_of`, `children_of`, `Cursor`; the bench is `session_pages::bench`).
-   Measured in release on its own 50,000-chat database: first page 0.10 ms (p99 0.13 ms), page 101 0.10 ms, unread, links and marks of a page 0.06 ms, p99 append wait behind page and those three 0.27 ms; `children_of` 5.5 ms (see Children above).
+   Measured in release on its own 50,000-chat database: first page 0.10 ms (p99 0.13 ms), page 101 0.10 ms, unread, links and marks of a page 0.06 ms, p99 append wait behind page and those three 0.27 ms; `children_of` 5.5 ms before migration 7, 0.03 ms after (see Children above).
 2. **`/api/sessions` paged** (`http/sessions.rs`, no growth of `http.rs`).
    Tests: another user's cursor returns only the caller's chats; a cursor from workspace A used in B lists B's chats from that position and nothing of A's; `limit=1000000000` returns 200; a malformed cursor is 400; seen routine run chats never shorten a page; children of the page's parents arrive.
 3. **UI: load more on scroll** (state in a hook, not in `Shell.tsx`), refetch policy, `pruneDrafts` on first load only, `subAgentRunning` from `children` and the lookup.
