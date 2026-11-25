@@ -312,6 +312,10 @@ fn ids(rows: &[SessionRow]) -> Vec<SessionId> {
 }
 
 /// Statements `f` runs on `s`'s connection.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "counts statements in a test; nothing is logged"
+)]
 fn statements<R>(s: &Store, f: impl FnOnce() -> R) -> (usize, R) {
     let n = Arc::new(AtomicUsize::new(0));
     let seen = n.clone();
@@ -444,7 +448,11 @@ fn the_owner_page_seeks_the_owner_index_and_never_scans_sessions() {
     // index), at every level of the recursion, not by walking the owner's
     // chats; the owner is a filter.
     for (owner, bound) in [(Owner::User("a"), Some("a")), (Owner::Everyone, None)] {
-        let p = plan(&f.s, &children_sql(owner), params![bound, "[]", 10i64]);
+        let p = plan(
+            &f.s,
+            &children_sql(owner),
+            params![bound, "[]", 10i64, 11i64],
+        );
         let by_parent = p
             .iter()
             .filter(|l| l.starts_with("SEARCH s USING INDEX sessions_parent (parent_id=?)"))
@@ -902,20 +910,87 @@ fn a_parent_loop_ends() {
     assert_eq!(child_ids(&s, "a", &[me]), vec![me]);
 }
 
+fn plain_running(s: &Store, owner: &str, parent: SessionId, updated_ms: i64) -> SessionId {
+    let id = child(s, owner, parent, updated_ms);
+    exec(
+        s,
+        "UPDATE sessions SET running = 1 WHERE session_id = ?1",
+        params![id.to_string()],
+    );
+    id
+}
+
+fn descendants(s: &Store, parent: SessionId) -> Descendants {
+    s.children_of(Owner::User("a"), &[parent]).unwrap()
+}
+
+/// Past the cap the newest are kept, whatever order the walk finds them
+/// in, and `truncated` says exactly whether a chat was left out.
 #[test]
-fn more_than_the_row_cap_is_cut_and_said() {
+fn the_cap_keeps_the_newest_and_says_exactly_when_it_cut() {
     let s = Store::open_in_memory().unwrap();
     user(&s, "a");
+    // Children inserted oldest first: the walk meets the oldest first.
     let p = plain(&s, "a", 0);
-    for k in 0..(MAX_DESCENDANTS + 5) {
-        child(&s, "a", p, 1 + k as i64);
-    }
-    let d = s.children_of(Owner::User("a"), &[p]).unwrap();
+    let made: Vec<SessionId> = (0..MAX_DESCENDANTS + 5)
+        .map(|k| child(&s, "a", p, 1 + k as i64))
+        .collect();
+    let d = descendants(&s, p);
     assert!(d.truncated);
     assert_eq!(d.rows.len(), MAX_DESCENDANTS);
+    let mut newest: Vec<SessionId> = made[5..].to_vec();
+    newest.reverse();
+    assert_eq!(ids(&d.rows), newest, "the 2,000 newest, newest first");
+
+    // A running grandchild, the newest of all, behind 2,002 old children
+    // of the first child's siblings: the walk finds it last.
     let q = plain(&s, "a", 0);
-    child(&s, "a", q, 1);
-    assert!(!s.children_of(Owner::User("a"), &[q]).unwrap().truncated);
+    let first = child(&s, "a", q, 1);
+    for k in 0..(MAX_DESCENDANTS + 2) {
+        child(&s, "a", q, 2 + k as i64);
+    }
+    let running = plain_running(&s, "a", first, 1_000_000);
+    let d = descendants(&s, q);
+    assert!(d.truncated);
+    assert_eq!(d.rows[0].session_id, running);
+    assert!(d.rows[0].running);
+
+    // Exactly the cap: nothing cut; one more: cut.
+    for (n, cut) in [(MAX_DESCENDANTS, false), (MAX_DESCENDANTS + 1, true)] {
+        let r = plain(&s, "a", 0);
+        for k in 0..n {
+            child(&s, "a", r, 1 + k as i64);
+        }
+        let d = descendants(&s, r);
+        assert_eq!(d.truncated, cut, "{n}");
+        assert_eq!(d.rows.len(), n.min(MAX_DESCENDANTS), "{n}");
+    }
+}
+
+/// A corrupt `parent_id` loop counts each chat once: it neither cuts the
+/// answer early nor makes `truncated` say a chat was left out.
+#[test]
+fn a_parent_loop_does_not_make_truncated_lie() {
+    for (others, cut) in [(MAX_DESCENDANTS - 2, false), (MAX_DESCENDANTS - 1, true)] {
+        let s = Store::open_in_memory().unwrap();
+        user(&s, "a");
+        let one = plain(&s, "a", 1);
+        let two = child(&s, "a", one, 2);
+        exec(
+            &s,
+            "UPDATE sessions SET parent_id = ?2 WHERE session_id = ?1",
+            params![one.to_string(), two.to_string()],
+        );
+        for k in 0..others {
+            child(&s, "a", one, 10 + k as i64);
+        }
+        // Reachable from `one`: `two`, `one` itself and the others.
+        let d = descendants(&s, one);
+        assert_eq!(d.truncated, cut, "{others}");
+        assert_eq!(d.rows.len(), (others + 2).min(MAX_DESCENDANTS), "{others}");
+        let distinct: HashSet<SessionId> = ids(&d.rows).into_iter().collect();
+        assert_eq!(distinct.len(), d.rows.len(), "each chat once");
+    }
 }
 
 /// Decided: a child is shown nested under its parent, so it follows the
@@ -963,40 +1038,119 @@ fn a_child_follows_its_parent_whatever_its_own_workspace() {
     assert!(!ids(&old).contains(&c), "today's list leaves it out");
 }
 
-/// Decided: a stored id in another spelling (here upper case) is corrupt
-/// data. Paging ends with an error naming no chat content; it never loops.
-#[test]
-fn a_stored_id_in_another_spelling_is_an_error_not_a_loop() {
-    let s = Store::open_in_memory().unwrap();
-    user(&s, "a");
-    for _ in 0..6 {
-        exec(
-            &s,
-            "INSERT INTO sessions (session_id, node_id, title, created_ms, updated_ms, head_seq, owner_id)
-             VALUES (?1, 'node-1', 'secret title', 0, 7, 0, 'a')",
-            params![SessionId::new().to_string().to_uppercase()],
-        );
+/// Insert a chat of `owner` whose stored id is not in canonical form.
+fn odd(s: &Store, owner: Option<&str>, updated_ms: i64) -> String {
+    let id = SessionId::new().to_string().to_uppercase();
+    exec(
+        s,
+        "INSERT INTO sessions (session_id, node_id, title, created_ms, updated_ms, head_seq, owner_id)
+         VALUES (?1, 'node-1', 'secret title', 0, ?2, 0, ?3)",
+        params![id, updated_ms, owner],
+    );
+    id
+}
+
+/// Every page from the top, at most `max_pages`.
+fn walk_bounded(s: &Store, q: PageQuery<'_>, max_pages: usize) -> Vec<SessionId> {
+    let mut q = q;
+    let mut out = Vec::new();
+    for _ in 0..max_pages {
+        let (page, next) = s.sessions_page(&q).unwrap();
+        assert!(page.len() <= q.limit.clamp(1, MAX_PAGE));
+        out.extend(ids(&page));
+        match next {
+            Some(c) => {
+                assert_eq!(Some(c), page.last().map(Cursor::of), "from a good row");
+                q.after = Some(c);
+            }
+            None => return out,
+        }
     }
-    let mut q = PageQuery {
-        owner: Owner::User("a"),
+    panic!("paging did not end in {max_pages} pages");
+}
+
+fn by_limit(owner: Owner<'_>, limit: usize) -> PageQuery<'_> {
+    PageQuery {
+        owner,
         workspace: None,
         top_level: false,
         hide_seen_runs: false,
         after: None,
-        limit: 2,
-    };
-    let mut pages = 0;
-    let err = loop {
-        pages += 1;
-        assert!(pages <= 10, "paging loops");
-        match s.sessions_page(&q) {
-            Ok((_, Some(next))) => q.after = Some(next),
-            Ok((_, None)) => panic!("paged to the end over corrupt ids"),
-            Err(e) => break e,
+        limit,
+    }
+}
+
+/// Decided: a chat whose stored id is not in canonical form is skipped
+/// (logged with its id), never returned and never a cursor; the list goes
+/// on and paging always ends.
+#[test]
+fn a_stored_id_in_another_spelling_is_skipped_and_the_list_goes_on() {
+    // The reviewer's probe: three good chats and a newer odd one.
+    let s = Store::open_in_memory().unwrap();
+    user(&s, "a");
+    let good: Vec<SessionId> = (1..=3).map(|k| plain(&s, "a", k)).collect();
+    odd(&s, Some("a"), 10);
+    let mut want = good.clone();
+    want.reverse();
+    assert_eq!(walk_bounded(&s, by_limit(Owner::User("a"), 50), 3), want);
+    assert_eq!(walk_bounded(&s, by_limit(Owner::User("a"), 1), 10), want);
+
+    // Only odd ones, tied: an empty list and no cursor.
+    let s = Store::open_in_memory().unwrap();
+    user(&s, "a");
+    for _ in 0..6 {
+        odd(&s, Some("a"), 7);
+    }
+    let (page, next) = s.sessions_page(&by_limit(Owner::User("a"), 2)).unwrap();
+    assert!(page.is_empty());
+    assert_eq!(next, None);
+
+    // Mixed: a whole page of odd ones, and odd ones tied with good ones.
+    let s = Store::open_in_memory().unwrap();
+    user(&s, "a");
+    user(&s, "b");
+    let mut good = Vec::new();
+    for t in 0..12i64 {
+        for k in 0..3 {
+            if (t + k) % 3 == 0 || t % 4 == 1 {
+                odd(&s, Some(if k == 1 { "b" } else { "a" }), t);
+            } else {
+                good.push((t, plain(&s, if k == 1 { "b" } else { "a" }, t)));
+            }
         }
+    }
+    for t in 20..26 {
+        odd(&s, Some("a"), t);
+    }
+    odd(&s, None, 5);
+    let expect = |owner: Option<&str>| -> Vec<SessionId> {
+        let mut v: Vec<(i64, String, SessionId)> = good
+            .iter()
+            .map(|(t, id)| (*t, id.to_string(), *id))
+            .filter(|(_, text, _)| {
+                owner.is_none_or(|o| {
+                    s.session(text.parse().unwrap())
+                        .unwrap()
+                        .unwrap()
+                        .owner_id
+                        .as_deref()
+                        == Some(o)
+                })
+            })
+            .collect();
+        v.sort_by(|x, y| (y.0, &y.1).cmp(&(x.0, &x.1)));
+        v.into_iter().map(|x| x.2).collect()
     };
-    assert!(matches!(err, StoreError::Corrupt(_)), "{err}");
-    assert!(!err.to_string().contains("secret"), "{err}");
+    for (owner, bound) in [
+        (Owner::User("a"), Some("a")),
+        (Owner::User("b"), Some("b")),
+        (Owner::Everyone, None),
+    ] {
+        let got = walk_bounded(&s, by_limit(owner, 2), 100);
+        let once: HashSet<SessionId> = got.iter().copied().collect();
+        assert_eq!(once.len(), got.len(), "{owner:?}: each good row once");
+        assert_eq!(got, expect(bound), "{owner:?}");
+    }
 }
 
 /// A last page that is exactly full has no next cursor.

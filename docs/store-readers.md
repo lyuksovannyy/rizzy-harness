@@ -245,11 +245,19 @@ The owner is the caller (`who.user_id`); the API token (no user) gets every chat
   The API token keeps its every-chat listing, paged by the same cursor without the owner term (3–4 ms full scan at 50,000; no index added).
 - **Workspace:** as today, `ws::scope` checks membership before any query.
 - **Children:** every sub-agent chat below a chat on this page, at any depth (sub-agents of sub-agents nest, and today's sidebar shows them all), in one recursive query, so nesting and `subAgentRunning` keep working.
-  The owner is checked at every step, so a chain stops at a chat of somebody else; the depth is capped at 16 (the node has no limit of its own; the cap also ends a corrupt `parent_id` loop) and the rows at 2,000 (ten under each of 200 parents), past which the oldest are left out and the response says so (`truncated`).
+  The owner is checked at every step, so a chain stops at a chat of somebody else; the depth is capped at 16 (the node has no limit of its own; the cap also ends a corrupt `parent_id` loop) and the answer at 2,000 rows (ten under each of 200 parents): the walk is sorted newest first and cut there, so the newest (and so a running sub-agent) survive whatever order the walk meets them in, and `truncated` says exactly whether a chat was left out.
+  The walk itself reads at most `MAX_WALK` = 16 × 2,001 = 32,016 rows: each chat appears at most once per depth, so a shorter walk is complete and one that reaches the cap has found more than 2,000 distinct chats, which makes `truncated` true either way (a corrupt loop cannot make it lie).
+  Only a walk cut at that cap keeps the newest of the rows it found rather than of all of them.
+  Measured worst case (release, 50,000-chat bench, 33,016 sub-agent chats under one parent so the walk is cut): 26 ms under the store lock (p99 26.4 ms); a page's usual descendants take 0.05 ms.
+  That only an account with tens of thousands of sub-agent chats under one page can reach it is why the cap is not lower; lowering `MAX_DESCENDANTS` lowers it in proportion.
   Deliberately unlike today: a child is returned whatever its own effective workspace, since it is shown nested under its parent (today the list drops a child whose own mapping differs from the parent's workspace, so it vanishes from both places).
   Measured in slice 1: without an index on `sessions.parent_id` this query walked all of the owner's chats, 5.5 ms at 10,000 (p99 append wait behind the page 5.9 ms).
   Migration 7 adds the partial index `sessions_parent ON sessions(parent_id) WHERE parent_id IS NOT NULL`, and the query names it (`INDEXED BY`): with an owner term SQLite still picks `sessions_owner` over a new index, and `INDEXED BY` makes an unusable index an error instead of a silent walk.
   With it (direct children only, before the review): 0.03 ms for a page's children, p99 append wait behind page, annotations and children 0.22 ms; the recursive form is measured in slice 1 below.
+
+- **Odd stored ids:** a chat whose stored id is not exactly `SessionId::to_string()` (no writer stores another spelling, so it is corrupt data) is skipped with a `tracing` warning naming its id (titles and content never), never returned and never used as a cursor, and the list goes on.
+  The keyset compares stored text, so another spelling as a cursor would page in a loop; the page walks on the stored text itself and keeps reading until the page is full or the list ends, each row at most once per call (so the rows skipped per call are bounded by the owner's chats, every chat for the API token, the same bound as a sparse workspace).
+  Slice 1 first refused the whole list with an error; the review showed that one bad row then broke the owner's list for good, with no way out through the API.
 
 ### Live updates
 

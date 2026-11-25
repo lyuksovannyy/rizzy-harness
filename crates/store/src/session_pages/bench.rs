@@ -515,6 +515,41 @@ fn fifty_thousand_chats() {
         t,
     );
 
+    // The worst walk: one parent with more sub-agent chats than the walk
+    // reads (MAX_WALK), so it is cut and the answer is truncated.
+    let fan = super::MAX_WALK + 1_000;
+    let root = SessionId::new();
+    {
+        let mut conn = s.lock();
+        let tx = conn.transaction().unwrap();
+        let now = harness_core::now_ms();
+        tx.execute(
+            "INSERT INTO sessions (session_id, node_id, created_ms, updated_ms, head_seq, owner_id)
+             VALUES (?1, 'node-1', ?2, ?2, 0, ?3)",
+            params![root.to_string(), now, u0],
+        )
+        .unwrap();
+        for k in 0..fan {
+            tx.execute(
+                "INSERT INTO sessions (session_id, node_id, created_ms, updated_ms, head_seq, owner_id, parent_id)
+                 VALUES (?1, 'node-1', ?2, ?2, 0, ?3, ?4)",
+                params![SessionId::new().to_string(), now - k as i64, u0, root.to_string()],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let (t, d) = timed(20, || s.children_of(Owner::User(&u0), &[root]).unwrap());
+    assert!(d.truncated);
+    let worst = show(
+        &format!(
+            "children, worst walk ({fan} under one parent, cut at {})",
+            super::MAX_WALK
+        ),
+        t,
+    );
+    println!("worst walk p99 {worst:?}");
+
     assert!(first < FIRST_PAGE_P99, "first page p99 {first:?}");
     assert!(first_any < FIRST_PAGE_P99, "first page p99 {first_any:?}");
     assert!(append[0] < APPEND_P99, "append p99 {:?}", append[0]);

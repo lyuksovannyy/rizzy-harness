@@ -1,0 +1,8 @@
+# Statement tracing sees every statement with its bound values (password
+# and token hashes among them): none of it may reach a log. rusqlite's
+# `trace` feature is on only so that tests can count statements.
+disallowed-methods = [
+    { path = "rusqlite::Connection::trace_v2", reason = "statements carry bound values (hashes, tokens) and must never be logged; tests only, with an #[expect]" },
+    { path = "rusqlite::trace::StmtRef::expanded_sql", reason = "the expanded text holds bound values (hashes, tokens)" },
+    { path = "rusqlite::trace::log", reason = "writes into SQLite's error log; not for this program" },
+]

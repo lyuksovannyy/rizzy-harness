@@ -161,15 +161,27 @@ fn page_sql(owner: Owner<'_>, after: bool) -> String {
 pub const MAX_DEPTH: usize = 16;
 /// The most rows [`Store::children_of`] returns. A page has at most
 /// [`MAX_PAGE`] parents; 2,000 is ten sub-agent chats under each of them,
-/// a response of a few hundred KB, read in a few ms under the store lock.
-/// Past it the oldest are left out and the caller is told.
+/// a response of a few hundred KB. Past it the newest are kept and the
+/// caller is told.
 pub const MAX_DESCENDANTS: usize = 2_000;
+/// The most rows the walk below a page reads. Each chat appears at most
+/// once per depth (it has one parent, which appears at most once at the
+/// depth above, by induction from the distinct seeds), so a walk of
+/// fewer than this many rows is complete, and one that reaches it has
+/// found more than [`MAX_DESCENDANTS`] distinct chats: `truncated` is then
+/// true either way. Only past it are the kept rows the newest of those
+/// found rather than of all. Measured worst case (a walk cut here): see
+/// `docs/store-readers.md`.
+pub const MAX_WALK: usize = MAX_DEPTH * (MAX_DESCENDANTS + 1);
 
 /// Every sub-agent chat below the parents, at any depth, through
 /// [`PARENT_SCHEMA`]'s index. The owner term is checked at every step, so
-/// a chain stops at a chat of somebody else. `UNION` drops a repeated
-/// (chat, depth) only, so a loop of `parent_id`s ends at [`MAX_DEPTH`];
-/// the final `IN` lists each chat once.
+/// a chain stops at a chat of somebody else. A loop of `parent_id`s ends
+/// at [`MAX_DEPTH`] (each chat once per depth, see [`MAX_WALK`]), so
+/// `UNION ALL`: a `UNION` would drop nothing. The final `IN` lists each
+/// chat once; it is sorted newest first and cut to one more than
+/// [`MAX_DESCENDANTS`], so the newest survive whatever order the walk
+/// finds them in.
 ///
 /// `INDEXED BY`, not `+s.owner_id`: with an owner term SQLite prefers
 /// `sessions_owner` and walks all of the owner's chats (5.5 ms at 10,000,
@@ -181,14 +193,14 @@ fn children_sql(owner: Owner<'_>) -> String {
         "WITH RECURSIVE tree(id, depth) AS (
              SELECT s.session_id, 1 FROM sessions s INDEXED BY sessions_parent
               WHERE s.parent_id IN (SELECT value FROM json_each(?2)) AND {owner}
-             UNION
+             UNION ALL
              SELECT s.session_id, t.depth + 1 FROM tree t
                JOIN sessions s INDEXED BY sessions_parent ON s.parent_id = t.id
               WHERE t.depth < {MAX_DEPTH} AND {owner}
              LIMIT ?3)
          SELECT {SESSION_COLS}, {EFFECTIVE_WS} FROM sessions s {WS_JOINS}
           WHERE s.session_id IN (SELECT id FROM tree)
-          ORDER BY s.updated_ms DESC, s.session_id DESC"
+          ORDER BY s.updated_ms DESC, s.session_id DESC LIMIT ?4"
     )
 }
 
@@ -240,7 +252,8 @@ fn marks_sql(owner: Owner<'_>) -> String {
 pub struct Descendants {
     /// Newest first.
     pub rows: Vec<SessionRow>,
-    /// More than [`MAX_DESCENDANTS`]: the oldest were left out.
+    /// More than [`MAX_DESCENDANTS`] distinct chats: only the newest are in
+    /// `rows`.
     pub truncated: bool,
 }
 
@@ -264,39 +277,66 @@ impl Store {
     /// time went down past the cursor: node clocks are not monotonic) or
     /// be passed over in this walk (its time went up past the cursor; the
     /// next read from the top lists it). No other chat is repeated or lost.
+    ///
+    /// A chat whose stored id is not exactly `SessionId::to_string()` (no
+    /// writer stores another spelling, so it is corrupt data) is skipped
+    /// with a warning naming its id: it is never returned and never a
+    /// cursor, since the keyset compares stored text and another spelling
+    /// would page in a loop. The walk pages on the stored text itself, so
+    /// it always moves forward; a call reads each row at most once, so the
+    /// rows it may skip are bounded by the owner's chats (every chat for
+    /// [`Owner::Everyone`]), the same bound as a sparse workspace.
     pub fn sessions_page(&self, q: &PageQuery<'_>) -> Result<(Vec<SessionRow>, Option<Cursor>)> {
         let limit = q.limit.clamp(1, MAX_PAGE);
+        // One more than asked: whether there is a next page.
+        let want = limit + 1;
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(&page_sql(q.owner, q.after.is_some()))?;
-        let rows = stmt.query_map(
-            params![
-                q.owner.bind(),
-                q.after.map(|c| c.updated_ms),
-                q.after.map(|c| c.session_id.to_string()),
-                q.workspace,
-                q.top_level,
-                q.hide_seen_runs,
-                // One more than asked: whether there is a next page.
-                (limit + 1) as i64,
-            ],
-            Self::session_from_row,
-        )?;
-        let mut out = rows
-            .map(|r| {
-                let (text, row) = r?;
-                let row = Self::finish_session((text.clone(), row))?;
-                // The cursor compares the canonical text with the stored
-                // one: another spelling would page in a loop. Every writer
-                // stores `SessionId::to_string()`, so this is corrupt data.
-                if row.session_id.to_string() != text {
-                    return Err(StoreError::Corrupt(
-                        "a stored chat id is not in canonical form; the chat list cannot be paged"
-                            .into(),
-                    ));
+        let mut out: Vec<SessionRow> = Vec::with_capacity(want);
+        // Where the walk stands, as stored: (updated_ms, stored id text).
+        let mut at: Option<(i64, String)> =
+            q.after.map(|c| (c.updated_ms, c.session_id.to_string()));
+        loop {
+            let batch = want - out.len();
+            let mut stmt = conn.prepare_cached(&page_sql(q.owner, at.is_some()))?;
+            let rows = stmt.query_map(
+                params![
+                    q.owner.bind(),
+                    at.as_ref().map(|a| a.0),
+                    at.as_ref().map(|a| a.1.as_str()),
+                    q.workspace,
+                    q.top_level,
+                    q.hide_seen_runs,
+                    batch as i64,
+                ],
+                Self::session_from_row,
+            )?;
+            let mut read = 0;
+            for r in rows {
+                let (text, mut row) = r?;
+                read += 1;
+                match text.parse::<SessionId>() {
+                    Ok(id) if id.to_string() == text => {
+                        row.session_id = id;
+                        at = Some((row.updated_ms, text));
+                        out.push(row);
+                    }
+                    Ok(id) => {
+                        tracing::warn!(session = %id, "chat list: skipped a chat whose stored id is not in canonical form");
+                        at = Some((row.updated_ms, text));
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            bytes = text.len(),
+                            "chat list: skipped a chat whose stored id is not a session id"
+                        );
+                        at = Some((row.updated_ms, text));
+                    }
                 }
-                Ok(row)
-            })
-            .collect::<Result<Vec<_>>>()?;
+            }
+            if read < batch || out.len() == want {
+                break;
+            }
+        }
         let next = if out.len() > limit {
             out.truncate(limit);
             out.last().map(Cursor::of)
@@ -325,7 +365,12 @@ impl Store {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&children_sql(owner))?;
         let rows = stmt.query_map(
-            params![owner.bind(), list, (MAX_DESCENDANTS + 1) as i64],
+            params![
+                owner.bind(),
+                list,
+                MAX_WALK as i64,
+                (MAX_DESCENDANTS + 1) as i64
+            ],
             Self::session_from_row,
         )?;
         let mut rows = rows
