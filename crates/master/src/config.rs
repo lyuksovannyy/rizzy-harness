@@ -648,7 +648,7 @@ impl Config {
     /// Parse without validating (the environment may complete it).
     pub fn load_raw(path: &Path) -> anyhow::Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(s) => toml::from_str(&s).with_context(|| format!("parsing {}", path.display())),
+            Ok(s) => toml::from_str(&s).map_err(|e| bad_toml(path, &s, &e)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
@@ -782,8 +782,13 @@ impl Config {
         Ok(())
     }
 
-    /// Write atomically (temp file + rename). Holds no secrets.
+    /// Write atomically (temp file + rename). Holds no secrets. One writer
+    /// at a time in this process: the temp file has a fixed name, so two
+    /// writers would tear it. (The edit lock already keeps the server's
+    /// writers apart; this keeps the function safe on its own.)
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        static ONE_WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = ONE_WRITER.lock().unwrap_or_else(|p| p.into_inner());
         let text = format!(
             "# Written by {} (onboarding / settings). Keys live in secrets.toml.\n{}",
             harness_core::APP_NAME,
@@ -929,6 +934,37 @@ impl Config {
             .iter()
             .any(|p| p.kind != ProviderKind::Mock && !p.models.is_empty())
     }
+}
+
+/// Where in `text` a TOML error is: line and column, in words. Never what
+/// the text says there: `toml` quotes the line it cannot read, and
+/// serde's type errors quote the value, and in `secrets.toml` or an inline
+/// `config.toml` setting that is a key or a URL with a password. Every
+/// parse error of a file of ours goes through here before it is shown,
+/// logged or sent.
+pub fn toml_position(text: &str, e: &toml::de::Error) -> String {
+    let Some(span) = e.span() else {
+        return "(position unknown)".into();
+    };
+    let bytes = text.as_bytes();
+    let at = span.start.min(bytes.len());
+    let line = bytes[..at].iter().filter(|b| **b == b'\n').count() + 1;
+    let from = bytes[..at]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |i| i + 1);
+    let column = String::from_utf8_lossy(&bytes[from..at]).chars().count() + 1;
+    format!("at line {line}, column {column}")
+}
+
+/// The error for a file that is not valid TOML (or not a valid config):
+/// its path and the position, nothing the file says.
+pub fn bad_toml(path: &Path, text: &str, e: &toml::de::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{} is not valid TOML {}",
+        path.display(),
+        toml_position(text, e)
+    )
 }
 
 #[cfg(test)]

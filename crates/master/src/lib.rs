@@ -395,6 +395,8 @@ pub struct MasterInner {
     sockets: ws::Sockets,
     /// Hosts an admin's provider test may reach besides public addresses.
     outbound: Mutex<outbound::Outbound>,
+    /// How long recording a model listing waits for the config edit lock.
+    listing_lock_wait: Mutex<Duration>,
     /// Sealed storage and forge connections (X.27 step 1).
     forge: forge::State,
     /// Custom connectors' checks: limits, offers, test hooks (X.35).
@@ -911,6 +913,7 @@ impl Master {
                 artifact_throttle: Default::default(),
                 sockets: Default::default(),
                 outbound: Mutex::new(outbound::Outbound::from_env()),
+                listing_lock_wait: Mutex::new(model_cache::LISTING_LOCK_WAIT),
                 forge: Default::default(),
                 connectors: Default::default(),
                 callbacks: Default::default(),
@@ -943,6 +946,12 @@ impl Master {
     /// (`HARNESS_PLAIN_HTTP_HOSTS` unless set here).
     pub fn outbound(&self) -> outbound::Outbound {
         lock(&self.inner.outbound).clone()
+    }
+
+    /// How long a model listing waits for the config edit lock before the
+    /// round is skipped (tests shorten it).
+    pub fn set_listing_lock_wait(&self, d: Duration) {
+        *lock(&self.inner.listing_lock_wait) = d;
     }
 
     /// Replace the listed hosts (tests list their 127.0.0.1 fakes).

@@ -78,10 +78,9 @@ async fn put_settings(
     let b: StorageConfig = serde_json::from_value(b).map_err(|e| bad(e.to_string()))?;
     b.check().map_err(bad)?;
     let rt = runtime(&m)?;
-    let _edits = rt.lock_edits().await;
+    let edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     cfg.storage = b;
-    rt.save(cfg.clone())
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    rt.save(cfg.clone(), edits).await?;
     Ok(Json(settings_json(&cfg.storage)))
 }

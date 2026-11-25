@@ -18,7 +18,8 @@ use crate::Master;
 use crate::avatars::AgentAvatar;
 use crate::config::{AgentChain, Config, ModelConfig, ProviderConfig, ProviderKind, check_chain};
 use crate::presets::{self, Preset};
-use crate::providers::{ProviderRuntime, secret_name};
+use crate::providers::{EditGuard, Held, ProviderRuntime, SaveError, SectionLost, secret_name};
+use std::sync::Arc;
 
 const MAX_NAME: usize = 64;
 const MAX_TOKENS: u64 = 100_000_000;
@@ -282,32 +283,93 @@ fn secrets_path(rt: &ProviderRuntime) -> std::path::PathBuf {
 /// Store `key` under `name` for `f` (which builds and persists the config
 /// that uses it), and put the previous value back when `f` fails, so a
 /// failed save never pairs the new key with the old URL.
-pub(super) fn with_secret<T>(
+pub(super) async fn with_secret<T, Fut: std::future::Future<Output = ApiResult<T>>>(
     path: &std::path::Path,
     name: &str,
     key: Option<&Secret<String>>,
-    f: impl FnOnce() -> ApiResult<T>,
+    f: impl FnOnce() -> Fut,
 ) -> ApiResult<T> {
-    let Some(k) = key else { return f() };
+    let Some(k) = key else { return f().await };
     let internal = |e: crate::secrets::SecretsError| {
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     };
-    let prev = crate::secrets::get(path, name).map_err(internal)?;
-    crate::secrets::set(path, name, Some(k)).map_err(internal)?;
-    let r = f();
+    let prev = crate::secrets::get_off_thread(path, name)
+        .await
+        .map_err(internal)?;
+    crate::secrets::set_off_thread(path, name, Some(k))
+        .await
+        .map_err(internal)?;
+    let r = f().await;
     if r.is_err()
-        && let Err(e) = crate::secrets::set(path, name, prev.as_ref())
+        && let Err(e) = crate::secrets::set_off_thread(path, name, prev.as_ref()).await
     {
         tracing::error!("restoring secret {name:?} after a failed save: {e}");
     }
     r
 }
 
+/// A refused change is a 400 with its sentence; a config file that could
+/// not be written is a 500 (its text names the server's path, so it is for
+/// the log: `response::finish` keeps it from the client).
+impl From<SaveError> for ApiError {
+    fn from(e: SaveError) -> Self {
+        let code = match &e {
+            SaveError::Invalid(_) => StatusCode::BAD_REQUEST,
+            SaveError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError(code, e.to_string())
+    }
+}
+
+/// A provider that does not answer is a 502 with its sentence; the server's
+/// own file trouble is a 500 (the cause goes to the log).
+impl From<crate::model_cache::ListingError> for ApiError {
+    fn from(e: crate::model_cache::ListingError) -> Self {
+        use crate::model_cache::ListingError;
+        let code = match &e {
+            ListingError::Failed(_) => StatusCode::BAD_GATEWAY,
+            ListingError::Server(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ListingError::Busy(_) => StatusCode::SERVICE_UNAVAILABLE,
+        };
+        ApiError(code, e.to_string())
+    }
+}
+
+impl From<SectionLost> for ApiError {
+    fn from(e: SectionLost) -> Self {
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    }
+}
+
 /// Validate, persist, switch, and refresh the model list and the memory
-/// embedder.
-pub(super) fn apply(m: &Master, rt: &ProviderRuntime, mut cfg: Config) -> ApiResult<()> {
+/// embedder, as one section that runs to its end even if the request is
+/// cut (`ProviderRuntime::section`). Takes the edit lock `guard`.
+pub(super) async fn apply(
+    m: &Master,
+    rt: &Arc<ProviderRuntime>,
+    cfg: Config,
+    guard: EditGuard,
+) -> ApiResult<()> {
+    let m = m.clone();
+    rt.section(guard, move |rt, held| async move {
+        apply_in(&m, &rt, cfg, &held).await
+    })
+    .await?
+}
+
+/// [`apply`] inside a section.
+pub(super) async fn apply_in(
+    m: &Master,
+    rt: &ProviderRuntime,
+    mut cfg: Config,
+    held: &Held,
+) -> ApiResult<()> {
     cfg.normalize();
-    rt.apply(cfg).map_err(|e| bad(format!("{e:#}")))?;
+    // A refusal keeps its whole chain here (it always did on these routes).
+    rt.apply_in(cfg, held).await.map_err(|e| match e {
+        SaveError::Invalid(e) => bad(format!("{e:#}")),
+        io => io.into(),
+    })?;
     m.set_models(rt.models());
     super::memory_settings::refresh_embedder(m, rt);
     Ok(())
@@ -315,7 +377,7 @@ pub(super) fn apply(m: &Master, rt: &ProviderRuntime, mut cfg: Config) -> ApiRes
 
 /// Drop a stored key nothing uses any more (only our own `provider-<id>`
 /// names; a key referenced by hand under another name is left alone).
-fn forget_key(rt: &ProviderRuntime, old: Option<&ProviderConfig>) {
+async fn forget_key(rt: &ProviderRuntime, old: Option<&ProviderConfig>) {
     let Some(old) = old else { return };
     let name = secret_name(&old.id);
     let in_use = rt
@@ -324,7 +386,7 @@ fn forget_key(rt: &ProviderRuntime, old: Option<&ProviderConfig>) {
         .iter()
         .any(|p| p.api_key_secret.as_deref() == Some(name.as_str()));
     if old.api_key_secret.as_deref() == Some(name.as_str()) && !in_use {
-        let _ = crate::secrets::set(&secrets_path(rt), &name, None);
+        let _ = crate::secrets::set_off_thread(&secrets_path(rt), &name, None).await;
     }
 }
 
@@ -354,7 +416,7 @@ pub(super) async fn put_provider(
     } else {
         p.label.to_string()
     };
-    let _edits = rt.lock_edits().await;
+    let edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     let old = cfg.provider(&id).cloned();
     // One prefix, one provider: a preset never silently replaces another
@@ -419,10 +481,20 @@ pub(super) async fn put_provider(
     }
     cfg.normalize();
     cfg.validate().map_err(|e| bad(format!("{e:#}")))?;
-    with_secret(&secrets_path(&rt), &secret_name(&id), key.as_ref(), || {
-        apply(&m, &rt, cfg)
-    })?;
-    forget_key(&rt, old.as_ref());
+    // The secret, the config and the switch go together, or not at all,
+    // even if this request is cut while they run.
+    let (path, name) = (secrets_path(&rt), secret_name(&id));
+    let m2 = m.clone();
+    let old2 = old.clone();
+    rt.section(edits, move |rt, held| async move {
+        with_secret(&path, &name, key.as_ref(), || {
+            apply_in(&m2, &rt, cfg, &held)
+        })
+        .await?;
+        forget_key(&rt, old2.as_ref()).await;
+        Ok::<(), ApiError>(())
+    })
+    .await??;
     if moved {
         m.forget_listing(&id).await;
     }
@@ -436,15 +508,20 @@ pub(super) async fn delete_provider(
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let rt = runtime(&m)?;
-    let _edits = rt.lock_edits().await;
+    let edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     let old = cfg.provider(&id).cloned();
     if old.is_none() {
         return Err(ApiError(StatusCode::NOT_FOUND, "unknown provider".into()));
     }
     cfg.providers.retain(|p| p.id != id);
-    apply(&m, &rt, cfg)?;
-    forget_key(&rt, old.as_ref());
+    let m2 = m.clone();
+    rt.section(edits, move |rt, held| async move {
+        apply_in(&m2, &rt, cfg, &held).await?;
+        forget_key(&rt, old.as_ref()).await;
+        Ok::<(), ApiError>(())
+    })
+    .await??;
     m.forget_listing(&id).await;
     tracing::info!(provider = %id, "provider deleted");
     Ok(Json(state_json(&rt.config(), rt.data_dir())))
@@ -483,13 +560,13 @@ pub(super) async fn use_demo(
     State(m): State<Master>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let rt = runtime(&m)?;
-    let _edits = rt.lock_edits().await;
+    let edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     if cfg.provider(presets::DEMO).is_none() {
         cfg.providers.push(ProviderConfig::demo(40));
     }
     cfg.default_model = Some(format!("{}::mock", presets::DEMO));
-    apply(&m, &rt, cfg)?;
+    apply(&m, &rt, cfg, edits).await?;
     Ok(Json(state_json(&rt.config(), rt.data_dir())))
 }
 
@@ -519,7 +596,7 @@ pub(super) async fn put_agent_models(
     Json(b): Json<AgentModelsBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let rt = runtime(&m)?;
-    let _edits = rt.lock_edits().await;
+    let edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     let agents = m.agents();
     let model = |cfg: &Config, id: &str| {
@@ -546,7 +623,7 @@ pub(super) async fn put_agent_models(
         Some(None) => cfg.default_model = None,
         None => {}
     }
-    apply(&m, &rt, cfg)?;
+    apply(&m, &rt, cfg, edits).await?;
     Ok(Json(state_json(&rt.config(), rt.data_dir())))
 }
 
@@ -565,10 +642,10 @@ pub(super) async fn put_agent_avatar(
     let avatar: AgentAvatar =
         serde_json::from_str(&body).map_err(|e| bad(format!("bad avatar: {e}")))?;
     let rt = runtime(&m)?;
-    let _edits = rt.lock_edits().await;
+    let edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     cfg.agent_avatars.insert(id, avatar);
-    apply(&m, &rt, cfg)?;
+    apply(&m, &rt, cfg, edits).await?;
     // Server settings show the server's own chains.
     Ok(Json(super::agent_edits::agent_json(
         &m,
@@ -611,10 +688,7 @@ pub(super) async fn get_models(
         .ok_or_else(unknown_provider)?;
     let l = match m.cached_listing(&id, &base).await {
         Some(l) => l,
-        None => m
-            .refresh_listing(&id)
-            .await
-            .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?,
+        None => m.refresh_listing(&id).await.map_err(ApiError::from)?,
     };
     Ok(Json(listing_json(&rt.config(), &id, &l)))
 }
@@ -629,10 +703,7 @@ pub(super) async fn refresh_models(
     if rt.config().provider(&id).is_none() {
         return Err(unknown_provider());
     }
-    let l = m
-        .refresh_listing(&id)
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    let l = m.refresh_listing(&id).await.map_err(ApiError::from)?;
     Ok(Json(listing_json(&rt.config(), &id, &l)))
 }
 
@@ -644,7 +715,7 @@ pub(super) async fn delete_model(
     Path((id, raw)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let rt = runtime(&m)?;
-    let _edits = rt.lock_edits().await;
+    let edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     let p = cfg
         .providers
@@ -658,7 +729,7 @@ pub(super) async fn delete_model(
     }
     // Agents and defaults that named it are repaired by `apply`: a fallback
     // takes the place of a main model, a default falls back.
-    apply(&m, &rt, cfg)?;
+    apply(&m, &rt, cfg, edits).await?;
     tracing::info!(provider = %id, model = %raw, "model removed");
     Ok(Json(state_json(&rt.config(), rt.data_dir())))
 }

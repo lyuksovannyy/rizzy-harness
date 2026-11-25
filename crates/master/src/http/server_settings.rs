@@ -3,7 +3,6 @@
 //! feature flags, token savings and the graphify status.
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -12,7 +11,7 @@ use serde_json::json;
 use super::agent_edits::{ScopeQuery, settings_scope};
 use super::caller::{Admin, User};
 use super::search::kinds_shown;
-use super::{ApiError, ApiResult, runtime};
+use super::{ApiResult, runtime};
 use crate::Master;
 use crate::workspaces as ws;
 
@@ -74,11 +73,10 @@ async fn put_savings(
     Json(b): Json<harness_core::savings::TokenSavings>,
 ) -> ApiResult<Json<harness_core::savings::TokenSavings>> {
     let rt = runtime(&m)?;
-    let _edits = rt.lock_edits().await;
+    let edits = rt.lock_edits().await;
     let mut cfg = rt.config();
     cfg.savings = b;
-    rt.save(cfg.clone())
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    rt.save(cfg.clone(), edits).await?;
     Ok(Json(cfg.savings))
 }
 

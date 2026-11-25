@@ -407,7 +407,7 @@ pub(super) async fn keep(
         .await
         .map_err(refused)?;
     if written.size == 0 {
-        let _ = std::fs::remove_file(&written.path);
+        let _ = tokio::fs::remove_file(&written.path).await;
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
             "the file is empty".into(),

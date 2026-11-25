@@ -312,7 +312,7 @@ async fn upload(
     };
     if let Some(why) = refusal {
         // The writer is done: its file is ours to remove.
-        let _ = std::fs::remove_file(&written.path);
+        let _ = tokio::fs::remove_file(&written.path).await;
         return Err(ApiError(StatusCode::UNSUPPORTED_MEDIA_TYPE, why.into()));
     }
     let item = NewItem {

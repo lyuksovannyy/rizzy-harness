@@ -7,8 +7,8 @@
 //!   for every request (never taken from the client, never derived from
 //!   anything), in `x-request-id` on every response.
 //! - **No detail in a 500.** Whatever a handler put in a 500's body (a
-//!   store error with SQL, a file path, a library's message) is logged with
-//!   the request id and replaced by `{"error":"internal error",
+//!   store error with SQL, a file path, a library's message) is logged, with
+//!   the master's known secrets scrubbed, with the request id and replaced by `{"error":"internal error",
 //!   "request_id":"…"}`. This is done to the response, not at each call
 //!   site, so a new handler cannot leak by building its own 500.
 //! - **`Cache-Control: no-store`** on every `/api/*` response, errors and
@@ -61,7 +61,7 @@ pub async fn finish(State(master): State<Master>, mut req: Request, next: Next) 
     req.extensions_mut().insert(RequestId(id.clone()));
     let mut resp = next.run(req).await;
     if resp.status() == StatusCode::INTERNAL_SERVER_ERROR {
-        resp = internal(resp, &id, &method, &path).await;
+        resp = internal(&master, resp, &id, &method, &path).await;
     }
     let h = resp.headers_mut();
     h.insert(
@@ -81,11 +81,25 @@ pub async fn finish(State(master): State<Master>, mut req: Request, next: Next) 
 }
 
 /// Log a 500's body with the request id; answer with the fixed one.
-async fn internal(resp: Response, id: &str, method: &axum::http::Method, path: &str) -> Response {
+///
+/// The logged text goes through the master's secret set first (PLAN.md T3):
+/// an error that carries a provider key, the API token or another secret the
+/// set holds (a path or a message built from one) logs the marker instead.
+async fn internal(
+    master: &Master,
+    resp: Response,
+    id: &str,
+    method: &axum::http::Method,
+    path: &str,
+) -> Response {
     let (parts, body) = resp.into_parts();
     let detail = match axum::body::to_bytes(body, LOGGED_BODY).await {
         Ok(b) => String::from_utf8_lossy(&b).into_owned(),
         Err(_) => format!("(body over {LOGGED_BODY} bytes or unreadable)"),
+    };
+    let detail = match master.provider_runtime() {
+        Some(rt) => rt.secrets.scrub(&detail),
+        None => detail,
     };
     tracing::error!(request_id = %id, %method, path, %detail, "internal error");
     let mut out = (

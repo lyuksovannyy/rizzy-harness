@@ -49,7 +49,7 @@ pub fn resolve_key(
         (None, Some(name)) => {
             let path = data_dir.join("secrets.toml");
             let v = crate::secrets::get(&path, name)?
-                .with_context(|| format!("secret {name:?} not found in {}", path.display()))?;
+                .with_context(|| format!("secret {name:?} not found in secrets.toml"))?;
             (Some(v), vec![])
         }
         (None, None) => (None, vec![]),
@@ -91,9 +91,8 @@ pub fn web_tools_from(
                 ),
                 (None, Some(name)) => {
                     let path = data_dir.join("secrets.toml");
-                    crate::secrets::get(&path, name)?.with_context(|| {
-                        format!("secret {name:?} not found in {}", path.display())
-                    })?
+                    crate::secrets::get(&path, name)?
+                        .with_context(|| format!("secret {name:?} not found in secrets.toml"))?
                 }
                 (None, None) => anyhow::bail!("[web] brave needs a key"),
             };
@@ -175,6 +174,41 @@ pub fn model_list(cfg: &Config) -> Vec<ModelInfo> {
         .collect()
 }
 
+/// Why [`ProviderRuntime::save`] or [`ProviderRuntime::apply`] failed.
+/// Callers answer the two differently: a refused change is the admin's to
+/// fix (a 400 with the sentence), a file that could not be written is the
+/// server's trouble (a 500, whose text holds a server path and goes to the
+/// log, never to the client).
+#[derive(Debug, thiserror::Error)]
+pub enum SaveError {
+    /// The change is refused: the environment, `validate` or building the
+    /// providers said why.
+    #[error("{0}")]
+    Invalid(anyhow::Error),
+    /// `config.toml` could not be written (or read back for the settings
+    /// the environment fixes).
+    #[error("{0:#}")]
+    Io(anyhow::Error),
+}
+
+/// The lock that serialises changes to `config.toml` and `secrets.toml`.
+pub type EditGuard = tokio::sync::OwnedMutexGuard<()>;
+
+/// Proof, inside [`ProviderRuntime::section`], that the edit lock is held.
+pub struct Held(());
+
+/// The task that carried a change out stopped without an answer (it
+/// panicked, or the runtime is shutting down).
+#[derive(Debug, thiserror::Error)]
+#[error("the change did not finish")]
+pub struct SectionLost;
+
+impl From<SectionLost> for SaveError {
+    fn from(e: SectionLost) -> Self {
+        SaveError::Io(e.into())
+    }
+}
+
 /// Owns the live provider, its config file and the shared secret set.
 pub struct ProviderRuntime {
     pub provider: Arc<SwappableProvider>,
@@ -183,7 +217,7 @@ pub struct ProviderRuntime {
     config: Mutex<Config>,
     /// Held by every config change from its `config()` read through its
     /// `save` / `apply`, so no change writes back a stale snapshot.
-    edits: tokio::sync::Mutex<()>,
+    edits: Arc<tokio::sync::Mutex<()>>,
     /// Settings the environment fixes (`.env`): they win over every change
     /// and are never written over `config.toml`'s own values.
     env: crate::env::EnvSettings,
@@ -206,7 +240,7 @@ impl ProviderRuntime {
                 secrets,
                 data_dir: data_dir.to_path_buf(),
                 config: Mutex::new(cfg),
-                edits: tokio::sync::Mutex::new(()),
+                edits: Arc::new(tokio::sync::Mutex::new(())),
                 env: crate::env::EnvSettings::default(),
             },
             built.env_remove,
@@ -224,10 +258,15 @@ impl ProviderRuntime {
     }
 
     /// Write `cfg` to `config.toml`, keeping the file's own values for the
-    /// settings the environment fixes.
-    fn persist(&self, cfg: &Config) -> anyhow::Result<()> {
+    /// settings the environment fixes. The one place the running server
+    /// writes the file: on the blocking pool, so a slow disk stalls a
+    /// thread meant for it and not the async workers (FIX_PLAN 4.2).
+    async fn persist(&self, cfg: &Config) -> anyhow::Result<()> {
         let path = self.data_dir.join(harness_core::CONFIG_FILE);
-        self.env.for_file(cfg, &path)?.save(&path)
+        let (env, cfg) = (self.env.clone(), cfg.clone());
+        tokio::task::spawn_blocking(move || env.for_file(&cfg, &path)?.save(&path))
+            .await
+            .context("the config write did not finish")?
     }
 
     pub fn config(&self) -> Config {
@@ -238,10 +277,42 @@ impl ProviderRuntime {
     }
 
     /// Serialise config changes: take this before reading the config you
-    /// are about to change, and keep it until it is saved or applied. Never
-    /// hold it across a network call.
-    pub async fn lock_edits(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.edits.lock().await
+    /// are about to change, and hand it to [`Self::section`], [`Self::save`]
+    /// or [`Self::apply`], which keep it until the change is written and
+    /// switched. Never hold it across a network call.
+    pub async fn lock_edits(&self) -> EditGuard {
+        self.edits.clone().lock_owned().await
+    }
+
+    /// Run a change to the saved configuration to its end, whether or not
+    /// the request that asked for it is still waiting.
+    ///
+    /// The route timeout (`limits::enforce`) and a client that hangs up drop
+    /// the handler's future. A write on the blocking pool then keeps going
+    /// without it, and with the lock gone the next change would start beside
+    /// it on the same temp file, or the file would hold a value the running
+    /// configuration never took. So the change runs in a task of its own that
+    /// owns the lock `guard`; the handler waits for it, and dropping that wait
+    /// stops nothing. Everything that must go together goes inside: the secret
+    /// write, the file write, the switch of the running configuration, the
+    /// restore of a previous secret on failure.
+    pub async fn section<T, F, Fut>(
+        self: &Arc<Self>,
+        guard: EditGuard,
+        f: F,
+    ) -> Result<T, SectionLost>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<Self>, Held) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = T> + Send + 'static,
+    {
+        let rt = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            f(rt, Held(())).await
+        })
+        .await
+        .map_err(|_| SectionLost)
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -253,21 +324,52 @@ impl ProviderRuntime {
     }
 
     /// Validate and persist a config change that does not touch the provider.
-    pub fn save(&self, mut cfg: Config) -> anyhow::Result<()> {
-        self.env.apply(&mut cfg)?;
-        cfg.validate()?;
-        self.persist(&cfg)?;
+    pub async fn save(self: &Arc<Self>, cfg: Config, guard: EditGuard) -> Result<(), SaveError> {
+        self.section(guard, move |rt, held| async move {
+            rt.save_in(cfg, &held).await
+        })
+        .await?
+    }
+
+    /// [`Self::save`] inside a [`Self::section`].
+    pub async fn save_in(&self, mut cfg: Config, _: &Held) -> Result<(), SaveError> {
+        self.env.apply(&mut cfg).map_err(SaveError::Invalid)?;
+        cfg.validate().map_err(SaveError::Invalid)?;
+        self.persist(&cfg).await.map_err(SaveError::Io)?;
         *self.config.lock().unwrap_or_else(|p| p.into_inner()) = cfg;
         Ok(())
     }
 
     /// Validate, build, persist to `config.toml`, then switch. Running turns
     /// finish on the old provider; the next turn uses the new one.
-    pub fn apply(&self, mut cfg: Config) -> anyhow::Result<()> {
-        self.env.apply(&mut cfg)?;
-        cfg.validate()?;
-        let built = build(&cfg, &self.data_dir)?;
-        self.persist(&cfg)?;
+    pub async fn apply(self: &Arc<Self>, cfg: Config, guard: EditGuard) -> Result<(), SaveError> {
+        self.section(guard, move |rt, held| async move {
+            rt.apply_in(cfg, &held).await
+        })
+        .await?
+    }
+
+    /// [`Self::apply`] inside a [`Self::section`].
+    pub async fn apply_in(&self, mut cfg: Config, _: &Held) -> Result<(), SaveError> {
+        self.env.apply(&mut cfg).map_err(SaveError::Invalid)?;
+        cfg.validate().map_err(SaveError::Invalid)?;
+        let dir = self.data_dir.clone();
+        let (cfg, built) = tokio::task::spawn_blocking(move || {
+            let built = build(&cfg, &dir);
+            (cfg, built)
+        })
+        .await
+        .map_err(|e| SaveError::Io(e.into()))?;
+        let built = built.map_err(|e| {
+            // A secrets file that cannot be read is the server's trouble;
+            // a provider that cannot be built is the change's.
+            if e.chain().any(|c| c.is::<crate::secrets::SecretsError>()) {
+                SaveError::Io(e)
+            } else {
+                SaveError::Invalid(e)
+            }
+        })?;
+        self.persist(&cfg).await.map_err(SaveError::Io)?;
         for k in built.keys {
             self.secrets.add(k);
         }
@@ -308,7 +410,7 @@ fn secret(data_dir: &Path, name: &Option<String>) -> anyhow::Result<Option<Secre
         Some(n) => {
             let path = data_dir.join("secrets.toml");
             let k: Secret<String> = crate::secrets::get(&path, n)?
-                .with_context(|| format!("secret {n:?} not found in {}", path.display()))?;
+                .with_context(|| format!("secret {n:?} not found in secrets.toml"))?;
             // An empty key is no key: nothing is sent for it.
             Ok(Some(k).filter(|k| !k.is_blank()))
         }

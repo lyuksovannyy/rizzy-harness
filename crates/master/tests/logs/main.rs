@@ -22,4 +22,5 @@ mod doc_http;
 mod forge_clone_http;
 mod forge_push_http;
 mod login_binding_http;
+mod save_errors_http;
 mod temp_passwords_http;
