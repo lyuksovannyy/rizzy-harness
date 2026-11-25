@@ -77,7 +77,9 @@ nix = { version = "0.31.3", features = ["signal", "process", "hostname", "net", 
 pulldown-cmark = { version = "=0.13.6", default-features = false }
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "http2", "multipart"] }
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+# `trace`: no extra crate; harness-store's tests count the statements a call
+# runs. One feature set for every crate, so rusqlite is built once.
+rusqlite = { version = "0.41.1", features = ["bundled", "trace"] }
 rust-embed = "8.13.0"
 # The MCP client (ADOPTION_PLAN X.3): the protocol's official Rust SDK, the
 # client half only, over our own stdio pipes. Pinned exactly: a 3.x minor

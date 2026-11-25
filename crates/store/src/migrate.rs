@@ -340,6 +340,20 @@ fn run(
             start = 1;
         }
     }
+    // A file at a version between: it must be exactly that version's
+    // schema before a later migration runs over it. Another kind of file
+    // with a version of its own (a memory.db in place of a node.db) would
+    // otherwise pass the `IF NOT EXISTS` migrations and fail in the first
+    // one that names a table, blamed on that migration.
+    if from > 0 {
+        let now = schema_text(&tx).map_err(sqlite)?;
+        if now != schema_of(&steps[..from as usize]).map_err(sqlite)? {
+            return Err(MigrateError::Mismatch {
+                db: db.to_string(),
+                version: from,
+            });
+        }
+    }
     // Re-check D4: a reference that dangles already is not this
     // migration's doing, and must not be reported as if it were.
     if let Some((table, parent)) = dangling(&tx).map_err(sqlite)? {

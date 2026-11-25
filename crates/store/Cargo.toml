@@ -11,6 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# Already the workspace's (core, master, node): the page cursor's wire form.
+base64.workspace = true
 harness-core.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

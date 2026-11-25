@@ -924,7 +924,7 @@ fn a_version_2_database_is_migrated_to_the_latest_and_keeps_its_rows() {
         }
         drop(Store::open(&path, d).unwrap_or_else(|e| panic!("{name}: {e}")));
         assert_eq!(version_of(&path), MIGRATIONS.len() as i64, "{name}");
-        assert_eq!(MIGRATIONS.len(), 6);
+        assert_eq!(MIGRATIONS.len(), 7);
         let c = Connection::open(&path).unwrap();
         assert_eq!(count(&c, "events"), 1, "{name}: the row is kept");
         assert_eq!(
@@ -1127,7 +1127,7 @@ fn a_version_5_database_is_migrated_and_its_rows_are_not_made_files() {
         }
         migrate::check_file(&path, &harness_store::DB_SCHEMA).unwrap();
         drop(Store::open(&path, d).unwrap_or_else(|e| panic!("{name}: {e}")));
-        assert_eq!(version_of(&path), 6, "{name}");
+        assert_eq!(version_of(&path), MIGRATIONS.len() as i64, "{name}");
         let c = Connection::open(&path).unwrap();
         let made: i64 = c
             .query_row(
@@ -1139,6 +1139,73 @@ fn a_version_5_database_is_migrated_and_its_rows_are_not_made_files() {
         assert_eq!(made, 0, "{name}: an attachment is not a made file");
         drop(c);
         drop(Store::open(&path, d).unwrap());
+    }
+}
+
+/// Version 6 is as recorded when migration 6 shipped.
+#[test]
+fn the_recorded_version_6_is_the_frozen_one() {
+    let recorded = include_str!("../schema/6.sql");
+    assert!(
+        !recorded.contains("sessions_parent"),
+        "version 6 was recorded before sessions_parent; that index is migration 7"
+    );
+    assert_eq!(recorded.len(), FROZEN_V6_BYTES, "schema/6.sql was changed");
+    assert_eq!(
+        fnv1a(recorded.as_bytes()),
+        FROZEN_V6_FNV1A,
+        "schema/6.sql was changed"
+    );
+}
+
+/// Migration 7 (docs/store-readers.md): a version 6 database gets the
+/// partial index on `sessions(parent_id)` the chat list's children are
+/// read through, keeps its rows, and the index holds only sub-agent chats.
+#[test]
+fn a_version_6_database_is_migrated_and_gets_the_parent_index() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, d) in [
+        ("master.db", Durability::Normal),
+        ("chat.db", Durability::Normal),
+        ("node.db", Durability::Full),
+    ] {
+        let path = dir.path().join(name);
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(include_str!("../schema/6.sql")).unwrap();
+            c.execute_batch(
+                "INSERT INTO sessions (session_id, node_id, created_ms, updated_ms, head_seq, parent_id)
+                   VALUES ('p', 'n', 1, 1, 0, NULL), ('c', 'n', 2, 2, 0, 'p');
+                 PRAGMA user_version = 6;",
+            )
+            .unwrap();
+        }
+        migrate::check_file(&path, &harness_store::DB_SCHEMA).unwrap();
+        drop(Store::open(&path, d).unwrap_or_else(|e| panic!("{name}: {e}")));
+        assert_eq!(version_of(&path), 7, "{name}");
+        assert_eq!(MIGRATIONS.len(), 7);
+        let c = Connection::open(&path).unwrap();
+        assert_eq!(count(&c, "sessions"), 2, "{name}: the rows are kept");
+        let sql: String = c
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = 'sessions_parent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|e| panic!("{name}: no sessions_parent: {e}"));
+        assert!(sql.contains("WHERE parent_id IS NOT NULL"), "{name}: {sql}");
+        let indexed: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM sessions INDEXED BY sessions_parent WHERE parent_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1, "{name}: only the sub-agent chat");
+        drop(c);
+        // A second open is a no-op.
+        drop(Store::open(&path, d).unwrap());
+        assert_eq!(version_of(&path), 7, "{name}");
     }
 }
 
@@ -1170,9 +1237,43 @@ const FROZEN_V4_BYTES: usize = 25235;
 const FROZEN_V4_FNV1A: u64 = 0x29f4_5b7b_4f19_bd90;
 const FROZEN_V5_BYTES: usize = 25830;
 const FROZEN_V5_FNV1A: u64 = 0xdb6d_3a17_b9d7_1b06;
+const FROZEN_V6_BYTES: usize = 25886;
+const FROZEN_V6_FNV1A: u64 = 0x6ade_11d9_cbf9_efdf;
 
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
         (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
     })
+}
+
+/// A file at an older version whose schema is not that version's (another
+/// kind of database with a version of its own, or one changed by hand) is
+/// refused as a mismatch before any later migration runs over it, not
+/// blamed on the first migration that names a table it lacks. Unchanged.
+#[test]
+fn an_older_version_with_another_schema_is_refused_before_any_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    for version in [1, 6] {
+        let path = dir.path().join(format!("v{version}.db"));
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(&format!(
+                "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT);
+                 PRAGMA user_version = {version};"
+            ))
+            .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let err = Store::open(&path, Durability::Normal)
+            .err()
+            .unwrap_or_else(|| panic!("version {version} opened"))
+            .to_string();
+        assert!(
+            err.contains(&format!("does not match schema version {version}")),
+            "{err}"
+        );
+        assert!(!err.contains("no such table"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "version {version}");
+        assert_eq!(version_of(&path), version);
+    }
 }

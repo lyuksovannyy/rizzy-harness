@@ -29,6 +29,7 @@ pub mod routines;
 pub mod session_files;
 pub mod session_forks;
 pub mod session_images;
+pub mod session_pages;
 pub mod stored_skills;
 pub mod usage;
 pub mod workspace_agents;
@@ -548,7 +549,7 @@ CREATE INDEX IF NOT EXISTS session_workspaces_ws ON session_workspaces(workspace
 /// last one leaves, as recorded (`schema/<n>.sql`, n = `MIGRATIONS.len()`).
 pub const DB_SCHEMA: migrate::Schema<'static> = migrate::Schema {
     steps: MIGRATIONS,
-    recorded: include_str!("../schema/6.sql"),
+    recorded: include_str!("../schema/7.sql"),
 };
 
 /// The schema of `master.db`, `chat.db` and `node.db`, one entry per version.
@@ -583,6 +584,8 @@ pub const MIGRATIONS: &[migrate::Migration] = &[
     &[session_files::SCHEMA],
     // 6: which `session_files` rows an agent made (PLAN.md T97).
     &[session_files::MADE_SCHEMA],
+    // 7: the chat list's sub-agent chats by parent (docs/store-readers.md).
+    &[session_pages::PARENT_SCHEMA],
 ];
 
 /// The most files one message may name in `user_message.attached` (the

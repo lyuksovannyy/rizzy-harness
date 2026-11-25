@@ -87,7 +87,7 @@ pub const DEDUPE_MS: i64 = 24 * 3600 * 1000;
 
 /// Runs that have not finished: the overlap rule, the watcher and the
 /// restart reconcile work on these.
-const ACTIVE: &str = "('pending','running','waiting')";
+pub(crate) const ACTIVE: &str = "('pending','running','waiting')";
 /// Runs with a result the owner should see: these count as unseen.
 const FINISHED: &str =
     "('completed','error','failed','timed_out','interrupted','cancelled','blocked')";
