@@ -1208,6 +1208,26 @@ mod tests {
     }
 
     #[test]
+    fn the_login_and_lookup_limits_keep_their_own_maps() {
+        let a = Auth::new(Secret::new("t".into()), vec![], false);
+        for t in 0..THROTTLE_MAX_FAILURES as i64 {
+            a.failures.try_reserve("victim", t).unwrap().failed();
+        }
+        for i in 0..(FAILURE_MAP_CAPACITY as i64 + 100) {
+            a.reserve_lookup(&format!("user-{i}"), 10 + i)
+                .unwrap()
+                .failed();
+        }
+        assert_eq!(
+            a.login_throttle_len(),
+            1,
+            "no lookup key reached the login map"
+        );
+        assert!(a.failures.check("victim", 100_000).is_err());
+        assert!(a.lookups.check("victim", 100_000).is_ok());
+    }
+
+    #[test]
     fn a_caller_with_nothing_left_in_the_window_leaves_no_entry() {
         let a = Auth::new(Secret::new("t".into()), vec![], false);
         drop(a.reserve_lookup("u1", 0).unwrap());

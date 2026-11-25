@@ -12,12 +12,16 @@
 //! counted), `succeeded` (the key is cleared) or dropped (the slot is given
 //! back, by id: it can never remove another attempt's slot); `clear` forgets
 //! a key. The map holds at most `capacity` keys. Before a new key goes in
-//! while full, keys with no live slot are dropped, then the key whose latest
-//! slot is oldest, whoever it is. So a flood of more than `capacity` distinct
-//! keys inside one window can push out older keys, locked ones included
-//! (PLAN.md T12 prices that for logins: paced by the hash permits); a flood
-//! of fewer cannot, and never changes another key's count. Empty keys are
-//! always removed.
+//! while full, keys with no live slot are dropped, then the key *below its
+//! limit* whose latest slot is oldest, and only when every key is at its
+//! limit the oldest of those. So a flood of fresh keys pushes out only fresh
+//! or partly failed keys, and a locked key goes only when `capacity` keys
+//! are locked at once; a partly failed key can be pushed out, and then its
+//! count restarts. Empty keys are always removed. PLAN.md T12 prices both
+//! floods for logins: 65,536 hashes took about 162 s on the measuring
+//! machine (8.9 ms per Argon2id verify, 4 permits: 404 a second; a release
+//! build of `argon2` 0.6.0 defaults, timed over the permits), and 65,536
+//! locked keys of five failures each about 13.5 minutes.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -113,7 +117,8 @@ impl FailureMap {
     }
 
     /// Before a new key goes in: drop expired keys, then, if still full,
-    /// the key whose latest failure is oldest. Linear, but only when full,
+    /// the key below its limit whose latest slot is oldest; only when every
+    /// key is at its limit, the oldest of those. Linear, but only when full,
     /// and inserts are paced by the hash permits.
     fn make_room(&self, map: &mut HashMap<Box<str>, Vec<Slot>>, now_ms: i64) {
         if map.len() < self.capacity {
@@ -121,11 +126,14 @@ impl FailureMap {
         }
         map.retain(|_, slots| slots.iter().any(|s| now_ms - s.at_ms < self.window_ms));
         while map.len() >= self.capacity {
-            let oldest = map
+            let latest = |slots: &Vec<Slot>| slots.iter().map(|s| s.at_ms).max();
+            let victim = map
                 .iter()
-                .min_by_key(|(_, slots)| slots.iter().map(|s| s.at_ms).max())
+                .filter(|(_, slots)| slots.len() < self.max)
+                .min_by_key(|(_, slots)| latest(slots))
+                .or_else(|| map.iter().min_by_key(|(_, slots)| latest(slots)))
                 .map(|(k, _)| k.clone());
-            match oldest {
+            match victim {
                 Some(k) => map.remove(&k),
                 None => break,
             };
@@ -320,10 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn a_flood_past_the_bound_pushes_out_the_oldest_key_and_nothing_else() {
-        // The rule's price, pinned so that a change is a decision: a flood of
-        // `capacity` new keys inside one window evicts the key whose latest
-        // slot is oldest, a locked one included (PLAN.md T12).
+    fn a_locked_key_survives_a_flood_of_capacity_fresh_keys() {
         let m = FailureMap::new(100, 3, W);
         lock(&m, "victim");
         for i in 0..100 {
@@ -332,10 +337,47 @@ mod tests {
                 .failed();
         }
         assert_eq!(m.len(), 100, "never over the bound");
-        assert!(m.check("victim", 200).is_ok(), "the oldest key went");
-        // Newer keys keep their counts: the flood does not lock anyone out.
+        assert!(m.check("victim", 200).is_err(), "still locked");
         assert!(m.check("bystander", 200).is_ok());
-        assert!(m.try_reserve("flood99", 200).is_ok());
+    }
+
+    #[test]
+    fn a_partly_failed_key_may_be_pushed_out_and_then_counts_afresh() {
+        // The price, stated: below its limit a key is as evictable as a fresh
+        // one, so a flood of `capacity` new keys restarts its count.
+        let m = FailureMap::new(100, 3, W);
+        m.try_reserve("partial", 0).unwrap().failed();
+        m.try_reserve("partial", 1).unwrap().failed();
+        for i in 0..100 {
+            m.try_reserve(&format!("flood{i}"), 10 + i)
+                .unwrap()
+                .failed();
+        }
+        assert!(!m.lock().map.contains_key("partial"), "evicted");
+        for t in 0..3 {
+            m.try_reserve("partial", 300 + t).unwrap().failed();
+        }
+        assert!(
+            m.check("partial", 400).is_err(),
+            "three fresh failures lock it"
+        );
+    }
+
+    #[test]
+    fn a_full_map_of_locked_keys_still_drops_the_oldest_locked_one() {
+        let m = FailureMap::new(5, 3, W);
+        for k in 0..5 {
+            for t in 0..3 {
+                m.try_reserve(&format!("k{k}"), k * 10 + t)
+                    .unwrap()
+                    .failed();
+            }
+        }
+        m.try_reserve("new", 100).unwrap().failed();
+        assert_eq!(m.len(), 5);
+        let inner = m.lock();
+        assert!(!inner.map.contains_key("k0"), "oldest locked key goes");
+        assert!(inner.map.contains_key("k1") && inner.map.contains_key("new"));
     }
 
     #[test]

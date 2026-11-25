@@ -21,8 +21,8 @@ pub const HASH_WAIT: Duration = Duration::from_secs(2);
 /// `Retry-After` (seconds) when no permit came free in time.
 pub const BUSY_RETRY_AFTER_S: u64 = 1;
 /// Keys the login failure map holds. When it is full, expired entries go
-/// first, then the entry whose latest failure is oldest (PLAN.md T12 has
-/// what that costs an attacker). About 150 bytes per key: under 10 MiB.
+/// first, then the oldest entry below its limit, and a locked one only when
+/// all are (`keyed_limit`; PLAN.md T12 has what that costs an attacker). About 150 bytes per key: under 10 MiB.
 pub const FAILURE_MAP_CAPACITY: usize = 65_536;
 
 #[derive(Debug, thiserror::Error)]
