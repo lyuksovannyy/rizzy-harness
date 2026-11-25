@@ -1,12 +1,13 @@
 import { Menu } from "lucide-react";
 import { APP_TITLE } from "../lib/brand";
 import { choiceUp } from "../lib/choiceGuard";
-import { pruneDrafts, writeDraft } from "../lib/drafts";
+import { writeDraft } from "../lib/drafts";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, HttpError } from "../api";
 import { Live } from "../live";
 import { t } from "../lib/i18n";
 import { useClassifier } from "../lib/useClassifier";
+import { useChatList } from "../lib/useChatList";
 import { agenticBlockReason, hostRightOf } from "../lib/modes";
 import { parseRoute, type Route, routeHash } from "../lib/routes";
 import { afterChange, followRoute, keepsRoute, switchRoute, workspaceName } from "../lib/workspaces";
@@ -152,10 +153,6 @@ export function Shell(props: {
   // new chat names it, so nothing depends on the server's idea of "active".
   const workspaceId = me.workspace?.workspace_id ?? null;
   const [live] = useState(() => new Live());
-  // null until the first load, so a chat the route opens is not taken for
-  // one from another workspace before this one's chats are known.
-  const [loadedSessions, setSessions] = useState<SessionRow[] | null>(null);
-  const sessions = useMemo(() => loadedSessions ?? [], [loadedSessions]);
   const [workspaces, setWorkspaces] = useState<WorkspaceList | null>(null);
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -226,16 +223,23 @@ export function Shell(props: {
       })
       .catch(() => {});
   }, []);
+  // A chat opened from another workspace, or beyond the loaded pages: its
+  // lookup (below). Declared here because the list shows its row.
+  const [found, setFound] = useState<{ id: string; row: SessionRow | null } | null>(null);
+  const openId = route.kind === "session" ? route.id : null;
+  const chatList = useChatList(workspaceId, unauthorized, {
+    keep: route.kind === "project" && route.id !== "new" ? route.id : null,
+    extra: found && found.id === openId ? found.row : null,
+  });
+  // null until the first load, so a chat the route opens is not taken for
+  // one from another workspace before this one's chats are known.
+  const loadedSessions = chatList.sessions;
+  const sessions = useMemo(() => loadedSessions ?? [], [loadedSessions]);
+  const refreshChats = chatList.refresh;
   const refreshSessions = useCallback(() => {
-    api
-      .sessions(workspaceId)
-      .then((r) => {
-        setSessions(r.sessions);
-        pruneDrafts(r.sessions);
-      })
-      .catch(unauthorized);
+    refreshChats();
     refreshAttention();
-  }, [workspaceId, unauthorized, refreshAttention]);
+  }, [refreshChats, refreshAttention]);
   // Models, agents and notices follow the workspace's defaults and chains.
   const scope = useMemo(() => (workspaceId ? { workspace: workspaceId } : null), [workspaceId]);
   const refreshNotices = useCallback(() => {
@@ -452,7 +456,6 @@ export function Shell(props: {
   // A chat opened from another workspace (a notification, Attention, a
   // sub-task's parent link, back/forward) shows in its own: look it up, then
   // switch there, staying on it (lib/workspaces.ts decides).
-  const [found, setFound] = useState<{ id: string; row: SessionRow | null } | null>(null);
   const lookup = found && found.id === selected ? found : null;
   const follow = followRoute({
     id: selected,
@@ -590,6 +593,7 @@ export function Shell(props: {
         rail={collapsed && !narrow}
         projects={projects}
         canCreateProject={canCreateProject}
+        pages={chatList.pages}
       />
       {drawerOpen && <div className="scrim" onClick={() => setDrawer(false)} />}
       <main className="main" inert={drawerOpen}>
@@ -639,6 +643,7 @@ export function Shell(props: {
               version={projectsVersion}
               memoryVersion={memoryVersion}
               chats={listed}
+              moreChats={chatList.pages.group(route.id)?.next ? () => chatList.pages.moreIn(route.id) : undefined}
               agents={agents}
               agentDefaults={newChatAgents}
               models={models}

@@ -26,6 +26,7 @@ import type { Features, Me, NodeInfo, SessionRow, WorkspaceList } from "../types
 import type { MenuView } from "./AccountMenu";
 import { NavLink } from "./NavLink";
 import { SidebarLists } from "./ProjectNav";
+import type { ChatPages } from "../lib/useChatList";
 
 // Imported ahead of the first click (pointer, focus or touch on the
 // button), so opening the menu never waits on the network.
@@ -38,7 +39,7 @@ export interface SidebarProps {
   me: Me;
   /** The name the user goes by (preferences), else the username. */
   displayName: string;
-  /** The workspace's chats, newest first, sub-agents' included (incognito ones are left out here). */
+  /** The workspace's loaded chats, newest first, sub-agents' included (incognito ones are left out here). */
   sessions: SessionRow[];
   nodes: NodeInfo[];
   conn: ConnState;
@@ -60,6 +61,8 @@ export interface SidebarProps {
   rail?: boolean;
   projects: ProjectSummary[];
   canCreateProject: boolean;
+  /** Loads more of the list and each open project's own chats. */
+  pages?: ChatPages;
 }
 
 interface Entry {
@@ -261,6 +264,7 @@ export function Sidebar(props: SidebarProps) {
         nodes={props.nodes}
         projects={props.projects}
         canCreateProject={props.canCreateProject}
+        pages={props.pages}
       />
       <div className="sidebar-foot">{accountButton}</div>
       {menuPopup}

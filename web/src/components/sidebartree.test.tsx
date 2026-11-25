@@ -10,6 +10,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vi
 import type { ProjectSummary } from "../lib/projects";
 import type { Features, Me, NodeInfo, SessionRow } from "../types";
 import type { SidebarProps } from "./Sidebar";
+import type { ChatPages } from "../lib/useChatList";
 
 vi.mock("./AccountMenu", () => ({ default: () => null }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -443,5 +444,87 @@ describe("the open chat stays findable", () => {
     } finally {
       page.remove();
     }
+  });
+});
+
+describe("the paged list (FIX_PLAN 4.5)", () => {
+  const pages = (over: Partial<ChatPages> = {}): ChatPages => ({
+    more: vi.fn(),
+    busy: false,
+    stalled: false,
+    watch: vi.fn(() => vi.fn()),
+    group: () => undefined,
+    moreIn: vi.fn(),
+    ...over,
+  });
+
+  test("an open project group asks for its own chats; a closed one costs nothing", () => {
+    const p = pages();
+    render({ ...scene(), pages: p });
+    expect(p.watch).toHaveBeenCalledWith("p1");
+    expect(p.watch).toHaveBeenCalledWith("p2");
+    const w = p.watch as ReturnType<typeof vi.fn>;
+    const release = (id: string) => w.mock.results[w.mock.calls.findIndex((c) => c[0] === id)]!.value as ReturnType<typeof vi.fn>;
+    act(() => byLabel("Collapse Project 2").click());
+    expect(release("p1")).not.toHaveBeenCalled();
+    expect(release("p2")).toHaveBeenCalledTimes(1);
+    // Closed in this browser: no request for it next time.
+    const again = pages();
+    remount({ ...scene(), pages: again });
+    expect(again.watch).toHaveBeenCalledWith("p1");
+    expect(again.watch).not.toHaveBeenCalledWith("p2");
+  });
+
+  test("a group with more on the server offers its next page once every loaded row shows", () => {
+    const rows = Array.from({ length: 7 }, (_, i) => chat(`g${i}`, { project_id: "p1", updated_ms: 100 - i }));
+    const own = { rows, children: [], next: "cursor" };
+    const p = pages({ group: (id) => (id === "p1" ? own : undefined) });
+    render({ projects: [project(1)], sessions: rows, pages: p });
+    const box = () => q(".project-box")!;
+    const button = (label: string) => [...box().querySelectorAll("button")].find((b) => b.textContent === label);
+    expect(button("Show 2 more")).toBeTruthy();
+    act(() => button("Show 2 more")!.click());
+    act(() => button("Show more")!.click());
+    expect(p.moreIn).toHaveBeenCalledWith("p1");
+  });
+
+  test("the end loads the next page when it scrolls into view, but not after a failed load", () => {
+    const seen: Element[] = [];
+    let report: ((es: { isIntersecting: boolean }[]) => void) | null = null;
+    class IO {
+      constructor(cb: (es: { isIntersecting: boolean }[]) => void) {
+        report = cb;
+      }
+      observe(el: Element) {
+        seen.push(el);
+      }
+      disconnect() {}
+    }
+    vi.stubGlobal("IntersectionObserver", IO);
+    try {
+      const p = pages();
+      render({ ...scene(), pages: p });
+      expect(seen).toEqual([q(".load-more")]);
+      act(() => report!([{ isIntersecting: true }]));
+      expect(p.more).toHaveBeenCalledTimes(1);
+      seen.length = 0;
+      remount({ ...scene(), pages: pages({ stalled: true }) });
+      expect(seen).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test("the end of the list is a button that loads older chats, disabled while it loads", () => {
+    const p = pages();
+    render({ ...scene(), pages: p });
+    const more = q<HTMLButtonElement>(".load-more")!;
+    expect(more.textContent).toBe("Load older chats");
+    act(() => more.click());
+    expect(p.more).toHaveBeenCalled();
+    render({ ...scene(), pages: pages({ busy: true }) });
+    expect(q<HTMLButtonElement>(".load-more")!.disabled).toBe(true);
+    render({ ...scene(), pages: pages({ more: null }) });
+    expect(q(".load-more")).toBeNull();
   });
 });

@@ -85,7 +85,8 @@ let PAGE = null;
     const until = Date.now() + 60000;
     let kids = [];
     while (Date.now() < until) {
-      const list = (await api('GET', '/api/sessions')).body.sessions;
+      // Sub-agent chats come below the page's chats (`children`).
+      const list = (await api('GET', '/api/sessions')).body.children;
       kids = list.filter((s) => s.parent_id === lead);
       if (kids.length >= 2) break;
       await sleep(300);

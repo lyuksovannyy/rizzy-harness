@@ -136,6 +136,23 @@ async fn visible(
     Ok((who, row, a))
 }
 
+/// A project the chat list may filter by (`GET /api/sessions?project=`):
+/// one the caller may see, in `workspace` when the list has one. Any other
+/// id, a project of another workspace included, is the 404 of a project
+/// that does not exist.
+pub(super) async fn listed_in(
+    m: &Master,
+    who: &Principal,
+    workspace: Option<&str>,
+    id: &str,
+) -> ApiResult<String> {
+    let (_, row, _) = visible(m, who.clone(), id).await?;
+    if workspace.is_some_and(|w| w != row.workspace_id) {
+        return Err(not_found("project"));
+    }
+    Ok(row.project_id)
+}
+
 /// The project, if the caller may also change it.
 async fn managed(m: &Master, who: Principal, id: &str) -> ApiResult<(Principal, ProjectRow)> {
     let (who, row, a) = visible(m, who, id).await?;

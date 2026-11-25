@@ -1268,7 +1268,7 @@ async fn agentic_runs_wait_for_approval_and_time_out() {
     let waiting = wait_status(&t, &alex, &deleg, &run, "waiting").await;
     let parent = waiting["session_id"].as_str().unwrap().to_string();
     let (_, all) = req(&t, Method::GET, "/api/sessions?routine_runs=1", None, &alex).await;
-    let kid = all["sessions"]
+    let kid = all["children"]
         .as_array()
         .unwrap()
         .iter()

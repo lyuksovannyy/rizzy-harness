@@ -1,5 +1,6 @@
-//! What the owner sees of runs: the `routine` mark on chat rows (and which
-//! run chats the chat list leaves out), the attention rows, the continued
+//! What the owner sees of runs: the `routine` mark on a chat row (the chat
+//! list's marks and which run chats it leaves out are the store's
+//! `session_pages`), the attention rows, the continued
 //! flag, and the hourly retention of run chats and purge of old runs.
 
 use std::collections::HashMap;
@@ -39,29 +40,6 @@ async fn marks(
 fn mark_of(marks: &HashMap<SessionId, RoutineMark>, row: &Value) -> Option<RoutineMark> {
     let sid: SessionId = row.get("session_id")?.as_str()?.parse().ok()?;
     marks.get(&sid).cloned()
-}
-
-/// A run chat stays in the chat list while its run is going or waiting,
-/// while its result is unseen, and once the owner continued it.
-fn listed(mark: &RoutineMark) -> bool {
-    !mark.seen || mark.promoted || matches!(mark.status.as_str(), "pending" | "running" | "waiting")
-}
-
-// A `Vec`, not a slice: the filter removes rows.
-#[allow(clippy::ptr_arg)]
-pub(super) async fn annotate(
-    m: &Master,
-    rows: &mut Vec<Value>,
-    include_runs: bool,
-) -> harness_store::Result<()> {
-    let marks = marks(m, rows).await?;
-    rows.retain_mut(|row| {
-        let mark = mark_of(&marks, row);
-        let keep = include_runs || mark.as_ref().is_none_or(listed);
-        row["routine"] = json!(mark);
-        keep
-    });
-    Ok(())
 }
 
 pub(super) async fn annotate_one(m: &Master, row: &mut Value) -> harness_store::Result<()> {

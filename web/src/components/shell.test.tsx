@@ -167,7 +167,8 @@ describe("Shell", () => {
     stubs.workspaces.mockResolvedValue(list(personal, promoted));
     await act(async () => lives[0]!.onWorkspacesChanged());
     expect(stubs.sessions.mock.calls.length).toBe(before + 1);
-    expect(stubs.sessions).toHaveBeenLastCalledWith("acme");
+    // From the top, one page (no more were loaded).
+    expect(stubs.sessions).toHaveBeenLastCalledWith("acme", {});
     expect(p.onMeChanged).toHaveBeenLastCalledWith(promoted);
     expect(p.onGone).not.toHaveBeenCalled();
   });

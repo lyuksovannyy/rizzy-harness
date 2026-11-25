@@ -157,13 +157,23 @@ export const api = {
   me: () => call<{ ok: boolean; app: string; user: Me; workspace: WorkspaceSummary | null }>("GET", "/api/me"),
   logout: () => call<{ ok: boolean }>("POST", "/api/logout"),
   nodes: () => call<{ nodes: NodeInfo[] }>("GET", "/api/nodes"),
-  /** The chats in a workspace (the API token: all, unless one is named).
-   * `routineRuns` also lists the routine run chats left out once seen. */
-  sessions: (workspace?: string | null, opts: { routineRuns?: boolean } = {}) =>
-    call<{ sessions: SessionRow[] }>(
+  /** One page of the caller's top-level chats in a workspace (the API
+   * token: every owner's, unless one is named), newest first, with every
+   * sub-agent chat below them in `children` and the next page's start in
+   * `next`; `project`: that project's chats only. `routineRuns` also lists
+   * the routine run chats left out once seen. */
+  sessions: (workspace?: string | null, opts: { routineRuns?: boolean; limit?: number; after?: string; project?: string } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.routineRuns) q.set("routine_runs", "1");
+    if (opts.project) q.set("project", opts.project);
+    if (opts.limit) q.set("limit", String(opts.limit));
+    if (opts.after) q.set("after", opts.after);
+    const qs = q.toString();
+    return call<{ sessions: SessionRow[]; children: SessionRow[]; next: string | null }>(
       "GET",
-      scoped(`/api/sessions${opts.routineRuns ? "?routine_runs=1" : ""}`, workspace ? { workspace } : null),
-    ),
+      scoped(`/api/sessions${qs ? `?${qs}` : ""}`, workspace ? { workspace } : null),
+    );
+  },
   /** One chat, in whichever workspace it is. */
   session: (id: string) => call<SessionRow>("GET", `/api/sessions/${encodeURIComponent(id)}`),
   events: (id: string, after = 0) =>

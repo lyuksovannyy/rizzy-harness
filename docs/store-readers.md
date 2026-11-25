@@ -234,7 +234,17 @@ The owner is the caller (`who.user_id`); the API token (no user) gets every chat
 
 ### New shape
 
-`GET /api/sessions?workspace=W&limit=50&after=<cursor>` → `{ "sessions": [...], "children": [...], "next": "<cursor>" | null }`.
+`GET /api/sessions?workspace=W&project=P&limit=50&after=<cursor>` → `{ "sessions": [...], "children": [...], "children_truncated": bool, "next": "<cursor>" | null }` (slice 2, `crates/master/src/http/sessions.rs`).
+
+- **Rows:** top-level chats only (no sub-agent and no incognito chat; the open incognito chat comes from its lookup), seen routine runs left out in SQL unless `routine_runs=1`; each row carries `project_id`, `unread`, `routine` and `background` as before, from `unread_of`, `project_links_of` and `routine_marks_of` over the page and its children (three statements), all in one `Store::call`.
+- **Project (owner's decision of 2026-11-25, replacing open question 2):** each open project group of the sidebar loads its own newest chats, `project=P`.
+  The project must be one the caller may see (a member of its workspace, the project page's own check), and in the list's workspace: a project of another workspace, one the caller cannot see and one that does not exist all answer the same 404 `unknown project`.
+  The store's `PageQuery.project` keeps a chat whose effective project is P (linked, and P in the chat's effective workspace: `projects::effective`), the owner term unchanged, so a project never widens whose chats are listed.
+  No "no project" variant: the main list keeps every top-level chat, and the sidebar puts each in its group; a folded group's marks (open chat, running, unseen) come from the main list's rows, and a chat linked to a project the list does not show stays loose, as before.
+  Its query is driven by the project's links (`session_projects_project`) with the owner as a filter (`+s.owner_id`) and checked inside the links' subquery; the plan test refuses `sessions_owner` there.
+  As a plain owner term SQLite walked the owner's chats and checked each link, which for a project holding few of them reads all of them (release bench, 50,000 chats: another user's project 8.6 ms that way, 0.6 ms driven by the links; the owner's ~400-chat project 2.2 against 1.4 ms).
+  Worst case, measured: a team project holding 40,000 of the other members' chats and none of the caller's, 9.0 ms p99 (21 ms before the owner check moved into the subquery), append p99 9.4 ms while it loops; the API token's page of that project 48 ms (top 50 of 40,000, sorted).
+  Linear in the project's links of every member; no index fixes it short of a project column on `sessions` (a migration and a second copy of the link), so none was added.
 
 - **Cursor:** opaque to the client, unpadded base64url of 25 bytes (a version byte, `updated_ms` as a big-endian `i64`, the session id's 16 bytes): 34 characters; keyset, never `OFFSET`.
   Parsed strictly (`session_pages::Cursor::parse`: length cap, version, exact length, one spelling); anything else is 400.
@@ -266,7 +276,10 @@ The owner is the caller (`who.user_id`); the API token (no user) gets every chat
 ### Live updates
 
 The socket keeps sending content-free `sessions_changed` (T58: it says nothing about whose chat changed).
-The client refetches from the top with `limit = min(loaded, 200)` and replaces that many rows; rows loaded beyond 200 stay until scrolled again.
+The client refetches from the top with `limit = min(max(loaded, 50), 200)` and replaces the rows that answer covers; rows loaded past its last row stay, with their sub-agents and the old `next`, until scrolled again (`web/src/lib/chatPages.ts`, `applyRefetch`).
+Open project groups refetch the same way, each with its own count; a folded group drops its rows and asks for nothing.
+Nudges are coalesced: one refetch in flight, at most one queued (`coalesce`).
+`pruneDrafts` runs on the first load only: on later refreshes it would ask the server about every draft of a chat beyond the first page, on every turn start and end.
 A chat outside the loaded pages that changes moves to the top (its `updated_ms` moved) and so appears; one deleted elsewhere disappears on the next refetch if it is within the first 200, else on scroll or a 404 when opened.
 
 ### Migration 7
@@ -289,9 +302,16 @@ Each slice is reviewable alone and starts with a test that fails on the old code
    The owner term in the three id-list annotations is a filter only (`+s.owner_id`): as a plain term SQLite walked all of the owner's chats through `sessions_owner`, 16 ms per page at 10,000 (the bench caught it; the plan test now refuses `sessions_owner` there).
 2. **`/api/sessions` paged** (`http/sessions.rs`, no growth of `http.rs`).
    Tests: another user's cursor returns only the caller's chats; a cursor from workspace A used in B lists B's chats from that position and nothing of A's; `limit=1000000000` returns 200; a malformed cursor is 400; seen routine run chats never shorten a page; children of the page's parents arrive.
+   Built with slice 3 (one change: the API alone would cut the sidebar to one page); tests in `crates/master/tests/it/session_pages_http.rs`, plus another user's project, a project never widening the owner, incognito and sub-agent chats not being rows, exactly-once paging with ties, and a page after a chat moved to the top.
+   `limit` is read as an `i64` and clamped, so `-5` reads 1; a value that is not an integer, or past `i64`, is 400.
+   The master's `routines::annotate` (one query per listed chat) is gone; `routines::annotate_one` stays for the lookup of one chat.
 3. **UI: load more on scroll** (state in a hook, not in `Shell.tsx`), refetch policy, `pruneDrafts` on first load only, `subAgentRunning` from `children` and the lookup.
    Tests in `web/` for the merge of a refetch with loaded pages; an e2e script that creates 120 chats with the demo provider and scrolls.
    First-load bytes: the hook replaces existing code; measured with `pnpm size` before and after.
+   Built as `web/src/lib/useChatList.ts` (state) and `chatPages.ts` (the merge, tested in `chatPages.test.ts`), the sidebar's end a button that is also the IntersectionObserver's target (`ProjectNav.tsx`, `LoadMore`), and `web/e2e/chat-list-pages.cjs`.
+   The open chat's lookup row joins the list when it is in this workspace, so the open chat always shows.
+   `subAgentRunning` reads the page's `children`; the sub-agents of an open chat older than every loaded page are not known (a chat that starts a sub-agent has just been active, so it is on the first page).
+   First load grew by 1.5 KB gzip (103.3 to 104.8 KB of the 110 ceiling): the merge and the paging state replace a dozen lines.
 4. **The other whole-table and N+1 callers:** `board_json`, both `chat_owners`, `own_chats`, the search no-words branch and `chat_results`, `delete_workspace`, member removal, user delete, `cancel_revoked`, the members roster (`member_json`'s two calls per member).
    Test: a store wrapper or SQLite `trace` counts statements per request for a roster of 20 and a board of 50 cards, constant in N.
 5. **The FTS merge out of the delete path**, into the hourly maintenance with a bounded `('merge', N)`.
@@ -318,6 +338,6 @@ Not done from the row, and why:
 ## 7. Open questions for the owner
 
 1. Deleted chats' words: today every delete merges the whole FTS index (0.6 s stall at 50,000 chats) so that their terms leave the index pages at once. Is "gone from search at once, gone from the index pages within the hour" acceptable?
-2. The sidebar's project groups would show only loaded chats. Acceptable, or should each project group show its own newest N (one more query per expanded project)?
+2. ~~The sidebar's project groups would show only loaded chats.~~ Answered 2026-11-25: each open project group shows its own newest chats (§4, Project).
 3. The mutex is unfair (an append waited 1.8 s behind a back-to-back reader in the hot-loop run). Worth a fair lock now (for example `parking_lot::Mutex` with fair unlocks, a new dependency), or wait for a real symptom?
 4. Do we agree to drop the reader pool from 4.5 and leave the row's text with the trigger in §3?

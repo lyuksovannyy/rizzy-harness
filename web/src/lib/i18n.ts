@@ -96,6 +96,8 @@ const en = {
   "nav.noProjects": "No projects yet",
   "nav.showMore": "Show {n} more",
   "nav.showFewer": "Show fewer",
+  "nav.loadMore": "Show more",
+  "nav.olderChats": "Load older chats",
   "nav.unread": "Finished; not seen yet",
   "notify.finished": "A chat finished: number {n} in your recent chats",
   "nav.account": "{name} (@{username}) — {tier}",

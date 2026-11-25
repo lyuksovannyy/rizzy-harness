@@ -93,6 +93,7 @@ mod save_cancel_http;
 mod seams_http;
 mod search_http;
 mod server_limits;
+mod session_pages_http;
 mod settings_http;
 mod skills_menu_http;
 mod step_limit_http;

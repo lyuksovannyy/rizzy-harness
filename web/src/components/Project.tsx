@@ -63,6 +63,8 @@ export default function Project(props: {
   memoryVersion: number;
   /** The caller's listed chats. */
   chats: SessionRow[];
+  /** Loads the project's next page of chats; absent when there is none. */
+  moreChats?: () => void;
   agents: Agent[];
   /** The new chat's agent per mode when none is picked. */
   agentDefaults: AgentDefaults;
@@ -174,7 +176,7 @@ export default function Project(props: {
             </button>
           ))}
         </div>
-        {tab === "chats" && <Chats project={project} own={own} all={props.chats} onOpen={props.onOpenChat} />}
+        {tab === "chats" && <Chats project={project} own={own} all={props.chats} onOpen={props.onOpenChat} more={props.moreChats} />}
         {tab === "board" && <BoardView project={project} chats={own} version={version} onOpen={props.onOpenChat} />}
         {tab === "memory" && <ProjectMemory project={project} version={props.memoryVersion} onOpen={props.onOpenChat} />}
         {tab === "artifacts" && <ProjectArtifacts project={project} workspaceId={props.workspaceId} />}
@@ -350,7 +352,7 @@ function ProjectArtifacts(props: { project: ProjectDetail; workspaceId: string |
   );
 }
 
-function Chats(props: { project: ProjectDetail; own: SessionRow[]; all: SessionRow[]; onOpen: (id: string) => void }) {
+function Chats(props: { project: ProjectDetail; own: SessionRow[]; all: SessionRow[]; onOpen: (id: string) => void; more?: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const loose = props.all.filter((c) => !c.project_id);
   const move = (sid: string, to: string | null) => {
@@ -376,6 +378,11 @@ function Chats(props: { project: ProjectDetail; own: SessionRow[]; all: SessionR
           </li>
         ))}
       </ul>
+      {props.more && (
+        <button type="button" className="link small" onClick={props.more}>
+          Show more
+        </button>
+      )}
       {loose.length > 0 && (
         <label className="field-inline">
           <span className="muted small">Add a chat</span>
