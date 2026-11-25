@@ -180,7 +180,6 @@ impl FailureMap {
         self.lock().map.capacity()
     }
 
-    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

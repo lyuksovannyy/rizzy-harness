@@ -8,7 +8,6 @@
 //! and project come from the publishing session's own mirror row, never
 //! from its parent and never from the node (T7, T10, T18).
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use harness_core::RawEvent;
@@ -23,7 +22,7 @@ use serde_json::{Value, json};
 use crate::auth::Principal;
 use crate::search::{SearchCtx, SearchResult};
 use crate::workspaces::{self as ws, Access};
-use crate::{Master, lock, storage};
+use crate::{Master, storage};
 
 /// `[artifacts]` in config.toml; left out of the file while it is the
 /// default.
@@ -109,6 +108,7 @@ impl Throttle {
         }
     }
 
+    #[cfg(test)]
     fn nodes(&self) -> usize {
         self.seen.len()
     }
