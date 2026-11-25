@@ -1,7 +1,7 @@
 # Store readers and the paged chat list
 
-FIX_PLAN 4.5 (audit D3), stage 0: inventory, measurement, design.
-No production code is changed by this note.
+FIX_PLAN 4.5 (audit D3), stage 0: inventory, measurement, design; since slice 1 also what that slice built and measured.
+Sections 1 and 2 are stage 0's (no production code was changed by it); where slice 1 differs from stage 0's design, the text says so.
 The throwaway bench (`bench_readers.rs`, an in-crate `#[ignore]` test) and its two logs are kept in `.claude/handoff-2026-11-15/b-store45/` (git-ignored); every number below comes from them.
 
 ## Verdict first
@@ -165,14 +165,17 @@ At -512 it is 8.5 MB for four, and every reader then reads more from the OS page
 
 ### A: scoped keyset queries on the one connection (chosen)
 
-- `Store::sessions_page(q: &PageQuery) -> (Vec<SessionRow>, Option<Cursor>)`, with `owner: Option<&str>` (from the caller only), `workspace: Option<&str>` (the effective workspace, as `EFFECTIVE_WS` computes it today), `top_level: bool` (`parent_id IS NULL AND incognito = 0`, what the sidebar shows), `hide_seen_runs: bool` (the routine filter, moved into SQL as a `NOT EXISTS` on `routine_runs`), `after: Option<(i64, SessionId)>`, `limit`.
+- `Store::sessions_page(q: &PageQuery) -> (Vec<SessionRow>, Option<Cursor>)`, with `owner: Owner` (`Owner::User(id)` from the caller's session, or `Owner::Everyone` for the API token only; an enum so that a forgotten `None` never means every account), `workspace: Option<&str>` (the effective workspace, as `EFFECTIVE_WS` computes it today), `top_level: bool` (`parent_id IS NULL AND incognito = 0`, what the sidebar shows), `hide_seen_runs: bool` (the routine filter, moved into SQL as a `NOT EXISTS` on `routine_runs`), `after: Option<Cursor>` (a typed `updated_ms` and session id), `limit`.
   `WHERE s.owner_id = ?1 AND (s.updated_ms < ?2 OR (s.updated_ms = ?2 AND s.session_id < ?3)) … ORDER BY s.updated_ms DESC, s.session_id DESC LIMIT ?n + 1`; the extra row tells whether there is a next page.
-- `unread_of(ids)`, `project_links_of(ids)`, `routine_marks(ids)` as one `IN (…)` query each (the page is at most 200 ids, well under SQLite's variable limit), replacing the per-id loop and the whole-table reads.
+- `unread_of(owner, viewer, ids)`, `project_links_of(owner, ids)`, `routine_marks_of(owner, ids)` and `children_of(owner, parents)`, one statement each over the ids bound as one JSON array (`json_each`, so no variable limit), each joined to `sessions` on the owner, so they answer only for the owner's chats whatever ids a caller passes.
+  They sit beside the old functions: the per-id `routine_marks`, `unread` and `project_links(None)` stay, and the master still calls them, until slice 2 switches the list over.
+  `children_of` returns every descendant at any depth (sub-agents nest), up to 16 levels and 2,000 rows, see Children below.
 - `sessions_in(owner, workspace)` (ids and the few fields the members and revocation paths use) for `delete_workspace`, member removal and `cancel_revoked`, one query for a set of users.
 - `session_owners(ids)` for the two `chat_owners` and `board_json`; `project_chat_counts(owner, workspace)` for `own_chats`.
 - The `'optimize'` merge leaves `delete_session` (and the artifact and media deletes): deleted terms stay as FTS5 tombstones, which search already skips, and the hourly maintenance runs a bounded `('merge', N)` instead.
   The privacy reason for the merge (secure delete of a deleted chat's words) holds as long as the hourly merge runs; how long a deleted chat's terms may linger in index pages is a question for the owner (below).
-- No new connection, no new dependency, no new pragma; one migration, an index (7, added in slice 1 for the page's children).
+- No new connection, no new pragma, no new crate in `Cargo.lock`: harness-store now depends on `base64` (already a workspace dependency, for the cursor), and the workspace's rusqlite turns on its `trace` feature (no extra crate; tests count statements with it).
+  One migration, an index (7, added in slice 1 for the page's children).
 
 ### B: A plus N read-only connections (rejected for now)
 
@@ -223,7 +226,7 @@ The owner is the caller (`who.user_id`); the API token (no user) gets every chat
 | `Shell.tsx:422` the backdrop's topic titles and banned titles | every title | shows the loaded titles only (cosmetic) |
 | `Shell.tsx:460` `followRoute` `listed` | whether the open chat is in the list | an unloaded chat triggers the existing lookup (`api.session`), which keeps it in this workspace; works, one more request |
 | `Shell.tsx:478` `openRow` | the open chat's row | falls back to the lookup row (exists) |
-| `Shell.tsx:632` `subAgentRunning` | children of the open chat | needs the open chat's children: the page response carries the children of its own parents, and the open chat's children come from its lookup |
+| `Shell.tsx:632` `subAgentRunning` | children of the open chat | needs the open chat's sub-agents: the page response carries every descendant of its own parents, and the open chat's children come from its lookup |
 | `lib/drafts.ts:80` `pruneDrafts` | every chat not listed is asked about with `GET /api/sessions/{id}` | **breaks quietly**: every draft of a chat beyond page 1 costs one request on every refresh, i.e. on every turn start and end; run it on the first load only |
 | incognito chats | listed today, hidden by the sidebar | leave the page (`top_level`); the open one comes from the lookup |
 | search | server-side (`search.rs`) | unaffected; its no-words branch moves to `sessions_page` |
@@ -241,10 +244,12 @@ The owner is the caller (`who.user_id`); the API token (no user) gets every chat
 - **Owner:** always `who.user_id`; there is no owner parameter.
   The API token keeps its every-chat listing, paged by the same cursor without the owner term (3–4 ms full scan at 50,000; no index added).
 - **Workspace:** as today, `ws::scope` checks membership before any query.
-- **Children:** the sub-agent chats whose parent is on this page (one query, `parent_id IN (…)`), so nesting and `subAgentRunning` keep working.
+- **Children:** every sub-agent chat below a chat on this page, at any depth (sub-agents of sub-agents nest, and today's sidebar shows them all), in one recursive query, so nesting and `subAgentRunning` keep working.
+  The owner is checked at every step, so a chain stops at a chat of somebody else; the depth is capped at 16 (the node has no limit of its own; the cap also ends a corrupt `parent_id` loop) and the rows at 2,000 (ten under each of 200 parents), past which the oldest are left out and the response says so (`truncated`).
+  Deliberately unlike today: a child is returned whatever its own effective workspace, since it is shown nested under its parent (today the list drops a child whose own mapping differs from the parent's workspace, so it vanishes from both places).
   Measured in slice 1: without an index on `sessions.parent_id` this query walked all of the owner's chats, 5.5 ms at 10,000 (p99 append wait behind the page 5.9 ms).
   Migration 7 adds the partial index `sessions_parent ON sessions(parent_id) WHERE parent_id IS NOT NULL`, and the query names it (`INDEXED BY`): with an owner term SQLite still picks `sessions_owner` over a new index, and `INDEXED BY` makes an unusable index an error instead of a silent walk.
-  With it: 0.03 ms for a page's children, p99 append wait behind page, annotations and children 0.22 ms.
+  With it (direct children only, before the review): 0.03 ms for a page's children, p99 append wait behind page, annotations and children 0.22 ms; the recursive form is measured in slice 1 below.
 
 ### Live updates
 
@@ -257,7 +262,7 @@ A chat outside the loaded pages that changes moves to the top (its `updated_ms` 
 Stage 0 said none was needed, and none is for the page: `updated_ms` exists and is maintained, `sessions_owner` exists, and the keyset query uses it.
 The page's children were missed: migration 7 (slice 1) adds `sessions_parent` (see Children above).
 It only creates an index, so it needs no backfill and a crash halfway leaves version 6 (the runner's transaction); `master.db`, `chat.db` and `node.db` all open through `DB_SCHEMA` and all get it.
-No backfill, nothing to survive a crash halfway.
+Its cost is the start after the upgrade: like every version change, it first takes the full pre-migration copy of all three databases (`crates/cli/src/premigration.rs`: a byte copy, then `VACUUM INTO`), about twice their size written once; at the 1.6 GB of section 2 that is some 3 GB on the owner's USB disk, before the server opens.
 
 ## 5. Slices
 
@@ -268,7 +273,8 @@ Each slice is reviewable alone and starts with a test that fails on the old code
    Failing first, and deterministic for CI: a test that runs `EXPLAIN QUERY PLAN` on the page query and asserts `SEARCH s USING INDEX sessions_owner`, no `SCAN s`; a test that 120 chats come back as 50 + 50 + 20 with no row twice and none lost across equal `updated_ms`; a test that `routine_marks` of 500 ids is one statement (count via `trace` or a profile hook).
    **This slice meets the plan's benchmark** (measured: 0.06 ms page, 0.3 ms p99 append wait).
    Built as `crates/store/src/session_pages.rs` (`sessions_page`, `unread_of`, `project_links_of`, `routine_marks_of`, `children_of`, `Cursor`; the bench is `session_pages::bench`).
-   Measured in release on its own 50,000-chat database: first page 0.10 ms (p99 0.13 ms), page 101 0.10 ms, unread, links and marks of a page 0.06 ms, p99 append wait behind page and those three 0.27 ms; `children_of` 5.5 ms before migration 7, 0.03 ms after (see Children above).
+   Measured in release on its own 50,000-chat database after the review fixes: first page 0.11 ms (p99 0.14 ms), page 101 0.11 ms, unread, links and marks of a page 0.08 ms (p99 0.10 ms), every descendant of the page (`children_of`, recursive) 0.05 ms (p99 0.07 ms; 5.5 ms before migration 7), page with every annotation p99 0.31 ms, p99 append wait behind it 0.25 ms (behind today's list 18 ms).
+   The owner term in the three id-list annotations is a filter only (`+s.owner_id`): as a plain term SQLite walked all of the owner's chats through `sessions_owner`, 16 ms per page at 10,000 (the bench caught it; the plan test now refuses `sessions_owner` there).
 2. **`/api/sessions` paged** (`http/sessions.rs`, no growth of `http.rs`).
    Tests: another user's cursor returns only the caller's chats; a cursor from workspace A used in B lists B's chats from that position and nothing of A's; `limit=1000000000` returns 200; a malformed cursor is 400; seen routine run chats never shorten a page; children of the page's parents arrive.
 3. **UI: load more on scroll** (state in a hook, not in `Shell.tsx`), refetch policy, `pruneDrafts` on first load only, `subAgentRunning` from `children` and the lookup.

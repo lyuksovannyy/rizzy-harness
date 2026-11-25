@@ -351,11 +351,11 @@ fn contended(
 fn page_and_annotations(s: &Store, q: &PageQuery<'_>, viewer: &str, children: bool) -> usize {
     let (rows, _) = s.sessions_page(q).unwrap();
     let ids: Vec<SessionId> = rows.iter().map(|r| r.session_id).collect();
-    let n = s.unread_of(viewer, &ids).unwrap().len()
-        + s.project_links_of(&ids).unwrap().len()
-        + s.routine_marks_of(&ids).unwrap().len();
+    let n = s.unread_of(q.owner, viewer, &ids).unwrap().len()
+        + s.project_links_of(q.owner, &ids).unwrap().len()
+        + s.routine_marks_of(q.owner, &ids).unwrap().len();
     if children {
-        n + s.children_of(q.owner, &ids).unwrap().len()
+        n + s.children_of(q.owner, &ids).unwrap().rows.len()
     } else {
         n
     }
@@ -464,12 +464,12 @@ fn fifty_thousand_chats() {
     show("page 101 by cursor", t);
     let ids: Vec<SessionId> = p.0.iter().map(|r| r.session_id).collect();
     let (t, _) = timed(100, || {
-        s.unread_of(&u0, &ids).unwrap().len()
-            + s.project_links_of(&ids).unwrap().len()
-            + s.routine_marks_of(&ids).unwrap().len()
+        s.unread_of(q.owner, &u0, &ids).unwrap().len()
+            + s.project_links_of(q.owner, &ids).unwrap().len()
+            + s.routine_marks_of(q.owner, &ids).unwrap().len()
     });
     show("unread, links, marks of the page (3 statements)", t);
-    let (t, _) = timed(100, || s.children_of(q.owner, &ids).unwrap().len());
+    let (t, _) = timed(100, || s.children_of(q.owner, &ids).unwrap().rows.len());
     let children = show("children of the page", t);
     let (t, _) = timed(100, || page_and_annotations(&s, &q, &u0, true));
     show("page + every annotation", t);

@@ -155,34 +155,94 @@ fn page_sql(owner: Owner<'_>, after: bool) -> String {
     )
 }
 
-/// Driven from the parent ids into [`PARENT_SCHEMA`]'s index; the owner
-/// is then a filter on a handful of rows. `INDEXED BY`, not `+s.owner_id`:
-/// with an owner term SQLite prefers `sessions_owner` and walks all of
-/// the owner's chats (5.5 ms at 10,000, measured), and an unusable index
-/// is an error here instead of a silent walk.
+/// How deep [`Store::children_of`] follows sub-agents of sub-agents. The
+/// node has no depth limit of its own; 16 levels is far past any real
+/// delegation, and it is what ends a corrupt `parent_id` loop.
+pub const MAX_DEPTH: usize = 16;
+/// The most rows [`Store::children_of`] returns. A page has at most
+/// [`MAX_PAGE`] parents; 2,000 is ten sub-agent chats under each of them,
+/// a response of a few hundred KB, read in a few ms under the store lock.
+/// Past it the oldest are left out and the caller is told.
+pub const MAX_DESCENDANTS: usize = 2_000;
+
+/// Every sub-agent chat below the parents, at any depth, through
+/// [`PARENT_SCHEMA`]'s index. The owner term is checked at every step, so
+/// a chain stops at a chat of somebody else. `UNION` drops a repeated
+/// (chat, depth) only, so a loop of `parent_id`s ends at [`MAX_DEPTH`];
+/// the final `IN` lists each chat once.
+///
+/// `INDEXED BY`, not `+s.owner_id`: with an owner term SQLite prefers
+/// `sessions_owner` and walks all of the owner's chats (5.5 ms at 10,000,
+/// measured), and an unusable index is an error here instead of a silent
+/// walk.
 fn children_sql(owner: Owner<'_>) -> String {
     let owner = owner_term(owner);
     format!(
-        "SELECT {SESSION_COLS}, {EFFECTIVE_WS} FROM sessions s INDEXED BY sessions_parent {WS_JOINS}
-         WHERE s.parent_id IN (SELECT value FROM json_each(?2)) AND {owner}
-         ORDER BY s.updated_ms DESC, s.session_id DESC"
+        "WITH RECURSIVE tree(id, depth) AS (
+             SELECT s.session_id, 1 FROM sessions s INDEXED BY sessions_parent
+              WHERE s.parent_id IN (SELECT value FROM json_each(?2)) AND {owner}
+             UNION
+             SELECT s.session_id, t.depth + 1 FROM tree t
+               JOIN sessions s INDEXED BY sessions_parent ON s.parent_id = t.id
+              WHERE t.depth < {MAX_DEPTH} AND {owner}
+             LIMIT ?3)
+         SELECT {SESSION_COLS}, {EFFECTIVE_WS} FROM sessions s {WS_JOINS}
+          WHERE s.session_id IN (SELECT id FROM tree)
+          ORDER BY s.updated_ms DESC, s.session_id DESC"
     )
 }
 
-const UNREAD_OF: &str = "SELECT s.session_id FROM sessions s
-     LEFT JOIN seen v ON v.session_id = s.session_id AND v.user_id = ?1
-     WHERE s.session_id IN (SELECT value FROM json_each(?2))
-       AND s.finished_seq > COALESCE(v.seq, 0)";
+/// The owner as a filter only (`+` keeps it off `sessions_owner`): the
+/// id-list annotations look each id up by key and drop chats of somebody
+/// else. With a plain owner term SQLite walks all of the owner's chats
+/// through `sessions_owner` instead (16 ms at 10,000, measured).
+fn owner_filter(owner: Owner<'_>) -> &'static str {
+    match owner {
+        Owner::User(_) => "+s.owner_id = ?1",
+        Owner::Everyone => "?1 IS NULL",
+    }
+}
 
-const LINKS_OF: &str =
-    "SELECT sp.session_id, sp.project_id, p.workspace_id FROM session_projects sp
-     JOIN projects p ON p.project_id = sp.project_id
-     WHERE sp.session_id IN (SELECT value FROM json_each(?1))";
+/// The id-list annotations answer only for chats of `owner`, whatever
+/// ids a caller passes.
+fn unread_sql(owner: Owner<'_>) -> String {
+    let owner = owner_filter(owner);
+    format!(
+        "SELECT s.session_id FROM sessions s
+         LEFT JOIN seen v ON v.session_id = s.session_id AND v.user_id = ?2
+         WHERE s.session_id IN (SELECT value FROM json_each(?3)) AND {owner}
+           AND s.finished_seq > COALESCE(v.seq, 0)"
+    )
+}
 
-const MARKS_OF: &str =
-    "SELECT r.session_id, r.routine_id, o.name, r.run_id, r.status, r.seen, r.promoted, r.untrusted
-     FROM routine_runs r JOIN routines o ON o.routine_id = r.routine_id
-     WHERE r.session_id IN (SELECT value FROM json_each(?1))";
+fn links_sql(owner: Owner<'_>) -> String {
+    let owner = owner_filter(owner);
+    format!(
+        "SELECT sp.session_id, sp.project_id, p.workspace_id FROM session_projects sp
+         JOIN sessions s ON s.session_id = sp.session_id
+         JOIN projects p ON p.project_id = sp.project_id
+         WHERE sp.session_id IN (SELECT value FROM json_each(?2)) AND {owner}"
+    )
+}
+
+fn marks_sql(owner: Owner<'_>) -> String {
+    let owner = owner_filter(owner);
+    format!(
+        "SELECT r.session_id, r.routine_id, o.name, r.run_id, r.status, r.seen, r.promoted, r.untrusted
+         FROM routine_runs r JOIN routines o ON o.routine_id = r.routine_id
+         JOIN sessions s ON s.session_id = r.session_id
+         WHERE r.session_id IN (SELECT value FROM json_each(?2)) AND {owner}"
+    )
+}
+
+/// What [`Store::children_of`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Descendants {
+    /// Newest first.
+    pub rows: Vec<SessionRow>,
+    /// More than [`MAX_DESCENDANTS`]: the oldest were left out.
+    pub truncated: bool,
+}
 
 /// `ids` as one JSON array, the single parameter of an `IN` list.
 fn id_list(ids: &[SessionId]) -> Result<String> {
@@ -222,7 +282,20 @@ impl Store {
             Self::session_from_row,
         )?;
         let mut out = rows
-            .map(|r| Self::finish_session(r?))
+            .map(|r| {
+                let (text, row) = r?;
+                let row = Self::finish_session((text.clone(), row))?;
+                // The cursor compares the canonical text with the stored
+                // one: another spelling would page in a loop. Every writer
+                // stores `SessionId::to_string()`, so this is corrupt data.
+                if row.session_id.to_string() != text {
+                    return Err(StoreError::Corrupt(
+                        "a stored chat id is not in canonical form; the chat list cannot be paged"
+                            .into(),
+                    ));
+                }
+                Ok(row)
+            })
             .collect::<Result<Vec<_>>>()?;
         let next = if out.len() > limit {
             out.truncate(limit);
@@ -233,41 +306,70 @@ impl Store {
         Ok((out, next))
     }
 
-    /// The sub-agent chats of `owner` whose parent is one of `parents`,
-    /// newest first.
-    pub fn children_of(&self, owner: Owner<'_>, parents: &[SessionId]) -> Result<Vec<SessionRow>> {
+    /// Every sub-agent chat of `owner` below `parents`, at any depth up to
+    /// [`MAX_DEPTH`], newest first; a chain stops at a chat that is not
+    /// `owner`'s.
+    ///
+    /// Deliberately unlike today's list, a child is returned whatever its
+    /// own effective workspace: it is shown nested under its parent, so it
+    /// follows the parent's workspace (a child created before its parent
+    /// was moved keeps its own mapping, and would otherwise vanish).
+    pub fn children_of(&self, owner: Owner<'_>, parents: &[SessionId]) -> Result<Descendants> {
         if parents.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Descendants {
+                rows: Vec::new(),
+                truncated: false,
+            });
         }
         let list = id_list(parents)?;
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&children_sql(owner))?;
-        let rows = stmt.query_map(params![owner.bind(), list], Self::session_from_row)?;
-        rows.map(|r| Self::finish_session(r?)).collect()
+        let rows = stmt.query_map(
+            params![owner.bind(), list, (MAX_DESCENDANTS + 1) as i64],
+            Self::session_from_row,
+        )?;
+        let mut rows = rows
+            .map(|r| Self::finish_session(r?))
+            .collect::<Result<Vec<_>>>()?;
+        let truncated = rows.len() > MAX_DESCENDANTS;
+        rows.truncate(MAX_DESCENDANTS);
+        Ok(Descendants { rows, truncated })
     }
 
-    /// Which of `ids` finished after `viewer` last looked at them: the
-    /// same rule as [`Store::unread`], for these chats only.
-    pub fn unread_of(&self, viewer: &str, ids: &[SessionId]) -> Result<HashSet<SessionId>> {
+    /// Which of `owner`'s chats among `ids` finished after `viewer` last
+    /// looked at them: the same rule as [`Store::unread`].
+    pub fn unread_of(
+        &self,
+        owner: Owner<'_>,
+        viewer: &str,
+        ids: &[SessionId],
+    ) -> Result<HashSet<SessionId>> {
         if ids.is_empty() {
             return Ok(HashSet::new());
         }
         let list = id_list(ids)?;
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(UNREAD_OF)?;
-        let rows = stmt.query_map(params![viewer, list], |r| r.get::<_, String>(0))?;
+        let mut stmt = conn.prepare_cached(&unread_sql(owner))?;
+        let rows = stmt.query_map(params![owner.bind(), viewer, list], |r| {
+            r.get::<_, String>(0)
+        })?;
         rows.map(|r| sid(r?)).collect()
     }
 
-    /// The project links of `ids` (chats without one are left out).
-    pub fn project_links_of(&self, ids: &[SessionId]) -> Result<Vec<ProjectLink>> {
+    /// The project links of `owner`'s chats among `ids` (chats without one
+    /// are left out).
+    pub fn project_links_of(
+        &self,
+        owner: Owner<'_>,
+        ids: &[SessionId],
+    ) -> Result<Vec<ProjectLink>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         let list = id_list(ids)?;
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(LINKS_OF)?;
-        let rows = stmt.query_map(params![list], |r| {
+        let mut stmt = conn.prepare_cached(&links_sql(owner))?;
+        let rows = stmt.query_map(params![owner.bind(), list], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -285,15 +387,20 @@ impl Store {
         .collect()
     }
 
-    /// [`Store::routine_marks`] in one statement.
-    pub fn routine_marks_of(&self, ids: &[SessionId]) -> Result<HashMap<SessionId, RoutineMark>> {
+    /// [`Store::routine_marks`] of `owner`'s chats among `ids`, in one
+    /// statement.
+    pub fn routine_marks_of(
+        &self,
+        owner: Owner<'_>,
+        ids: &[SessionId],
+    ) -> Result<HashMap<SessionId, RoutineMark>> {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
         let list = id_list(ids)?;
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(MARKS_OF)?;
-        let rows = stmt.query_map(params![list], |r| {
+        let mut stmt = conn.prepare_cached(&marks_sql(owner))?;
+        let rows = stmt.query_map(params![owner.bind(), list], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 RoutineMark {

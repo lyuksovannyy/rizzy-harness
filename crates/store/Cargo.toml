@@ -22,7 +22,5 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-# `trace` (no extra crate): tests count the statements a call runs.
-rusqlite = { workspace = true, features = ["trace"] }
 tempfile.workspace = true
 serde_json.workspace = true
