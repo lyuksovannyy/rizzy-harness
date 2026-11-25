@@ -78,18 +78,41 @@ describe("finished, unread", () => {
       ["c", true],
       ["d", false],
     ]);
-    expect(newlyFinished(before, rows).map((r) => r.session_id)).toEqual(["a"]);
+    expect(newlyFinished(before, rows, Infinity).map((r) => r.session_id)).toEqual(["a"]);
+    // e is newer than the first load's newest chat: it is news.
+    expect(newlyFinished(before, [chat("e", { unread: true, updated_ms: 9 })], 5).map((r) => r.session_id)).toEqual(["e"]);
+    expect(newlyFinished(before, [chat("e", { unread: true, updated_ms: 5 })], 5)).toEqual([]);
+  });
+
+  // Review R2-4: started in another tab or device, finished before this
+  // tab's next list: first seen already unread, but newer than the first load.
+  test("a chat started elsewhere that finished before the next list notifies once", async () => {
+    await show([chat("a", { updated_ms: 100 })]);
+    await show([chat("new", { unread: true, updated_ms: 200 }), chat("a", { updated_ms: 100 })]);
+    expect(shown).toHaveLength(1);
+    expect(shown[0]!.body).toBe("A chat finished: number 1 in your recent chats");
+    await show([chat("new", { unread: true, updated_ms: 200 }), chat("a", { updated_ms: 100 })]);
+    await show([chat("a", { updated_ms: 100 })]);
+    await show([chat("new", { unread: true, updated_ms: 200 }), chat("a", { updated_ms: 100 })]);
+    expect(shown).toHaveLength(1);
+  });
+
+  test("with no chat at the first load, the first chat that finishes elsewhere notifies", async () => {
+    await show([]);
+    await show([chat("new", { unread: true, updated_ms: 5 })]);
+    expect(shown).toHaveLength(1);
   });
 
   // Review F1: rows that enter by paging or by opening a project group.
   test("an old unread chat that a page or an opened group brings in is not notified", async () => {
-    await show([chat("a")]);
-    await show([chat("a"), chat("old", { unread: true })]);
+    await show([chat("a", { updated_ms: 100 })]);
+    await show([chat("a", { updated_ms: 100 }), chat("old", { unread: true, updated_ms: 50 })]);
+    await show([chat("a", { updated_ms: 100 }), chat("tie", { unread: true, updated_ms: 100 })]);
     expect(shown).toEqual([]);
   });
 
   test("folding and unfolding a group twice notifies nothing", async () => {
-    await show([chat("a")]);
+    await show([chat("a", { updated_ms: 1 })]);
     for (let i = 0; i < 2; i++) {
       await show([chat("a"), chat("old", { unread: true })]);
       await show([chat("a")]);

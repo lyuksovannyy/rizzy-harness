@@ -13,13 +13,19 @@ import { APP_TITLE } from "./brand";
 import { t } from "./i18n";
 import { notifyEnabled } from "./notify";
 
-/** Unread chats in `now` that this tab saw before and saw not unread then.
- * `before`: every chat seen so far, and whether it was finished and unread
- * when last seen. A chat seen for the first time already unread (a page
- * loaded by scrolling, a project group opened) finished before it came into
- * view: its dot says so, a notification would not be news. Pure, for tests. */
-export function newlyFinished(before: ReadonlyMap<string, boolean>, now: SessionRow[]): SessionRow[] {
-  return now.filter((s) => done(s) && before.get(s.session_id) === false);
+/** Unread chats in `now` that are news. `before`: every chat seen so far,
+ * and whether it was finished and unread when last seen; a chat seen before
+ * is news when it was not unread then. A chat seen for the first time
+ * already unread is news only when it is newer than `baseline`, the newest
+ * chat of the tab's first list: then it began after that list (another tab
+ * or device, finished before this tab's next list). At or below it, it is an
+ * old chat a scrolled page or an opened project group brought in; its dot
+ * says so. Times are the server's `updated_ms` (node clocks), never this
+ * browser's: a chat on a node whose clock runs behind can fall below the
+ * baseline and stay silent, as every first-seen chat did before. Pure, for
+ * tests. */
+export function newlyFinished(before: ReadonlyMap<string, boolean>, now: SessionRow[], baseline: number): SessionRow[] {
+  return now.filter((s) => done(s) && (before.get(s.session_id) ?? !(s.updated_ms > baseline)) === false);
 }
 
 const NONE: SessionRow[] = [];
@@ -35,10 +41,13 @@ export function useFinishedSignal(loaded: SessionRow[] | null, viewing: string |
   // Null until the first list: what was unread before this tab opened is
   // shown by its dot, never notified.
   const before = useRef<Map<string, boolean> | null>(null);
+  // The newest chat of the first list; none (an empty account): -Infinity,
+  // so the first chat that finishes elsewhere is news.
+  const baseline = useRef(-Infinity);
   useEffect(() => {
     if (!loaded) return;
     if (before.current && notifyEnabled()) {
-      for (const s of newlyFinished(before.current, listed)) {
+      for (const s of newlyFinished(before.current, listed, baseline.current)) {
         if (looking(s.session_id, viewing)) continue;
         const id = s.session_id;
         const n = new Notification(APP_TITLE, {
@@ -54,6 +63,7 @@ export function useFinishedSignal(loaded: SessionRow[] | null, viewing: string |
     }
     // Chats that leave the list (a folded group) keep what was last seen of
     // them, so coming back is no news either.
+    if (!before.current) baseline.current = Math.max(-Infinity, ...listed.map((s) => s.updated_ms));
     const seen = before.current ?? new Map<string, boolean>();
     for (const s of listed) seen.set(s.session_id, done(s));
     before.current = seen;

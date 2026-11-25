@@ -5,7 +5,7 @@
 // top, as many rows as are loaded (at most 200), one request in flight and
 // one queued however many nudges come; the merge is `chatPages.ts`.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../api";
+import { api, HttpError } from "../api";
 import type { SessionRow } from "../types";
 import { appendPage, applyRefetch, coalesce, combine, type List, refetchLimit } from "./chatPages";
 import { pruneDrafts } from "./drafts";
@@ -34,6 +34,15 @@ export interface ChatPages {
 }
 
 
+/** The open chat's row to show: its refreshed copy; none once it was
+ * deleted or moved to another workspace. */
+function shownRow(extra: SessionRow | null, fresh: SessionRow | { gone: string } | null, ws: string | null) {
+  if (!extra || !fresh) return extra;
+  if ("gone" in fresh) return fresh.gone === extra.session_id ? null : extra;
+  if (fresh.session_id !== extra.session_id) return extra;
+  return (fresh.workspace_id ?? null) === ws ? fresh : null;
+}
+
 export function useChatList(
   workspaceId: string | null,
   onError: (e: unknown) => void,
@@ -50,8 +59,9 @@ export function useChatList(
   // Groups whose first page is on its way when a nudge comes: refetched once
   // it lands, so the nudge is not lost for them.
   const nudged = useRef(new Set<string>());
-  // The open chat's row as refreshed here, when no loaded page holds it.
-  const [fresh, setFresh] = useState<SessionRow | null>(null);
+  // The open chat's row as refreshed here, when no loaded page holds it;
+  // `gone`: the server said 404 for it (deleted elsewhere).
+  const [fresh, setFresh] = useState<SessionRow | { gone: string } | null>(null);
   const extra = opts.extra && (opts.extra.workspace_id ?? null) === workspaceId ? opts.extra : null;
   // The latest lists, for callbacks that outlive a render.
   const now = useRef({ main, groups, extra });
@@ -101,13 +111,14 @@ export function useChatList(
         for (const id of open) if (!groups[id]) nudged.current.add(id);
         const each = open.filter((id) => groups[id]).map((id) => refetchGroup(id, groups[id]!.rows.length));
         // The open chat outside every loaded page: its row again (a rename or
-        // a move does not bring it to the top). A 404 means it is gone.
+        // a move does not bring it to the top). A 404, and only that, means it
+        // is gone; a network error keeps what is shown.
         const held = (id: string) => [main, ...Object.values(groups)].some((l) => l?.rows.some((r) => r.session_id === id) || l?.children.some((r) => r.session_id === id));
         const own =
           extra && main && !held(extra.session_id)
             ? api.session(extra.session_id).then(
                 (r) => setFresh(r),
-                () => {},
+                (e: unknown) => e instanceof HttpError && e.status === 404 && setFresh({ gone: extra.session_id }),
               )
             : null;
         return Promise.all([top, ...each, own]).catch((e: unknown) => err.current(e));
@@ -176,8 +187,7 @@ export function useChatList(
 
   useEffect(() => (opts.keep ? watch(opts.keep) : undefined), [opts.keep, watch]);
 
-  // Refreshed into another workspace, it no longer shows here.
-  const shown = extra && fresh?.session_id === extra.session_id ? ((fresh.workspace_id ?? null) === workspaceId ? fresh : null) : extra;
+  const shown = shownRow(extra, fresh, workspaceId);
   const sessions = useMemo(() => (main ? combine([main, ...Object.values(groups)], shown) : null), [main, groups, shown]);
   const pages: ChatPages = useMemo(
     () => ({ more: main?.next ? more : null, busy, stalled, loaded, watch, group: (id: string) => groups[id], moreIn }),

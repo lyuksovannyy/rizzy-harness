@@ -559,6 +559,55 @@ describe("the paged list (FIX_PLAN 4.5)", () => {
     expect(status.textContent).toBe("50 older chats loaded");
   });
 
+  // Review R2-1: a page that lands with more left ends the wait; focus is
+  // never taken later from where the person put it.
+  test("a group's Show more never takes focus back after its page landed", () => {
+    const rows = Array.from({ length: 7 }, (_, i) => chat(`h${i}`, { project_id: "p1", updated_ms: 100 - i }));
+    const view = (list: SessionRow[], next: string | null) =>
+      render({ projects: [project(1)], sessions: list, pages: pages({ group: () => ({ rows: list, children: [], next }) }) });
+    view(rows, "c1");
+    const button = (label: string) => [...q(".project-box")!.querySelectorAll("button")].find((b) => b.textContent === label);
+    act(() => button("Show 2 more")!.click());
+    button("Show more")!.focus();
+    act(() => button("Show more")!.click());
+    const more = [...rows, chat("h7", { project_id: "p1", updated_ms: 50 }), chat("h8", { project_id: "p1", updated_ms: 40 })];
+    view(more, "c2");
+    const input = document.createElement("input");
+    document.body.append(input);
+    try {
+      input.focus();
+      view(more, null);
+      expect(document.activeElement).toBe(input);
+    } finally {
+      input.remove();
+    }
+  });
+
+  // Review R2-2: the main list's button goes with its last page.
+  test("when the main list has nothing left, focus goes to the last row, only if it was on the button", () => {
+    const first = [chat("m1", { updated_ms: 10 }), chat("m2", { updated_ms: 9 })];
+    const p = pages();
+    render({ sessions: first, pages: p });
+    const more = q<HTMLButtonElement>(".load-more")!;
+    more.focus();
+    act(() => more.click());
+    const all = [...first, chat("m3", { updated_ms: 8 })];
+    render({ sessions: all, pages: pages({ more: null }) });
+    expect(document.activeElement?.getAttribute("href")).toBe("#/s/m3");
+    // Elsewhere: left alone.
+    remount({ sessions: first, pages: pages() });
+    act(() => q<HTMLButtonElement>(".load-more")!.click());
+    const input = document.createElement("input");
+    document.body.append(input);
+    try {
+      input.focus();
+      render({ sessions: all, pages: pages({ more: null }) });
+      expect(document.activeElement).toBe(input);
+    } finally {
+      input.remove();
+    }
+  });
+
   test("when a group has nothing left, focus goes to the last row its last page added", () => {
     const rows = Array.from({ length: 7 }, (_, i) => chat(`g${i}`, { project_id: "p1", updated_ms: 100 - i }));
     const p = pages({ group: () => ({ rows, children: [], next: "cursor" }) });

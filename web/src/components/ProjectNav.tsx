@@ -4,7 +4,7 @@
 // this browser's (localStorage, inside try/catch). The open chat is never lost:
 // a cap shows it in its place, and a closed group's header carries its mark.
 import { ChevronRight, Cloud, Plus } from "lucide-react";
-import { lazy, type ReactNode, Suspense, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ACCENTS } from "../lib/appearance";
 import { t } from "../lib/i18n";
 import { ProjectIcon } from "../lib/projectIcons";
@@ -40,13 +40,13 @@ export function nodeHue(id: string): string {
 /** The first `cap` rows and any row `keep` asks for (the open chat, its
  * parents, its project) in its place; the rest on request, and with `load`
  * the server's next page once every loaded row shows. */
-function Capped<T>(props: { items: T[]; cap: number; keep: (x: T) => boolean; row: (x: T) => ReactNode; load?: () => void }) {
+function Capped<T>(props: { items: T[]; cap: number; keep: (x: T) => boolean; row: (x: T) => ReactNode; load?: (button: HTMLElement) => void }) {
   const [all, setAll] = useState(false);
   const first = props.items.filter((x, i) => i < props.cap || props.keep(x));
   const more = props.items.length - first.length;
-  const button = (label: string, onClick: () => void) => (
+  const button = (label: string, onClick: (button: HTMLElement) => void) => (
     <li>
-      <button type="button" className="link small show-more" onClick={onClick}>
+      <button type="button" className="link small show-more" onClick={(e) => onClick(e.currentTarget)}>
         {label}
       </button>
     </li>
@@ -58,9 +58,9 @@ function Capped<T>(props: { items: T[]; cap: number; keep: (x: T) => boolean; ro
       {more > 0 && !all
         ? button(t("nav.showMore", { n: String(more) }), () => setAll(true))
         : load &&
-          button(t("nav.loadMore"), () => {
+          button(t("nav.loadMore"), (b) => {
             setAll(true);
-            load();
+            load(b);
           })}
       {all && button(t("nav.showFewer"), () => setAll(false))}
     </>
@@ -69,7 +69,7 @@ function Capped<T>(props: { items: T[]; cap: number; keep: (x: T) => boolean; ro
 
 /** The end of the list: loads the next page when it scrolls into view, and
  * is the button that does it (keyboard, assistive tech, no observer). */
-function LoadMore(props: { more: () => void; busy: boolean; stalled: boolean }) {
+function LoadMore(props: { more: () => void; busy: boolean; stalled: boolean; clicked: (button: HTMLElement) => void }) {
   const ref = useRef<HTMLButtonElement>(null);
   const { more, busy, stalled } = props;
   useEffect(() => {
@@ -86,7 +86,13 @@ function LoadMore(props: { more: () => void; busy: boolean; stalled: boolean }) 
   }, [more, busy, stalled]);
   // Never `disabled` while it loads: that would drop a keyboard user's focus.
   return (
-    <button ref={ref} type="button" className="link small show-more load-more" onClick={() => busy || more()} aria-busy={busy}>
+    <button ref={ref} type="button" className="link small show-more load-more" onClick={(e) => {
+        if (busy) return;
+        props.clicked(e.currentTarget);
+        more();
+      }}
+      aria-busy={busy}
+    >
       {t("nav.olderChats")}
     </button>
   );
@@ -131,20 +137,35 @@ function Chat({ s, c }: { s: SessionRow; c: Ctx }) {
   );
 }
 
+/** After a click on a "load more" button: once the page it asked for lands
+ * (`size` changed, or `more` went), the wait ends; if nothing is left, the
+ * button is gone, and focus was still on it (or fell to the page with it),
+ * focus moves to the last of `rows` inside `box`. Focus the person put
+ * elsewhere meanwhile is never taken. Returns what the click calls. */
+function useFocusAfterLoad(box: RefObject<HTMLElement | null>, rows: string, more: boolean, size: number) {
+  const asked = useRef<{ button: HTMLElement; size: number } | null>(null);
+  useEffect(() => {
+    const a = asked.current;
+    if (!a || (more && size === a.size)) return;
+    asked.current = null;
+    const now = document.activeElement;
+    if (more || (now && now !== document.body && now !== a.button)) return;
+    const all = box.current?.querySelectorAll<HTMLElement>(rows);
+    all?.[all.length - 1]?.focus();
+  }, [box, rows, more, size]);
+  return (button: HTMLElement) => {
+    asked.current = { button, size };
+  };
+}
+
+const ROWS = ":scope > li > a.session-item";
+
 function Chats({ list, c, cap = Infinity, sub, load }: { list: SessionRow[]; c: Ctx; cap?: number; sub?: boolean; load?: () => void }) {
   const ul = useRef<HTMLUListElement>(null);
-  const asked = useRef(false);
-  // The last page came and nothing is left: its "Show more" goes, and focus
-  // moves to the last row it added instead of falling to the page.
-  useEffect(() => {
-    if (load || !asked.current) return;
-    asked.current = false;
-    const rows = ul.current?.querySelectorAll<HTMLElement>(":scope > li > a.session-item");
-    rows?.[rows.length - 1]?.focus();
-  }, [load, list.length]);
+  const mark = useFocusAfterLoad(ul, ROWS, !!load, list.length);
   const asking = load
-    ? () => {
-        asked.current = true;
+    ? (button: HTMLElement) => {
+        mark(button);
         load();
       }
     : undefined;
@@ -311,9 +332,12 @@ export function SidebarLists(props: {
   const sectionOpen = open.projects !== false;
   const projectChats = sectionOpen ? [] : [...tree.inProject.values()].flat();
   const sectionHere = projectChats.some((s) => path.has(s.session_id));
+  // The main list's button goes with its last page: focus to the last loose row.
+  const scroll = useRef<HTMLDivElement>(null);
+  const markMain = useFocusAfterLoad(scroll, ":scope > ul.chats > li > a.session-item", !!props.pages?.more, props.sessions.length);
 
   return (
-    <div className="sidebar-scroll">
+    <div ref={scroll} className="sidebar-scroll">
       <section className="side-section">
         <div className={`section-label section-row${sectionHere ? " active" : ""}`}>
           <Toggle open={sectionOpen} body={body} onToggle={() => toggle("projects")}>
@@ -352,7 +376,7 @@ export function SidebarLists(props: {
       </section>
       {tree.none && <div className="muted pad small">{t("nav.noChats")}</div>}
       <Chats list={tree.loose} c={c} />
-      {props.pages?.more && <LoadMore more={props.pages.more} busy={props.pages.busy} stalled={props.pages.stalled} />}
+      {props.pages?.more && <LoadMore more={props.pages.more} busy={props.pages.busy} stalled={props.pages.stalled} clicked={markMain} />}
       <div className="sr-only" role="status" aria-live="polite">
         {props.pages?.loaded && <span key={props.pages.loaded.at}>{t("nav.olderLoaded", { n: String(props.pages.loaded.n) })}</span>}
       </div>

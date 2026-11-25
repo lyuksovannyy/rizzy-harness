@@ -13,10 +13,15 @@ const sessions = vi.fn<(ws: string | null, o: Record<string, unknown>) => Promis
 const session = vi.fn<(id: string) => Promise<SessionRow>>();
 vi.mock("../api", () => ({
   api: { sessions: (ws: string | null, o: Record<string, unknown>) => sessions(ws, o), session: (id: string) => session(id) },
-  HttpError: class extends Error {},
+  HttpError: class extends Error {
+    constructor(public status: number) {
+      super(String(status));
+    }
+  },
 }));
 vi.mock("./drafts", () => ({ pruneDrafts: () => {} }));
 const { useChatList } = await import("./useChatList");
+const { HttpError } = await import("../api");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -76,6 +81,23 @@ describe("useChatList", () => {
     await settle();
     expect(session).toHaveBeenCalledWith("old");
     expect(got!.sessions!.find((r) => r.session_id === "old")?.title).toBe("After");
+  });
+
+  // Review R2-3: a 404 means the open chat is gone; a network error does not.
+  test("a deleted open chat leaves the list; a failed request keeps it", async () => {
+    sessions.mockResolvedValue(page([row("new", { updated_ms: 100 })]));
+    const old = row("old", { updated_ms: 1 });
+    await act(async () => root.render(<Probe extra={old} keep={null} />));
+    await act(async () => got!.refresh());
+    await settle();
+    session.mockRejectedValue(new TypeError("Failed to fetch"));
+    await act(async () => got!.refresh());
+    await settle();
+    expect(got!.sessions!.some((r) => r.session_id === "old")).toBe(true);
+    session.mockRejectedValue(new (HttpError as unknown as new (s: number) => Error)(404));
+    await act(async () => got!.refresh());
+    await settle();
+    expect(got!.sessions!.some((r) => r.session_id === "old")).toBe(false);
   });
 
   test("an open chat a page holds is not looked up again", async () => {
