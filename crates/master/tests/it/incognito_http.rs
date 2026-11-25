@@ -153,15 +153,18 @@ async fn incognito_leaves_no_rows_after_ttl() {
     let kept = chat(&t, &c, "normal chat about zebrafish", false).await;
     let gone = chat(&t, &c, "secret plan okapimarker", true).await;
 
-    // Listed (flagged), but never searchable.
+    // Not a row of the chat list (the sidebar never showed it; the open
+    // one comes from its lookup, flagged), and never searchable.
     let (_, v) = req(&t, Method::GET, "/api/sessions", None, &c).await;
-    let row = v["sessions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["session_id"] == gone.as_str())
-        .unwrap()
-        .clone();
+    assert!(
+        v["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["session_id"] != gone.as_str()),
+        "{v}"
+    );
+    let (_, row) = req(&t, Method::GET, &format!("/api/sessions/{gone}"), None, &c).await;
     assert_eq!(row["incognito"], true);
     let (_, v) = req(&t, Method::GET, "/api/search?q=okapimarker", None, &c).await;
     assert!(v["results"].as_array().unwrap().is_empty());

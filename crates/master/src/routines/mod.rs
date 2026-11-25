@@ -263,18 +263,6 @@ pub async fn features(m: &Master, who: &Principal, scope: Option<&Access>) -> Va
     json!({ "enabled": true, "show": show, "webhooks": webhooks, "why": why })
 }
 
-/// Give each chat row its `routine` mark, and leave out the run chats the
-/// sessions list hides unless `include_runs`.
-// A `Vec`, not a slice: the filter removes rows.
-#[allow(clippy::ptr_arg)]
-pub async fn annotate(
-    m: &Master,
-    rows: &mut Vec<Value>,
-    include_runs: bool,
-) -> harness_store::Result<()> {
-    results::annotate(m, rows, include_runs).await
-}
-
 /// `annotate` for one chat row.
 pub async fn annotate_one(m: &Master, row: &mut Value) -> harness_store::Result<()> {
     results::annotate_one(m, row).await

@@ -378,7 +378,8 @@ async fn review_projects_subagents_and_an_outside_admin_stay_silent() {
         &bob,
     )
     .await;
-    let list = all["sessions"].as_array().unwrap();
+    // Sub-agent chats come below the page's chats.
+    let list = all["children"].as_array().unwrap();
     for r in list {
         eprintln!(
             "row {} parent={} project={}",

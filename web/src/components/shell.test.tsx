@@ -109,7 +109,7 @@ let root: Root;
 let mounted = false;
 beforeEach(() => {
   lives.length = 0;
-  stubs.sessions.mockReset().mockResolvedValue({ sessions: [] });
+  stubs.sessions.mockReset().mockResolvedValue({ sessions: [], children: [], next: null });
   stubs.workspaces.mockReset().mockResolvedValue(list(personal, acme));
   stubs.attention.mockReset().mockReturnValue(new Promise(() => {}));
   stubs.agents.mockReset().mockReturnValue(new Promise(() => {}));
@@ -167,7 +167,8 @@ describe("Shell", () => {
     stubs.workspaces.mockResolvedValue(list(personal, promoted));
     await act(async () => lives[0]!.onWorkspacesChanged());
     expect(stubs.sessions.mock.calls.length).toBe(before + 1);
-    expect(stubs.sessions).toHaveBeenLastCalledWith("acme");
+    // From the top, one page (no more were loaded).
+    expect(stubs.sessions).toHaveBeenLastCalledWith("acme", {});
     expect(p.onMeChanged).toHaveBeenLastCalledWith(promoted);
     expect(p.onGone).not.toHaveBeenCalled();
   });

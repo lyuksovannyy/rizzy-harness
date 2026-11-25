@@ -248,6 +248,21 @@ fn listed(m: &RoutineMark) -> bool {
 fn old_list(s: &Store, q: &PageQuery<'_>) -> Vec<SessionRow> {
     let mut rows = s.sessions_of(q.owner.bind()).unwrap();
     rows.retain(|r| q.workspace.is_none() || r.workspace_id.as_deref() == q.workspace);
+    if let Some(p) = q.project {
+        // The master's `projects::effective`: linked, and the project is in
+        // the chat's workspace.
+        let links: HashMap<SessionId, ProjectLink> = s
+            .project_links(None)
+            .unwrap()
+            .into_iter()
+            .map(|l| (l.session_id, l))
+            .collect();
+        rows.retain(|r| {
+            links.get(&r.session_id).is_some_and(|l| {
+                l.project_id == p && r.workspace_id.as_deref() == Some(l.workspace_id.as_str())
+            })
+        });
+    }
     if q.top_level {
         rows.retain(|r| r.parent_id.is_none() && !r.incognito);
     }
@@ -413,7 +428,7 @@ fn cursor_round_trips_and_is_parsed_strictly() {
 fn the_owner_page_seeks_the_owner_index_and_never_scans_sessions() {
     let f = fixture();
     for after in [false, true] {
-        let sql = page_sql(Owner::User("a"), after);
+        let sql = page_sql(Owner::User("a"), after, false);
         for ws in [None, Some(f.team.as_str())] {
             for flags in [(false, false), (true, true)] {
                 let p = plan(
@@ -426,7 +441,8 @@ fn the_owner_page_seeks_the_owner_index_and_never_scans_sessions() {
                         ws,
                         flags.0,
                         flags.1,
-                        51i64
+                        51i64,
+                        None::<&str>
                     ],
                 );
                 assert!(
@@ -500,6 +516,7 @@ fn one_hundred_twenty_chats_page_as_fifty_fifty_twenty() {
             owner: Owner::User("a"),
             workspace: None,
             top_level: true,
+            project: None,
             hide_seen_runs: true,
             after: None,
             limit: 50,
@@ -537,6 +554,7 @@ fn a_chat_that_moves_between_reads_never_hides_another() {
         owner: Owner::User("a"),
         workspace: None,
         top_level: false,
+        project: None,
         hide_seen_runs: false,
         after: None,
         limit: 10,
@@ -590,6 +608,7 @@ fn the_limit_is_clamped_inside_the_store() {
         owner: Owner::User("a"),
         workspace: None,
         top_level: false,
+        project: None,
         hide_seen_runs: false,
         after: None,
         limit,
@@ -630,6 +649,7 @@ fn each_annotation_is_one_statement_and_an_empty_list_none() {
             owner: Owner::User("a"),
             workspace: Some(&f.team),
             top_level: true,
+            project: None,
             hide_seen_runs: true,
             after: None,
             limit: 200,
@@ -653,6 +673,17 @@ fn each_annotation_is_one_statement_and_an_empty_list_none() {
     assert!(r.0.is_empty() && r.1.is_empty() && r.2.is_empty() && r.3.is_empty());
 }
 
+/// The fixture's projects (`pa`, `pb`: a's and b's Personal; `pt`: the
+/// team's; `po`: c's workspace), one that does not exist, and none.
+const PROJECTS: [Option<&str>; 6] = [
+    None,
+    Some("pa"),
+    Some("pb"),
+    Some("pt"),
+    Some("po"),
+    Some("no-such"),
+];
+
 fn workspaces(f: &Fix) -> Vec<Option<&str>> {
     let mut v: Vec<Option<&str>> = vec![None, Some(&f.team), Some(&f.other), Some("no-such")];
     v.extend(f.personal.values().map(|w| Some(w.as_str())));
@@ -664,6 +695,7 @@ fn the_page_and_its_annotations_equal_todays_path() {
     let f = fixture();
     let s = &f.s;
     let mut checked = 0;
+    let mut project_rows = 0;
     for owner in [
         Owner::User("a"),
         Owner::User("b"),
@@ -671,21 +703,27 @@ fn the_page_and_its_annotations_equal_todays_path() {
         Owner::Everyone,
     ] {
         for ws in workspaces(&f) {
-            for top_level in [false, true] {
-                for hide_seen_runs in [false, true] {
-                    for limit in [7, 50] {
-                        let q = PageQuery {
-                            owner,
-                            workspace: ws,
-                            top_level,
-                            hide_seen_runs,
-                            after: None,
-                            limit,
-                        };
-                        let got = walk(s, &q);
-                        let want = old_list(s, &q);
-                        assert_eq!(got, want, "{q:?}");
-                        checked += got.len();
+            for project in PROJECTS {
+                for top_level in [false, true] {
+                    for hide_seen_runs in [false, true] {
+                        for limit in [7, 50] {
+                            let q = PageQuery {
+                                owner,
+                                workspace: ws,
+                                top_level,
+                                project,
+                                hide_seen_runs,
+                                after: None,
+                                limit,
+                            };
+                            let got = walk(s, &q);
+                            let want = old_list(s, &q);
+                            assert_eq!(got, want, "{q:?}");
+                            checked += got.len();
+                            if project.is_some() {
+                                project_rows += got.len();
+                            }
+                        }
                     }
                 }
             }
@@ -744,6 +782,7 @@ fn the_page_and_its_annotations_equal_todays_path() {
     }
     // The fixture exercises every branch.
     assert!(checked > 1_000, "{checked}");
+    assert!(project_rows > 100, "{project_rows}");
     let marks = s.routine_marks(&ids(&s.sessions().unwrap())).unwrap();
     assert!(marks.values().any(|m| !listed(m)) && marks.values().any(listed));
     assert!(
@@ -792,6 +831,7 @@ fn an_owner_never_receives_another_owners_chat() {
                                 owner: Owner::User(u),
                                 workspace: ws,
                                 top_level,
+                                project: None,
                                 hide_seen_runs,
                                 after: *after,
                                 limit,
@@ -1012,6 +1052,7 @@ fn a_child_follows_its_parent_whatever_its_own_workspace() {
             owner: Owner::User("a"),
             workspace: Some(&f.team),
             top_level: true,
+            project: None,
             hide_seen_runs: false,
             after: None,
             limit: 1,
@@ -1030,6 +1071,7 @@ fn a_child_follows_its_parent_whatever_its_own_workspace() {
             owner: Owner::User("a"),
             workspace: Some(&f.team),
             top_level: false,
+            project: None,
             hide_seen_runs: false,
             after: None,
             limit: 1,
@@ -1074,6 +1116,7 @@ fn by_limit(owner: Owner<'_>, limit: usize) -> PageQuery<'_> {
         owner,
         workspace: None,
         top_level: false,
+        project: None,
         hide_seen_runs: false,
         after: None,
         limit,
@@ -1304,6 +1347,7 @@ fn an_exact_multiple_has_no_next_page() {
             owner: Owner::User("a"),
             workspace: None,
             top_level: false,
+            project: None,
             hide_seen_runs: false,
             after: None,
             limit: 50,
@@ -1357,6 +1401,7 @@ fn hide_seen_runs_hides_only_runs_over_seen_and_not_continued() {
                 owner: Owner::User("a"),
                 workspace: None,
                 top_level: true,
+                project: None,
                 hide_seen_runs: hide,
                 after: None,
                 limit: 50,
@@ -1370,4 +1415,182 @@ fn hide_seen_runs_hides_only_runs_over_seen_and_not_continued() {
             assert_eq!(got.contains(id), !hide, "hide {hide}");
         }
     }
+}
+
+/// A project's page is driven by the project's links
+/// (`session_projects_project`), not by a walk of the owner's chats, and
+/// never scans `sessions` or the links.
+#[test]
+fn a_project_page_is_driven_by_its_links() {
+    let f = fixture();
+    for (owner, bound) in [(Owner::User("a"), Some("a")), (Owner::Everyone, None)] {
+        for after in [false, true] {
+            let sql = page_sql(owner, after, true);
+            for ws in [None, Some(f.team.as_str())] {
+                let p = plan(
+                    &f.s,
+                    &sql,
+                    params![
+                        bound,
+                        after.then_some(1_010i64),
+                        after.then_some("0194f5c0-0000-7000-8000-000000000000"),
+                        ws,
+                        true,
+                        true,
+                        51i64,
+                        "pt"
+                    ],
+                );
+                assert!(
+                    p.iter().any(|l| l.starts_with("SEARCH sp USING")
+                        && l.ends_with("session_projects_project (project_id=?)")),
+                    "the links by project: {owner:?}: {p:#?}"
+                );
+                assert!(
+                    p.iter().any(|l| l.starts_with(
+                        "SEARCH s USING INDEX sqlite_autoindex_sessions_1 (session_id=?)"
+                    )),
+                    "each chat by key: {owner:?}: {p:#?}"
+                );
+                assert!(
+                    !p.iter().any(|l| l.contains("sessions_owner")),
+                    "{owner:?}: {p:#?}"
+                );
+                for alias in ["s", "sp", "p"] {
+                    assert!(!scans(&p, alias), "{owner:?}: {p:#?}");
+                }
+            }
+        }
+    }
+}
+
+/// A project filter narrows a page and never widens it: for every
+/// project (another owner's, another workspace's, one that does not
+/// exist) and cursors from anybody's rows, an owner's page holds only that
+/// owner's chats, each in that project.
+#[test]
+fn a_project_never_widens_the_owner() {
+    let f = fixture();
+    let s = &f.s;
+    let everyone = s.sessions().unwrap();
+    let links: HashMap<SessionId, ProjectLink> = s
+        .project_links(None)
+        .unwrap()
+        .into_iter()
+        .map(|l| (l.session_id, l))
+        .collect();
+    let cursors: Vec<Option<Cursor>> = std::iter::once(None)
+        .chain(everyone.iter().step_by(23).map(|r| Some(Cursor::of(r))))
+        .collect();
+    let mut rows_seen = 0;
+    for u in OWNERS {
+        for ws in workspaces(&f) {
+            for project in PROJECTS.iter().flatten() {
+                for after in &cursors {
+                    let q = PageQuery {
+                        owner: Owner::User(u),
+                        workspace: ws,
+                        top_level: false,
+                        project: Some(project),
+                        hide_seen_runs: false,
+                        after: *after,
+                        limit: 200,
+                    };
+                    let (page, _) = s.sessions_page(&q).unwrap();
+                    rows_seen += page.len();
+                    for r in &page {
+                        assert_eq!(r.owner_id.as_deref(), Some(u), "{q:?}");
+                        let l = &links[&r.session_id];
+                        assert_eq!(l.project_id, *project, "{q:?}");
+                        assert_eq!(r.workspace_id.as_deref(), Some(l.workspace_id.as_str()));
+                    }
+                }
+            }
+        }
+    }
+    assert!(rows_seen > 100, "{rows_seen}");
+    // Chats of a linked to `po` (c's workspace): a is not a member there,
+    // so they sit in a's Personal and are in no project.
+    let q = PageQuery {
+        owner: Owner::User("a"),
+        workspace: None,
+        top_level: false,
+        project: Some("po"),
+        hide_seen_runs: false,
+        after: None,
+        limit: 200,
+    };
+    assert!(s.sessions_page(&q).unwrap().0.is_empty());
+    assert!(
+        everyone.iter().any(|r| r.owner_id.as_deref() == Some("a")
+            && links
+                .get(&r.session_id)
+                .is_some_and(|l| l.project_id == "po")),
+        "the fixture links a chat of a to c's project"
+    );
+}
+
+/// The owner check inside a project page's links subquery is for speed
+/// only (the outer owner filter keeps the result right without it): with
+/// it, another member's chat in a shared project is dropped inside the
+/// subquery. This counts the virtual machine's steps with and without it,
+/// so removing it fails here, and checks the answer is the same.
+#[test]
+fn the_owner_check_inside_the_links_saves_work() {
+    let s = Store::open_in_memory().unwrap();
+    user(&s, "a");
+    user(&s, "b");
+    let team = s.create_workspace("Team", "a").unwrap().workspace_id;
+    s.add_member(&team, "b", "member").unwrap();
+    exec(
+        &s,
+        "INSERT INTO projects (project_id, workspace_id, name, icon, accent, created_ms, updated_ms)
+         VALUES ('pt', ?1, 'p', 'i', 'a', 0, 0)",
+        params![team],
+    );
+    for k in 0..2_000 {
+        let id = plain(&s, "b", k).to_string();
+        exec(
+            &s,
+            "INSERT INTO session_workspaces (session_id, workspace_id) VALUES (?1, ?2)",
+            params![id, team],
+        );
+        exec(
+            &s,
+            "INSERT INTO session_projects (session_id, project_id, added_ms) VALUES (?1, 'pt', 0)",
+            params![id],
+        );
+    }
+    let sql = page_sql(Owner::User("a"), false, true);
+    assert!(sql.contains("AND o.owner_id = ?1"), "{sql}");
+    let without = sql.replace("AND o.owner_id = ?1", "AND 1");
+    let run = |text: &str| {
+        let c = s.lock();
+        let mut st = c.prepare(text).unwrap();
+        let n = st
+            .query_map(
+                params![
+                    "a",
+                    None::<i64>,
+                    None::<String>,
+                    team,
+                    true,
+                    true,
+                    51i64,
+                    "pt"
+                ],
+                |_| Ok(()),
+            )
+            .unwrap()
+            .count();
+        (n, st.get_status(rusqlite::StatementStatus::VmStep))
+    };
+    let (rows, with_check) = run(&sql);
+    let (rows_without, without_check) = run(&without);
+    println!("vm steps: with the inner check {with_check}, without {without_check}");
+    assert_eq!((rows, rows_without), (0, 0), "the same answer either way");
+    assert!(
+        with_check * 4 < without_check * 3,
+        "steps with the inner owner check {with_check}, without {without_check}"
+    );
 }

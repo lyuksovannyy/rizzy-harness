@@ -91,63 +91,137 @@ fn session_json(r: &harness_store::SessionRow, blocked: Option<&str>) -> serde_j
 struct SessionsQuery {
     #[serde(default)]
     workspace: Option<String>,
+    /// Only this project's chats (one the caller may see, in the
+    /// workspace): each project group of the sidebar pages on its own.
+    #[serde(default)]
+    project: Option<String>,
     /// Also the routine run chats the list leaves out once seen.
     #[serde(default, deserialize_with = "query_flag")]
     routine_runs: bool,
+    /// Rows per page: default [`DEFAULT_PAGE`], clamped to
+    /// `1..=MAX_PAGE`; not a number (or past `i64`) is 400.
+    #[serde(default)]
+    limit: Option<i64>,
+    /// The `next` of the previous page; malformed is 400.
+    #[serde(default)]
+    after: Option<String>,
 }
 
-/// The caller's own chats in one workspace (the API token: every chat,
-/// optionally in one workspace). The workspace is an extra filter: other
-/// members' chats stay private (T10).
+/// Rows of a page when the request does not say.
+const DEFAULT_PAGE: i64 = 50;
+
+/// One page of the caller's own top-level chats in one workspace, newest
+/// first (the API token: every owner's, optionally in one workspace), with
+/// every sub-agent chat below them in `children` and where the next page
+/// starts in `next` (`docs/store-readers.md` §4). The owner comes from the
+/// caller only; the cursor and the project only narrow what that owner
+/// sees (T10).
 async fn list_sessions(
     User(who): User,
     State(m): State<Master>,
     Query(q): Query<SessionsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
-    // Every listed chat is in the scope's workspace: the caller's level
-    // there, against each chat's own mode (reading stays allowed).
-    let local_ok = ws::may_use_local_node(&m, &who);
-    let in_scope = |r: &&harness_store::SessionRow| match &scope {
-        Some(a) => r.workspace_id.as_deref() == Some(a.id()),
-        None => true,
+    use harness_store::session_pages::{Cursor, MAX_PAGE, Owner, PageQuery};
+    let after = match q.after.as_deref() {
+        None => None,
+        Some(text) => Some(
+            Cursor::parse(text)
+                .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "invalid cursor".into()))?,
+        ),
     };
-    let owner = who.user_id.clone();
-    let viewer = owner.clone().unwrap_or_default();
-    let (rows, unread) = m
+    let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE as i64) as usize;
+    let scope = ws::scope(&m, &who, q.workspace.as_deref()).await?;
+    let project = match q.project.as_deref() {
+        Some(id) => Some(projects::listed_in(&m, &who, scope.as_ref().map(|a| a.id()), id).await?),
+        None => None,
+    };
+    let local_ok = ws::may_use_local_node(&m, &who);
+    let owner_id = who.user_id.clone();
+    let viewer = owner_id.clone().unwrap_or_default();
+    let workspace = scope.as_ref().map(|a| a.id().to_string());
+    let hide_seen_runs = !q.routine_runs;
+    let page = m
         .inner
         .mirror
         .call(move |s| {
-            Ok::<_, harness_store::StoreError>((
-                s.sessions_of(owner.as_deref())?,
-                s.unread(owner.as_deref(), &viewer)?,
-            ))
+            let owner = match owner_id.as_deref() {
+                Some(u) => Owner::User(u),
+                None => Owner::Everyone,
+            };
+            let (rows, next) = s.sessions_page(&PageQuery {
+                owner,
+                workspace: workspace.as_deref(),
+                top_level: true,
+                project: project.as_deref(),
+                hide_seen_runs,
+                after,
+                limit,
+            })?;
+            let ids: Vec<SessionId> = rows.iter().map(|r| r.session_id).collect();
+            let children = s.children_of(owner, &ids)?;
+            let all: Vec<SessionId> = ids
+                .into_iter()
+                .chain(children.rows.iter().map(|r| r.session_id))
+                .collect();
+            Ok::<_, harness_store::StoreError>(Page {
+                unread: s.unread_of(owner, &viewer, &all)?,
+                links: s
+                    .project_links_of(owner, &all)?
+                    .into_iter()
+                    .map(|l| (l.session_id, l))
+                    .collect(),
+                marks: s.routine_marks_of(owner, &all)?,
+                rows,
+                children,
+                next,
+            })
         })
         .await?;
-    let links = crate::projects::links(&m).await?;
-    let mut list: Vec<serde_json::Value> = rows
+    let json_of = |r: &harness_store::SessionRow| {
+        let on_local = (!local_ok && m.is_local_node(&r.node_id))
+            .then(|| ws::LOCAL_NODE_ADMINS_ONLY.to_string());
+        let blocked = ws::row_refusal(&who, scope.as_ref(), r);
+        let mut v = session_json(r, blocked.or(on_local).as_deref());
+        v["project_id"] = json!(crate::projects::effective(&page.links, r));
+        let mark = page.marks.get(&r.session_id);
+        v["routine"] = json!(mark);
+        // A routine's run says it is done through the routine's own results.
+        v["unread"] = json!(mark.is_none() && page.unread.contains(&r.session_id));
+        v
+    };
+    // The store already answered for the caller's chats only; this is the
+    // second line.
+    let mut list: Vec<Value> = page
+        .rows
         .iter()
         .filter(|r| who.can_see(r.owner_id.as_deref()))
-        .filter(in_scope)
-        .map(|r| {
-            let on_local = (!local_ok && m.is_local_node(&r.node_id))
-                .then(|| ws::LOCAL_NODE_ADMINS_ONLY.to_string());
-            let blocked = ws::row_refusal(&who, scope.as_ref(), r);
-            let mut v = session_json(r, blocked.or(on_local).as_deref());
-            v["project_id"] = json!(crate::projects::effective(&links, r));
-            v["unread"] = json!(unread.contains(&r.session_id));
-            v
-        })
+        .map(json_of)
         .collect();
-    crate::routines::annotate(&m, &mut list, q.routine_runs).await?;
-    // A routine's run says it is done through the routine's own results.
-    for v in &mut list {
-        if !v["routine"].is_null() {
-            v["unread"] = json!(false);
-        }
-    }
+    let mut children: Vec<Value> = page
+        .children
+        .rows
+        .iter()
+        .filter(|r| who.can_see(r.owner_id.as_deref()))
+        .map(json_of)
+        .collect();
     m.annotate_background(&mut list);
-    Ok(Json(json!({ "sessions": list })))
+    m.annotate_background(&mut children);
+    Ok(Json(json!({
+        "sessions": list,
+        "children": children,
+        "children_truncated": page.children.truncated,
+        "next": page.next.map(|c| c.encode()),
+    })))
+}
+
+/// What one store call gathers for a page.
+struct Page {
+    rows: Vec<harness_store::SessionRow>,
+    children: harness_store::session_pages::Descendants,
+    next: Option<harness_store::session_pages::Cursor>,
+    unread: std::collections::HashSet<SessionId>,
+    links: std::collections::HashMap<SessionId, harness_store::ProjectLink>,
+    marks: std::collections::HashMap<SessionId, harness_store::routines::RoutineMark>,
 }
 
 /// Any of the caller's chats, whatever its workspace (the UI follows a

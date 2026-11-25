@@ -10,6 +10,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vi
 import type { ProjectSummary } from "../lib/projects";
 import type { Features, Me, NodeInfo, SessionRow } from "../types";
 import type { SidebarProps } from "./Sidebar";
+import type { ChatPages } from "../lib/useChatList";
 
 vi.mock("./AccountMenu", () => ({ default: () => null }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -443,5 +444,216 @@ describe("the open chat stays findable", () => {
     } finally {
       page.remove();
     }
+  });
+});
+
+describe("the paged list (FIX_PLAN 4.5)", () => {
+  const pages = (over: Partial<ChatPages> = {}): ChatPages => ({
+    more: vi.fn(),
+    busy: false,
+    stalled: false,
+    loaded: null,
+    landed: 0,
+    landedIn: () => 0,
+    watch: vi.fn(() => vi.fn()),
+    group: () => undefined,
+    moreIn: vi.fn(),
+    ...over,
+  });
+
+  test("an open project group asks for its own chats; a closed one costs nothing", () => {
+    const p = pages();
+    render({ ...scene(), pages: p });
+    expect(p.watch).toHaveBeenCalledWith("p1");
+    expect(p.watch).toHaveBeenCalledWith("p2");
+    const w = p.watch as ReturnType<typeof vi.fn>;
+    const release = (id: string) => w.mock.results[w.mock.calls.findIndex((c) => c[0] === id)]!.value as ReturnType<typeof vi.fn>;
+    act(() => byLabel("Collapse Project 2").click());
+    expect(release("p1")).not.toHaveBeenCalled();
+    expect(release("p2")).toHaveBeenCalledTimes(1);
+    // Closed in this browser: no request for it next time.
+    const again = pages();
+    remount({ ...scene(), pages: again });
+    expect(again.watch).toHaveBeenCalledWith("p1");
+    expect(again.watch).not.toHaveBeenCalledWith("p2");
+  });
+
+  // Review F2: the open chat, older than the group's loaded page, shows in
+  // its group (README: the chat you have open always shows).
+  test("the open chat shows in its open group though it is older than the group's page", () => {
+    const rows = Array.from({ length: 10 }, (_, i) => chat(`g${i}`, { project_id: "p1", updated_ms: 100 - i }));
+    const old = chat("old", { project_id: "p1", updated_ms: 1 });
+    const p = pages({ group: (id) => (id === "p1" ? { rows, children: [], next: "cursor" } : undefined) });
+    render({ projects: [project(1)], sessions: [...rows, old], pages: p, route: { kind: "session", id: "old" } });
+    expect(hrefs()).toContain("#/s/old");
+  });
+
+  test("a group with more on the server offers its next page once every loaded row shows", () => {
+    const rows = Array.from({ length: 7 }, (_, i) => chat(`g${i}`, { project_id: "p1", updated_ms: 100 - i }));
+    const own = { rows, children: [], next: "cursor" };
+    const p = pages({ group: (id) => (id === "p1" ? own : undefined) });
+    render({ projects: [project(1)], sessions: rows, pages: p });
+    const box = () => q(".project-box")!;
+    const button = (label: string) => [...box().querySelectorAll("button")].find((b) => b.textContent === label);
+    expect(button("Show 2 more")).toBeTruthy();
+    act(() => button("Show 2 more")!.click());
+    act(() => button("Show more")!.click());
+    expect(p.moreIn).toHaveBeenCalledWith("p1");
+  });
+
+  test("the end loads the next page when it scrolls into view, but not after a failed load", () => {
+    const seen: Element[] = [];
+    let report: ((es: { isIntersecting: boolean }[]) => void) | null = null;
+    let root: unknown = undefined;
+    class IO {
+      constructor(cb: (es: { isIntersecting: boolean }[]) => void, o: { root?: unknown }) {
+        report = cb;
+        root = o.root;
+      }
+      observe(el: Element) {
+        seen.push(el);
+      }
+      disconnect() {}
+    }
+    vi.stubGlobal("IntersectionObserver", IO);
+    try {
+      const p = pages();
+      render({ ...scene(), pages: p });
+      expect(seen).toEqual([q(".load-more")]);
+      // The scrolling box is the root, so its margin loads ahead (review F3).
+      expect(root).toBe(q(".sidebar-scroll"));
+      act(() => report!([{ isIntersecting: true }]));
+      expect(p.more).toHaveBeenCalledTimes(1);
+      seen.length = 0;
+      remount({ ...scene(), pages: pages({ stalled: true }) });
+      expect(seen).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test("the end of the list is a button that loads older chats; busy, it keeps focus and ignores clicks", () => {
+    const p = pages();
+    render({ ...scene(), pages: p });
+    const more = q<HTMLButtonElement>(".load-more")!;
+    expect(more.textContent).toBe("Load older chats");
+    more.focus();
+    act(() => more.click());
+    expect(p.more).toHaveBeenCalledTimes(1);
+    const busy = pages({ busy: true });
+    render({ ...scene(), pages: busy });
+    const same = q<HTMLButtonElement>(".load-more")!;
+    expect(same).toBe(more);
+    expect(same.disabled).toBe(false);
+    expect(same.getAttribute("aria-busy")).toBe("true");
+    act(() => same.click());
+    expect(busy.more).not.toHaveBeenCalled();
+    render({ ...scene(), pages: pages() });
+    expect(document.activeElement).toBe(more);
+    render({ ...scene(), pages: pages({ more: null }) });
+    expect(q(".load-more")).toBeNull();
+  });
+
+  test("a loaded page is said once, politely", () => {
+    render({ ...scene(), pages: pages({ loaded: { n: 50, at: 1 } }) });
+    const status = q('.sidebar-scroll [role="status"]')!;
+    expect(status.getAttribute("aria-live")).toBe("polite");
+    expect(status.textContent).toBe("50 older chats loaded");
+  });
+
+  // Review R2-1: a page that lands with more left ends the wait; focus is
+  // never taken later from where the person put it.
+  test("a group's Show more never takes focus back after its page landed", () => {
+    const rows = Array.from({ length: 7 }, (_, i) => chat(`h${i}`, { project_id: "p1", updated_ms: 100 - i }));
+    const view = (list: SessionRow[], next: string | null, landed = 0) =>
+      render({ projects: [project(1)], sessions: list, pages: pages({ group: () => ({ rows: list, children: [], next }), landedIn: () => landed }) });
+    view(rows, "c1");
+    const button = (label: string) => [...q(".project-box")!.querySelectorAll("button")].find((b) => b.textContent === label);
+    act(() => button("Show 2 more")!.click());
+    button("Show more")!.focus();
+    act(() => button("Show more")!.click());
+    const more = [...rows, chat("h7", { project_id: "p1", updated_ms: 50 }), chat("h8", { project_id: "p1", updated_ms: 40 })];
+    view(more, "c2", 1);
+    const input = document.createElement("input");
+    document.body.append(input);
+    try {
+      input.focus();
+      view(more, null, 1);
+      expect(document.activeElement).toBe(input);
+    } finally {
+      input.remove();
+    }
+  });
+
+  // Review R2-2: the main list's button goes with its last page.
+  test("when the main list has nothing left, focus goes to the last row, only if it was on the button", () => {
+    const first = [chat("m1", { updated_ms: 10 }), chat("m2", { updated_ms: 9 })];
+    const p = pages();
+    render({ sessions: first, pages: p });
+    const more = q<HTMLButtonElement>(".load-more")!;
+    more.focus();
+    act(() => more.click());
+    const all = [...first, chat("m3", { updated_ms: 8 })];
+    render({ sessions: all, pages: pages({ more: null, landed: 1 }) });
+    expect(document.activeElement?.getAttribute("href")).toBe("#/s/m3");
+    // Elsewhere: left alone.
+    remount({ sessions: first, pages: pages() });
+    act(() => q<HTMLButtonElement>(".load-more")!.click());
+    const input = document.createElement("input");
+    document.body.append(input);
+    try {
+      input.focus();
+      render({ sessions: all, pages: pages({ more: null, landed: 1 }) });
+      expect(document.activeElement).toBe(input);
+    } finally {
+      input.remove();
+    }
+  });
+
+  test("when a group has nothing left, focus goes to the last row its last page added", () => {
+    const rows = Array.from({ length: 7 }, (_, i) => chat(`g${i}`, { project_id: "p1", updated_ms: 100 - i }));
+    const p = pages({ group: () => ({ rows, children: [], next: "cursor" }) });
+    render({ projects: [project(1)], sessions: rows, pages: p });
+    const button = (label: string) => [...q(".project-box")!.querySelectorAll("button")].find((b) => b.textContent === label);
+    act(() => button("Show 2 more")!.click());
+    button("Show more")!.focus();
+    act(() => button("Show more")!.click());
+    expect(p.moreIn).toHaveBeenCalledWith("p1");
+    const more = [...rows, chat("g7", { project_id: "p1", updated_ms: 50 }), chat("g8", { project_id: "p1", updated_ms: 40 })];
+    render({ projects: [project(1)], sessions: more, pages: pages({ group: () => ({ rows: more, children: [], next: null }), landedIn: () => 1 }) });
+    expect(button("Show more")).toBeUndefined();
+    expect(document.activeElement?.getAttribute("href")).toBe("#/s/g8");
+  });
+
+  // Review R3-1: the wait ends when the clicked page lands, not when the
+  // row count moves (a refetch's new chat on top).
+  test("a refetch during the last page does not end the wait; the page landing does", () => {
+    const first = [chat("m1", { updated_ms: 10 }), chat("m2", { updated_ms: 9 })];
+    render({ sessions: first, pages: pages() });
+    const more = q<HTMLButtonElement>(".load-more")!;
+    more.focus();
+    act(() => more.click());
+    const top = chat("m0", { updated_ms: 20 });
+    render({ sessions: [top, ...first], pages: pages() });
+    expect(document.activeElement).toBe(more);
+    const all = [top, ...first, chat("m3", { updated_ms: 8 })];
+    render({ sessions: all, pages: pages({ more: null, landed: 1 }) });
+    expect(document.activeElement?.getAttribute("href")).toBe("#/s/m3");
+  });
+
+  // Review R3-2: a group page that adds no row still ends the wait.
+  test("a group page that adds no new rows disarms the wait", () => {
+    const rows = Array.from({ length: 7 }, (_, i) => chat(`k${i}`, { project_id: "p1", updated_ms: 100 - i }));
+    const view = (next: string | null, landed: number) =>
+      render({ projects: [project(1)], sessions: rows, pages: pages({ group: () => ({ rows, children: [], next }), landedIn: () => landed }) });
+    view("c1", 0);
+    const button = (label: string) => [...q(".project-box")!.querySelectorAll("button")].find((b) => b.textContent === label);
+    act(() => button("Show 2 more")!.click());
+    button("Show more")!.focus();
+    act(() => button("Show more")!.click());
+    view("c2", 1);
+    (document.activeElement as HTMLElement | null)?.blur();
+    view(null, 1);
+    expect(document.activeElement).toBe(document.body);
   });
 });

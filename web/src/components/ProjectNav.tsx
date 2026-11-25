@@ -4,12 +4,13 @@
 // this browser's (localStorage, inside try/catch). The open chat is never lost:
 // a cap shows it in its place, and a closed group's header carries its mark.
 import { ChevronRight, Cloud, Plus } from "lucide-react";
-import { lazy, type ReactNode, Suspense, useId, useMemo, useState, useSyncExternalStore } from "react";
+import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ACCENTS } from "../lib/appearance";
 import { t } from "../lib/i18n";
 import { ProjectIcon } from "../lib/projectIcons";
 import { pendingProjects, type ProjectSummary } from "../lib/projects";
 import type { Route } from "../lib/routes";
+import type { ChatPages } from "../lib/useChatList";
 import { shownName } from "../md/hiddenChars";
 import type { NodeInfo, SessionRow } from "../types";
 import { NavLink } from "./NavLink";
@@ -37,22 +38,63 @@ export function nodeHue(id: string): string {
 }
 
 /** The first `cap` rows and any row `keep` asks for (the open chat, its
- * parents, its project) in its place; the rest on request. */
-function Capped<T>(props: { items: T[]; cap: number; keep: (x: T) => boolean; row: (x: T) => ReactNode }) {
+ * parents, its project) in its place; the rest on request, and with `load`
+ * the server's next page once every loaded row shows. */
+function Capped<T>(props: { items: T[]; cap: number; keep: (x: T) => boolean; row: (x: T) => ReactNode; load?: (button: HTMLElement) => void }) {
   const [all, setAll] = useState(false);
   const first = props.items.filter((x, i) => i < props.cap || props.keep(x));
   const more = props.items.length - first.length;
+  const button = (label: string, onClick: (button: HTMLElement) => void) => (
+    <li>
+      <button type="button" className="link small show-more" onClick={(e) => onClick(e.currentTarget)}>
+        {label}
+      </button>
+    </li>
+  );
+  const load = props.load;
   return (
     <>
       {(all ? props.items : first).map(props.row)}
-      {(more > 0 || all) && (
-        <li>
-          <button type="button" className="link small show-more" onClick={() => setAll((v) => !v)}>
-            {all ? t("nav.showFewer") : t("nav.showMore", { n: String(more) })}
-          </button>
-        </li>
-      )}
+      {more > 0 && !all
+        ? button(t("nav.showMore", { n: String(more) }), () => setAll(true))
+        : load &&
+          button(t("nav.loadMore"), (b) => {
+            setAll(true);
+            load(b);
+          })}
+      {all && button(t("nav.showFewer"), () => setAll(false))}
     </>
+  );
+}
+
+/** The end of the list: loads the next page when it scrolls into view, and
+ * is the button that does it (keyboard, assistive tech, no observer). */
+function LoadMore(props: { more: () => void; busy: boolean; stalled: boolean; clicked: (button: HTMLElement) => void }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const { more, busy, stalled } = props;
+  useEffect(() => {
+    const el = ref.current;
+    if (busy || stalled || !el || typeof IntersectionObserver === "undefined") return;
+    // A new observer after each page reports at once whether the end is
+    // still in view, so a tall sidebar fills itself. The scrolling box is
+    // the root: a margin on the viewport is clipped by it, so nothing would
+    // load ahead.
+    const root = el.closest(".sidebar-scroll");
+    const io = new IntersectionObserver((es) => es.some((e) => e.isIntersecting) && more(), { root, rootMargin: "200px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [more, busy, stalled]);
+  // Never `disabled` while it loads: that would drop a keyboard user's focus.
+  return (
+    <button ref={ref} type="button" className="link small show-more load-more" onClick={(e) => {
+        if (busy) return;
+        props.clicked(e.currentTarget);
+        more();
+      }}
+      aria-busy={busy}
+    >
+      {t("nav.olderChats")}
+    </button>
   );
 }
 
@@ -63,6 +105,7 @@ interface Ctx {
   /** The open chat and its parents. */
   path: Set<string>;
   onNavigate: (r: Route) => void;
+  pages?: ChatPages;
 }
 
 /** An agentic chat's node: a square in the node's colour, named on hover
@@ -94,11 +137,45 @@ function Chat({ s, c }: { s: SessionRow; c: Ctx }) {
   );
 }
 
-function Chats({ list, c, cap = Infinity, sub }: { list: SessionRow[]; c: Ctx; cap?: number; sub?: boolean }) {
+/** After a click on a "load more" button: the wait ends when the page it
+ * asked for lands (`landed`, the list's count of pages that came or failed,
+ * moves; a refetch or another list's page does not end it, and a page that
+ * adds no row does). Then, if nothing is left, the button is gone, and
+ * focus was still on it (or fell to the page with it), focus moves to the
+ * last of `rows` inside `box`. Focus the person put elsewhere meanwhile is
+ * never taken. Returns what the click calls. */
+function useFocusAfterLoad(box: RefObject<HTMLElement | null>, rows: string, more: boolean, landed: number) {
+  const asked = useRef<{ button: HTMLElement; landed: number } | null>(null);
+  useEffect(() => {
+    const a = asked.current;
+    if (!a || landed === a.landed) return;
+    asked.current = null;
+    const now = document.activeElement;
+    if (more || (now && now !== document.body && now !== a.button)) return;
+    const all = box.current?.querySelectorAll<HTMLElement>(rows);
+    all?.[all.length - 1]?.focus();
+  }, [box, rows, more, landed]);
+  return (button: HTMLElement) => {
+    asked.current = { button, landed };
+  };
+}
+
+const ROWS = ":scope > li > a.session-item";
+
+function Chats(props: { list: SessionRow[]; c: Ctx; cap?: number; sub?: boolean; load?: () => void; landed?: number }) {
+  const { list, c, cap = Infinity, sub, load } = props;
+  const ul = useRef<HTMLUListElement>(null);
+  const mark = useFocusAfterLoad(ul, ROWS, !!load, props.landed ?? 0);
+  const asking = load
+    ? (button: HTMLElement) => {
+        mark(button);
+        load();
+      }
+    : undefined;
   return (
     // `role`: Safari drops a styled list's semantics.
-    <ul role="list" className={sub ? "chats sub" : "chats"}>
-      <Capped items={list} cap={cap} keep={(s) => c.path.has(s.session_id)} row={(s) => <Chat key={s.session_id} s={s} c={c} />} />
+    <ul ref={ul} role="list" className={sub ? "chats sub" : "chats"}>
+      <Capped items={list} cap={cap} keep={(s) => c.path.has(s.session_id)} row={(s) => <Chat key={s.session_id} s={s} c={c} />} load={asking} />
     </ul>
   );
 }
@@ -149,6 +226,15 @@ function Plus14(props: { label: string; onClick: () => void }) {
 function Box(props: { p: ProjectSummary; chats: SessionRow[]; open: boolean; onToggle: () => void; route: Route; c: Ctx }) {
   const { p, c } = props;
   const body = useId();
+  const pages = c.pages;
+  const id = p.project_id;
+  // Open, the group loads its own newest chats; closed, it costs nothing.
+  useEffect(() => (props.open && pages ? pages.watch(id) : undefined), [props.open, pages?.watch, id]);
+  // The main list's rows of the project and the group's own are both the
+  // project's newest, in order, so together they have no gap; the open
+  // chat's own row may come from its lookup, older than both, and shows.
+  const own = pages?.group(id);
+  const chats = props.chats;
   // Another member may have named it: hidden characters show (W-3).
   const name = shownName(p.name);
   const here = !props.open && props.chats.some((s) => c.path.has(s.session_id));
@@ -178,7 +264,13 @@ function Box(props: { p: ProjectSummary; chats: SessionRow[]; open: boolean; onT
         />
       </div>
       {props.open && (
-        <div id={body}>{props.chats.length ? <Chats list={props.chats} c={c} cap={5} /> : <div className="muted pad small">{t("nav.noChats")}</div>}</div>
+        <div id={body}>
+          {chats.length ? (
+            <Chats list={chats} c={c} cap={5} load={own?.next ? () => pages?.moreIn(id) : undefined} landed={pages?.landedIn(id)} />
+          ) : (
+            <div className="muted pad small">{t("nav.noChats")}</div>
+          )}
+        </div>
       )}
     </li>
   );
@@ -191,11 +283,12 @@ const Pending = lazy(() => import("./PendingProjects"));
 export function SidebarLists(props: {
   route: Route;
   onNavigate: (r: Route) => void;
-  /** The workspace's chats, newest first, sub-agents' included. */
+  /** The workspace's loaded chats, newest first, sub-agents' included. */
   sessions: SessionRow[];
   nodes: NodeInfo[];
   projects: ProjectSummary[];
   canCreateProject: boolean;
+  pages?: ChatPages;
 }) {
   const [open, setOpen] = useState(readOpen);
   const pending = useSyncExternalStore(pendingProjects.sub, pendingProjects.get);
@@ -238,13 +331,16 @@ export function SidebarLists(props: {
     path.add(s.session_id);
     if (!s.parent_id) break;
   }
-  const c: Ctx = { kids: tree.kids, nodes: new Map(props.nodes.map((n) => [n.node_id, n])), selected, path, onNavigate: props.onNavigate };
+  const c: Ctx = { kids: tree.kids, nodes: new Map(props.nodes.map((n) => [n.node_id, n])), selected, path, onNavigate: props.onNavigate, pages: props.pages };
   const sectionOpen = open.projects !== false;
   const projectChats = sectionOpen ? [] : [...tree.inProject.values()].flat();
   const sectionHere = projectChats.some((s) => path.has(s.session_id));
+  // The main list's button goes with its last page: focus to the last loose row.
+  const scroll = useRef<HTMLDivElement>(null);
+  const markMain = useFocusAfterLoad(scroll, ":scope > ul.chats > li > a.session-item", !!props.pages?.more, props.pages?.landed ?? 0);
 
   return (
-    <div className="sidebar-scroll">
+    <div ref={scroll} className="sidebar-scroll">
       <section className="side-section">
         <div className={`section-label section-row${sectionHere ? " active" : ""}`}>
           <Toggle open={sectionOpen} body={body} onToggle={() => toggle("projects")}>
@@ -283,6 +379,10 @@ export function SidebarLists(props: {
       </section>
       {tree.none && <div className="muted pad small">{t("nav.noChats")}</div>}
       <Chats list={tree.loose} c={c} />
+      {props.pages?.more && <LoadMore more={props.pages.more} busy={props.pages.busy} stalled={props.pages.stalled} clicked={markMain} />}
+      <div className="sr-only" role="status" aria-live="polite">
+        {props.pages?.loaded && <span key={props.pages.loaded.at}>{t("nav.olderLoaded", { n: String(props.pages.loaded.n) })}</span>}
+      </div>
     </div>
   );
 }

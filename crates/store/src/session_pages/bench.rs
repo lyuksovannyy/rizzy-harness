@@ -390,6 +390,7 @@ fn fifty_thousand_chats() {
         owner: Owner::User(&u0),
         workspace: Some(&personal),
         top_level: true,
+        project: None,
         hide_seen_runs: true,
         after: None,
         limit: PAGE,
@@ -474,6 +475,56 @@ fn fifty_thousand_chats() {
     let (t, _) = timed(100, || page_and_annotations(&s, &q, &u0, true));
     show("page + every annotation", t);
 
+    // A project's own page (slice 2: each expanded project group asks for
+    // its newest chats), driven by the project's links, against the same
+    // query with the owner as an index term (SQLite then walks the
+    // owner's chats through `sessions_owner` and checks each link).
+    let own = format!("{u0}-p0");
+    let others = format!("{}-p0", users[1]);
+    let mut project_p99 = Vec::new();
+    for (what, project) in [
+        ("first page, owner's project (~400 of 10,000)", own.as_str()),
+        (
+            "first page, another user's project (none of the owner's)",
+            others.as_str(),
+        ),
+    ] {
+        let pq = PageQuery {
+            project: Some(project),
+            workspace: None,
+            ..q
+        };
+        let (t, _) = timed(100, || s.sessions_page(&pq).unwrap());
+        project_p99.push(show(what, t));
+        // Today's text with the owner term of an owner page: SQLite then
+        // seeks `sessions_owner` and checks each chat against the links.
+        let walked =
+            super::page_sql(pq.owner, false, true).replace("+s.owner_id = ?1", "s.owner_id = ?1");
+        let (t, _) = timed(20, || {
+            let c = s.lock();
+            let mut st = c.prepare_cached(&walked).unwrap();
+            st.query_map(
+                params![
+                    u0,
+                    None::<i64>,
+                    None::<String>,
+                    None::<String>,
+                    true,
+                    true,
+                    51i64,
+                    project
+                ],
+                |_| Ok(()),
+            )
+            .unwrap()
+            .count()
+        });
+        show(
+            &format!("  same, owner as an index term (walks {u0}'s chats)"),
+            t,
+        );
+    }
+
     let rows = s.sessions_of(Some(&u0)).unwrap();
     let mid = &rows[rows.len() / 2];
     let (sid, mut head) = (mid.session_id, mid.head_seq);
@@ -489,6 +540,7 @@ fn fifty_thousand_chats() {
                 owner: Owner::User(&u),
                 workspace: Some(&w),
                 top_level: true,
+                project: None,
                 hide_seen_runs: true,
                 after: None,
                 limit: PAGE,
@@ -549,6 +601,71 @@ fn fifty_thousand_chats() {
         t,
     );
     println!("worst walk p99 {worst:?}");
+
+    // The worst project page: a team project that holds every other
+    // user's 40,000 chats and none of the owner's (the links drive, so it
+    // reads all of them).
+    {
+        let conn = s.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO projects (project_id, workspace_id, name, icon, accent, created_ms, updated_ms)
+             VALUES ('big', ?1, 'p', 'i', 'a', 0, 0)",
+            params![team],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO session_workspaces (session_id, workspace_id)
+             SELECT session_id, ?1 FROM sessions WHERE owner_id <> ?2",
+            params![team, u0],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO session_projects (session_id, project_id, added_ms)
+             SELECT session_id, 'big', 0 FROM sessions WHERE owner_id <> ?1",
+            params![u0],
+        )
+        .unwrap();
+    }
+    let bq = PageQuery {
+        project: Some("big"),
+        workspace: Some(&team),
+        ..q
+    };
+    let (t, _) = timed(20, || s.sessions_page(&bq).unwrap());
+    let big = show(
+        "first page, team project of 40,000 others' chats, none of the owner's",
+        t,
+    );
+    let (t, p) = timed(20, || {
+        s.sessions_page(&PageQuery {
+            owner: Owner::Everyone,
+            ..bq
+        })
+        .unwrap()
+    });
+    assert_eq!(p.0.len(), PAGE);
+    show("  same, every owner (API token): top 50 of 40,000", t);
+    let (s1, u, w) = (s.clone(), u0.clone(), team.clone());
+    let (t, n) = contended(&s, sid, &mut head, move || {
+        let q = PageQuery {
+            owner: Owner::User(&u),
+            workspace: Some(&w),
+            top_level: true,
+            project: Some("big"),
+            hide_seen_runs: true,
+            after: None,
+            limit: PAGE,
+        };
+        s1.sessions_page(&q).unwrap();
+    });
+    show(
+        &format!("append while that project page loops ({n} runs)"),
+        t,
+    );
+    for (i, p) in project_p99.iter().enumerate() {
+        assert!(*p < FIRST_PAGE_P99, "project page {i} p99 {p:?}");
+    }
+    println!("big project page p99 {big:?}");
 
     assert!(first < FIRST_PAGE_P99, "first page p99 {first:?}");
     assert!(first_any < FIRST_PAGE_P99, "first page p99 {first_any:?}");

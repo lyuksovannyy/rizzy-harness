@@ -527,8 +527,12 @@ Collapse sit together at the top right.
 
 Each project is a box with its chats inside; its **+** opens the project to
 start a chat there, and its arrow folds it (the **Projects** arrow folds them
-all; this browser remembers both). Chats in no project follow below the
-projects. A chat that handed work to sub-agents shows their sessions nested
+all; this browser remembers both). An open project loads its own newest
+chats, however old they are, and **Show more** in it loads the next ones; a
+folded project asks the server for nothing. Chats in no project follow below the
+projects, newest first. The list loads your chats fifty at a time: scrolling
+to its end (or **Load older chats** there) loads the next fifty. The chat you have open always shows,
+even when it is older than what is loaded. A chat that handed work to sub-agents shows their sessions nested
 under it; click one to read it. **Deleting a chat deletes the sessions of
 its sub-agents with it** (and those of their own sub-agents, if any), on the
 server and on the node, with their logs and working copies. The chat goes at
