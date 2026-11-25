@@ -453,6 +453,8 @@ describe("the paged list (FIX_PLAN 4.5)", () => {
     busy: false,
     stalled: false,
     loaded: null,
+    landed: 0,
+    landedIn: () => 0,
     watch: vi.fn(() => vi.fn()),
     group: () => undefined,
     moreIn: vi.fn(),
@@ -563,20 +565,20 @@ describe("the paged list (FIX_PLAN 4.5)", () => {
   // never taken later from where the person put it.
   test("a group's Show more never takes focus back after its page landed", () => {
     const rows = Array.from({ length: 7 }, (_, i) => chat(`h${i}`, { project_id: "p1", updated_ms: 100 - i }));
-    const view = (list: SessionRow[], next: string | null) =>
-      render({ projects: [project(1)], sessions: list, pages: pages({ group: () => ({ rows: list, children: [], next }) }) });
+    const view = (list: SessionRow[], next: string | null, landed = 0) =>
+      render({ projects: [project(1)], sessions: list, pages: pages({ group: () => ({ rows: list, children: [], next }), landedIn: () => landed }) });
     view(rows, "c1");
     const button = (label: string) => [...q(".project-box")!.querySelectorAll("button")].find((b) => b.textContent === label);
     act(() => button("Show 2 more")!.click());
     button("Show more")!.focus();
     act(() => button("Show more")!.click());
     const more = [...rows, chat("h7", { project_id: "p1", updated_ms: 50 }), chat("h8", { project_id: "p1", updated_ms: 40 })];
-    view(more, "c2");
+    view(more, "c2", 1);
     const input = document.createElement("input");
     document.body.append(input);
     try {
       input.focus();
-      view(more, null);
+      view(more, null, 1);
       expect(document.activeElement).toBe(input);
     } finally {
       input.remove();
@@ -592,7 +594,7 @@ describe("the paged list (FIX_PLAN 4.5)", () => {
     more.focus();
     act(() => more.click());
     const all = [...first, chat("m3", { updated_ms: 8 })];
-    render({ sessions: all, pages: pages({ more: null }) });
+    render({ sessions: all, pages: pages({ more: null, landed: 1 }) });
     expect(document.activeElement?.getAttribute("href")).toBe("#/s/m3");
     // Elsewhere: left alone.
     remount({ sessions: first, pages: pages() });
@@ -601,7 +603,7 @@ describe("the paged list (FIX_PLAN 4.5)", () => {
     document.body.append(input);
     try {
       input.focus();
-      render({ sessions: all, pages: pages({ more: null }) });
+      render({ sessions: all, pages: pages({ more: null, landed: 1 }) });
       expect(document.activeElement).toBe(input);
     } finally {
       input.remove();
@@ -618,8 +620,40 @@ describe("the paged list (FIX_PLAN 4.5)", () => {
     act(() => button("Show more")!.click());
     expect(p.moreIn).toHaveBeenCalledWith("p1");
     const more = [...rows, chat("g7", { project_id: "p1", updated_ms: 50 }), chat("g8", { project_id: "p1", updated_ms: 40 })];
-    render({ projects: [project(1)], sessions: more, pages: pages({ group: () => ({ rows: more, children: [], next: null }) }) });
+    render({ projects: [project(1)], sessions: more, pages: pages({ group: () => ({ rows: more, children: [], next: null }), landedIn: () => 1 }) });
     expect(button("Show more")).toBeUndefined();
     expect(document.activeElement?.getAttribute("href")).toBe("#/s/g8");
+  });
+
+  // Review R3-1: the wait ends when the clicked page lands, not when the
+  // row count moves (a refetch's new chat on top).
+  test("a refetch during the last page does not end the wait; the page landing does", () => {
+    const first = [chat("m1", { updated_ms: 10 }), chat("m2", { updated_ms: 9 })];
+    render({ sessions: first, pages: pages() });
+    const more = q<HTMLButtonElement>(".load-more")!;
+    more.focus();
+    act(() => more.click());
+    const top = chat("m0", { updated_ms: 20 });
+    render({ sessions: [top, ...first], pages: pages() });
+    expect(document.activeElement).toBe(more);
+    const all = [top, ...first, chat("m3", { updated_ms: 8 })];
+    render({ sessions: all, pages: pages({ more: null, landed: 1 }) });
+    expect(document.activeElement?.getAttribute("href")).toBe("#/s/m3");
+  });
+
+  // Review R3-2: a group page that adds no row still ends the wait.
+  test("a group page that adds no new rows disarms the wait", () => {
+    const rows = Array.from({ length: 7 }, (_, i) => chat(`k${i}`, { project_id: "p1", updated_ms: 100 - i }));
+    const view = (next: string | null, landed: number) =>
+      render({ projects: [project(1)], sessions: rows, pages: pages({ group: () => ({ rows, children: [], next }), landedIn: () => landed }) });
+    view("c1", 0);
+    const button = (label: string) => [...q(".project-box")!.querySelectorAll("button")].find((b) => b.textContent === label);
+    act(() => button("Show 2 more")!.click());
+    button("Show more")!.focus();
+    act(() => button("Show more")!.click());
+    view("c2", 1);
+    (document.activeElement as HTMLElement | null)?.blur();
+    view(null, 1);
+    expect(document.activeElement).toBe(document.body);
   });
 });

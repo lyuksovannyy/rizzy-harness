@@ -26,6 +26,11 @@ export interface ChatPages {
   /** How many older chats the last page added (`at` tells two equal ones
    * apart), for the sidebar's polite status line. */
   loaded: { n: number; at: number } | null;
+  /** Pages asked for by `more` that have landed, or failed: a click's wait
+   * ends when this moves, whatever else changes the rows meanwhile. */
+  landed: number;
+  /** The same for one group's `moreIn`. */
+  landedIn(project: string): number;
   /** An open project group (or the open project's page) wants its own
    * newest chats; the returned function lets go. */
   watch(project: string): () => void;
@@ -56,6 +61,8 @@ export function useChatList(
   const [stalled, setStalled] = useState(false);
   const [loaded, setLoaded] = useState<{ n: number; at: number } | null>(null);
   const groupBusy = useRef(new Set<string>());
+  const [landed, setLanded] = useState(0);
+  const [groupLanded, setGroupLanded] = useState<Record<string, number>>({});
   // Groups whose first page is on its way when a nudge comes: refetched once
   // it lands, so the nudge is not lost for them.
   const nudged = useRef(new Set<string>());
@@ -145,6 +152,7 @@ export function useChatList(
       .finally(() => {
         loading.current = false;
         setBusy(false);
+        setLanded((n) => n + 1);
       });
   }, [get]);
 
@@ -180,7 +188,10 @@ export function useChatList(
       get({ project: id, after: next, limit: GROUP })
         .then((p) => putGroup(id, (l) => appendPage(l ?? null, p)))
         .catch((e: unknown) => err.current(e))
-        .finally(() => groupBusy.current.delete(id));
+        .finally(() => {
+          groupBusy.current.delete(id);
+          setGroupLanded((g) => ({ ...g, [id]: (g[id] ?? 0) + 1 }));
+        });
     },
     [get, putGroup],
   );
@@ -190,8 +201,18 @@ export function useChatList(
   const shown = shownRow(extra, fresh, workspaceId);
   const sessions = useMemo(() => (main ? combine([main, ...Object.values(groups)], shown) : null), [main, groups, shown]);
   const pages: ChatPages = useMemo(
-    () => ({ more: main?.next ? more : null, busy, stalled, loaded, watch, group: (id: string) => groups[id], moreIn }),
-    [main?.next, more, busy, stalled, loaded, watch, groups, moreIn],
+    () => ({
+      more: main?.next ? more : null,
+      busy,
+      stalled,
+      loaded,
+      landed,
+      landedIn: (id: string) => groupLanded[id] ?? 0,
+      watch,
+      group: (id: string) => groups[id],
+      moreIn,
+    }),
+    [main?.next, more, busy, stalled, loaded, landed, groupLanded, watch, groups, moreIn],
   );
   return { sessions, refresh, pages };
 }

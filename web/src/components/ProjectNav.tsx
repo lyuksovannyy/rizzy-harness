@@ -137,32 +137,35 @@ function Chat({ s, c }: { s: SessionRow; c: Ctx }) {
   );
 }
 
-/** After a click on a "load more" button: once the page it asked for lands
- * (`size` changed, or `more` went), the wait ends; if nothing is left, the
- * button is gone, and focus was still on it (or fell to the page with it),
- * focus moves to the last of `rows` inside `box`. Focus the person put
- * elsewhere meanwhile is never taken. Returns what the click calls. */
-function useFocusAfterLoad(box: RefObject<HTMLElement | null>, rows: string, more: boolean, size: number) {
-  const asked = useRef<{ button: HTMLElement; size: number } | null>(null);
+/** After a click on a "load more" button: the wait ends when the page it
+ * asked for lands (`landed`, the list's count of pages that came or failed,
+ * moves; a refetch or another list's page does not end it, and a page that
+ * adds no row does). Then, if nothing is left, the button is gone, and
+ * focus was still on it (or fell to the page with it), focus moves to the
+ * last of `rows` inside `box`. Focus the person put elsewhere meanwhile is
+ * never taken. Returns what the click calls. */
+function useFocusAfterLoad(box: RefObject<HTMLElement | null>, rows: string, more: boolean, landed: number) {
+  const asked = useRef<{ button: HTMLElement; landed: number } | null>(null);
   useEffect(() => {
     const a = asked.current;
-    if (!a || (more && size === a.size)) return;
+    if (!a || landed === a.landed) return;
     asked.current = null;
     const now = document.activeElement;
     if (more || (now && now !== document.body && now !== a.button)) return;
     const all = box.current?.querySelectorAll<HTMLElement>(rows);
     all?.[all.length - 1]?.focus();
-  }, [box, rows, more, size]);
+  }, [box, rows, more, landed]);
   return (button: HTMLElement) => {
-    asked.current = { button, size };
+    asked.current = { button, landed };
   };
 }
 
 const ROWS = ":scope > li > a.session-item";
 
-function Chats({ list, c, cap = Infinity, sub, load }: { list: SessionRow[]; c: Ctx; cap?: number; sub?: boolean; load?: () => void }) {
+function Chats(props: { list: SessionRow[]; c: Ctx; cap?: number; sub?: boolean; load?: () => void; landed?: number }) {
+  const { list, c, cap = Infinity, sub, load } = props;
   const ul = useRef<HTMLUListElement>(null);
-  const mark = useFocusAfterLoad(ul, ROWS, !!load, list.length);
+  const mark = useFocusAfterLoad(ul, ROWS, !!load, props.landed ?? 0);
   const asking = load
     ? (button: HTMLElement) => {
         mark(button);
@@ -263,7 +266,7 @@ function Box(props: { p: ProjectSummary; chats: SessionRow[]; open: boolean; onT
       {props.open && (
         <div id={body}>
           {chats.length ? (
-            <Chats list={chats} c={c} cap={5} load={own?.next ? () => pages?.moreIn(id) : undefined} />
+            <Chats list={chats} c={c} cap={5} load={own?.next ? () => pages?.moreIn(id) : undefined} landed={pages?.landedIn(id)} />
           ) : (
             <div className="muted pad small">{t("nav.noChats")}</div>
           )}
@@ -334,7 +337,7 @@ export function SidebarLists(props: {
   const sectionHere = projectChats.some((s) => path.has(s.session_id));
   // The main list's button goes with its last page: focus to the last loose row.
   const scroll = useRef<HTMLDivElement>(null);
-  const markMain = useFocusAfterLoad(scroll, ":scope > ul.chats > li > a.session-item", !!props.pages?.more, props.sessions.length);
+  const markMain = useFocusAfterLoad(scroll, ":scope > ul.chats > li > a.session-item", !!props.pages?.more, props.pages?.landed ?? 0);
 
   return (
     <div ref={scroll} className="sidebar-scroll">
